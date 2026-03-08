@@ -55,8 +55,8 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         Some(vma) => vma,
         None => {
             debug_warn!(
-                "no VMAs for address {}, killing the current process...",
-                unaligned_vaddr
+                "no VMAs for address {} (ip={:x}), killing the current process...",
+                unaligned_vaddr, ip
             );
             drop(vm);
             drop(vm_ref);
@@ -81,7 +81,9 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             let offset_in_file;
             let copy_len;
             if aligned_vaddr < vma.start() {
-                offset_in_page = unaligned_vaddr.value() % PAGE_SIZE;
+                // The VMA starts partway through this page. Place file data
+                // at the VMA start's offset within the page.
+                offset_in_page = vma.start().value() % PAGE_SIZE;
                 offset_in_file = *offset;
                 copy_len = min(*file_size, PAGE_SIZE - offset_in_page);
             } else {

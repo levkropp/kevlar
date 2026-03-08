@@ -15,10 +15,24 @@ pub enum Auxv {
     Phdr(UserVAddr),
     /// The size of a program header.
     Phent(usize),
-    /// The number of program heaers.
+    /// The number of program headers.
     Phnum(usize),
     /// The size of a page.
     Pagesz(usize),
+    /// Base address where the interpreter was loaded.
+    Base(usize),
+    /// Entry point of the main executable.
+    Entry(usize),
+    /// Real UID.
+    Uid(usize),
+    /// Effective UID.
+    Euid(usize),
+    /// Real GID.
+    Gid(usize),
+    /// Effective GID.
+    Egid(usize),
+    /// Whether the process is setuid/setgid.
+    Secure(usize),
     /// 16 random bytes. Used for stack canary.
     Random([u8; 16]),
 }
@@ -44,7 +58,6 @@ fn push_usize_to_stack(sp: &mut VAddr, stack_bottom: VAddr, value: usize) -> Res
 }
 
 fn push_aux_data_to_stack(sp: &mut VAddr, stack_bottom: VAddr, auxv: &Auxv) -> Result<()> {
-    #[allow(clippy::single_match)]
     match auxv {
         Auxv::Random(values) => push_bytes_to_stack(sp, stack_bottom, values.as_slice())?,
         _ => {}
@@ -65,6 +78,13 @@ fn push_auxv_entry_to_stack(
         Auxv::Phent(value) => (4, *value),
         Auxv::Phnum(value) => (5, *value),
         Auxv::Pagesz(value) => (6, *value),
+        Auxv::Base(value) => (7, *value),
+        Auxv::Entry(value) => (9, *value),
+        Auxv::Uid(value) => (11, *value),
+        Auxv::Euid(value) => (12, *value),
+        Auxv::Gid(value) => (13, *value),
+        Auxv::Egid(value) => (14, *value),
+        Auxv::Secure(value) => (23, *value),
         Auxv::Random(_) => (25, data_ptr.unwrap().as_isize() as usize),
     };
 
@@ -86,8 +106,8 @@ pub(super) fn estimate_user_init_stack_size(
 
     let aux_data_len = auxv.iter().fold(0, |l, aux| {
         l + match aux {
-            Auxv::Null | Auxv::Phdr(_) | Auxv::Phent(_) | Auxv::Phnum(_) | Auxv::Pagesz(_) => 0,
             Auxv::Random(_) => 16,
+            _ => 0,
         }
     });
 

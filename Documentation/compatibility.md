@@ -4,8 +4,8 @@
 Not supported.
 
 ## libc
-- musl: supported (static linking; dynamic linking needs futex, pread64)
-- glibc: *not* yet supported (requires dynamic linking, futex, clone, and other unimplemented features)
+- musl: supported (static and dynamic linking; PIE executables with ld-musl interpreter)
+- glibc: *not* yet supported (requires clone, robust futex, and other unimplemented features)
 
 ## Compatibility Milestones
 
@@ -13,13 +13,13 @@ Not supported.
 |-----------|----------------|----------------|--------|
 | M1: Static Busybox | ~50 | 79 | **Complete** — BusyBox boots, shell works |
 | M1.5: ARM64 | -- | 79 | **Complete** — BusyBox boots on QEMU virt (cortex-a72) |
-| M2: Dynamic linking (ld-linux.so) | ~55 | 79 | Next — needs pread64, futex, madvise |
-| M3: GNU Coreutils + Bash | ~80 | 79 | Planned |
-| M4: systemd (PID 1) | ~110 | 79 | Planned |
-| M5: apt/dpkg | ~120 | 79 | Planned |
-| M6: Full networking (SSH, DNS) | ~130 | 79 | Planned |
-| M7: Container runtime | ~145 | 79 | Planned |
-| M8: Kubuntu 24.04 desktop | ~170 | 79 | Planned |
+| M2: Dynamic linking (ld-linux.so) | ~55 | 83 | **Complete** — PIE + musl dynamic linker works |
+| M3: GNU Coreutils + Bash | ~80 | 83 | Next |
+| M4: systemd (PID 1) | ~110 | 83 | Planned |
+| M5: apt/dpkg | ~120 | 83 | Planned |
+| M6: Full networking (SSH, DNS) | ~130 | 83 | Planned |
+| M7: Container runtime | ~145 | 83 | Planned |
+| M8: Kubuntu 24.04 desktop | ~170 | 83 | Planned |
 
 ## System Calls
 
@@ -48,7 +48,7 @@ Not supported.
 
 | No  | Name                   | Status        | Milestone | Reference | Notes                                                  |
 |-----|------------------------|---------------|-----------|-----------|--------------------------------------------------------|
-| 0   | read                   | Partial       | M1        |           | Implemented; needs pread64 variant                     |
+| 0   | read                   | Partial       | M1        |           | Implemented                                            |
 | 1   | write                  | Partial       | M1        |           | Implemented                                            |
 | 2   | open                   | Partial       | M1        |           | Implemented; modern code uses openat(257) instead      |
 | 3   | close                  | Full          | M1        |           |                                                        |
@@ -57,7 +57,7 @@ Not supported.
 | 6   | lstat                  | Partial       | M1        |           | Implemented                                            |
 | 7   | poll                   | Partial       | M1        |           | Implemented                                            |
 | 8   | lseek                  | Full          | M1        | OSv       | SEEK_SET/CUR/END; ref OSv vfs_syscalls.cc              |
-| 9   | mmap                   | Full          | M1        | FreeBSD   | Prot flags stored in VmArea, NX bit support            |
+| 9   | mmap                   | Full          | M1        | FreeBSD   | MAP_FIXED unmaps existing, prot flags, NX bit support  |
 | 10  | mprotect               | Full          | M1        | FreeBSD   | VMA splitting, PTE update, TLB flush; ref OSv mmu.cc  |
 | 11  | munmap                 | Full          | M1        | FreeBSD   | VMA removal/splitting, page freeing; ref OSv mmu.cc   |
 | 12  | brk                    | Full          | M1        |           |                                                        |
@@ -65,7 +65,7 @@ Not supported.
 | 14  | rt_sigprocmask         | Full          | M1        |           |                                                        |
 | 15  | rt_sigreturn           | Full          | M1        |           |                                                        |
 | 16  | ioctl                  | Partial       | M1        | FreeBSD   | TTY ioctls; needs expansion per device                 |
-| 17  | pread64                | Unimplemented | M2        | FreeBSD   | Dynamic linker reads ELF segments at offsets            |
+| 17  | pread64                | Full          | M2        | FreeBSD   | Read at offset without changing file position           |
 | 18  | pwrite64               | Unimplemented | M3        | FreeBSD   |                                                        |
 | 19  | readv                  | Unimplemented | M3        | FreeBSD   |                                                        |
 | 20  | writev                 | Full          | M1        |           |                                                        |
@@ -76,7 +76,7 @@ Not supported.
 | 25  | mremap                 | Unimplemented | M2        | FreeBSD   | glibc malloc uses this for realloc                     |
 | 26  | msync                  | Unimplemented | M5        | FreeBSD   |                                                        |
 | 27  | mincore                | Unimplemented | M8        | FreeBSD   |                                                        |
-| 28  | madvise                | Unimplemented | M2        | FreeBSD   | MADV_DONTNEED used by allocators                       |
+| 28  | madvise                | Stub          | M2        | FreeBSD   | Returns 0; MADV_DONTNEED needs real impl later         |
 | 29  | shmget                 | Unimplemented | M8        | FreeBSD   | X11 MIT-SHM extension                                  |
 | 30  | shmat                  | Unimplemented | M8        | FreeBSD   |                                                        |
 | 31  | shmctl                 | Unimplemented | M8        | FreeBSD   |                                                        |
@@ -250,7 +250,7 @@ Not supported.
 | 199 | fremovexattr           | Unimplemented | M5        | Own       |                                                        |
 | 200 | tkill                  | Unimplemented | M4        | Own       | Send signal to thread                                  |
 | 201 | time                   | Unimplemented | M3        | OSv       | Trivial wrapper around clock_gettime                    |
-| 202 | futex                  | Unimplemented | M2        | FreeBSD   | FreeBSD linuxulator has WAIT/WAKE/REQUEUE              |
+| 202 | futex                  | Partial       | M2        | FreeBSD   | WAIT/WAKE with per-address wait queues                 |
 | 203 | sched_setaffinity      | Unimplemented | M8        | FreeBSD   |                                                        |
 | 204 | sched_getaffinity      | Unimplemented | M8        | FreeBSD   |                                                        |
 | 205 | set_thread_area        | Unimplemented | —         |           | x86-32 only                                             |
@@ -266,7 +266,7 @@ Not supported.
 | 215 | epoll_wait_old         | Unimplemented | —         |           | Removed                                                 |
 | 216 | remap_file_pages       | Unimplemented | —         |           | Deprecated since Linux 3.16                             |
 | 217 | getdents64             | Partial       | M1        |           |                                                        |
-| 218 | set_tid_address        | Stub          | M1        |           | Returns 0; needs real TID tracking for threading        |
+| 218 | set_tid_address        | Partial       | M2        |           | Returns caller's TID; clear_child_tid not yet used     |
 | 219 | restart_syscall        | Unimplemented | M3        | Own       | Signal restart mechanism                                |
 | 220 | semtimedop             | Unimplemented | M8        | Own       |                                                        |
 | 221 | fadvise64              | Unimplemented | M8        | FreeBSD   |                                                        |
@@ -321,7 +321,7 @@ Not supported.
 | 270 | pselect6               | Unimplemented | M3        | Own       | Select with signal mask                                 |
 | 271 | ppoll                  | Unimplemented | M3        | OSv       | Poll with signal mask                                   |
 | 272 | unshare                | Unimplemented | M7        | FreeBSD   | Namespaces                                              |
-| 273 | set_robust_list        | Unimplemented | M2        | Own       | Futex robust lists                                      |
+| 273 | set_robust_list        | Stub          | M2        | Own       | Accepts and ignores; real robust futex deferred         |
 | 274 | get_robust_list        | Unimplemented | M2        | Own       |                                                        |
 | 275 | splice                 | Unimplemented | M5        | FreeBSD   | Efficient fd-to-fd data transfer                        |
 | 276 | tee                    | Unimplemented | M5        | Own       |                                                        |

@@ -41,6 +41,15 @@ RUN ./configure CC=musl-gcc --enable-static --disable-largefile --disable-zlib -
 RUN make -j$(nproc)
 
 #
+#  Dynamic linking test binary (musl)
+#
+FROM ubuntu:20.04 as dyntest
+RUN apt-get update && apt-get install -qy musl-tools
+RUN echo '#include <unistd.h>\nint main(){const char m[]="hello from dynamic linking!\\n";write(1,m,sizeof(m)-1);return 0;}' > /hello.c
+RUN musl-gcc -o /hello-dynamic /hello.c
+RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
+
+#
 #  Initramfs
 #
 FROM busybox as empty_dir
@@ -57,6 +66,8 @@ COPY --from=empty_dir /empty_dir /usr/sbin
 COPY --from=busybox  /build/busybox_unstripped /bin/busybox
 COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
+COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
+COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /var/www/html

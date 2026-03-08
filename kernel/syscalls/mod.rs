@@ -109,6 +109,12 @@ mod sysinfo;
 mod mprotect;
 mod munmap;
 
+// M2: Dynamic linking
+mod futex;
+mod madvise;
+mod pread64;
+mod set_robust_list;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -159,8 +165,10 @@ mod syscall_numbers {
     pub const SYS_RT_SIGACTION: usize = 13;
     pub const SYS_RT_SIGPROCMASK: usize = 14;
     pub const SYS_RT_SIGRETURN: usize = 15;
+    pub const SYS_PREAD64: usize = 17;
     pub const SYS_IOCTL: usize = 16;
     pub const SYS_WRITEV: usize = 20;
+    pub const SYS_MADVISE: usize = 28;
     pub const SYS_ACCESS: usize = 21;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_SELECT: usize = 23;
@@ -234,6 +242,8 @@ mod syscall_numbers {
     pub const SYS_PRLIMIT64: usize = 302;
     pub const SYS_FCHMODAT: usize = 268;
     pub const SYS_FCHOWNAT: usize = 260;
+    pub const SYS_FUTEX: usize = 202;
+    pub const SYS_SET_ROBUST_LIST: usize = 273;
     pub const SYS_GETRANDOM: usize = 318;
 }
 
@@ -337,6 +347,10 @@ mod syscall_numbers {
     pub const SYS_PRLIMIT64: usize = 261;
     pub const SYS_FCHMODAT: usize = 53;
     pub const SYS_FCHOWNAT: usize = 55;
+    pub const SYS_PREAD64: usize = 67;
+    pub const SYS_MADVISE: usize = 233;
+    pub const SYS_FUTEX: usize = 98;
+    pub const SYS_SET_ROBUST_LIST: usize = 99;
     // ARM64 doesn't have arch_prctl; use a dummy value that won't conflict.
     pub const SYS_ARCH_PRCTL: usize = 0xFFFF;
 }
@@ -601,6 +615,16 @@ impl<'a> SyscallHandler<'a> {
             SYS_FACCESSAT => self.sys_access(&resolve_path(a2)?),
             SYS_PPOLL => self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int),
             SYS_PRLIMIT64 => self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?),
+            // M2: Dynamic linking
+            SYS_PREAD64 => self.sys_pread64(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3,
+                a4,
+            ),
+            SYS_MADVISE => self.sys_madvise(a1, a2, a3 as i32),
+            SYS_FUTEX => self.sys_futex(a1, a2 as i32, a3 as u32, a4, a5, a6 as u32),
+            SYS_SET_ROBUST_LIST => self.sys_set_robust_list(a1, a2),
             _ => {
                 debug_warn!(
                     "unimplemented system call: {} (n={})",
@@ -705,6 +729,10 @@ fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FACCESSAT => "faccessat",
         SYS_PPOLL => "ppoll",
         SYS_PRLIMIT64 => "prlimit64",
+        SYS_PREAD64 => "pread64",
+        SYS_MADVISE => "madvise",
+        SYS_FUTEX => "futex",
+        SYS_SET_ROBUST_LIST => "set_robust_list",
         _ => "(unknown)",
     }
 }

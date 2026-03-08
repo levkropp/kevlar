@@ -13,13 +13,14 @@ the most capable permissively licensed Rust kernel for running real Linux usersp
 
 ## Current Status
 
-After completing M1.5, the kernel boots static musl BusyBox and runs an interactive shell on both x86_64 and ARM64. `echo`, `ls`, `cat` all work on both architectures.
+After completing M2, the kernel boots static musl BusyBox, runs an interactive shell on both x86_64 and ARM64, and supports dynamically linked musl PIE binaries with the musl dynamic linker.
 
-- **79 implemented syscalls** (86 dispatch entries, 7 of which are UID/GID stubs)
+- **83 implemented syscalls** (90 dispatch entries)
+- **Dynamic linking:** PIE executables with PT_INTERP, dual ELF loading, auxiliary vectors
 - **Two architectures:** x86_64 and ARM64 (QEMU virt, cortex-a72)
-- Full memory management: mmap with protection flags, mprotect, munmap with NX bit support
-- File operations: openat, newfstatat, lseek, unlink, rmdir, rename (musl-compatible *at variants)
-- Process control: fork, vfork, execve, wait4 (correct status encoding), signals
+- Full memory management: mmap (MAP_FIXED), mprotect, munmap, madvise with NX bit support
+- File operations: openat, newfstatat, lseek, pread64, unlink, rmdir, rename
+- Process control: fork, vfork, execve, wait4 (correct status encoding), signals, futex
 - FD plumbing: dup, dup2, dup3, pipe, pipe2, fcntl (F_GETFD/F_SETFD/F_GETFL/F_SETFL)
 - Networking: TCP/UDP via smoltcp (virtio-net), socket, bind, listen, accept, connect
 - Time: clock_gettime, gettimeofday, nanosleep
@@ -41,7 +42,7 @@ After completing M1.5, the kernel boots static musl BusyBox and runs an interact
 |-----------|----------|--------|-------------|
 | M1: Static Busybox | ~50 | **Complete** | Core syscalls for static musl binaries |
 | M1.5: ARM64 | -- | **Complete** | ARM64 port; BusyBox boots on QEMU virt (cortex-a72) |
-| M2: Dynamic linking | ~55 | Next | pread64, futex, mremap, madvise |
+| M2: Dynamic linking | ~55 | **Complete** | PIE + musl ld-linux; pread64, futex, madvise |
 | M3: Coreutils + Bash | ~80 | Planned | clone, job control, symlinks |
 | M4: systemd | ~110 | Planned | epoll, signalfd, timerfd, mount |
 | M5: apt/dpkg | ~120 | Planned | xattr, statx, splice |

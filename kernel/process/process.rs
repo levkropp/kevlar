@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicI32, Ordering};
-use core::{cmp::max, sync::atomic::AtomicUsize};
+use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
 use kevlar_runtime::{
@@ -617,48 +617,319 @@ fn do_script_binfmt(
     do_setup_userspace(shebang_path, &argv, envp, root_fs, false)
 }
 
+/// Load PT_LOAD segments from an ELF into the VM, then fill inter-segment
+/// gaps with anonymous VMAs so that addresses within the full page-aligned
+/// span are always backed by a VMA.  This is required because libc (e.g.
+/// musl's `reclaim_gaps`) reuses these gap pages for its allocator.
+fn load_elf_segments(
+    vm: &mut Vm,
+    phdrs: &[ProgramHeader],
+    base_offset: usize,
+    file: &Arc<dyn FileLike>,
+) -> Result<()> {
+    use kevlar_utils::alignment::align_down;
+
+    // First, add file-backed VMAs for each PT_LOAD (non-page-aligned, as the
+    // page fault handler already handles partial pages correctly).
+    let mut page_ranges: Vec<(usize, usize)> = Vec::new();
+    for phdr in phdrs {
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+
+        let seg_start = (phdr.p_vaddr as usize) + base_offset;
+        let area_type = if phdr.p_filesz > 0 {
+            VmAreaType::File {
+                file: file.clone(),
+                offset: phdr.p_offset as usize,
+                file_size: phdr.p_filesz as usize,
+            }
+        } else {
+            VmAreaType::Anonymous
+        };
+        vm.add_vm_area(
+            UserVAddr::new_nonnull(seg_start)?,
+            phdr.p_memsz as usize,
+            area_type,
+        )?;
+
+        // Track the page-aligned range this segment occupies.
+        let seg_end = seg_start + phdr.p_memsz as usize;
+        let page_start = align_down(seg_start, PAGE_SIZE);
+        let page_end = align_up(seg_end, PAGE_SIZE);
+        page_ranges.push((page_start, page_end));
+    }
+
+    // Sort by start address.
+    page_ranges.sort_by_key(|&(start, _)| start);
+
+    // Fill all gaps with anonymous VMAs: both gaps between segments and
+    // the padding after each segment's memsz up to its page-aligned end.
+    // We merge all page ranges and fill any unmapped holes.
+    let mut covered_end = if let Some(&(start, _)) = page_ranges.first() {
+        start
+    } else {
+        return Ok(());
+    };
+
+    for &(page_start, page_end) in &page_ranges {
+        // Gap before this segment's page range (between previous segment end
+        // and this segment start).
+        if covered_end < page_start {
+            let gap_len = page_start - covered_end;
+            if vm.is_free_vaddr_range(UserVAddr::new_nonnull(covered_end)?, gap_len) {
+                vm.add_vm_area(
+                    UserVAddr::new_nonnull(covered_end)?,
+                    gap_len,
+                    VmAreaType::Anonymous,
+                )?;
+            }
+        }
+        if page_end > covered_end {
+            covered_end = page_end;
+        }
+    }
+
+    // Now fill gaps within each segment's page range where the VMA
+    // doesn't cover the full page-aligned extent.  We walk through the
+    // page range and add anonymous VMAs for any bytes not already covered
+    // by the file-backed VMAs above.
+    for phdr in phdrs {
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+        let seg_start = (phdr.p_vaddr as usize) + base_offset;
+        let seg_end = seg_start + phdr.p_memsz as usize;
+        let page_start = align_down(seg_start, PAGE_SIZE);
+        let page_end = align_up(seg_end, PAGE_SIZE);
+
+        // Anonymous padding before segment start (within the first page).
+        if page_start < seg_start {
+            let pad_len = seg_start - page_start;
+            if vm.is_free_vaddr_range(UserVAddr::new_nonnull(page_start)?, pad_len) {
+                vm.add_vm_area(
+                    UserVAddr::new_nonnull(page_start)?,
+                    pad_len,
+                    VmAreaType::Anonymous,
+                )?;
+            }
+        }
+
+        // Anonymous padding after segment end (within the last page).
+        if seg_end < page_end {
+            let pad_len = page_end - seg_end;
+            if vm.is_free_vaddr_range(UserVAddr::new_nonnull(seg_end)?, pad_len) {
+                vm.add_vm_area(
+                    UserVAddr::new_nonnull(seg_end)?,
+                    pad_len,
+                    VmAreaType::Anonymous,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn do_elf_binfmt(
     executable: &Arc<dyn FileLike>,
     argv: &[&[u8]],
     envp: &[&[u8]],
     file_header_pages: kevlar_api::address::PAddr,
     buf: &[u8],
+    root_fs: &Arc<SpinLock<RootFs>>,
 ) -> Result<UserspaceEntry> {
     let file_header_top = USER_STACK_TOP;
     let elf = Elf::parse(buf)?;
-    let ip = elf.entry()?;
 
-    let mut end_of_image = 0;
+    trace!("do_elf_binfmt: e_type={}, is_dyn={}", elf.header().e_type, elf.is_dyn());
+
+    // Check for PT_INTERP (dynamic linker).
+    let interp_path = elf.interp_path(buf).map(|s| {
+        let mut v = Vec::new();
+        v.extend_from_slice(s.as_bytes());
+        v
+    });
+
+    // For ET_DYN (PIE), compute the address span; for ET_EXEC, compute end_of_image directly.
+    let mut main_lo = usize::MAX;
+    let mut main_hi = 0usize;
     for phdr in elf.program_headers() {
         if phdr.p_type == PT_LOAD {
-            end_of_image = max(end_of_image, (phdr.p_vaddr + phdr.p_memsz) as usize);
+            main_lo = core::cmp::min(main_lo, phdr.p_vaddr as usize);
+            main_hi = core::cmp::max(main_hi, (phdr.p_vaddr + phdr.p_memsz) as usize);
         }
+    }
+    if main_lo == usize::MAX {
+        main_lo = 0;
     }
 
     let mut random_bytes = [0u8; 16];
     read_secure_random(((&mut random_bytes) as &mut [u8]).into())?;
 
-    // Set up the user stack.
-    let auxv = &[
-        Auxv::Phdr(
-            file_header_top
-                .sub(buf.len())
-                .add(elf.header().e_phoff as usize),
-        ),
-        Auxv::Phnum(elf.program_headers().len()),
-        Auxv::Phent(size_of::<ProgramHeader>()),
-        Auxv::Pagesz(PAGE_SIZE),
-        Auxv::Random(random_bytes),
-    ];
-    const USER_STACK_LEN: usize = 128 * 1024; // TODO: Implement rlimit
-    let init_stack_top = file_header_top.sub(buf.len());
-    let user_stack_bottom = init_stack_top.sub(USER_STACK_LEN).value();
-    let user_heap_bottom = align_up(end_of_image, PAGE_SIZE);
-    let init_stack_len = align_up(estimate_user_init_stack_size(argv, envp, auxv), PAGE_SIZE);
-    if user_heap_bottom >= user_stack_bottom || init_stack_len >= USER_STACK_LEN {
-        return Err(Errno::E2BIG.into());
+    // Build auxiliary vectors. We'll add AT_BASE and AT_ENTRY if we have an interpreter.
+    let mut auxv = Vec::new();
+    auxv.push(Auxv::Phdr(
+        file_header_top
+            .sub(buf.len())
+            .add(elf.header().e_phoff as usize),
+    ));
+    auxv.push(Auxv::Phnum(elf.program_headers().len()));
+    auxv.push(Auxv::Phent(size_of::<ProgramHeader>()));
+    auxv.push(Auxv::Pagesz(PAGE_SIZE));
+    auxv.push(Auxv::Uid(0));
+    auxv.push(Auxv::Euid(0));
+    auxv.push(Auxv::Gid(0));
+    auxv.push(Auxv::Egid(0));
+    auxv.push(Auxv::Secure(0));
+    auxv.push(Auxv::Random(random_bytes));
+
+    // Determine base offset for main executable.
+    // ET_EXEC: segments are at fixed addresses (main_base_offset = 0).
+    // ET_DYN (PIE): segments need relocation; we choose a base.
+    let main_span = align_up(main_hi - main_lo, PAGE_SIZE);
+    let is_pie = elf.is_dyn();
+
+    // --- Create VM ---
+    // For PIE, heap goes right after the relocated image; for ET_EXEC, after the fixed image.
+    const USER_STACK_LEN: usize = 128 * 1024;
+    let file_header_top_val = file_header_top;
+    let init_stack_top = file_header_top_val.sub(buf.len());
+    // Heap bottom will be set after we know where the main image lands.
+
+    let ip;
+    let mut vm;
+
+    if let Some(ref interp_path_bytes) = interp_path {
+        // --- Dynamic linking path ---
+        let interp_path_str = core::str::from_utf8(interp_path_bytes)
+            .map_err(|_| Error::new(Errno::ENOEXEC))?;
+        trace!("loading interpreter: {}", interp_path_str);
+
+        let interp_component = root_fs.lock().lookup_path(Path::new(interp_path_str), true)?;
+        let interp_file = interp_component.inode.as_file()?;
+
+        // Read interpreter's ELF header.
+        let interp_header_pages = alloc_pages(1, AllocPageFlags::KERNEL)?;
+        let interp_buf = unsafe {
+            core::slice::from_raw_parts_mut(interp_header_pages.as_mut_ptr(), PAGE_SIZE)
+        };
+        interp_file.read(0, interp_buf.into(), &OpenOptions::readwrite())?;
+
+        let interp_elf = Elf::parse(interp_buf)?;
+        trace!("interpreter parsed: is_dyn={}, entry={:#x}", interp_elf.is_dyn(), interp_elf.entry_offset());
+        if !interp_elf.is_dyn() {
+            warn!("interpreter is not ET_DYN");
+            return Err(Errno::ENOEXEC.into());
+        }
+
+        // Compute the interpreter's virtual address span.
+        let mut interp_lo = usize::MAX;
+        let mut interp_hi = 0usize;
+        for phdr in interp_elf.program_headers() {
+            if phdr.p_type == PT_LOAD {
+                interp_lo = core::cmp::min(interp_lo, phdr.p_vaddr as usize);
+                interp_hi = core::cmp::max(interp_hi, (phdr.p_vaddr + phdr.p_memsz) as usize);
+            }
+        }
+        let interp_span = align_up(interp_hi - interp_lo, PAGE_SIZE);
+        let interp_entry_offset = interp_elf.entry_offset() as usize;
+        let interp_phdrs: Vec<ProgramHeader> = interp_elf.program_headers().to_vec();
+
+        // Create VM. For PIE, heap bottom is arbitrary (will be after the alloc region).
+        // Use a safe default; the actual images are placed via alloc_vaddr_range.
+        let user_heap_bottom = if is_pie {
+            // PIE: heap starts after a placeholder. Images go in the valloc region.
+            align_up(PAGE_SIZE, PAGE_SIZE)
+        } else {
+            align_up(main_hi, PAGE_SIZE)
+        };
+        let user_stack_bottom = init_stack_top.sub(USER_STACK_LEN).value();
+
+        vm = Vm::new(
+            UserVAddr::new(user_stack_bottom).unwrap(),
+            UserVAddr::new(user_heap_bottom).unwrap(),
+        )?;
+
+        // Map file header pages (for AT_PHDR).
+        for i in 0..(buf.len() / PAGE_SIZE) {
+            vm.page_table_mut().map_user_page(
+                file_header_top_val.sub(((buf.len() / PAGE_SIZE) - i) * PAGE_SIZE),
+                file_header_pages.add(i * PAGE_SIZE),
+            );
+        }
+
+        // Load main executable's PT_LOAD segments.
+        let main_base_offset = if is_pie {
+            let base = vm.alloc_vaddr_range(main_span)?;
+            trace!("PIE main: base={:#x}, main_lo={:#x}, main_hi={:#x}, span={:#x}",
+                   base.value(), main_lo, main_hi, main_span);
+            base.value() - main_lo
+        } else {
+            0
+        };
+
+        let main_entry = (elf.header().e_entry as usize) + main_base_offset;
+
+        load_elf_segments(&mut vm, elf.program_headers(), main_base_offset, executable)?;
+
+        // Allocate address range for interpreter and load its segments.
+        let interp_base_uaddr = vm.alloc_vaddr_range(interp_span)?;
+        let interp_base_offset = interp_base_uaddr.value() - interp_lo;
+        trace!("interpreter: base={:#x}, interp_lo={:#x}, interp_hi={:#x}, offset={:#x}",
+               interp_base_uaddr.value(), interp_lo, interp_hi, interp_base_offset);
+
+        load_elf_segments(&mut vm, &interp_phdrs, interp_base_offset, &interp_file)?;
+
+        // Entry point is the interpreter's entry, relocated.
+        ip = UserVAddr::new_nonnull(interp_entry_offset + interp_base_offset)?;
+
+        // Update AT_PHDR for PIE: point into the relocated main executable image.
+        // The dynamic linker computes load bias as (AT_PHDR - phdr[0].p_vaddr).
+        // For PIE, phdrs are at main_base + e_phoff (within the first PT_LOAD segment).
+        if is_pie {
+            let phdr_addr = main_base_offset + (elf.header().e_phoff as usize);
+            trace!("AT_PHDR (PIE relocated): {:#x}", phdr_addr);
+            auxv[0] = Auxv::Phdr(UserVAddr::new_nonnull(phdr_addr)?);
+        }
+
+        // Add AT_ENTRY (main exe relocated entry) and AT_BASE (interpreter base).
+        auxv.push(Auxv::Entry(main_entry));
+        auxv.push(Auxv::Base(interp_base_uaddr.value()));
+
+        trace!("dynamic link: ip={:#x}, main_entry={:#x}, interp_base={:#x}",
+              ip.value(), main_entry, interp_base_uaddr.value());
+    } else {
+        // --- Static executable (no interpreter) ---
+        let end_of_image = main_hi;
+        let user_heap_bottom = align_up(end_of_image, PAGE_SIZE);
+        let user_stack_bottom = init_stack_top.sub(USER_STACK_LEN).value();
+
+        if user_heap_bottom >= user_stack_bottom {
+            return Err(Errno::E2BIG.into());
+        }
+
+        vm = Vm::new(
+            UserVAddr::new(user_stack_bottom).unwrap(),
+            UserVAddr::new(user_heap_bottom).unwrap(),
+        )?;
+
+        // Map file header pages.
+        for i in 0..(buf.len() / PAGE_SIZE) {
+            vm.page_table_mut().map_user_page(
+                file_header_top_val.sub(((buf.len() / PAGE_SIZE) - i) * PAGE_SIZE),
+                file_header_pages.add(i * PAGE_SIZE),
+            );
+        }
+
+        // Register main executable's PT_LOAD segments.
+        load_elf_segments(&mut vm, elf.program_headers(), 0, executable)?;
+
+        ip = elf.entry()?;
     }
 
+    // Build init stack.
+    let init_stack_len = align_up(estimate_user_init_stack_size(argv, envp, &auxv), PAGE_SIZE);
     let init_stack_pages = alloc_pages(init_stack_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
     let user_sp = init_user_stack(
         init_stack_top,
@@ -666,48 +937,13 @@ fn do_elf_binfmt(
         init_stack_pages.as_vaddr(),
         argv,
         envp,
-        auxv,
+        &auxv,
     )?;
-
-    let mut vm = Vm::new(
-        UserVAddr::new(user_stack_bottom).unwrap(),
-        UserVAddr::new(user_heap_bottom).unwrap(),
-    )?;
-    for i in 0..(buf.len() / PAGE_SIZE) {
-        vm.page_table_mut().map_user_page(
-            file_header_top.sub(((buf.len() / PAGE_SIZE) - i) * PAGE_SIZE),
-            file_header_pages.add(i * PAGE_SIZE),
-        );
-    }
-
     for i in 0..(init_stack_len / PAGE_SIZE) {
         vm.page_table_mut().map_user_page(
             init_stack_top.sub(((init_stack_len / PAGE_SIZE) - i) * PAGE_SIZE),
             init_stack_pages.add(i * PAGE_SIZE),
         );
-    }
-
-    // Register program headers in the virtual memory space.
-    for phdr in elf.program_headers() {
-        if phdr.p_type != PT_LOAD {
-            continue;
-        }
-
-        let area_type = if phdr.p_filesz > 0 {
-            VmAreaType::File {
-                file: executable.clone(),
-                offset: phdr.p_offset as usize,
-                file_size: phdr.p_filesz as usize,
-            }
-        } else {
-            VmAreaType::Anonymous
-        };
-
-        vm.add_vm_area(
-            UserVAddr::new_nonnull(phdr.p_vaddr as usize)?,
-            phdr.p_memsz as usize,
-            area_type,
-        )?;
     }
 
     Ok(UserspaceEntry { vm, ip, user_sp })
@@ -735,7 +971,7 @@ fn do_setup_userspace(
         return do_script_binfmt(&executable_path, argv, envp, root_fs, buf);
     }
 
-    do_elf_binfmt(executable, argv, envp, file_header_pages, buf)
+    do_elf_binfmt(executable, argv, envp, file_header_pages, buf, root_fs)
 }
 
 pub fn gc_exited_processes() {

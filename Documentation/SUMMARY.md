@@ -33,3 +33,4 @@
 - [The Road to 170 Syscalls](blog/002-syscall-roadmap.md)
 - [Milestone 1: BusyBox Boots on Kevlar](blog/003-milestone-1-busybox-boots.md)
 - [Milestone 1.5: ARM64 BusyBox Boots on Kevlar](blog/004-milestone-1.5-arm64.md)
+- [Milestone 2: Dynamic Linking Works on Kevlar](blog/005-milestone-2-dynamic-linking.md)
