@@ -14,11 +14,6 @@
 - [Filesystems](architecture/filesystems.md)
 - [Networking](architecture/networking.md)
 
-# Syscalls
-
-- [Syscall Coverage](syscalls/overview.md)
-- [Priority Syscalls](syscalls/priority.md)
-
 # Provenance
 
 - [Licensing](provenance/licensing.md)
@@ -30,12 +25,9 @@
 - [Kernel Parameters](kernel-parameters.md)
 - [Logging](logging.md)
 - [Contributing](contributing.md)
-- [Kernel Hackers Guide](hacking/README.md)
-  - [Debugging 101](hacking/debugging-101.md)
-
-- [Environments](environments/README.md)
-  - [DigitalOcean](environments/digitalocean.md)
+- [Debugging 101](hacking/debugging-101.md)
 
 # Blog
 
 - [Reviving Kerla: Forking a Dead Rust Kernel](blog/001-reviving-kerla.md)
+- [The Road to 170 Syscalls](blog/002-syscall-roadmap.md)
