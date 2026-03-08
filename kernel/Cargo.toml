@@ -1,0 +1,36 @@
+[package]
+name = "kevlar_kernel"
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "kevlar_kernel"
+path = "main.rs"
+
+[dependencies]
+log = "0.4"
+spin = "0.9"
+goblin = { version = "0.9", default-features = false, features = ["elf64"] }
+smoltcp = { version = "0.7.5", default-features = false, features = ["alloc", "proto-ipv4", "socket", "socket-raw", "socket-udp", "socket-tcp", "proto-dhcpv4", "ethernet"] }
+boot2dump = { version = "0" }
+
+# Data structures.
+bitflags = "2"
+arrayvec = { version = "0.7", default-features = false }
+hashbrown = { version = "0.14", default-features = false, features = ["inline-more", "ahash"] }
+crossbeam = { version = "0.8", default-features = false, features = ["alloc"] }
+atomic_refcell = "0.1"
+bitvec = { version = "1", default-features = false, features = ["atomic", "alloc"] }
+
+# Arch-specific dependencies.
+x86 = "0.52"
+
+# Local dependencies.
+kevlar_runtime = { path = "../runtime" }
+kevlar_api = { path = "../libs/kevlar_api" }
+kevlar_utils = { path = "../libs/kevlar_utils", features = ["no_std"] }
+
+# Kernel Extensions.
+virtio_net = { path = "../exts/virtio_net" }

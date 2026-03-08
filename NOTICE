@@ -1,0 +1,13 @@
+Kevlar Kernel
+Copyright 2026 Kevlar Contributors
+Licensed under MIT OR Apache-2.0
+
+This product includes software originally developed by:
+
+- Kerla (Copyright 2021 Seiya Nuta, MIT OR Apache-2.0)
+  https://github.com/nuta/kerla
+  Original kernel fork base
+
+- smoltcp (Copyright whitequark, 0-clause BSD)
+  https://github.com/smoltcp-rs/smoltcp
+  TCP/IP networking library

@@ -1,0 +1,13 @@
+[package]
+name = "log_filter"
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "log_filter"
+path = "lib.rs"
+
+[dependencies]
+log = "0.4"

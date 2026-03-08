@@ -1,0 +1,27 @@
+[package]
+name = "kevlar_runtime"
+description = "An OS-agnostic bootstrap and runtime support library for kernels."
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "kevlar_runtime"
+path = "lib.rs"
+
+[dependencies]
+log = "0.4"
+cfg-if = "1"
+arrayvec = { version = "0.7", default-features = false }
+bitflags = "2"
+atomic_refcell = "0.1"
+spin = "0.9"
+buddy_system_allocator = { version = "0.9", features = ["const_fn"] }
+
+# x64-specific dependencies.
+x86 = "0.52"
+vte = "0.13"
+
+kevlar_utils = { path = "../libs/kevlar_utils", features = ["no_std"] }
+log_filter = { path = "../libs/log_filter" }

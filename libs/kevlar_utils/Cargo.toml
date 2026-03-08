@@ -1,0 +1,19 @@
+[package]
+name = "kevlar_utils"
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "kevlar_utils"
+path = "lib.rs"
+
+[features]
+no_std = []
+
+[dependencies]
+log = "0.4"
+spin = "0.9"
+crossbeam = { version = "0.8", default-features = false }
+bitvec = { version = "1", default-features = false }
