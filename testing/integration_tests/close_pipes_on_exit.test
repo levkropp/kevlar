@@ -6,7 +6,7 @@
 # wait4(2) after the pipe is closed, on child's exit, its opened files must be
 # closed to return EOF to the parent.
 #
-# This script is a regression test for: https://github.com/nuta/kevlar/issues/54
+# This script is a regression test for: https://github.com/nuta/kerla/issues/54
 set -ue
 
 result=$(echo hello from pipe)

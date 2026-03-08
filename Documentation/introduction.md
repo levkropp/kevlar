@@ -1,14 +1,6 @@
 # Introduction
-Kevlar is a monolithic operating system kernel from scratch in Rust which aims to be compatible with the Linux ABI, that is, runs Linux binaries without any modifications.
-
-## Demo
-
-You can play with Kevlar over ssh. Your login is not visible from others (except me): we automatically launch a dedicated microVM on Firecracker for each TCP connection.
-
-```
-$ ssh root@demo.kevlar.dev
-```
+Kevlar is a monolithic operating system kernel written in Rust which aims to be compatible with the Linux ABI, that is, it runs Linux binaries without any modifications.
 
 ## Links
 
-- [GitHub](https://github.com/nuta/kevlar)
+- [GitHub](https://github.com/levkropp/kevlar)

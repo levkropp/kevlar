@@ -5,7 +5,7 @@
 
 A tiny operating system which takes a filename and memory buffer, saves it into
 the disk, and reboots the computer. It's initially designed for collecting kernel
-crash logs from [Kevlar](https://kevlar.dev) running on cloud.
+crash logs from [Kevlar](https://github.com/levkropp/kevlar) running on cloud.
 
 ## Prerequisites
 Boot2dump assumes the following prerequisites:

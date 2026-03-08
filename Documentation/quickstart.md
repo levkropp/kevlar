@@ -25,7 +25,7 @@ $ sudo apt install qemu-system gdb python3
 
 ## Building
 ```
-$ git clone https://github.com/nuta/kevlar && cd kevlar
+$ git clone https://github.com/levkropp/kevlar && cd kevlar
 $ rustup override set nightly
 $ rustup component add llvm-tools-preview rust-src
 $ cargo install cargo-watch cargo-binutils rustfilt

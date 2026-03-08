@@ -1,9 +1,9 @@
-#
-#  mdBook (https://github.com/rust-lang/mdBook)
-#
 [book]
 authors = ["The Kevlar Authors"]
 language = "en"
-multilingual = false
 src = "."
 title = "Kevlar Documentation"
+
+[output.html]
+git-repository-url = "https://github.com/levkropp/kevlar"
+edit-url-template = "https://github.com/levkropp/kevlar/edit/main/Documentation/{path}"

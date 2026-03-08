@@ -41,8 +41,8 @@ const Home: NextPage = () => {
             </Typography>
 
             <Button color="inherit" href="/docs/index.html">Docs</Button>
-            <Button color="inherit" href="https://github.com/nuta/kevlar">GitHub</Button>
-            <Button color="inherit" href="https://discord.gg/6Pu4ujpp6h">Discord</Button>
+            <Button color="inherit" href="https://github.com/levkropp/kevlar">GitHub</Button>
+
           </Toolbar>
         </AppBar>
 
@@ -68,7 +68,7 @@ const Home: NextPage = () => {
                 justifyContent="center"
               >
                 <Button variant="contained" href="/docs/quickstart.html">Quickstart</Button>
-                <Button variant="outlined" href="https://github.com/nuta/kevlar">GitHub</Button>
+                <Button variant="outlined" href="https://github.com/levkropp/kevlar">GitHub</Button>
               </Stack>
 
               <Box sx={{ pt: 4 }}>
@@ -88,8 +88,8 @@ const Home: NextPage = () => {
             >
               Made by Kevlar Authors.<br />
               <Link href="/docs/index.html" color="inherit" sx={{ mr: "1rem" }}>Docs</Link>
-              <Link href="https://github.com/nuta/kevlar" color="inherit" sx={{ mr: "1rem" }}>GitHub</Link>
-              <Link href="https://discord.gg/6Pu4ujpp6h" color="inherit">Discord</Link>
+              <Link href="https://github.com/levkropp/kevlar" color="inherit" sx={{ mr: "1rem" }}>GitHub</Link>
+
             </Typography>
           </Box>
         </footer>
