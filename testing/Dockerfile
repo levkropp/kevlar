@@ -55,7 +55,7 @@ COPY --from=empty_dir /empty_dir /usr/bin
 COPY --from=empty_dir /empty_dir /usr/sbin
 
 COPY --from=busybox  /build/busybox_unstripped /bin/busybox
-COPY --from=dropbear /build/dropbear /build/dropbearkey /bin
+COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
 
 RUN ["/bin/busybox", "--install", "-s"]

@@ -11,7 +11,8 @@ use crate::{
 use alloc::{collections::BTreeSet, sync::Arc};
 use core::{convert::TryInto, fmt};
 use kevlar_runtime::spinlock::SpinLock;
-use smoltcp::socket::{UdpPacketMetadata, UdpSocketBuffer};
+use smoltcp::iface::SocketHandle;
+use smoltcp::socket::udp;
 use smoltcp::wire::IpEndpoint;
 
 use super::{process_packets, socket::*, SOCKETS, SOCKET_WAIT_QUEUE};
@@ -19,14 +20,14 @@ use super::{process_packets, socket::*, SOCKETS, SOCKET_WAIT_QUEUE};
 static INUSE_ENDPOINTS: SpinLock<BTreeSet<u16>> = SpinLock::new(BTreeSet::new());
 
 pub struct UdpSocket {
-    handle: smoltcp::socket::SocketHandle,
+    handle: SocketHandle,
 }
 
 impl UdpSocket {
     pub fn new() -> Arc<UdpSocket> {
-        let rx_buffer = UdpSocketBuffer::new(vec![UdpPacketMetadata::EMPTY; 64], vec![0; 4096]);
-        let tx_buffer = UdpSocketBuffer::new(vec![UdpPacketMetadata::EMPTY; 64], vec![0; 4096]);
-        let inner = smoltcp::socket::UdpSocket::new(rx_buffer, tx_buffer);
+        let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 4096]);
+        let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 4096]);
+        let inner = udp::Socket::new(rx_buffer, tx_buffer);
         let handle = SOCKETS.lock().add(inner);
         Arc::new(UdpSocket { handle })
     }
@@ -55,8 +56,9 @@ impl FileLike for UdpSocket {
 
         SOCKETS
             .lock()
-            .get::<smoltcp::socket::UdpSocket>(self.handle)
-            .bind(endpoint)?;
+            .get_mut::<udp::Socket>(self.handle)
+            .bind(endpoint)
+            .map_err(|_| Errno::EADDRINUSE)?;
         inuse_endpoints.insert(endpoint.port);
 
         Ok(())
@@ -72,12 +74,13 @@ impl FileLike for UdpSocket {
             .ok_or_else(|| Error::new(Errno::EINVAL))?
             .try_into()?;
         let mut sockets = SOCKETS.lock();
-        let mut socket = sockets.get::<smoltcp::socket::UdpSocket>(self.handle);
+        let socket = sockets.get_mut::<udp::Socket>(self.handle);
         let mut reader = UserBufReader::from(buf);
-        let dst = socket.send(reader.remaining_len(), endpoint)?;
+        let dst = socket
+            .send(reader.remaining_len(), endpoint)
+            .map_err(|_| Errno::ENOBUFS)?;
         let copied_len = reader.read_bytes(dst)?;
 
-        drop(socket);
         drop(sockets);
         process_packets();
         Ok(copied_len)
@@ -92,25 +95,25 @@ impl FileLike for UdpSocket {
         let mut writer = UserBufWriter::from(buf);
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
             let mut sockets = SOCKETS.lock();
-            let mut socket = sockets.get::<smoltcp::socket::UdpSocket>(self.handle);
+            let socket = sockets.get_mut::<udp::Socket>(self.handle);
             match socket.recv() {
-                Ok((payload, endpoint)) => {
+                Ok((payload, meta)) => {
                     writer.write_bytes(payload)?;
-                    Ok(Some((writer.written_len(), endpoint.into())))
+                    Ok(Some((writer.written_len(), meta.endpoint.into())))
                 }
-                Err(smoltcp::Error::Exhausted) if options.nonblock => Err(Errno::EAGAIN.into()),
-                Err(smoltcp::Error::Exhausted) => {
+                Err(udp::RecvError::Exhausted) if options.nonblock => Err(Errno::EAGAIN.into()),
+                Err(udp::RecvError::Exhausted) => {
                     // The receive buffer is empty. Try again later...
                     Ok(None)
                 }
-                Err(err) => Err(err.into()),
+                Err(_) => Err(Errno::EINVAL.into()),
             }
         })
     }
 
     fn poll(&self) -> Result<PollStatus> {
-        let mut sockets = SOCKETS.lock();
-        let socket = sockets.get::<smoltcp::socket::UdpSocket>(self.handle);
+        let sockets = SOCKETS.lock();
+        let socket: &udp::Socket = sockets.get(self.handle);
 
         let mut status = PollStatus::empty();
         if socket.can_recv() {

@@ -12,13 +12,11 @@ impl<'a> SyscallHandler<'a> {
         &mut self,
         addr_hint: Option<UserVAddr>,
         len: c_size,
-        _prot: MMapProt,
+        prot: MMapProt,
         flags: MMapFlags,
         fd: Fd,
         offset: c_off,
     ) -> Result<isize> {
-        // TODO: Respect `prot`.
-
         if !is_aligned(len as usize, PAGE_SIZE) {
             return Err(Errno::EINVAL.into());
         }
@@ -61,7 +59,7 @@ impl<'a> SyscallHandler<'a> {
             None => vm.alloc_vaddr_range(len as usize)?,
         };
 
-        vm.add_vm_area(mapped_uaddr, len as usize, area_type)?;
+        vm.add_vm_area_with_prot(mapped_uaddr, len as usize, area_type, prot)?;
         Ok(mapped_uaddr.value() as isize)
     }
 }

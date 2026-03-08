@@ -18,10 +18,11 @@ use core::{
 };
 use crossbeam::atomic::AtomicCell;
 use kevlar_runtime::spinlock::{SpinLock, SpinLockGuard};
-use smoltcp::socket::{SocketRef, TcpSocketBuffer};
-use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
+use smoltcp::iface::SocketHandle;
+use smoltcp::socket::tcp;
+use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
 
-use super::{process_packets, SOCKETS, SOCKET_WAIT_QUEUE};
+use super::{process_packets, INTERFACE, SOCKETS, SOCKET_WAIT_QUEUE};
 
 const BACKLOG_MAX: usize = 8;
 static INUSE_ENDPOINTS: SpinLock<BTreeSet<u16>> = SpinLock::new(BTreeSet::new());
@@ -46,17 +47,17 @@ pub fn read_tcp_stats() -> Stats {
 
 /// Looks for an accept'able socket in the backlog.
 fn get_ready_backlog_index(
-    sockets: &mut smoltcp::socket::SocketSet,
+    sockets: &mut smoltcp::iface::SocketSet,
     backlogs: &[Arc<TcpSocket>],
 ) -> Option<usize> {
     backlogs.iter().position(|sock| {
-        let smol_socket: SocketRef<'_, smoltcp::socket::TcpSocket> = sockets.get(sock.handle);
+        let smol_socket: &tcp::Socket = sockets.get(sock.handle);
         smol_socket.may_recv() || smol_socket.may_send()
     })
 }
 
 pub struct TcpSocket {
-    handle: smoltcp::socket::SocketHandle,
+    handle: SocketHandle,
     local_endpoint: AtomicCell<Option<IpEndpoint>>,
     backlogs: SpinLock<Vec<Arc<TcpSocket>>>,
     num_backlogs: AtomicCell<usize>,
@@ -64,9 +65,9 @@ pub struct TcpSocket {
 
 impl TcpSocket {
     pub fn new() -> Arc<TcpSocket> {
-        let rx_buffer = TcpSocketBuffer::new(vec![0; 4096]);
-        let tx_buffer = TcpSocketBuffer::new(vec![0; 4096]);
-        let inner = smoltcp::socket::TcpSocket::new(rx_buffer, tx_buffer);
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let inner = tcp::Socket::new(rx_buffer, tx_buffer);
         let handle = SOCKETS.lock().add(inner);
         Arc::new(TcpSocket {
             handle,
@@ -85,12 +86,18 @@ impl TcpSocket {
             None => return Err(Errno::EINVAL.into()),
         };
 
+        let listen_endpoint = IpListenEndpoint {
+            addr: Some(local_endpoint.addr),
+            port: local_endpoint.port,
+        };
+
         for _ in 0..(self.num_backlogs.load() - backlogs.len()) {
             let socket = TcpSocket::new();
             SOCKETS
                 .lock()
-                .get::<smoltcp::socket::TcpSocket>(socket.handle)
-                .listen(local_endpoint)?;
+                .get_mut::<tcp::Socket>(socket.handle)
+                .listen(listen_endpoint)
+                .map_err(|_| Errno::EADDRINUSE)?;
             backlogs.push(socket);
         }
 
@@ -121,15 +128,21 @@ impl FileLike for TcpSocket {
                     self.refill_backlog_sockets(&mut backlogs)?;
 
                     // Extract the remote endpoint.
-                    let mut sockets_lock = SOCKETS.lock();
-                    let smol_socket: SocketRef<'_, smoltcp::socket::TcpSocket> =
-                        sockets_lock.get(socket.handle);
+                    let sockets_lock = SOCKETS.lock();
+                    let smol_socket: &tcp::Socket = sockets_lock.get(socket.handle);
 
                     PASSIVE_OPENS_TOTAL.fetch_add(1, Ordering::SeqCst);
 
+                    let remote = smol_socket
+                        .remote_endpoint()
+                        .unwrap_or(IpEndpoint {
+                            addr: IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
+                            port: 0,
+                        });
+
                     Ok(Some((
                         socket as Arc<dyn FileLike>,
-                        smol_socket.remote_endpoint().into(),
+                        remote.into(),
                     )))
                 }
                 None => {
@@ -150,7 +163,7 @@ impl FileLike for TcpSocket {
     fn shutdown(&self, _how: super::ShutdownHow) -> Result<()> {
         SOCKETS
             .lock()
-            .get::<smoltcp::socket::TcpSocket>(self.handle)
+            .get_mut::<tcp::Socket>(self.handle)
             .close();
 
         process_packets();
@@ -158,29 +171,25 @@ impl FileLike for TcpSocket {
     }
 
     fn getsockname(&self) -> Result<SockAddr> {
-        let endpoint = SOCKETS
-            .lock()
-            .get::<smoltcp::socket::TcpSocket>(self.handle)
-            .local_endpoint();
+        let sockets = SOCKETS.lock();
+        let smol_socket: &tcp::Socket = sockets.get(self.handle);
+        let endpoint = smol_socket.local_endpoint();
 
-        if endpoint.addr.is_unspecified() {
-            return Err(Errno::ENOTCONN.into());
+        match endpoint {
+            Some(ep) => Ok(ep.into()),
+            None => Err(Errno::ENOTCONN.into()),
         }
-
-        Ok(endpoint.into())
     }
 
     fn getpeername(&self) -> Result<SockAddr> {
-        let endpoint = SOCKETS
-            .lock()
-            .get::<smoltcp::socket::TcpSocket>(self.handle)
-            .remote_endpoint();
+        let sockets = SOCKETS.lock();
+        let smol_socket: &tcp::Socket = sockets.get(self.handle);
+        let endpoint = smol_socket.remote_endpoint();
 
-        if endpoint.addr.is_unspecified() {
-            return Err(Errno::ENOTCONN.into());
+        match endpoint {
+            Some(ep) => Ok(ep.into()),
+            None => Err(Errno::ENOTCONN.into()),
         }
-
-        Ok(endpoint.into())
     }
 
     fn connect(&self, sockaddr: SockAddr, _options: &OpenOptions) -> Result<()> {
@@ -189,11 +198,13 @@ impl FileLike for TcpSocket {
         // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
         //       does not check that.
         let mut inuse_endpoints = INUSE_ENDPOINTS.lock();
-        let mut local_endpoint = self.local_endpoint.load().unwrap_or(IpEndpoint {
+        let local_endpoint = self.local_endpoint.load().unwrap_or(IpEndpoint {
             addr: IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
             port: 0,
         });
-        if local_endpoint.port == 0 {
+
+        let mut local_port = local_endpoint.port;
+        if local_port == 0 {
             // Assign a unused port.
             // TODO: Assign a *random* port instead.
             let mut port = 50000;
@@ -204,13 +215,23 @@ impl FileLike for TcpSocket {
 
                 port += 1;
             }
-            local_endpoint.port = port;
+            local_port = port;
         }
 
-        SOCKETS
-            .lock()
-            .get::<smoltcp::socket::TcpSocket>(self.handle)
-            .connect(remote_endpoint, local_endpoint)?;
+        let listen_endpoint = IpListenEndpoint {
+            addr: Some(local_endpoint.addr),
+            port: local_port,
+        };
+
+        {
+            let mut iface = INTERFACE.lock();
+            let cx = iface.context();
+            SOCKETS
+                .lock()
+                .get_mut::<tcp::Socket>(self.handle)
+                .connect(cx, remote_endpoint, listen_endpoint)
+                .map_err(|_| Errno::ECONNRESET)?;
+        }
         inuse_endpoints.insert(remote_endpoint.port);
         drop(inuse_endpoints);
 
@@ -221,7 +242,7 @@ impl FileLike for TcpSocket {
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
             if SOCKETS
                 .lock()
-                .get::<smoltcp::socket::TcpSocket>(self.handle)
+                .get::<tcp::Socket>(self.handle)
                 .may_send()
             {
                 Ok(Some(()))
@@ -237,7 +258,7 @@ impl FileLike for TcpSocket {
         loop {
             let copied_len = SOCKETS
                 .lock()
-                .get::<smoltcp::socket::TcpSocket>(self.handle)
+                .get_mut::<tcp::Socket>(self.handle)
                 .send(|dst| {
                     let copied_len = reader.read_bytes(dst).unwrap_or(0);
                     (copied_len, copied_len)
@@ -253,7 +274,7 @@ impl FileLike for TcpSocket {
                     // Continue writing.
                     total_len += copied_len;
                 }
-                Err(err) => return Err(err.into()),
+                Err(_) => return Err(Errno::ECONNRESET.into()),
             }
         }
     }
@@ -263,14 +284,14 @@ impl FileLike for TcpSocket {
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
             let copied_len = SOCKETS
                 .lock()
-                .get::<smoltcp::socket::TcpSocket>(self.handle)
+                .get_mut::<tcp::Socket>(self.handle)
                 .recv(|src| {
                     let copied_len = writer.write_bytes(src).unwrap_or(0);
                     (copied_len, copied_len)
                 });
 
             match copied_len {
-                Ok(0) | Err(smoltcp::Error::Exhausted) => {
+                Ok(0) | Err(tcp::RecvError::Finished) => {
                     if options.nonblock {
                         Err(Errno::EAGAIN.into())
                     } else {
@@ -283,8 +304,7 @@ impl FileLike for TcpSocket {
                     READ_BYTES_TOTAL.fetch_add(copied_len, Ordering::SeqCst);
                     Ok(Some(copied_len))
                 }
-                // TODO: Handle FIN
-                Err(err) => Err(err.into()),
+                Err(_) => Err(Errno::ECONNRESET.into()),
             }
         })
     }
@@ -318,7 +338,7 @@ impl FileLike for TcpSocket {
             status |= PollStatus::POLLIN;
         }
 
-        let socket = sockets.get::<smoltcp::socket::TcpSocket>(self.handle);
+        let socket: &tcp::Socket = sockets.get(self.handle);
         if socket.can_recv() {
             status |= PollStatus::POLLIN;
         }

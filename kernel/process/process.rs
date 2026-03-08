@@ -53,6 +53,10 @@ pub struct Stats {
     pub fork_total: usize,
 }
 
+pub fn process_count() -> usize {
+    PROCESSES.lock().len()
+}
+
 pub fn read_process_stats() -> Stats {
     Stats {
         fork_total: FORK_TOTAL.load(Ordering::SeqCst),
@@ -122,6 +126,7 @@ pub struct Process {
     signals: Arc<SpinLock<SignalDelivery>>,
     signaled_frame: AtomicCell<Option<PtRegs>>,
     sigset: SpinLock<SigSet>,
+    umask: AtomicCell<u32>,
 }
 
 impl Process {
@@ -146,6 +151,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(SigSet::ZERO),
+            umask: AtomicCell::new(0o022),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -207,6 +213,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(SigSet::ZERO),
+            umask: AtomicCell::new(0o022),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -285,6 +292,17 @@ impl Process {
     /// Signals.
     pub fn signals(&self) -> &SpinLock<SignalDelivery> {
         &self.signals
+    }
+
+    /// Gets the current umask.
+    #[allow(dead_code)]
+    pub fn umask(&self) -> u32 {
+        self.umask.load()
+    }
+
+    /// Sets the umask and returns the old value.
+    pub fn set_umask(&self, new_umask: u32) -> u32 {
+        self.umask.swap(new_umask & 0o777)
     }
 
     /// Changes the process group.
@@ -504,6 +522,7 @@ impl Process {
         let opened_files = parent.opened_files().lock().clone(); // TODO: #88 has to address this
         let process_group = parent.process_group();
         let sig_set = parent.sigset.lock();
+        let parent_umask = parent.umask.load();
 
         let child = Arc::new(Process {
             is_idle: false,
@@ -520,6 +539,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(*sig_set),
+            umask: AtomicCell::new(parent_umask),
         });
 
         process_group.lock().add(Arc::downgrade(&child));

@@ -173,6 +173,10 @@ impl OpenedFile {
         self.pos.load()
     }
 
+    pub fn set_pos(&self, new_pos: usize) {
+        self.pos.store(new_pos);
+    }
+
     pub fn options(&self) -> OpenOptions {
         *self.options.borrow()
     }

@@ -16,8 +16,8 @@ cfg-if = "1"
 arrayvec = { version = "0.7", default-features = false }
 bitflags = "2"
 atomic_refcell = "0.1"
-spin = "0.9"
-buddy_system_allocator = { version = "0.9", features = ["const_fn"] }
+spin = "0.10"
+buddy_system_allocator = "0.11"
 
 # x64-specific dependencies.
 x86 = "0.52"

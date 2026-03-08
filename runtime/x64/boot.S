@@ -156,10 +156,10 @@ enable_long_mode:
     lea eax, [__kernel_pml4]
     mov cr3, eax
 
-    // Enable long mode.
+    // Enable long mode and NX (No-Execute) page protection.
     mov ecx, 0xc0000080
     rdmsr
-    or  eax, 0x0100
+    or  eax, 0x0900    // LME (bit 8) | NXE (bit 11)
     wrmsr
 
     // Prepare for RETF.

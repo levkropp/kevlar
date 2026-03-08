@@ -33,13 +33,9 @@ endif
 
 DUMMY_INITRAMFS_PATH := build/dummy-for-lint.initramfs
 
-# Set the platform name for docker image cross compiling.
-ifeq ($(ARCH),x64)
-docker_platform = linux/amd64
-endif
-
-ifeq ($(docker_platform),)
-$(error "docker_platform is not set for $(ARCH)!")
+# Architecture guard: only x86_64 is supported for now.
+ifneq ($(ARCH),x64)
+$(error "Only ARCH=x64 is supported")
 endif
 
 topdir      := $(PWD)
@@ -53,13 +49,13 @@ PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
 PYTHON3    ?= python3
 CARGO      ?= cargo
 BOCHS      ?= bochs
-NM         ?= rust-nm
+NM         ?= nm
 READELF    ?= readelf
-STRIP      ?= rust-strip
+STRIP      ?= strip
 DRAWIO     ?= /Applications/draw.io.app/Contents/MacOS/draw.io
 
 export RUSTFLAGS = -Z emit-stack-sizes
-CARGOFLAGS += -Z build-std=core,alloc -Z build-std-features=compiler-builtins-mem
+CARGOFLAGS += -Z build-std=core,alloc
 CARGOFLAGS += --target $(target_json)
 CARGOFLAGS += $(if $(RELEASE),--release,)
 TESTCARGOFLAGS += --package kevlar_kernel -Z unstable-options
@@ -194,7 +190,7 @@ clean:
 #
 build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) Makefile
 	$(PROGRESS) "BUILD" testing
-	cd testing && docker buildx build --platform $(docker_platform) -t kevlar-testing .
+	cd testing && docker build -t kevlar-testing .
 	$(PROGRESS) "EXPORT" testing
 	mkdir -p build
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing

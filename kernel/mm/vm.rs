@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+use crate::ctypes::MMapProt;
 use crate::fs::inode::FileLike;
 use crate::{
     arch::{USER_STACK_TOP, USER_VALLOC_BASE, USER_VALLOC_END},
@@ -27,11 +28,16 @@ pub struct VmArea {
     start: UserVAddr,
     len: usize,
     area_type: VmAreaType,
+    prot: MMapProt,
 }
 
 impl VmArea {
     pub fn area_type(&self) -> &VmAreaType {
         &self.area_type
+    }
+
+    pub fn prot(&self) -> MMapProt {
+        self.prot
     }
 
     pub fn start(&self) -> UserVAddr {
@@ -71,12 +77,14 @@ impl Vm {
             start: stack_bottom,
             len: USER_STACK_TOP.value() - stack_bottom.value(),
             area_type: VmAreaType::Anonymous,
+            prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
         };
 
         let heap_vma = VmArea {
             start: heap_bottom,
             len: 0,
             area_type: VmAreaType::Anonymous,
+            prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
         };
 
         Ok(Vm {
@@ -118,6 +126,21 @@ impl Vm {
         len: usize,
         area_type: VmAreaType,
     ) -> Result<()> {
+        self.add_vm_area_with_prot(
+            start,
+            len,
+            area_type,
+            MMapProt::PROT_READ | MMapProt::PROT_WRITE | MMapProt::PROT_EXEC,
+        )
+    }
+
+    pub fn add_vm_area_with_prot(
+        &mut self,
+        start: UserVAddr,
+        len: usize,
+        area_type: VmAreaType,
+        prot: MMapProt,
+    ) -> Result<()> {
         start.access_ok(len)?;
 
         if !self.is_free_vaddr_range(start, len) {
@@ -128,6 +151,7 @@ impl Vm {
             start,
             len,
             area_type,
+            prot,
         });
 
         Ok(())
@@ -166,6 +190,109 @@ impl Vm {
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
         })
+    }
+
+    /// Remove a VMA region [start, start+len). Splits VMAs at boundaries if needed.
+    /// Returns the removed/affected VMAs' prot flags for the region.
+    pub fn remove_vma_range(&mut self, start: UserVAddr, len: usize) -> Result<()> {
+        let end = start.value() + len;
+        let mut new_areas: Vec<VmArea> = Vec::new();
+        let mut i = 0;
+
+        while i < self.vm_areas.len() {
+            let vma = &self.vm_areas[i];
+            let vma_start = vma.start.value();
+            let vma_end = vma_start + vma.len;
+
+            if vma_end <= start.value() || vma_start >= end {
+                // No overlap — keep as-is.
+                i += 1;
+                continue;
+            }
+
+            // This VMA overlaps with [start, end). Remove it and possibly
+            // re-insert trimmed pieces.
+            let removed = self.vm_areas.remove(i);
+
+            // Left piece: [vma_start, start)
+            if vma_start < start.value() {
+                new_areas.push(VmArea {
+                    start: removed.start,
+                    len: start.value() - vma_start,
+                    area_type: removed.area_type.clone(),
+                    prot: removed.prot,
+                });
+            }
+
+            // Right piece: [end, vma_end)
+            if vma_end > end {
+                new_areas.push(VmArea {
+                    start: UserVAddr::new_nonnull(end)?,
+                    len: vma_end - end,
+                    area_type: removed.area_type,
+                    prot: removed.prot,
+                });
+            }
+
+            // Don't increment i — the next element shifted into position.
+        }
+
+        self.vm_areas.extend(new_areas);
+        Ok(())
+    }
+
+    /// Update protection flags for all VMAs overlapping [start, start+len).
+    /// Splits VMAs at boundaries if the overlap is partial.
+    pub fn update_prot_range(&mut self, start: UserVAddr, len: usize, new_prot: MMapProt) -> Result<()> {
+        let end = start.value() + len;
+        let mut new_areas: Vec<VmArea> = Vec::new();
+        let mut i = 0;
+
+        while i < self.vm_areas.len() {
+            let vma = &self.vm_areas[i];
+            let vma_start = vma.start.value();
+            let vma_end = vma_start + vma.len;
+
+            if vma_end <= start.value() || vma_start >= end {
+                i += 1;
+                continue;
+            }
+
+            let removed = self.vm_areas.remove(i);
+
+            // Left piece (keeps old prot): [vma_start, start)
+            if vma_start < start.value() {
+                new_areas.push(VmArea {
+                    start: removed.start,
+                    len: start.value() - vma_start,
+                    area_type: removed.area_type.clone(),
+                    prot: removed.prot,
+                });
+            }
+
+            // Middle piece (new prot): [max(vma_start, start), min(vma_end, end))
+            let mid_start = core::cmp::max(vma_start, start.value());
+            let mid_end = core::cmp::min(vma_end, end);
+            new_areas.push(VmArea {
+                start: UserVAddr::new_nonnull(mid_start)?,
+                len: mid_end - mid_start,
+                area_type: removed.area_type.clone(),
+                prot: new_prot,
+            });
+
+            // Right piece (keeps old prot): [end, vma_end)
+            if vma_end > end {
+                new_areas.push(VmArea {
+                    start: UserVAddr::new_nonnull(end)?,
+                    len: vma_end - end,
+                    area_type: removed.area_type,
+                    prot: removed.prot,
+                });
+            }
+        }
+
+        self.vm_areas.extend(new_areas);
+        Ok(())
     }
 
     pub fn is_free_vaddr_range(&self, start: UserVAddr, len: usize) -> bool {

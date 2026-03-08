@@ -33,10 +33,9 @@ impl<'a> SyscallHandler<'a> {
                     continue;
                 }
 
-                if pid.as_i32() == 0 {
-                    // TODO: Wait for any children in the same process group.
-                    todo!();
-                }
+                // pid == -1: wait for any child (most common case from musl).
+                // pid == 0: wait for children in same process group (treat as any).
+                // pid > 0: wait for specific child (handled above).
 
                 if let ProcessState::ExitedWith(status_value) = child.state() {
                     return Ok(Some((child.pid(), status_value)));
@@ -50,12 +49,14 @@ impl<'a> SyscallHandler<'a> {
             Ok(None)
         })?;
 
-        // Evict the joined processs object.
+        // Evict the joined process object.
         current_process().children().retain(|p| p.pid() != got_pid);
 
         if let Some(status) = status {
-            // FIXME: This is NOT the correct format of `status`.
-            status.write::<c_int>(&status_value)?;
+            // Linux wait status encoding: normal exit is (exit_code << 8) | 0.
+            // Signal death would be raw signal number in low 7 bits.
+            let encoded_status = (status_value & 0xff) << 8;
+            status.write::<c_int>(&encoded_status)?;
         }
         Ok(got_pid.as_i32() as isize)
     }

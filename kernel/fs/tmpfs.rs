@@ -177,6 +177,69 @@ impl Directory for Dir {
 
         Ok((inode as Arc<dyn Directory>).into())
     }
+
+    fn unlink(&self, name: &str) -> Result<()> {
+        let mut dir_lock = self.0.lock();
+        match dir_lock.files.get(name) {
+            Some(TmpFsINode::Directory(_)) => return Err(Errno::EISDIR.into()),
+            Some(TmpFsINode::File(_)) => {}
+            None => return Err(Errno::ENOENT.into()),
+        }
+        dir_lock.files.remove(name);
+        Ok(())
+    }
+
+    fn rmdir(&self, name: &str) -> Result<()> {
+        let mut dir_lock = self.0.lock();
+        match dir_lock.files.get(name) {
+            Some(TmpFsINode::Directory(dir)) => {
+                if !dir.0.lock().files.is_empty() {
+                    return Err(Errno::ENOTEMPTY.into());
+                }
+            }
+            Some(TmpFsINode::File(_)) => return Err(Errno::ENOTDIR.into()),
+            None => return Err(Errno::ENOENT.into()),
+        }
+        dir_lock.files.remove(name);
+        Ok(())
+    }
+
+    fn rename(&self, old_name: &str, new_dir: &Arc<dyn Directory>, new_name: &str) -> Result<()> {
+        let new_dir: &Arc<Dir> = downcast(new_dir).ok_or_else(|| Error::new(Errno::EXDEV))?;
+        let self_ptr = self as *const Dir as usize;
+        let new_ptr = &**new_dir as *const Dir as usize;
+
+        // Handle same-directory rename without deadlock.
+        if self_ptr == new_ptr {
+            let mut dir_lock = self.0.lock();
+            let entry = dir_lock
+                .files
+                .remove(old_name)
+                .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            dir_lock.files.insert(new_name.to_owned(), entry);
+            return Ok(());
+        }
+
+        // Cross-directory: lock in pointer order to avoid deadlock.
+        if self_ptr < new_ptr {
+            let mut old_lock = self.0.lock();
+            let mut new_lock = new_dir.0.lock();
+            let entry = old_lock
+                .files
+                .remove(old_name)
+                .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            new_lock.files.insert(new_name.to_owned(), entry);
+        } else {
+            let mut new_lock = new_dir.0.lock();
+            let mut old_lock = self.0.lock();
+            let entry = old_lock
+                .files
+                .remove(old_name)
+                .ok_or_else(|| Error::new(Errno::ENOENT))?;
+            new_lock.files.insert(new_name.to_owned(), entry);
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Dir {
@@ -205,7 +268,10 @@ impl File {
 
 impl FileLike for File {
     fn stat(&self) -> Result<Stat> {
-        Ok(self.stat)
+        use crate::fs::stat::FileSize;
+        let mut stat = self.stat;
+        stat.size = FileSize(self.data.lock().len() as isize);
+        Ok(stat)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {

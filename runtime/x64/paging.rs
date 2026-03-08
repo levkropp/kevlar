@@ -18,6 +18,7 @@ bitflags! {
         const PRESENT = 1 << 0;
         const WRITABLE = 1 << 1;
         const USER = 1 << 2;
+        const NO_EXECUTE = 1 << 63;
     }
 }
 
@@ -185,6 +186,83 @@ impl PageTable {
             paddr,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE,
         );
+    }
+
+    /// Maps a user page with specific protection flags.
+    /// `prot_flags` uses Linux mmap prot bits: PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4.
+    pub fn map_user_page_with_prot(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
+        if prot_flags & 2 != 0 {
+            // PROT_WRITE
+            attrs |= PageAttrs::WRITABLE;
+        }
+        if prot_flags & 4 == 0 {
+            // No PROT_EXEC → set NX bit
+            attrs |= PageAttrs::NO_EXECUTE;
+        }
+        self.map_page(vaddr, paddr, attrs);
+    }
+
+    /// Updates the flags of an already-mapped user page.
+    /// Returns true if the page was mapped, false if not present.
+    pub fn update_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
+        let entry_ptr = match traverse(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            Some(ptr) => ptr,
+            None => return false,
+        };
+
+        let entry = unsafe { *entry_ptr.as_ptr() };
+        let paddr_bits = entry & 0x7ffffffffffff000;
+        if paddr_bits == 0 {
+            return false;
+        }
+
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
+        if prot_flags & 2 != 0 {
+            attrs |= PageAttrs::WRITABLE;
+        }
+        if prot_flags & 4 == 0 {
+            attrs |= PageAttrs::NO_EXECUTE;
+        }
+
+        unsafe {
+            *entry_ptr.as_ptr() = paddr_bits | attrs.bits();
+        }
+        true
+    }
+
+    /// Unmaps a user page, returning the physical address if it was mapped.
+    pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
+        let entry_ptr = match traverse(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            Some(ptr) => ptr,
+            None => return None,
+        };
+
+        let entry = unsafe { *entry_ptr.as_ptr() };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() {
+            return None;
+        }
+
+        // Clear the PTE.
+        unsafe {
+            *entry_ptr.as_ptr() = 0;
+        }
+        Some(paddr)
+    }
+
+    /// Flushes the TLB for a specific virtual address.
+    pub fn flush_tlb(&self, vaddr: UserVAddr) {
+        unsafe {
+            core::arch::asm!("invlpg [{}]", in(reg) vaddr.value(), options(nostack, preserves_flags));
+        }
+    }
+
+    /// Flushes the entire TLB by reloading CR3.
+    pub fn flush_tlb_all(&self) {
+        self.switch();
     }
 
     fn map_page(&mut self, vaddr: UserVAddr, paddr: PAddr, attrs: PageAttrs) {

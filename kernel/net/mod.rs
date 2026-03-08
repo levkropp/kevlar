@@ -4,7 +4,6 @@ use crate::{
     poll::POLL_WAIT_QUEUE, process::WaitQueue, timer::read_monotonic_clock, timer::MonotonicClock,
 };
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use atomic_refcell::AtomicRefCell;
 use crossbeam::queue::ArrayQueue;
@@ -12,21 +11,10 @@ use kevlar_api::driver::net::EthernetDriver;
 use kevlar_runtime::bootinfo::BootInfo;
 use kevlar_runtime::spinlock::SpinLock;
 use kevlar_utils::once::Once;
-use smoltcp::wire::{self, EthernetAddress, IpCidr};
-use smoltcp::{
-    dhcp::Dhcpv4Client,
-    phy::{Device, DeviceCapabilities},
-};
-use smoltcp::{iface::EthernetInterface, time::Instant};
-use smoltcp::{
-    iface::{EthernetInterfaceBuilder, NeighborCache, Routes},
-    phy::RxToken,
-};
-use smoltcp::{
-    phy::TxToken,
-    socket::{RawPacketMetadata, RawSocketBuffer, SocketSet},
-    wire::EthernetFrame,
-};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::time::Instant;
+use smoltcp::wire::{self, EthernetAddress, EthernetFrame, HardwareAddress, IpCidr};
 
 pub mod socket;
 mod tcp_socket;
@@ -59,9 +47,9 @@ impl From<MonotonicClock> for Instant {
     }
 }
 
-static SOCKETS: Once<SpinLock<SocketSet>> = Once::new();
-static INTERFACE: Once<SpinLock<EthernetInterface<OurDevice>>> = Once::new();
-static DHCP_CLIENT: Once<SpinLock<Dhcpv4Client>> = Once::new();
+static SOCKETS: Once<SpinLock<SocketSet<'static>>> = Once::new();
+static INTERFACE: Once<SpinLock<Interface>> = Once::new();
+static DHCP_HANDLE: Once<SocketHandle> = Once::new();
 static DHCP_ENABLED: Once<bool> = Once::new();
 static SOCKET_WAIT_QUEUE: Once<WaitQueue> = Once::new();
 
@@ -70,49 +58,35 @@ pub fn process_packets() {
     let mut iface = INTERFACE.lock();
 
     let timestamp = read_monotonic_clock().into();
-    loop {
-        if *DHCP_ENABLED {
-            let mut dhcp = DHCP_CLIENT.lock();
-            if let Some(config) = dhcp
-                .poll(&mut iface, &mut sockets, timestamp)
-                .unwrap_or_else(|e| {
-                    trace!("DHCP: {:?}", e);
-                    None
-                })
-            {
-                if let Some(cidr) = config.address {
-                    iface.update_ip_addrs(|addrs| {
-                        if let Some(addr) = addrs.iter_mut().next() {
-                            *addr = IpCidr::Ipv4(cidr);
-                        }
-                    });
-                    info!("DHCP: got a IPv4 address: {}", cidr);
-                }
-
-                config
-                    .router
-                    .map(|router| iface.routes_mut().add_default_ipv4_route(router).unwrap());
-            }
-        }
-
-        match iface.poll(&mut sockets, timestamp) {
-            Ok(false) => break,
-            Ok(true) => {}
-            Err(smoltcp::Error::Unrecognized) => {}
-            Err(err) => {
-                debug_warn!("smoltcp error: {:?}", err);
-                break;
-            }
-        }
-    }
 
     if *DHCP_ENABLED {
-        let dhcp = DHCP_CLIENT.lock();
-        dhcp.next_poll(timestamp);
+        let dhcp_handle = *DHCP_HANDLE;
+        let event = sockets
+            .get_mut::<smoltcp::socket::dhcpv4::Socket>(dhcp_handle)
+            .poll();
+        if let Some(smoltcp::socket::dhcpv4::Event::Configured(config)) = event {
+            let cidr = config.address;
+            iface.update_ip_addrs(|addrs| {
+                if let Some(addr) = addrs.iter_mut().next() {
+                    *addr = IpCidr::Ipv4(cidr);
+                }
+            });
+            info!("DHCP: got a IPv4 address: {}", cidr);
+
+            if let Some(router) = config.router {
+                iface
+                    .routes_mut()
+                    .add_default_ipv4_route(router)
+                    .unwrap();
+            }
+        }
     }
 
-    if let Some(_timeout) = iface.poll_delay(&sockets, timestamp) {
-        // TODO: Use timeout
+    loop {
+        match iface.poll(timestamp, &mut OurDevice, &mut sockets) {
+            smoltcp::iface::PollResult::None => break,
+            smoltcp::iface::PollResult::SocketStateChanged => {}
+        }
     }
 
     SOCKET_WAIT_QUEUE.wake_all();
@@ -124,9 +98,9 @@ struct OurRxToken {
 }
 
 impl RxToken for OurRxToken {
-    fn consume<R, F>(mut self, _timestamp: Instant, f: F) -> smoltcp::Result<R>
+    fn consume<R, F>(mut self, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
+        F: FnOnce(&[u8]) -> R,
     {
         f(&mut self.buffer)
     }
@@ -135,40 +109,41 @@ impl RxToken for OurRxToken {
 struct OurTxToken {}
 
 impl TxToken for OurTxToken {
-    fn consume<R, F>(self, _timestamp: Instant, len: usize, f: F) -> smoltcp::Result<R>
+    fn consume<R, F>(self, len: usize, f: F) -> R
     where
-        F: FnOnce(&mut [u8]) -> smoltcp::Result<R>,
+        F: FnOnce(&mut [u8]) -> R,
     {
         let mut buffer = vec![0; len];
-        let return_value = f(&mut buffer)?;
+        let return_value = f(&mut buffer);
         if EthernetFrame::new_checked(&mut buffer).is_ok() {
             use_ethernet_driver(|driver| driver.transmit(&buffer));
         }
 
-        Ok(return_value)
+        return_value
     }
 }
 
 struct OurDevice;
 
-impl<'a> Device<'a> for OurDevice {
-    type RxToken = OurRxToken;
-    type TxToken = OurTxToken;
+impl Device for OurDevice {
+    type RxToken<'a> = OurRxToken;
+    type TxToken<'a> = OurTxToken;
 
-    fn receive(&'a mut self) -> Option<(Self::RxToken, Self::TxToken)> {
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         RX_PACKET_QUEUE
             .lock()
             .pop()
             .map(|buffer| (OurRxToken { buffer }, OurTxToken {}))
     }
 
-    fn transmit(&'a mut self) -> Option<Self::TxToken> {
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
         Some(OurTxToken {})
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.max_transmission_unit = 1500;
+        caps.medium = Medium::Ethernet;
         caps
     }
 }
@@ -202,7 +177,7 @@ fn parse_ipv4_addr(addr: &str) -> Result<wire::Ipv4Address, IPv4AddrParseError> 
             .ok_or(IPv4AddrParseError)?;
     }
 
-    Ok(wire::Ipv4Address::from_bytes(&octets))
+    Ok(wire::Ipv4Address::from(octets))
 }
 
 /// Parses an IPv4 address with the prefix length (e.g. "10.123.123.123/24").
@@ -230,38 +205,35 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
         None => [IpCidr::new(wire::Ipv4Address::UNSPECIFIED.into(), 0)],
     };
 
-    let mut routes = Routes::new(BTreeMap::new());
+    let mac_addr = use_ethernet_driver(|driver| driver.mac_addr());
+    let ethernet_addr = EthernetAddress(mac_addr.as_array());
+    let config = Config::new(HardwareAddress::Ethernet(ethernet_addr));
+    let timestamp = read_monotonic_clock().into();
+    let mut iface = Interface::new(config, &mut OurDevice, timestamp);
+
+    iface.update_ip_addrs(|addrs| {
+        for cidr in &ip_addrs {
+            addrs.push(*cidr).unwrap();
+        }
+    });
+
     if let Some(gateway_ip4_str) = &bootinfo.gateway_ip4 {
         let gateway_ip4 = parse_ipv4_addr(gateway_ip4_str)
             .expect("bootinfo.gateway_ip4 should be formed as 10.0.0.1");
         info!("net: using a static gateway IPv4 address: {}", gateway_ip4);
-        routes.add_default_ipv4_route(gateway_ip4).unwrap();
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(gateway_ip4)
+            .unwrap();
     };
-
-    let neighbor_cache = NeighborCache::new(BTreeMap::new());
-
-    let mac_addr = use_ethernet_driver(|driver| driver.mac_addr());
-    let ethernet_addr = EthernetAddress(mac_addr.as_array());
-    let iface = EthernetInterfaceBuilder::new(OurDevice)
-        .ethernet_addr(ethernet_addr)
-        .neighbor_cache(neighbor_cache)
-        .ip_addrs(ip_addrs)
-        .routes(routes)
-        .finalize();
 
     let mut sockets = SocketSet::new(vec![]);
 
     DHCP_ENABLED.init(|| bootinfo.dhcp_enabled);
     if *DHCP_ENABLED {
-        let dhcp_rx_buffer = RawSocketBuffer::new([RawPacketMetadata::EMPTY; 4], vec![0; 2048]);
-        let dhcp_tx_buffer = RawSocketBuffer::new([RawPacketMetadata::EMPTY; 4], vec![0; 2048]);
-        let dhcp = Dhcpv4Client::new(
-            &mut sockets,
-            dhcp_rx_buffer,
-            dhcp_tx_buffer,
-            read_monotonic_clock().into(),
-        );
-        DHCP_CLIENT.init(|| SpinLock::new(dhcp));
+        let dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
+        let dhcp_handle = sockets.add(dhcp_socket);
+        DHCP_HANDLE.init(|| dhcp_handle);
     }
     RX_PACKET_QUEUE.init(|| SpinLock::new(ArrayQueue::new(128)));
     SOCKET_WAIT_QUEUE.init(WaitQueue::new);

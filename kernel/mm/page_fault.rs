@@ -107,6 +107,8 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     }
 
-    // Map the page in the page table.
-    vm.page_table_mut().map_user_page(aligned_vaddr, paddr);
+    // Map the page in the page table, respecting VMA protection flags.
+    let prot_flags = vma.prot().bits();
+    vm.page_table_mut()
+        .map_user_page_with_prot(aligned_vaddr, paddr, prot_flags);
 }

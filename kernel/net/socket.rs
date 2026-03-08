@@ -82,11 +82,7 @@ impl TryFrom<SockAddr> for IpEndpoint {
         match sockaddr {
             SockAddr::In(SockAddrIn { port, addr, .. }) => Ok(IpEndpoint {
                 port: u16::from_be_bytes(port),
-                addr: if u32::from_be_bytes(addr) == 0 {
-                    IpAddress::Unspecified
-                } else {
-                    IpAddress::Ipv4(smoltcp::wire::Ipv4Address(addr))
-                },
+                addr: IpAddress::Ipv4(Ipv4Address::from(addr)),
             }),
             _ => Err(Errno::EINVAL.into()),
         }
@@ -99,9 +95,9 @@ impl From<IpEndpoint> for SockAddr {
             family: AF_INET as u16,
             port: endpoint.port.to_be_bytes(),
             addr: match endpoint.addr {
-                IpAddress::Unspecified => Ipv4Address::UNSPECIFIED.0,
-                IpAddress::Ipv4(addr) => addr.0,
-                _ => unimplemented!(),
+                IpAddress::Ipv4(addr) => addr.octets(),
+                #[allow(unreachable_patterns)]
+                _ => Ipv4Address::UNSPECIFIED.octets(),
             },
             zero: [0; 8],
         })

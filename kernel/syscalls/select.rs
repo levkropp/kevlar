@@ -53,7 +53,7 @@ impl<'a> SyscallHandler<'a> {
         max_fd: c_int,
         readfds: Option<UserVAddr>,
         writefds: Option<UserVAddr>,
-        _errorfds: Option<UserVAddr>,
+        errorfds: Option<UserVAddr>,
         timeout: Option<Timeval>,
     ) -> Result<isize> {
         let started_at = read_monotonic_clock();
@@ -67,7 +67,6 @@ impl<'a> SyscallHandler<'a> {
             }
 
             // Check the statuses of all specified files one by one.
-            // TODO: Support errorfds
             let mut ready_fds = 0;
             if let Some(fds) = readfds {
                 ready_fds +=
@@ -75,7 +74,12 @@ impl<'a> SyscallHandler<'a> {
             }
             if let Some(fds) = writefds {
                 ready_fds +=
-                    check_fd_statuses(max_fd, fds, |status| status.contains(PollStatus::POLLIN))?;
+                    check_fd_statuses(max_fd, fds, |status| status.contains(PollStatus::POLLOUT))?;
+            }
+            if let Some(fds) = errorfds {
+                ready_fds += check_fd_statuses(max_fd, fds, |status| {
+                    status.intersects(PollStatus::POLLERR | PollStatus::POLLHUP)
+                })?;
             }
 
             if ready_fds > 0 {

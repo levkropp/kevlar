@@ -182,6 +182,18 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>>;
     /// `link(2)`.
     fn link(&self, _name: &str, _link_to: &INode) -> Result<()>;
+    /// `unlink(2)` — remove a file entry from this directory.
+    fn unlink(&self, _name: &str) -> Result<()> {
+        Err(Error::new(Errno::ENOSYS))
+    }
+    /// `rmdir(2)` — remove a subdirectory entry from this directory.
+    fn rmdir(&self, _name: &str) -> Result<()> {
+        Err(Error::new(Errno::ENOSYS))
+    }
+    /// `rename(2)` — move an entry from this directory to another.
+    fn rename(&self, _old_name: &str, _new_dir: &Arc<dyn Directory>, _new_name: &str) -> Result<()> {
+        Err(Error::new(Errno::ENOSYS))
+    }
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())

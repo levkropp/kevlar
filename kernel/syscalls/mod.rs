@@ -72,9 +72,42 @@ mod stat;
 mod syslog;
 mod uname;
 mod utimes;
+mod vfork;
 mod wait4;
 mod write;
 mod writev;
+
+// M1 Phase 1: Trivial syscalls
+mod dup;
+mod getegid;
+mod getpgrp;
+mod sched_yield;
+mod umask;
+
+// M1 Phase 2: FD plumbing
+mod dup3;
+mod pipe2;
+
+// M1 Phase 3: *at syscalls + file ops
+mod access;
+mod lseek;
+mod newfstatat;
+mod openat;
+
+// M1 Phase 4: Filesystem mutations
+mod rename;
+mod rmdir;
+mod unlink;
+
+// M1 Phase 5: Time & system info
+mod getrlimit;
+mod gettimeofday;
+mod nanosleep;
+mod sysinfo;
+
+// M1 Phase 6: Memory management
+mod mprotect;
+mod munmap;
 
 pub enum CwdOrFd {
     /// `AT_FDCWD`
@@ -170,6 +203,28 @@ const SYS_CLOCK_GETTIME: usize = 228;
 const SYS_EXIT_GROUP: usize = 231;
 const SYS_UTIMES: usize = 235;
 const SYS_LINKAT: usize = 265;
+const SYS_LSEEK: usize = 8;
+const SYS_MPROTECT: usize = 10;
+const SYS_MUNMAP: usize = 11;
+const SYS_ACCESS: usize = 21;
+const SYS_SCHED_YIELD: usize = 24;
+const SYS_DUP: usize = 32;
+const SYS_NANOSLEEP: usize = 35;
+const SYS_VFORK: usize = 58;
+const SYS_RENAME: usize = 82;
+const SYS_RMDIR: usize = 84;
+const SYS_UNLINK: usize = 87;
+const SYS_UMASK: usize = 95;
+const SYS_GETTIMEOFDAY: usize = 96;
+const SYS_GETRLIMIT: usize = 97;
+const SYS_SYSINFO: usize = 99;
+const SYS_GETGID: usize = 104;
+const SYS_GETEGID: usize = 108;
+const SYS_GETPGRP: usize = 111;
+const SYS_OPENAT: usize = 257;
+const SYS_NEWFSTATAT: usize = 262;
+const SYS_DUP3: usize = 292;
+const SYS_PIPE2: usize = 293;
 const SYS_GETRANDOM: usize = 318;
 
 fn resolve_path(uaddr: usize) -> Result<PathBuf> {
@@ -380,6 +435,48 @@ impl<'a> SyscallHandler<'a> {
             SYS_RT_SIGPROCMASK => {
                 self.sys_rt_sigprocmask(a1, UserVAddr::new(a2), UserVAddr::new(a3), a4)
             }
+            // M1 Phase 1: Trivial syscalls
+            SYS_SCHED_YIELD => self.sys_sched_yield(),
+            SYS_DUP => self.sys_dup(Fd::new(a1 as c_int)),
+            SYS_VFORK => self.sys_vfork(),
+            SYS_UMASK => self.sys_umask(a1 as u32),
+            SYS_GETGID => Ok(0),  // TODO: proper GID tracking
+            SYS_GETEGID => self.sys_getegid(),
+            SYS_GETPGRP => self.sys_getpgrp(),
+            // M1 Phase 2: FD plumbing
+            SYS_DUP3 => self.sys_dup3(Fd::new(a1 as c_int), Fd::new(a2 as c_int), a3 as i32),
+            SYS_PIPE2 => self.sys_pipe2(UserVAddr::new_nonnull(a1)?, a2 as c_int),
+            // M1 Phase 3: *at syscalls + file ops
+            SYS_LSEEK => self.sys_lseek(Fd::new(a1 as c_int), a2 as i64, a3 as c_int),
+            SYS_ACCESS => self.sys_access(&resolve_path(a1)?),
+            SYS_OPENAT => self.sys_openat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                bitflags_from_user!(OpenFlags, a3 as i32)?,
+                FileMode::new(a4 as u32),
+            ),
+            SYS_NEWFSTATAT => self.sys_newfstatat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+                a4 as c_int,
+            ),
+            // M1 Phase 6: Memory management
+            SYS_MPROTECT => self.sys_mprotect(
+                UserVAddr::new_nonnull(a1)?,
+                a2,
+                bitflags_from_user!(MMapProt, a3 as c_int)?,
+            ),
+            SYS_MUNMAP => self.sys_munmap(UserVAddr::new_nonnull(a1)?, a2),
+            // M1 Phase 4: Filesystem mutations
+            SYS_UNLINK => self.sys_unlink(&resolve_path(a1)?),
+            SYS_RMDIR => self.sys_rmdir(&resolve_path(a1)?),
+            SYS_RENAME => self.sys_rename(&resolve_path(a1)?, &resolve_path(a2)?),
+            // M1 Phase 5: Time & system info
+            SYS_NANOSLEEP => self.sys_nanosleep(UserVAddr::new_nonnull(a1)?),
+            SYS_GETTIMEOFDAY => self.sys_gettimeofday(UserVAddr::new_nonnull(a1)?),
+            SYS_GETRLIMIT => self.sys_getrlimit(a1 as c_int, UserVAddr::new_nonnull(a2)?),
+            SYS_SYSINFO => self.sys_sysinfo(UserVAddr::new_nonnull(a1)?),
             _ => {
                 debug_warn!(
                     "unimplemented system call: {} (n={})",
