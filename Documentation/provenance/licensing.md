@@ -9,6 +9,7 @@ Kevlar is dual-licensed under **MIT OR Apache-2.0**, matching the original Kerla
 | Kerla | MIT OR Apache-2.0 | Yes (identical) | Fork base, all original kernel code |
 | OSv | BSD-3-Clause | Yes | Port C/C++ implementations to Rust with attribution |
 | Asterinas | MPL-2.0 | Design only | Study architecture and feature lists; NO code copying |
+| FreeBSD | BSD-2-Clause | Yes | Reference Linux compat layer (linuxulator) and kernel for syscall semantics |
 | Linux kernel | GPL-2.0 | No (code) | Read man pages and POSIX specs only; never copy implementation |
 | smoltcp | 0-clause BSD | Yes | TCP/IP networking library (Cargo dependency) |
 
@@ -20,6 +21,24 @@ When porting OSv code to Rust, we:
 1. Retain the original copyright notice in the file
 2. Add an entry to the `NOTICE` file at the repository root
 3. Document the port in the [Clean-Room Implementation Log](clean-room-log.md)
+
+## FreeBSD as Primary Reference
+
+FreeBSD's linuxulator (`sys/compat/linux/`) is a complete Linux syscall compatibility layer
+maintained by the FreeBSD project under the BSD-2-Clause license. It provides:
+
+1. **Battle-tested Linux syscall semantics** — FreeBSD developers have mapped every Linux
+   syscall to its correct behavior, including edge cases and error conditions
+2. **Clean-room safety** — Re-implementing FreeBSD's C code in Rust constitutes a language
+   transformation, not code copying. The BSD license permits both study and adaptation.
+3. **Linux-focused perspective** — Unlike OSv (which targets cloud workloads), FreeBSD's
+   linuxulator specifically targets Linux binary compatibility, exactly matching Kevlar's goals
+
+When implementing a new syscall, the recommended reference order is:
+1. FreeBSD linuxulator (`sys/compat/linux/`) — for Linux-specific semantics
+2. FreeBSD kernel (`sys/kern/`, `sys/vm/`) — for POSIX-standard implementations
+3. OSv (`fs/vfs/`, `core/`) — for VFS layer and filesystem operations
+4. Linux man pages — for POSIX specification details (never the implementation)
 
 ## Why Not MPL-2.0 / GPL?
 

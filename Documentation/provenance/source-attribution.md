@@ -18,6 +18,21 @@ Portions of the following subsystems are ported from [OSv](https://github.com/cl
 |-----------|-----------|-------------------|-------|
 | *To be filled as ports are completed* | | | |
 
+## FreeBSD (BSD-2-Clause)
+
+The following subsystems reference [FreeBSD](https://github.com/freebsd/freebsd-src)
+(Copyright The FreeBSD Project, BSD-2-Clause) for syscall semantics and implementation approach:
+
+| Subsystem | FreeBSD Source | Kevlar Destination | Phase |
+|-----------|---------------|-------------------|-------|
+| Linux syscall semantics | sys/compat/linux/ | kernel/syscalls/ | M1+ |
+| VM management | sys/vm/ | kernel/mm/ | M1+ |
+| Process/signal handling | sys/kern/kern_sig.c | kernel/process/ | M2+ |
+| *To be filled as implementations reference FreeBSD* | | | |
+
+Note: Kevlar does not copy FreeBSD code. We study FreeBSD's implementation approach and
+re-implement the concepts in Rust. This constitutes a clean-room language transformation.
+
 ## Original Code
 
 All code not attributed to Kerla or OSv is original work by Kevlar contributors,

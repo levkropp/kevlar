@@ -31,3 +31,4 @@
 
 - [Reviving Kerla: Forking a Dead Rust Kernel](blog/001-reviving-kerla.md)
 - [The Road to 170 Syscalls](blog/002-syscall-roadmap.md)
+- [Milestone 1: BusyBox Boots on Kevlar](blog/003-milestone-1-busybox-boots.md)

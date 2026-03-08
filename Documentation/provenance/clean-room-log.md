@@ -25,4 +25,34 @@ and dependencies to modern versions.
 
 ---
 
+## Phase 1: Milestone 1 - Static Busybox - 2026-03-08
+
+### Reference materials consulted
+- Kerla source code (MIT OR Apache-2.0) — existing syscall implementations
+- OSv source code (BSD-3-Clause) — VFS layer for lseek, rename, unlink, rmdir, mprotect/munmap VMA logic
+- Linux man pages — POSIX syscall specifications
+- smoltcp documentation — networking API migration (0.7 → 0.12)
+- FreeBSD linuxulator source (BSD-2-Clause) — identified as primary reference for future syscall work
+
+### Implementation approach
+Added 44 new syscalls to reach 79 total. Upgraded all dependencies including major smoltcp migration.
+Fixed critical boot bugs: EFER.NXE for NX page protection, custom memcpy/memset/memcmp for no-SSE kernel.
+Established FreeBSD as primary reference for Linux syscall semantics going forward.
+
+### New syscalls implemented
+lseek, mprotect, munmap, openat, newfstatat, dup, dup3, pipe2, access, vfork, sched_yield,
+umask, getegid, getpgrp, getgid, unlink, rmdir, rename, nanosleep, gettimeofday, getrlimit,
+sysinfo, mmap (prot flags), select (writefds fix), wait4 (status encoding fix)
+
+### Attribution
+- Memory management VMA logic influenced by OSv core/mmu.cc (BSD-3-Clause)
+- VFS operations influenced by OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause)
+- Boot sequence and syscall dispatch from Kerla (MIT OR Apache-2.0)
+
+### Test coverage
+- QEMU boot test: BusyBox shell interactive (echo, ls, cat verified)
+- Syscall trace logging (all 79 syscalls verified in boot sequence)
+
+---
+
 *Subsequent phases will add entries here as subsystems are implemented.*

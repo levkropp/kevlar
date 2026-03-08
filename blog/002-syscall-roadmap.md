@@ -156,25 +156,49 @@ Most of the actual graphics work is in ioctl commands on `/dev/dri/*` (KMS/DRM),
 not in new syscalls. Wayland compositors use `sendmsg` with SCM_RIGHTS for buffer
 passing — which we already need for systemd.
 
-## OSv as a Reference: What's Usable and What's Not
+## Reference Architecture: FreeBSD + OSv
 
-We audited OSv's codebase subsystem by subsystem:
+> **Update (2026-03-08):** After completing M1, we identified FreeBSD as a far superior
+> reference for Linux syscall semantics. The original OSv assessment below is retained
+> for context, but FreeBSD is now our primary reference.
+
+### FreeBSD: The Ideal Reference
+
+FreeBSD's `linuxulator` (`sys/compat/linux/`) is a complete, battle-tested Linux syscall
+compatibility layer maintained under the BSD-2-Clause license. FreeBSD developers have
+already solved exactly the problem Kevlar is solving: making Linux binaries run correctly
+on a non-Linux kernel.
+
+| Subsystem | FreeBSD Source | Quality for Kevlar |
+|-----------|---------------|-------------------|
+| Linux syscall semantics | sys/compat/linux/ | Excellent — maps every Linux syscall to correct behavior |
+| VM management (mmap, mprotect, futex) | sys/vm/ | Excellent — production-grade, multiarch |
+| Process/threading (clone, fork, signals) | sys/kern/ | Excellent — full POSIX + Linux extensions |
+| Socket layer (AF_UNIX, sendmsg, SCM_RIGHTS) | sys/kern/uipc_* | Excellent — complete implementation |
+| IPC (SysV shm/sem/msg, epoll, signalfd) | sys/compat/linux/ | Excellent — Linux-specific semantics |
+| Namespaces, seccomp, capabilities | sys/compat/linux/ | Good — partial but growing |
+
+**Why FreeBSD over OSv?** OSv is a unikernel designed for cloud VMs — it has no process
+model, no fork, minimal signals, and no Linux-specific features. FreeBSD is a full
+multi-process POSIX OS with a dedicated Linux compatibility layer. For everything beyond
+basic VFS operations, FreeBSD is categorically the better reference.
+
+**Clean-room safety:** Re-implementing FreeBSD's C code in Rust is a language transformation
+of high-level concepts, not code copying. The BSD-2-Clause license explicitly permits study
+and adaptation. This gives Kevlar a provably clean-room path to Linux compatibility.
+
+### OSv: Still Useful for VFS
+
+OSv (BSD-3-Clause) remains our reference for filesystem abstractions:
 
 | Subsystem | OSv Quality | Usable for Kevlar? |
 |-----------|------------|---------------------|
 | VFS layer (vnode, mount, dentry) | Excellent (~2000 lines) | Yes — clean design, most file ops |
-| epoll | Good (~380 lines) | Yes — compact, self-contained |
-| mmap/VMA management | Good (~2100 lines) | Partially — VMA logic useful, page tables arch-specific |
 | nanosleep, clock_gettime, timerfd | Good | Yes — clean time subsystem |
-| Networking (FreeBSD port) | Good but huge | Reference only — too large to port directly |
-| Threading/clone | Moderate | API checklist only — single-process model differs |
-| Signal handling (x64) | Moderate | Reference for signal frame layout |
-| futex | Minimal (~60 lines) | No — only WAIT/WAKE, missing REQUEUE/BITSET |
-| Unix domain sockets | Minimal (~200 lines) | No — socketpair only, no named sockets or fd passing |
+| mmap/VMA management | Good (~2100 lines) | Partially — VMA logic useful, page tables arch-specific |
 
-**Bottom line:** OSv is a great reference for filesystem operations and epoll. For futex,
-clone, signals, Unix domain sockets, and most Linux-specific features (namespaces, seccomp,
-inotify, signalfd, eventfd), we're on our own.
+For everything else — threading, signals, futex, clone, Unix domain sockets, epoll,
+namespaces, seccomp, inotify, signalfd, eventfd — FreeBSD is the reference.
 
 ## Implementation Strategy
 
@@ -206,10 +230,10 @@ that the expected commands work.
 
 ## What's Next
 
-Phase 0.5 (HAL/kernel split) runs in parallel with M1 syscall work. The framekernel
-architecture confines all `unsafe` code to the runtime HAL crate, and the kernel itself
-uses `#![deny(unsafe_code)]`. This makes every new syscall implementation safer by
-construction.
+> **Update:** M1 is complete. BusyBox boots and runs an interactive shell. See
+> [blog post 003](003-milestone-1-busybox-boots.md) for the full story.
 
-Then we start on M1: `lseek`, `mprotect`, `munmap`, `openat`, `newfstatat`, and the rest
-of the BusyBox requirements. Target: boot BusyBox and run `ls -la /`.
+Next milestones:
+- **M1.5: ARM64 support** — boot.S is only ~250 lines, trap.S ~110, usercopy.S ~64. ARM64 parity is feasible.
+- **M2: Dynamic linking** — `pread64`, `futex`, `madvise` for ld-linux.so. FreeBSD's `sys/vm/` and `sys/compat/linux/linux_futex.c` are the references.
+- **M3: Coreutils + Bash** — `clone` with full flag support, job control. FreeBSD's `sys/compat/linux/linux_fork.c` maps the approach.
