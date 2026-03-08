@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::{
     ctypes::*,
     prelude::*,
@@ -22,7 +22,7 @@ struct Timer {
 /// Suspends the current process at least `ms` milliseconds.
 pub fn _sleep_ms(ms: usize) {
     TIMERS.lock().push(Timer {
-        current: ms * TICK_HZ / 1000,
+        current: (ms * TICK_HZ + 999) / 1000,
         process: current_process().clone(),
     });
 
@@ -41,7 +41,7 @@ impl WallClock {
     }
 
     pub fn msecs_from_epoch(self) -> usize {
-        self.ticks_from_epoch / (TICK_HZ / 1000)
+        self.ticks_from_epoch * 1000 / TICK_HZ
     }
 
     pub fn nanosecs_from_epoch(self) -> usize {
@@ -66,7 +66,7 @@ impl MonotonicClock {
     }
 
     pub fn msecs(self) -> usize {
-        self.ticks / (TICK_HZ / 1000)
+        self.ticks * 1000 / TICK_HZ
     }
 
     pub fn nanosecs(self) -> usize {
@@ -75,7 +75,7 @@ impl MonotonicClock {
 
     pub fn elapsed_msecs(self) -> usize {
         // FIXME: Consider wrapping.
-        (read_monotonic_clock().ticks - self.ticks) / (TICK_HZ / 1000)
+        (read_monotonic_clock().ticks - self.ticks) * 1000 / TICK_HZ
     }
 }
 

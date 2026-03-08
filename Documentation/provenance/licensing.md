@@ -1,6 +1,6 @@
 # Licensing
 
-Kevlar is dual-licensed under **MIT OR Apache-2.0**, matching the original Kerla upstream license.
+Kevlar is tri-licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**. The original Kerla upstream was MIT OR Apache-2.0; BSD-2-Clause was added to align with FreeBSD, the primary reference for syscall semantics.
 
 ## License Compatibility
 
@@ -13,10 +13,10 @@ Kevlar is dual-licensed under **MIT OR Apache-2.0**, matching the original Kerla
 | Linux kernel | GPL-2.0 | No (code) | Read man pages and POSIX specs only; never copy implementation |
 | smoltcp | 0-clause BSD | Yes | TCP/IP networking library (Cargo dependency) |
 
-## BSD-3-Clause Compatibility
+## BSD Compatibility
 
-BSD-3-Clause code (from OSv) is fully compatible with both MIT and Apache-2.0.
-When porting OSv code to Rust, we:
+BSD-2-Clause (FreeBSD) and BSD-3-Clause (OSv) code is fully compatible with MIT and Apache-2.0.
+When porting BSD-licensed code to Rust, we:
 
 1. Retain the original copyright notice in the file
 2. Add an entry to the `NOTICE` file at the repository root

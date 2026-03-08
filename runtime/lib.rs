@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! An OS-agnostic bootstrap and runtime support library for operating system
 //! kernels.
 #![no_std]
@@ -20,12 +20,22 @@ pub mod page_allocator;
 pub mod profile;
 pub mod spinlock;
 
+#[cfg(target_arch = "x86_64")]
 mod x64;
+#[cfg(target_arch = "aarch64")]
+mod arm64;
 
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
         enable_irq, halt, idle, read_clock_counter, semihosting_halt, x64_specific, Backtrace,
+        PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
+        KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
+    };
+
+    #[cfg(target_arch = "aarch64")]
+    pub use super::arm64::{
+        enable_irq, halt, idle, read_clock_counter, semihosting_halt, arm64_specific, Backtrace,
         PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
     };

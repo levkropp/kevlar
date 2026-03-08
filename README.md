@@ -6,16 +6,17 @@ A permissively licensed Rust kernel for running Linux binaries, informed by Free
 
 Kevlar is a monolithic operating system kernel written in Rust that aims for Linux ABI
 binary compatibility. It is a fork of [Kerla](https://github.com/nuta/kerla) (MIT/Apache-2.0),
-modernized and extended with the goal of becoming the most capable permissively licensed
-Rust kernel for running real Linux userspace software.
+modernized, extended, and relicensed as MIT/Apache-2.0/BSD-2-Clause with the goal of becoming
+the most capable permissively licensed Rust kernel for running real Linux userspace software.
 
-**License:** Dual MIT OR Apache-2.0
+**License:** MIT OR Apache-2.0 OR BSD-2-Clause
 
 ## Current Status
 
-After completing M1, the kernel boots static musl BusyBox and runs an interactive shell. `echo`, `ls`, `cat` all work.
+After completing M1.5, the kernel boots static musl BusyBox and runs an interactive shell on both x86_64 and ARM64. `echo`, `ls`, `cat` all work on both architectures.
 
 - **79 implemented syscalls** (86 dispatch entries, 7 of which are UID/GID stubs)
+- **Two architectures:** x86_64 and ARM64 (QEMU virt, cortex-a72)
 - Full memory management: mmap with protection flags, mprotect, munmap with NX bit support
 - File operations: openat, newfstatat, lseek, unlink, rmdir, rename (musl-compatible *at variants)
 - Process control: fork, vfork, execve, wait4 (correct status encoding), signals
@@ -23,14 +24,14 @@ After completing M1, the kernel boots static musl BusyBox and runs an interactiv
 - Networking: TCP/UDP via smoltcp (virtio-net), socket, bind, listen, accept, connect
 - Time: clock_gettime, gettimeofday, nanosleep
 - System info: uname, sysinfo, getrlimit, syslog
-- x86_64 architecture with initramfs root filesystem (tmpfs, basic procfs, devfs)
+- Initramfs root filesystem (tmpfs, basic procfs, devfs)
 - TTY and pseudo-terminal (PTY) support
-- QEMU and Firecracker support
+- QEMU and Firecracker support (x86_64); QEMU virt (ARM64)
 
 ## Goals
 
 1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
-2. **Permissive licensing** — All code is MIT/Apache-2.0 or BSD-3-Clause compatible
+2. **Permissive licensing** — All code is MIT/Apache-2.0/BSD-2-Clause or compatible
 3. **Clean-room provenance** — Syscall semantics informed by FreeBSD's linuxulator (BSD-2-Clause); VFS abstractions adapted from OSv (BSD-3-Clause); design inspired by Asterinas (studied, not copied)
 4. **170+ syscalls** — Full coverage for threading, signals, memory management, filesystems, and networking
 
@@ -39,6 +40,7 @@ After completing M1, the kernel boots static musl BusyBox and runs an interactiv
 | Milestone | Syscalls | Status | Description |
 |-----------|----------|--------|-------------|
 | M1: Static Busybox | ~50 | **Complete** | Core syscalls for static musl binaries |
+| M1.5: ARM64 | -- | **Complete** | ARM64 port; BusyBox boots on QEMU virt (cortex-a72) |
 | M2: Dynamic linking | ~55 | Next | pread64, futex, mremap, madvise |
 | M3: Coreutils + Bash | ~80 | Planned | clone, job control, symlinks |
 | M4: systemd | ~110 | Planned | epoll, signalfd, timerfd, mount |
@@ -70,11 +72,11 @@ Kevlar uses Rust nightly. To build:
 # Install Rust nightly
 rustup install nightly
 
-# Build the kernel
-make build
-
-# Run in QEMU
+# Build and run on x86_64
 make run
+
+# Build and run on ARM64 (release required for TCG performance)
+RELEASE=1 ARCH=arm64 make run
 ```
 
 ## Documentation
@@ -85,14 +87,15 @@ make run
 
 ## License
 
-Licensed under either of:
+Licensed under any of:
 
 - MIT license ([LICENSE.md](LICENSE.md))
 - Apache License, Version 2.0 ([LICENSE.md](LICENSE.md))
+- BSD-2-Clause license ([LICENSE.md](LICENSE.md))
 
 at your option.
 
 ### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
-in this project shall be dual licensed as above, without any additional terms or conditions.
+in this project shall be tri-licensed as above, without any additional terms or conditions.

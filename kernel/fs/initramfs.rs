@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Initramfs parser.
 //! <https://www.kernel.org/doc/html/latest/driver-api/early-userspace/buffer-format.html>
 use crate::{

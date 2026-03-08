@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Tty implementation.
 //!
 //! Read [The demystified](https://www.linusakesson.net/programming/tty/) if you're

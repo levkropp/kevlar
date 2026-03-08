@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::MAX_READ_WRITE_LEN;
 use crate::prelude::*;
 use crate::{fs::opened_file::Fd, user_buffer::UserBuffer};

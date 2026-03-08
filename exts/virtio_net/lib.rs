@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! A virtio-net device driver.
 #![no_std]
 
@@ -16,8 +16,12 @@ use memoffset::offset_of;
 
 use virtio::device::{IsrStatus, Virtio, VirtqDescBuffer, VirtqUsedChain};
 use virtio::transports::{
-    virtio_mmio::VirtioMmio, virtio_pci_legacy::VirtioLegacyPci,
-    virtio_pci_modern::VirtioModernPci, VirtioAttachError, VirtioTransport,
+    virtio_mmio::VirtioMmio, VirtioAttachError, VirtioTransport,
+};
+#[cfg(target_arch = "x86_64")]
+use virtio::transports::{
+    virtio_pci_legacy::VirtioLegacyPci,
+    virtio_pci_modern::VirtioModernPci,
 };
 
 use kevlar_api::address::VAddr;
@@ -27,7 +31,9 @@ use kevlar_api::driver::{
     net::{register_ethernet_driver, EthernetDriver, MacAddress},
     DeviceProber, Driver,
 };
-use kevlar_api::driver::{pci::PciDevice, VirtioMmioDevice};
+#[cfg(target_arch = "x86_64")]
+use kevlar_api::driver::pci::PciDevice;
+use kevlar_api::driver::VirtioMmioDevice;
 use kevlar_api::mm::{alloc_pages, AllocPageFlags};
 use kevlar_api::sync::SpinLock;
 use kevlar_utils::alignment::align_up;
@@ -297,6 +303,7 @@ impl VirtioNetProber {
 }
 
 impl DeviceProber for VirtioNetProber {
+    #[cfg(target_arch = "x86_64")]
     fn probe_pci(&self, pci_device: &PciDevice) {
         // Check if the device is a network card ("4.1.2 PCI Device Discovery").
         if pci_device.config().vendor_id() != 0x1af4 {
@@ -351,6 +358,11 @@ impl DeviceProber for VirtioNetProber {
         let magic = unsafe { *mmio.as_ptr::<u32>() };
         let virtio_version = unsafe { *mmio.add(4).as_ptr::<u32>() };
         let device_id = unsafe { *mmio.add(8).as_ptr::<u32>() };
+
+        info!(
+            "virtio-net: probing MMIO at {:?}: magic={:#x}, version={}, device_id={}",
+            mmio_device.mmio_base, magic, virtio_version, device_id
+        );
 
         if magic != 0x74726976 {
             return;

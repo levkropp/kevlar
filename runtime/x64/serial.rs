@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! A serial port driver. See https://wiki.osdev.org/Serial_Ports
 use x86::io::{inb, outb};
 

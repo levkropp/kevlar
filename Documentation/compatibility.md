@@ -12,6 +12,7 @@ Not supported.
 | Milestone | Syscalls Needed | Currently Have | Status |
 |-----------|----------------|----------------|--------|
 | M1: Static Busybox | ~50 | 79 | **Complete** — BusyBox boots, shell works |
+| M1.5: ARM64 | -- | 79 | **Complete** — BusyBox boots on QEMU virt (cortex-a72) |
 | M2: Dynamic linking (ld-linux.so) | ~55 | 79 | Next — needs pread64, futex, madvise |
 | M3: GNU Coreutils + Bash | ~80 | 79 | Planned |
 | M4: systemd (PID 1) | ~110 | 79 | Planned |

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // Reference: OSv core/osv_clock.cc (BSD-3-Clause) — gettimeofday.
 // Returns wall clock as struct timeval {tv_sec, tv_usec}.

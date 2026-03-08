@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_lseek.
 // OSv handles SEEK_SET/CUR/END by computing the new offset and clamping

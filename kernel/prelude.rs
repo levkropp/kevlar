@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 pub use crate::result::{Errno, Error, Result};
 
 pub use crate::alloc::borrow::ToOwned;

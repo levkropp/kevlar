@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Device driver APIs.
 use crate::kernel_ops::kernel_ops;
 
 use alloc::vec::Vec;
 
+#[cfg(target_arch = "x86_64")]
 pub mod ioport;
 pub mod net;
+#[cfg(target_arch = "x86_64")]
 pub mod pci;
 
 pub use kevlar_runtime::bootinfo::VirtioMmioDevice;
@@ -13,6 +15,7 @@ pub use kevlar_runtime::bootinfo::VirtioMmioDevice;
 use alloc::boxed::Box;
 use kevlar_runtime::{bootinfo::AllowedPciDevice, spinlock::SpinLock};
 
+#[cfg(target_arch = "x86_64")]
 use self::pci::PciDevice;
 
 static DEVICE_PROBERS: SpinLock<Vec<Box<dyn DeviceProber>>> = SpinLock::new(Vec::new());
@@ -22,6 +25,7 @@ pub trait Driver: Send + Sync {
 }
 
 pub trait DeviceProber: Send + Sync {
+    #[cfg(target_arch = "x86_64")]
     fn probe_pci(&self, pci_device: &PciDevice);
     fn probe_virtio_mmio(&self, mmio_device: &VirtioMmioDevice);
 }
@@ -39,7 +43,8 @@ pub fn init(
     pci_allowlist: &[AllowedPciDevice],
     mmio_devices: &[VirtioMmioDevice],
 ) {
-    // Scan PCI devices.
+    // Scan PCI devices (x86 only — ARM64 uses device tree).
+    #[cfg(target_arch = "x86_64")]
     if pci_enabled {
         for device in pci::enumerate_pci_devices() {
             if !pci_allowlist.is_empty()
@@ -68,6 +73,9 @@ pub fn init(
             }
         }
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (pci_enabled, pci_allowlist);
 
     // Register Virtio devices connected over MMIO.
     for device in mmio_devices {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::random::{read_insecure_random, read_secure_random};
 use crate::result::Result;
 use crate::syscalls::SyscallHandler;

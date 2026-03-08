@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::deferred_job::DeferredJob;
 use crate::{
     poll::POLL_WAIT_QUEUE, process::WaitQueue, timer::read_monotonic_clock, timer::MonotonicClock,
@@ -195,6 +195,11 @@ fn parse_ipv4_addr_with_prefix_len(
     Ok((ip, prefix_len))
 }
 pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
+    if ETHERNET_DRIVER.borrow().is_none() {
+        warn!("net: no ethernet driver, skipping network init");
+        return;
+    }
+
     let ip_addrs = match &bootinfo.ip4 {
         Some(ip4_str) => {
             let (ip4, prefix_len) = parse_ipv4_addr_with_prefix_len(ip4_str)

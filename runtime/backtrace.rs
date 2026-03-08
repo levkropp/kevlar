@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::{arch::global_asm, fmt, mem::size_of, slice, str};
 
 use alloc::boxed::Box;

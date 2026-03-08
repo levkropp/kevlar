@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use alloc::boxed::Box;
 use kevlar_runtime::print::{get_debug_printer, set_debug_printer, Printer};
 use kevlar_utils::ring_buffer::RingBuffer;

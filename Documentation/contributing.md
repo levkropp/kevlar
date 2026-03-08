@@ -11,7 +11,7 @@ When implementing new subsystems:
 1. **Document your references** in [clean-room-log.md](provenance/clean-room-log.md)
 2. **Never copy** Asterinas (MPL-2.0) or Linux (GPL-2.0) code
 3. **OSv code** (BSD-3-Clause) may be ported to Rust with proper attribution
-4. **Add SPDX headers** to all new `.rs` files: `// SPDX-License-Identifier: MIT OR Apache-2.0`
+4. **Add SPDX headers** to all new `.rs` files: `// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause`
 
 ## Code Style
 

@@ -3,7 +3,7 @@ name = "kevlar_api"
 version = "0.1.0"
 authors = ["The Kevlar Authors"]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT OR Apache-2.0 OR BSD-2-Clause"
 
 [lib]
 name = "kevlar_api"
@@ -14,9 +14,9 @@ log = "0.4"
 memoffset = "0.9"
 arrayvec = { version = "0.7", default-features = false }
 
-# Arch-specific dependencies.
-x86 = "0.52"
-
 # Local dependencies.
 kevlar_runtime = { path = "../../runtime" }
 kevlar_utils = { path = "../kevlar_utils" }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86 = "0.52"

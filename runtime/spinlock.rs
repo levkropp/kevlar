@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use cfg_if::cfg_if;
 use core::arch::asm;
 use core::mem::ManuallyDrop;
@@ -60,7 +60,10 @@ impl<T: ?Sized> SpinLock<T> {
 
         let saved_intr_status = SavedInterruptStatus::save();
         unsafe {
+            #[cfg(target_arch = "x86_64")]
             asm!("cli");
+            #[cfg(target_arch = "aarch64")]
+            asm!("msr daifset, #2"); // Mask IRQs
         }
 
         let guard = self.inner.lock();

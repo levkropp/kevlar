@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::device::IsrStatus;
 
 use kevlar_api::address::PAddr;
 
 pub mod virtio_mmio;
+#[cfg(target_arch = "x86_64")]
 pub mod virtio_pci_legacy;
+#[cfg(target_arch = "x86_64")]
 pub mod virtio_pci_modern;
 
 pub trait VirtioTransport: Send + Sync {

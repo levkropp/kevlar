@@ -1,0 +1,314 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+use core::cell::UnsafeCell;
+
+use crate::result::Result;
+use crate::{arch::KERNEL_STACK_SIZE, process::signal::Signal};
+use crossbeam::atomic::AtomicCell;
+use kevlar_runtime::address::{UserVAddr, VAddr};
+use kevlar_runtime::page_allocator::{alloc_pages_owned, OwnedPages};
+use kevlar_runtime::{
+    arch::arm64_specific::cpu_local_head,
+    arch::PtRegs,
+    arch::PAGE_SIZE,
+    page_allocator::AllocPageFlags,
+};
+
+pub struct Process {
+    sp: UnsafeCell<u64>,
+    pub(super) tpidr_el0: AtomicCell<u64>, // User TLS base (equivalent of fsbase)
+    kernel_stack: OwnedPages,
+    interrupt_stack: OwnedPages,
+    syscall_stack: OwnedPages,
+}
+
+unsafe impl Sync for Process {}
+
+unsafe extern "C" {
+    fn kthread_entry();
+    fn userland_entry();
+    fn forked_child_entry();
+    fn do_switch_thread(prev_sp: *const u64, next_sp: *const u64);
+}
+
+unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
+    unsafe {
+        sp = sp.sub(1);
+        sp.write(value);
+    }
+    sp
+}
+
+impl Process {
+    #[allow(unused)]
+    pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> Process {
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+
+        let sp = unsafe {
+            let mut sp: *mut u64 = stack_top.as_mut_ptr();
+
+            // Entry point for kthread_entry (popped and called via BLR).
+            sp = push_stack(sp, ip.value() as u64);
+
+            // Context matching do_switch_thread's save layout (low to high):
+            //   NZCV, x29, x30, x27, x28, x25, x26, x23, x24, x21, x22, x19, x20
+            // push_stack grows downward, so push in reverse (high to low).
+            sp = push_stack(sp, 0); // x20
+            sp = push_stack(sp, 0); // x19
+            sp = push_stack(sp, 0); // x22
+            sp = push_stack(sp, 0); // x21
+            sp = push_stack(sp, 0); // x24
+            sp = push_stack(sp, 0); // x23
+            sp = push_stack(sp, 0); // x26
+            sp = push_stack(sp, 0); // x25
+            sp = push_stack(sp, 0); // x28
+            sp = push_stack(sp, 0); // x27
+            sp = push_stack(sp, kthread_entry as *const u8 as u64); // x30 (LR)
+            sp = push_stack(sp, 0); // x29 (FP)
+            sp = push_stack(sp, 0); // NZCV
+            sp
+        };
+
+        Process {
+            sp: UnsafeCell::new(sp as u64),
+            tpidr_el0: AtomicCell::new(0),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        }
+    }
+
+    pub fn new_user_thread(ip: UserVAddr, user_sp: UserVAddr) -> Process {
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+
+        let sp = unsafe {
+            let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
+            let mut sp: *mut u64 = kernel_sp.as_mut_ptr();
+
+            // Push a PtRegs frame for userland_entry.
+            // PtRegs: x0-x30 (31 regs), sp_el0, elr_el1, spsr_el1 = 34 u64s
+            sp = sp.sub(34);
+            let frame = sp as *mut u64;
+
+            // Zero all x0-x30.
+            for i in 0..31 {
+                *frame.add(i) = 0;
+            }
+            *frame.add(31) = user_sp.value() as u64;  // sp_el0
+            *frame.add(32) = ip.value() as u64;       // elr_el1 (entry point)
+            *frame.add(33) = 0x0;                     // spsr_el1: EL0t, all interrupts unmasked
+
+            // Context matching do_switch_thread's save layout (low to high):
+            //   NZCV (8 bytes)
+            //   x29, x30 (16 bytes)  -- ldp x29, x30
+            //   x27, x28 (16 bytes)
+            //   x25, x26 (16 bytes)
+            //   x23, x24 (16 bytes)
+            //   x21, x22 (16 bytes)
+            //   x19, x20 (16 bytes)
+            // push_stack grows downward, so push in reverse order (high to low).
+            sp = push_stack(sp, 0); // x20
+            sp = push_stack(sp, 0); // x19
+            sp = push_stack(sp, 0); // x22
+            sp = push_stack(sp, 0); // x21
+            sp = push_stack(sp, 0); // x24
+            sp = push_stack(sp, 0); // x23
+            sp = push_stack(sp, 0); // x26
+            sp = push_stack(sp, 0); // x25
+            sp = push_stack(sp, 0); // x28
+            sp = push_stack(sp, 0); // x27
+            sp = push_stack(sp, userland_entry as *const u8 as u64); // x30 (LR)
+            sp = push_stack(sp, 0); // x29 (FP)
+            sp = push_stack(sp, 0); // NZCV
+            sp
+        };
+
+        Process {
+            sp: UnsafeCell::new(sp as u64),
+            tpidr_el0: AtomicCell::new(0),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        }
+    }
+
+    pub fn new_idle_thread() -> Process {
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+
+        Process {
+            sp: UnsafeCell::new(0),
+            tpidr_el0: AtomicCell::new(0),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        }
+    }
+
+    pub fn fork(&self, frame: &PtRegs) -> Result<Process> {
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+
+        let sp = unsafe {
+            let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
+            let mut sp: *mut u64 = kernel_sp.as_mut_ptr();
+
+            // Push a PtRegs frame with parent's register state.
+            sp = sp.sub(34);
+            let child_frame = sp as *mut u64;
+
+            // Copy x0-x30 from parent.
+            for i in 0..31 {
+                *child_frame.add(i) = frame.regs[i];
+            }
+            *child_frame.add(31) = frame.sp;      // sp_el0
+            *child_frame.add(32) = frame.pc;      // elr_el1
+            *child_frame.add(33) = frame.pstate;  // spsr_el1
+
+            // Context matching do_switch_thread's save layout (low to high):
+            //   NZCV, x29, x30, x27, x28, x25, x26, x23, x24, x21, x22, x19, x20
+            // push_stack grows downward, so push in reverse (high to low).
+            sp = push_stack(sp, frame.regs[20]); // x20
+            sp = push_stack(sp, frame.regs[19]); // x19
+            sp = push_stack(sp, frame.regs[22]); // x22
+            sp = push_stack(sp, frame.regs[21]); // x21
+            sp = push_stack(sp, frame.regs[24]); // x24
+            sp = push_stack(sp, frame.regs[23]); // x23
+            sp = push_stack(sp, frame.regs[26]); // x26
+            sp = push_stack(sp, frame.regs[25]); // x25
+            sp = push_stack(sp, frame.regs[28]); // x28
+            sp = push_stack(sp, frame.regs[27]); // x27
+            sp = push_stack(sp, forked_child_entry as *const u8 as u64); // x30 (LR)
+            sp = push_stack(sp, frame.regs[29]); // x29 (FP)
+            sp = push_stack(sp, 0); // NZCV
+            sp
+        };
+
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+
+        Ok(Process {
+            sp: UnsafeCell::new(sp as u64),
+            tpidr_el0: AtomicCell::new(self.tpidr_el0.load()),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        })
+    }
+
+    pub fn setup_execve_stack(
+        &self,
+        frame: &mut PtRegs,
+        ip: UserVAddr,
+        user_sp: UserVAddr,
+    ) -> Result<()> {
+        frame.pc = ip.as_isize() as u64;
+        frame.sp = user_sp.as_isize() as u64;
+        Ok(())
+    }
+
+    pub unsafe fn setup_signal_stack(
+        &self,
+        frame: &mut PtRegs,
+        signal: Signal,
+        sa_handler: UserVAddr,
+    ) -> Result<()> {
+        // ARM64 signal trampoline: SVC #0 with x8 = __NR_rt_sigreturn (139).
+        const TRAMPOLINE: &[u8] = &[
+            0x88, 0x11, 0x80, 0xd2, // mov x8, #139 (__NR_rt_sigreturn)
+            0x01, 0x00, 0x00, 0xd4, // svc #0
+        ];
+
+        fn push_to_user_stack(sp: UserVAddr, value: u64) -> Result<UserVAddr> {
+            let sp = sp.sub(8);
+            sp.write::<u64>(&value)?;
+            Ok(sp)
+        }
+
+        let mut user_sp = UserVAddr::new_nonnull(frame.sp as usize)?;
+
+        // Copy the trampoline code onto the user stack.
+        user_sp = user_sp.sub(TRAMPOLINE.len());
+        let trampoline_pc = user_sp;
+        user_sp.write_bytes(TRAMPOLINE)?;
+
+        // Set x30 (LR) to the trampoline so the signal handler returns to it.
+        frame.regs[30] = trampoline_pc.as_isize() as u64;
+
+        frame.pc = sa_handler.as_isize() as u64;
+        frame.sp = user_sp.as_isize() as u64;
+        frame.regs[0] = signal as u64;    // int signal (first argument)
+        frame.regs[1] = 0;               // siginfo_t *siginfo
+        frame.regs[2] = 0;               // void *ctx
+
+        Ok(())
+    }
+
+    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) {
+        *current_frame = *signaled_frame;
+    }
+}
+
+pub fn switch_thread(prev: &Process, next: &Process) {
+    let head = cpu_local_head();
+
+    // Set kernel stack for next thread's exception entry.
+    head.sp_el1 = (next.syscall_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64;
+
+    // Restore next thread's TPIDR_EL0 (user TLS base).
+    unsafe {
+        core::arch::asm!("msr tpidr_el0, {}", in(reg) next.tpidr_el0.load());
+        do_switch_thread(prev.sp.get(), next.sp.get());
+    }
+}

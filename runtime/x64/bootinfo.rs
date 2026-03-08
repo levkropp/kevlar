@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::address::{PAddr, VAddr};
 use crate::bootinfo::{AllowedPciDevice, BootInfo, RamArea, VirtioMmioDevice};
 use arrayvec::{ArrayString, ArrayVec};
@@ -127,7 +127,7 @@ unsafe extern "C" {
 
 struct Cmdline {
     pub pci_enabled: bool,
-    pub virtio_mmio_devices: ArrayVec<VirtioMmioDevice, 4>,
+    pub virtio_mmio_devices: ArrayVec<VirtioMmioDevice, 32>,
     pub log_filter: ArrayString<64>,
     pub use_second_serialport: bool,
     pub dhcp_enabled: bool,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // sysinfo(2) — returns system statistics. We expose real page allocator
 // stats for totalram/freeram and compute uptime from the monotonic clock.

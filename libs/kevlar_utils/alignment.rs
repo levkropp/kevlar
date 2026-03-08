@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 pub const fn align_down(value: usize, align: usize) -> usize {
     (value) & !(align - 1)
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::gdt::TSS_SEG;
 use x86::{segmentation::SegmentSelector, task::load_tr};
 

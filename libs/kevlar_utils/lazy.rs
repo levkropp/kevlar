@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::ops::{Deref, DerefMut};
 
 /// A container which can be uninitialized until the first write. As you may notice,

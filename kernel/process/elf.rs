@@ -1,7 +1,15 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::prelude::*;
 use core::{mem::size_of, slice::from_raw_parts};
-use goblin::elf64::header::{Header, ELFMAG, EM_X86_64, ET_EXEC};
+use goblin::elf64::header::{Header, ELFMAG, ET_EXEC};
+
+#[cfg(target_arch = "x86_64")]
+use goblin::elf64::header::EM_X86_64;
+
+#[cfg(target_arch = "x86_64")]
+const EXPECTED_MACHINE: u16 = EM_X86_64;
+#[cfg(target_arch = "aarch64")]
+const EXPECTED_MACHINE: u16 = 183; // EM_AARCH64
 pub use goblin::elf64::program_header::ProgramHeader;
 use kevlar_runtime::address::UserVAddr;
 
@@ -25,7 +33,7 @@ impl<'a> Elf<'a> {
             return Err(Errno::ENOEXEC.into());
         }
 
-        if header.e_machine != EM_X86_64 {
+        if header.e_machine != EXPECTED_MACHINE {
             debug_warn!("invalid ELF e_machine");
             return Err(Errno::ENOEXEC.into());
         }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::sync::atomic::AtomicBool;
 
 // Provide our own mem* functions instead of compiler-builtins-mem,

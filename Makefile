@@ -23,7 +23,11 @@ endif
 
 # $(IMAGE): Use a Docker image for initramfs.
 ifeq ($(IMAGE),)
+ifeq ($(ARCH),arm64)
+INITRAMFS_PATH := build/testing.arm64.initramfs
+else
 INITRAMFS_PATH := build/testing.initramfs
+endif
 export INIT_SCRIPT := /bin/sh
 else
 IMAGE_FILENAME := $(subst /,.s,$(IMAGE))
@@ -33,9 +37,9 @@ endif
 
 DUMMY_INITRAMFS_PATH := build/dummy-for-lint.initramfs
 
-# Architecture guard: only x86_64 is supported for now.
-ifneq ($(ARCH),x64)
-$(error "Only ARCH=x64 is supported")
+# Architecture guard.
+ifneq ($(ARCH),$(filter $(ARCH),x64 arm64))
+$(error "Supported ARCH values: x64, arm64")
 endif
 
 topdir      := $(PWD)
@@ -49,9 +53,16 @@ PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
 PYTHON3    ?= python3
 CARGO      ?= cargo
 BOCHS      ?= bochs
+LLVM_BIN_DIR := $(shell rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
+ifeq ($(ARCH),arm64)
+NM         ?= $(LLVM_BIN_DIR)/llvm-nm
+READELF    ?= $(LLVM_BIN_DIR)/llvm-readelf
+STRIP      ?= $(LLVM_BIN_DIR)/llvm-strip
+else
 NM         ?= nm
 READELF    ?= readelf
 STRIP      ?= strip
+endif
 DRAWIO     ?= /Applications/draw.io.app/Contents/MacOS/draw.io
 
 export RUSTFLAGS = -Z emit-stack-sizes

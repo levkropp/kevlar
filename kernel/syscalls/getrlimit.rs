@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // Reference: OSv core/rlimit.cc (BSD-3-Clause) — getrlimit.
 // Returns fake but reasonable limits: RLIM_INFINITY for most resources,

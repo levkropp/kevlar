@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::alignment::{align_up, is_aligned};
 use crate::byte_size::ByteSize;
 use core::cmp::min;

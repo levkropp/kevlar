@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Internal APIs exposed for kevlar_kernel crate. **Don't use from your kernel extensions!**
 use alloc::boxed::Box;
 use kevlar_runtime::bootinfo::{AllowedPciDevice, VirtioMmioDevice};

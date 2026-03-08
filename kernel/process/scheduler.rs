@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::process::PId;
 use alloc::collections::VecDeque;
 use kevlar_runtime::spinlock::SpinLock;

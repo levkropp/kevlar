@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_access.
 // OSv resolves the path and returns 0 if it exists, ENOENT otherwise.

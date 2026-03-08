@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::ctypes::c_int;
 use crate::fs::opened_file::Fd;
 use crate::net::ShutdownHow;

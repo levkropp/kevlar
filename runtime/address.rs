@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::arch::{KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END};
 
 #[cfg(debug_assertions)]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! A library for OS developers to save a kernel crash log happened in your
 //! own kernel into a file on disk reboot the computer.
 //!

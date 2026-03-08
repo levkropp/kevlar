@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::CwdOrFd;
 use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{inode::INode, opened_file::OpenFlags, path::Path, stat::FileMode};

@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+use core::arch::global_asm;
+
+use kevlar_runtime::{address::UserVAddr, arch::PAGE_SIZE};
+
+global_asm!(include_str!("usermode.S"));
+
+mod process;
+
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 256;
+pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
+pub const USER_VALLOC_BASE: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_000a_0000_0000) };
+pub const USER_STACK_TOP: UserVAddr = USER_VALLOC_BASE;
+
+pub use process::{switch_thread, Process};
+
+/// ARM64 equivalent of arch_prctl — sets TLS base (TPIDR_EL0).
+pub fn arch_prctl(current: &alloc::sync::Arc<crate::process::Process>, code: i32, uaddr: UserVAddr) -> crate::result::Result<()> {
+    const ARCH_SET_FS: i32 = 0x1002;
+    match code {
+        ARCH_SET_FS => {
+            let value = uaddr.value() as u64;
+            current.arch().tpidr_el0.store(value);
+            unsafe {
+                core::arch::asm!("msr tpidr_el0, {}", in(reg) value);
+            }
+        }
+        _ => {
+            return Err(crate::result::Errno::EINVAL.into());
+        }
+    }
+    Ok(())
+}

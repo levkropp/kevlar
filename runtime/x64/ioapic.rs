@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::address::PAddr;
 use crate::spinlock::SpinLock;
 use core::ptr::{read_volatile, write_volatile};

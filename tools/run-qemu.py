@@ -34,13 +34,34 @@ ARCHS = {
             "-d",
             "guest_errors,unimp",
         ]
+    },
+    "arm64": {
+        "bin":
+        "qemu-system-aarch64",
+        "args":
+        COMMON_ARGS + [
+            "-machine",
+            "virt",
+            "-cpu",
+            "cortex-a72",
+            "-m",
+            "1024",
+            "-global",
+            "virtio-mmio.force-legacy=false",
+            "-device",
+            "virtio-net-device,netdev=net0",
+            "-netdev",
+            "user,id=net0,hostfwd=tcp:127.0.0.1:20022-:22,hostfwd=tcp:127.0.0.1:20080-:80",
+            "-d",
+            "guest_errors,unimp",
+        ]
     }
 }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", choices=["x64"])
+    parser.add_argument("--arch", choices=["x64", "arm64"])
     parser.add_argument("--gui", action="store_true")
     parser.add_argument("--gdb", action="store_true")
     parser.add_argument("--kvm", action="store_true")

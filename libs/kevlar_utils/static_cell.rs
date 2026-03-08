@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! A thread-safe and almost readonly cell.
 //!
 //! Currently it is just a wrapper of AtomicCell, but we may optimize it to

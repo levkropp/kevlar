@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! User pointers.
 use crate::prelude::*;
 use core::{cmp::min, mem::size_of, slice};
