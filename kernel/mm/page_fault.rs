@@ -15,7 +15,7 @@ use core::cmp::min;
 use kevlar_platform::{
     address::UserVAddr,
     arch::{PageFaultReason, PAGE_SIZE},
-    page_allocator::{alloc_pages, AllocPageFlags},
+    page_allocator::{alloc_page, alloc_page_batch, AllocPageFlags},
     page_ops::zero_page,
 };
 #[cfg(not(feature = "profile-fortress"))]
@@ -24,8 +24,8 @@ use kevlar_platform::page_ops::page_as_slice_mut;
 use kevlar_platform::page_ops::PageFrame;
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
-    // Check if this fault occurred during a usercopy operation.
-    // If so, emit an enhanced debug event with the usercopy context tag.
+    // Usercopy fault debug check — only in debug builds to avoid hot-path overhead.
+    #[cfg(debug_assertions)]
     #[cfg(target_arch = "x86_64")]
     if debug::is_enabled(DebugFilter::FAULT) || debug::is_enabled(DebugFilter::USERCOPY) {
         #[allow(unsafe_code)]
@@ -89,7 +89,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Allocate and zero the page BEFORE acquiring the VM lock.
     // This keeps the lock hold time minimal (just VMA lookup + PTE write).
-    let paddr = alloc_pages(1, AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
+    let paddr = alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
         .expect("failed to allocate an anonymous page");
     zero_page(paddr);
 
@@ -186,8 +186,11 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Map the page in the page table, respecting VMA protection flags.
     let prot_flags = vma.prot().bits();
+    let vma_end_value = vma.end().value();
+    let is_anonymous = matches!(vma.area_type(), VmAreaType::Anonymous);
 
-    // Emit successful fault resolution event.
+    // Emit successful fault resolution event (only in debug builds).
+    #[cfg(debug_assertions)]
     if debug::is_enabled(DebugFilter::FAULT) {
         let vma_type_str = match vma.area_type() {
             VmAreaType::Anonymous => "anonymous",
@@ -207,4 +210,52 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     vm.page_table_mut()
         .map_user_page_with_prot(aligned_vaddr, paddr, prot_flags);
+
+    // Fault-around: for anonymous mappings, prefault adjacent pages to reduce
+    // the number of page faults (and their associated exception + EPT overhead).
+    // This mirrors Linux's fault_around_bytes behavior.
+    // Batch-allocate pages to amortize allocator lock overhead.
+    if is_anonymous {
+        use kevlar_platform::address::PAddr;
+        const FAULT_AROUND_PAGES: usize = 64;
+
+        // Count how many pages we can prefault.
+        let mut num_prefault = 0;
+        for i in 1..FAULT_AROUND_PAGES {
+            let next_value = aligned_vaddr.value() + i * PAGE_SIZE;
+            if next_value >= vma_end_value {
+                break;
+            }
+            if UserVAddr::new_nonnull(next_value).is_err() {
+                break;
+            }
+            num_prefault += 1;
+        }
+
+        if num_prefault > 0 {
+            let mut pages = [PAddr::new(0); FAULT_AROUND_PAGES];
+            let allocated = alloc_page_batch(&mut pages, num_prefault);
+
+            for i in 0..allocated {
+                let next_value = aligned_vaddr.value() + (i + 1) * PAGE_SIZE;
+                let next_addr = match UserVAddr::new_nonnull(next_value) {
+                    Ok(a) => a,
+                    Err(_) => {
+                        // Free remaining pages.
+                        for j in i..allocated {
+                            kevlar_platform::page_allocator::free_pages(pages[j], 1);
+                        }
+                        break;
+                    }
+                };
+
+                zero_page(pages[i]);
+                if !vm.page_table_mut()
+                    .try_map_user_page_with_prot(next_addr, pages[i], prot_flags)
+                {
+                    kevlar_platform::page_allocator::free_pages(pages[i], 1);
+                }
+            }
+        }
+    }
 }

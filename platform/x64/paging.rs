@@ -33,18 +33,22 @@ bitflags! {
     }
 }
 
+#[inline(always)]
 fn entry_paddr(entry: PageTableEntry) -> PAddr {
     PAddr::new((entry & 0x7ffffffffffff000) as usize)
 }
 
+#[inline(always)]
 fn entry_flags(entry: PageTableEntry) -> PageTableEntry {
     entry & !0x7ffffffffffff000
 }
 
+#[inline(always)]
 fn nth_level_table_index(vaddr: UserVAddr, level: usize) -> isize {
     ((vaddr.value() >> ((((level) - 1) * 9) + 12)) & 0x1ff) as isize
 }
 
+#[inline(always)]
 fn traverse(
     pml4: PAddr,
     vaddr: UserVAddr,
@@ -186,6 +190,7 @@ impl PageTable {
         }
     }
 
+    #[inline(always)]
     pub fn map_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr) {
         self.map_page(
             vaddr,
@@ -196,6 +201,7 @@ impl PageTable {
 
     /// Maps a user page with specific protection flags.
     /// `prot_flags` uses Linux mmap prot bits: PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4.
+    #[inline(always)]
     pub fn map_user_page_with_prot(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
         if prot_flags & 2 != 0 {
@@ -211,6 +217,7 @@ impl PageTable {
 
     /// Updates the flags of an already-mapped user page.
     /// Returns true if the page was mapped, false if not present.
+    #[inline(always)]
     pub fn update_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
         let entry_ptr = match traverse(self.pml4, vaddr, false,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
@@ -239,6 +246,7 @@ impl PageTable {
     }
 
     /// Unmaps a user page, returning the physical address if it was mapped.
+    #[inline(always)]
     pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
         let entry_ptr = match traverse(self.pml4, vaddr, false,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
@@ -259,7 +267,34 @@ impl PageTable {
         Some(paddr)
     }
 
+    /// Try to map a page. Returns `true` if mapped, `false` if already mapped.
+    /// Allocates intermediate page tables as needed.
+    #[inline(always)]
+    pub fn try_map_user_page_with_prot(
+        &mut self,
+        vaddr: UserVAddr,
+        paddr: PAddr,
+        prot_flags: i32,
+    ) -> bool {
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
+        if prot_flags & 2 != 0 {
+            attrs |= PageAttrs::WRITABLE;
+        }
+        if prot_flags & 4 == 0 {
+            attrs |= PageAttrs::NO_EXECUTE;
+        }
+        let mut entry = traverse(self.pml4, vaddr, true, attrs).unwrap();
+        unsafe {
+            if *entry.as_ptr() != 0 {
+                return false; // already mapped
+            }
+            *entry.as_mut() = paddr.value() as u64 | attrs.bits();
+            true
+        }
+    }
+
     /// Flushes the TLB for a specific virtual address.
+    #[inline(always)]
     pub fn flush_tlb(&self, vaddr: UserVAddr) {
         unsafe {
             core::arch::asm!("invlpg [{}]", in(reg) vaddr.value(), options(nostack, preserves_flags));
@@ -271,6 +306,7 @@ impl PageTable {
         self.switch();
     }
 
+    #[inline(always)]
     fn map_page(&mut self, vaddr: UserVAddr, paddr: PAddr, attrs: PageAttrs) {
         debug_assert!(is_aligned(vaddr.value(), PAGE_SIZE));
         let attrs_bits = attrs.bits();
@@ -279,4 +315,5 @@ impl PageTable {
             *entry.as_mut() = paddr.value() as u64 | attrs_bits;
         }
     }
+
 }

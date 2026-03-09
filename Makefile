@@ -279,6 +279,15 @@ bench:
 		| tee /tmp/kevlar-bench-$(PROFILE).log; true
 	@grep 'BENCH' /tmp/kevlar-bench-$(PROFILE).log || echo "(no BENCH output found)"
 
+.PHONY: bench-kvm
+bench-kvm:
+	$(PROGRESS) "BENCH-KVM" "profile-$(PROFILE)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_elf) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-bench-kvm-$(PROFILE).log; true
+	@grep 'BENCH' /tmp/kevlar-bench-kvm-$(PROFILE).log || echo "(no BENCH output found)"
+
 .PHONY: bench-all
 bench-all:
 	$(PYTHON3) benchmarks/run-benchmarks.py all-profiles

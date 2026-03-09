@@ -195,6 +195,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--quick") == 0 || strcmp(argv[i], "-q") == 0)
             quick_mode = 1;
+        else if (strcmp(argv[i], "--full") == 0 || strcmp(argv[i], "-f") == 0)
+            quick_mode = 0;
         else
             filter = argv[i];
     }

@@ -32,27 +32,33 @@ pub struct VmArea {
 }
 
 impl VmArea {
+    #[inline(always)]
     pub fn area_type(&self) -> &VmAreaType {
         &self.area_type
     }
 
+    #[inline(always)]
     pub fn prot(&self) -> MMapProt {
         self.prot
     }
 
+    #[inline(always)]
     pub fn start(&self) -> UserVAddr {
         self.start
     }
 
+    #[inline(always)]
     pub fn end(&self) -> UserVAddr {
         self.start.add(self.len)
     }
 
+    #[inline(always)]
     pub fn offset_in_vma(&self, vaddr: UserVAddr) -> usize {
         debug_assert!(self.contains(vaddr));
         vaddr.value() - self.start.value()
     }
 
+    #[inline(always)]
     pub fn contains(&self, vaddr: UserVAddr) -> bool {
         self.start.value() <= vaddr.value() && vaddr.value() < self.start.value() + self.len
     }
@@ -98,10 +104,12 @@ impl Vm {
         })
     }
 
+    #[inline(always)]
     pub fn page_table(&self) -> &PageTable {
         &self.page_table
     }
 
+    #[inline(always)]
     pub fn page_table_mut(&mut self) -> &mut PageTable {
         &mut self.page_table
     }
@@ -110,6 +118,7 @@ impl Vm {
         &self.vm_areas
     }
 
+    #[inline(always)]
     pub fn find_vma_cached(&mut self, vaddr: UserVAddr) -> Option<&VmArea> {
         // Try last successful VMA first (temporal locality optimization)
         if let Some(idx) = self.last_fault_vma_idx {
