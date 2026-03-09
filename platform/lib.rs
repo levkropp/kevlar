@@ -4,6 +4,15 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+// Ensure exactly one safety profile is active.
+#[cfg(not(any(
+    feature = "profile-fortress",
+    feature = "profile-balanced",
+    feature = "profile-performance",
+    feature = "profile-ludicrous",
+)))]
+compile_error!("Exactly one safety profile must be enabled. Add one of: profile-fortress, profile-balanced, profile-performance, profile-ludicrous");
+
 extern crate alloc;
 
 #[macro_use]

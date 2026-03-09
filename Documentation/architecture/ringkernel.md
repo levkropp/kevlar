@@ -363,10 +363,12 @@ trait impls to freestanding functions.
 Deferred: smoltcp, devfs, procfs — too tightly coupled to kernel internals
 for now (wait queue, IRQ handling, process state).
 
-### Phase 4: Add Panic Containment
+### Phase 4: Safety Profiles
 
-Add `catch_unwind` at Ring 1→Ring 2 boundaries. Implement service restart
-for filesystem and driver panics.
+Add configurable safety/performance profiles via Cargo features. Four
+profiles — Fortress, Balanced, Performance, Ludicrous — control the ring
+count, catch_unwind, frame access model, and capability checking at compile
+time. See [Safety Profiles](safety-profiles.md) for the full design.
 
 ## Provenance
 

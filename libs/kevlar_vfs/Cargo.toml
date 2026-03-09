@@ -6,5 +6,5 @@ description = "VFS trait definitions and shared types for the Kevlar kernel."
 
 [dependencies]
 bitflags = "2"
-kevlar_platform = { path = "../../platform" }
+kevlar_platform = { path = "../../platform", default-features = false }
 kevlar_utils = { path = "../kevlar_utils" }

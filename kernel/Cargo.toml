@@ -9,6 +9,13 @@ license = "MIT OR Apache-2.0 OR BSD-2-Clause"
 name = "kevlar_kernel"
 path = "main.rs"
 
+[features]
+default = ["profile-balanced"]
+profile-fortress = ["kevlar_platform/profile-fortress"]
+profile-balanced = ["kevlar_platform/profile-balanced"]
+profile-performance = ["kevlar_platform/profile-performance"]
+profile-ludicrous = ["kevlar_platform/profile-ludicrous"]
+
 [dependencies]
 log = "0.4"
 spin = "0.10"
@@ -25,7 +32,7 @@ atomic_refcell = "0.1"
 bitvec = { version = "1", default-features = false, features = ["atomic", "alloc"] }
 
 # Local dependencies.
-kevlar_platform = { path = "../platform" }
+kevlar_platform = { path = "../platform", default-features = false }
 kevlar_api = { path = "../libs/kevlar_api" }
 kevlar_utils = { path = "../libs/kevlar_utils", features = ["no_std"] }
 kevlar_vfs = { path = "../libs/kevlar_vfs" }

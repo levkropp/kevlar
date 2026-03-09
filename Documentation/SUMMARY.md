@@ -8,6 +8,7 @@
 
 - [Overview](architecture.md)
 - [The Ringkernel Architecture](architecture/ringkernel.md)
+- [Safety Profiles](architecture/safety-profiles.md)
 - [HAL / Kernel Split](architecture/hal.md)
 - [Memory Management](architecture/memory.md)
 - [Process & Thread Model](architecture/process.md)
@@ -39,3 +40,4 @@
 - [Ringkernel Phase 1: Extracting the Platform](blog/007-ringkernel-phase-1-platform-extraction.md)
 - [Ringkernel Phase 2: Core Traits and the Service Registry](blog/008-ringkernel-phase-2-core-traits.md)
 - [Ringkernel Phase 3: Extracting Services](blog/009-ringkernel-phase-3-service-extraction.md)
+- [Configurable Safety: Choose Your Own Tradeoff](blog/010-safety-profiles.md)

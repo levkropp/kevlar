@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 #![no_std]
 #![no_main]
-#![deny(unsafe_code)]
+#![cfg_attr(not(feature = "profile-ludicrous"), deny(unsafe_code))]
+#![cfg_attr(feature = "profile-ludicrous", allow(unsafe_code))]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]

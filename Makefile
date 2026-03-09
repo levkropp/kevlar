@@ -3,6 +3,7 @@ export V          ?=
 export GUI        ?=
 export RELEASE    ?=
 export ARCH       ?= x64
+export PROFILE    ?= balanced
 export LOG        ?=
 export LOG_SERIAL ?=
 export CMDLINE    ?=
@@ -65,10 +66,16 @@ STRIP      ?= strip
 endif
 DRAWIO     ?= /Applications/draw.io.app/Contents/MacOS/draw.io
 
+# Safety profile guard.
+ifneq ($(PROFILE),$(filter $(PROFILE),fortress balanced performance ludicrous))
+$(error "Supported PROFILE values: fortress, balanced, performance, ludicrous")
+endif
+
 export RUSTFLAGS = -Z emit-stack-sizes
 CARGOFLAGS += -Z build-std=core,alloc
 CARGOFLAGS += --target $(target_json)
 CARGOFLAGS += $(if $(RELEASE),--release,)
+CARGOFLAGS += --no-default-features --features profile-$(PROFILE)
 TESTCARGOFLAGS += --package kevlar_kernel -Z unstable-options
 TESTCARGOFLAGS += --config "target.$(ARCH).runner = './tools/run-unittests.sh'"
 WATCHFLAGS += --clear
@@ -148,6 +155,13 @@ testw:
 check:
 	$(MAKE) $(DUMMY_INITRAMFS_PATH)
 	INITRAMFS_PATH=$(DUMMY_INITRAMFS_PATH) $(CARGO) check $(CARGOFLAGS)
+
+.PHONY: check-all-profiles
+check-all-profiles:
+	for profile in fortress balanced performance ludicrous; do \
+		$(PROGRESS) "CHECK" "profile-$$profile"; \
+		$(MAKE) check PROFILE=$$profile || exit 1; \
+	done
 
 .PHONY: checkw
 checkw:

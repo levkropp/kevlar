@@ -219,6 +219,14 @@ impl UserVAddr {
     }
 
     pub fn access_ok(self, len: usize) -> Result<(), AccessError> {
+        // Ludicrous profile: skip software bounds check, rely on page fault handler.
+        #[cfg(feature = "profile-ludicrous")]
+        {
+            let _ = len;
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "profile-ludicrous"))]
         match self.value().checked_add(len) {
             Some(end) if end <= KERNEL_BASE_ADDR => Ok(()),
             Some(_end) => Err(AccessError),

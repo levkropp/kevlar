@@ -7,6 +7,6 @@ license = "MIT OR Apache-2.0 OR BSD-2-Clause"
 
 [dependencies]
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
-kevlar_platform = { path = "../../platform" }
+kevlar_platform = { path = "../../platform", default-features = false }
 kevlar_utils = { path = "../../libs/kevlar_utils", features = ["no_std"] }
 kevlar_vfs = { path = "../../libs/kevlar_vfs" }

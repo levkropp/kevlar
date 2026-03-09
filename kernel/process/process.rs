@@ -396,7 +396,8 @@ impl Process {
     pub fn exit(status: c_int) -> ! {
         let current = current_process();
         if current.pid == PId::new(1) {
-            panic!("init (pid=0) tried to exit")
+            info!("init exited with status {}, halting system", status);
+            kevlar_platform::arch::halt();
         }
 
         current.set_state(ProcessState::ExitedWith(status));

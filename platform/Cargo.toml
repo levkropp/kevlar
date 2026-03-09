@@ -25,5 +25,12 @@ vte = "0.13"
 kevlar_utils = { path = "../libs/kevlar_utils", features = ["no_std"] }
 log_filter = { path = "../libs/log_filter" }
 
+[features]
+default = ["profile-balanced"]
+profile-fortress = []
+profile-balanced = []
+profile-performance = []
+profile-ludicrous = []
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"
