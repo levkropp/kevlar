@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use alloc::sync::Arc;
 
-use kevlar_runtime::{address::UserVAddr, spinlock::SpinLock};
+use kevlar_platform::{address::UserVAddr, spinlock::SpinLock};
 
 use kevlar_utils::lazy::Lazy;
 use kevlar_utils::once::Once;
@@ -18,6 +18,7 @@ mod switch;
 pub mod wait_queue;
 
 pub use process::{gc_exited_processes, process_count, read_process_stats, PId, Process, ProcessState};
+pub use scheduler::SchedulerPolicy;
 pub use switch::switch;
 pub use wait_queue::WaitQueue;
 

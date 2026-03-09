@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::result::Result;
 use crate::{process::current_process, syscalls::SyscallHandler};
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_brk(&mut self, new_heap_end: Option<UserVAddr>) -> Result<isize> {

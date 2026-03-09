@@ -2,7 +2,7 @@
 use crate::fs::path::Path;
 use crate::result::Result;
 use crate::{process::current_process, syscalls::SyscallHandler};
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_stat(&mut self, path: &Path, buf: UserVAddr) -> Result<isize> {

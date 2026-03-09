@@ -2,7 +2,7 @@
 use crate::result::{Errno, Error, Result};
 
 use alloc::vec::Vec;
-use kevlar_runtime::address::{UserVAddr, VAddr};
+use kevlar_platform::address::{UserVAddr, VAddr};
 
 use core::mem::size_of;
 

@@ -6,7 +6,7 @@ use alloc::collections::BTreeMap;
 use crate::process::wait_queue::WaitQueue;
 use crate::result::{Errno, Result};
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 
 const FUTEX_WAIT: i32 = 0;
 const FUTEX_WAKE: i32 = 1;
@@ -42,7 +42,8 @@ impl<'a> SyscallHandler<'a> {
         match cmd {
             FUTEX_WAIT => {
                 // Read the current value at uaddr.
-                let current_val = unsafe { *(uaddr as *const u32) };
+                let user_addr = kevlar_platform::address::UserVAddr::new_nonnull(uaddr)?;
+                let current_val: u32 = user_addr.read()?;
                 if current_val != val {
                     return Err(Errno::EAGAIN.into());
                 }
@@ -52,7 +53,7 @@ impl<'a> SyscallHandler<'a> {
                 let queue = get_or_create_queue(uaddr);
                 queue.sleep_signalable_until(|| {
                     // Re-check the value; if it changed, wake up.
-                    let v = unsafe { *(uaddr as *const u32) };
+                    let v: u32 = user_addr.read().unwrap_or(0);
                     if v != val {
                         Ok(Some(0isize))
                     } else {

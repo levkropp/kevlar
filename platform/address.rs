@@ -156,6 +156,12 @@ pub struct AccessError;
 #[derive(Debug)]
 pub struct NullUserPointerError;
 
+impl From<NullUserPointerError> for AccessError {
+    fn from(_: NullUserPointerError) -> Self {
+        AccessError
+    }
+}
+
 /// Represents a user virtual memory address.
 ///
 /// It is guaranteed that `UserVaddr` contains a valid address, in other words,

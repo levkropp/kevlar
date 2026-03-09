@@ -6,7 +6,7 @@ use crate::fs::path::Path;
 use crate::prelude::*;
 use crate::user_buffer::UserBufWriter;
 use crate::{process::current_process, syscalls::SyscallHandler};
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_readlinkat(

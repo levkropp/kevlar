@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::prelude::*;
-use core::{mem::size_of, slice::from_raw_parts};
 use goblin::elf64::header::{Header, ELFMAG, ET_EXEC, ET_DYN};
 
 #[cfg(target_arch = "x86_64")]
@@ -12,7 +11,7 @@ const EXPECTED_MACHINE: u16 = EM_X86_64;
 const EXPECTED_MACHINE: u16 = 183; // EM_AARCH64
 pub use goblin::elf64::program_header::ProgramHeader;
 pub const PT_INTERP: u32 = 3;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 /// A parsed ELF object.
 pub struct Elf<'a> {
@@ -28,7 +27,8 @@ impl<'a> Elf<'a> {
             return Err(Errno::ENOEXEC.into());
         }
 
-        let header: &Header = unsafe { &*(buf.as_ptr() as *const Header) };
+        let header: &Header = kevlar_platform::pod::ref_from_prefix(buf)
+            .ok_or_else(|| Error::new(Errno::ENOEXEC))?;
         if &header.e_ident[..4] != ELFMAG {
             debug_warn!("invalid ELF magic");
             return Err(Errno::ENOEXEC.into());
@@ -44,12 +44,12 @@ impl<'a> Elf<'a> {
             return Err(Errno::ENOEXEC.into());
         }
 
-        let program_headers = unsafe {
-            from_raw_parts(
-                &buf[header.e_phoff as usize] as *const _ as *const ProgramHeader,
-                header.e_phnum as usize,
-            )
-        };
+        let ph_offset = header.e_phoff as usize;
+        let ph_count = header.e_phnum as usize;
+        let program_headers = kevlar_platform::pod::slice_from_prefix(
+            &buf[ph_offset..],
+            ph_count,
+        ).ok_or_else(|| Error::new(Errno::ENOEXEC))?;
 
         Ok(Elf {
             header,

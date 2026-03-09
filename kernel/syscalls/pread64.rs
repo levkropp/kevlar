@@ -3,7 +3,7 @@ use super::MAX_READ_WRITE_LEN;
 use crate::{fs::opened_file::Fd, prelude::*, user_buffer::UserBufferMut};
 use crate::{process::current_process, syscalls::SyscallHandler};
 use core::cmp::min;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_pread64(

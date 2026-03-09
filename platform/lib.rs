@@ -14,6 +14,11 @@ pub mod print;
 
 pub mod address;
 pub mod backtrace;
+mod mem;
+pub mod page_ops;
+pub mod pod;
+pub mod random;
+pub mod sync;
 pub mod bootinfo;
 pub mod global_allocator;
 pub mod logger;

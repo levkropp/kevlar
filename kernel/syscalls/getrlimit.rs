@@ -8,7 +8,7 @@ use crate::prelude::*;
 use crate::syscalls::SyscallHandler;
 use crate::user_buffer::UserBufWriter;
 use core::mem::size_of;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 const RLIM_INFINITY: u64 = !0u64;
 

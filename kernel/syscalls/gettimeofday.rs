@@ -8,7 +8,7 @@ use crate::syscalls::SyscallHandler;
 use crate::timer::read_wall_clock;
 use crate::user_buffer::UserBufWriter;
 use core::mem::size_of;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_gettimeofday(&mut self, tv: UserVAddr) -> Result<isize> {

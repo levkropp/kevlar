@@ -4,7 +4,7 @@ use crate::process::current_process;
 
 use crate::process::signal::SignalMask;
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl SyscallHandler<'_> {
     pub fn sys_rt_sigprocmask(

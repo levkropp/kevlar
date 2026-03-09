@@ -10,7 +10,7 @@ use crate::{
 };
 use alloc::{collections::BTreeSet, sync::Arc};
 use core::{convert::TryInto, fmt};
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::udp;
 use smoltcp::wire::IpEndpoint;

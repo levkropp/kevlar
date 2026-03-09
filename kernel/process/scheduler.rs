@@ -1,11 +1,25 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::process::PId;
 use alloc::collections::VecDeque;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 
-/// The process scheduler.
+/// Scheduling policy trait.
 ///
-/// Currently, it implements a round-robin algorithm.
+/// Defines the interface for process scheduling algorithms. The Core
+/// accesses the scheduler exclusively through this trait, making the
+/// scheduling policy pluggable (e.g., round-robin, CFS).
+pub trait SchedulerPolicy: Send + Sync {
+    /// Enqueue a process into the run queue.
+    fn enqueue(&self, pid: PId);
+
+    /// Pick the next process to run, removing it from the run queue.
+    fn pick_next(&self) -> Option<PId>;
+
+    /// Remove a process from the run queue (e.g., on exit).
+    fn remove(&self, pid: PId);
+}
+
+/// Round-robin scheduler.
 pub struct Scheduler {
     run_queue: SpinLock<VecDeque<PId>>,
 }
@@ -17,22 +31,18 @@ impl Scheduler {
             run_queue: SpinLock::new(VecDeque::new()),
         }
     }
+}
 
-    /// Enqueues a process into the runqueue.
-    pub fn enqueue(&self, pid: PId) {
+impl SchedulerPolicy for Scheduler {
+    fn enqueue(&self, pid: PId) {
         self.run_queue.lock().push_back(pid);
     }
 
-    /// Returns the next process to run.
-    ///
-    /// The process is removed from the runqueue so you need to enqueue it by
-    /// [`Scheduler::enqueue`] again.
-    pub fn pick_next(&self) -> Option<PId> {
+    fn pick_next(&self) -> Option<PId> {
         self.run_queue.lock().pop_front()
     }
 
-    /// Removes the process from the runqueue.
-    pub fn remove(&self, pid: PId) {
+    fn remove(&self, pid: PId) {
         self.run_queue.lock().retain(|p| *p != pid);
     }
 }

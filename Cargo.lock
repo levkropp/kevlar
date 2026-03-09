@@ -208,7 +208,7 @@ name = "kevlar_api"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
- "kevlar_runtime",
+ "kevlar_platform",
  "kevlar_utils",
  "log",
  "memoffset",
@@ -228,7 +228,7 @@ dependencies = [
  "goblin",
  "hashbrown",
  "kevlar_api",
- "kevlar_runtime",
+ "kevlar_platform",
  "kevlar_utils",
  "log",
  "smoltcp",
@@ -238,7 +238,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kevlar_runtime"
+name = "kevlar_platform"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
@@ -246,6 +246,7 @@ dependencies = [
  "bitflags 2.11.0",
  "buddy_system_allocator",
  "cfg-if",
+ "crossbeam",
  "kevlar_utils",
  "log",
  "log_filter",

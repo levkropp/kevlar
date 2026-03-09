@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use alloc::boxed::Box;
-use kevlar_runtime::print::{get_debug_printer, set_debug_printer, Printer};
+use kevlar_platform::print::{get_debug_printer, set_debug_printer, Printer};
 use kevlar_utils::ring_buffer::RingBuffer;
 
 use crate::lang_items::PANICKED;
@@ -32,6 +32,7 @@ impl Printer for LoggedPrinter {
             //
             // Since only single CPU can continue handling a panic, we can
             // ensure it's safe to unlock it.
+            #[allow(unsafe_code)]
             unsafe {
                 KERNEL_LOG_BUF.force_unlock();
             }
@@ -46,12 +47,12 @@ impl Printer for LoggedPrinter {
 macro_rules! debug_warn {
     ($fmt:expr) => {
         if cfg!(debug_assertions) {
-            ::kevlar_runtime::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"));
+            ::kevlar_platform::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"));
         }
     };
     ($fmt:expr, $($arg:tt)*) => {
         if cfg!(debug_assertions) {
-            ::kevlar_runtime::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"), $($arg)*);
+            ::kevlar_platform::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"), $($arg)*);
         }
     };
 }
@@ -62,13 +63,13 @@ macro_rules! warn_once {
     ($fmt:expr) => {{
         static ONCE: ::spin::Once<()> = ::spin::Once::new();
         ONCE.call_once(|| {
-            ::kevlar_runtime::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"));
+            ::kevlar_platform::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"));
         });
     }};
     ($fmt:expr, $($arg:tt)*) => {{
         static ONCE: ::spin::Once<()> = ::spin::Once::new();
         ONCE.call_once(|| {
-            ::kevlar_runtime::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"), $($arg)*);
+            ::kevlar_platform::println!(concat!("\x1b[1;33mWARN: ", $fmt, "\x1b[0m"), $($arg)*);
         });
     }};
 }

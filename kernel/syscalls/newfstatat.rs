@@ -7,7 +7,7 @@ use crate::ctypes::c_int;
 use crate::fs::path::Path;
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 const AT_EMPTY_PATH: c_int = 0x1000;
 const AT_SYMLINK_NOFOLLOW: c_int = 0x100;

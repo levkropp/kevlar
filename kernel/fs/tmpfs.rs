@@ -21,7 +21,7 @@ use crate::{
     user_buffer::UserBufferMut,
 };
 use hashbrown::HashMap;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::{downcast::downcast, once::Once};
 
 pub static TMP_FS: Once<Arc<TmpFs>> = Once::new();

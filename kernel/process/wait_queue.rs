@@ -4,7 +4,7 @@ use crate::result::Errno;
 use crate::result::Result;
 
 use alloc::{collections::VecDeque, sync::Arc};
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 
 pub struct WaitQueue {
     queue: SpinLock<VecDeque<Arc<Process>>>,

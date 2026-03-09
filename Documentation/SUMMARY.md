@@ -36,3 +36,5 @@
 - [Milestone 1.5: ARM64 BusyBox Boots on Kevlar](blog/004-milestone-1.5-arm64.md)
 - [Milestone 2: Dynamic Linking Works on Kevlar](blog/005-milestone-2-dynamic-linking.md)
 - [Milestone 3: Terminal Control, Job Control, and the Road to Bash](blog/006-milestone-3-job-control-and-terminal.md)
+- [Ringkernel Phase 1: Extracting the Platform](blog/007-ringkernel-phase-1-platform-extraction.md)
+- [Ringkernel Phase 2: Core Traits and the Service Registry](blog/008-ringkernel-phase-2-core-traits.md)

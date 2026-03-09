@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! User pointers.
 use crate::prelude::*;
-use core::{cmp::min, mem::size_of, slice};
-use kevlar_runtime::address::UserVAddr;
+use core::{cmp::min, mem::size_of};
+use kevlar_platform::address::UserVAddr;
 use kevlar_utils::alignment::align_up;
 
 /// Parses a bitflags field given from the user. Returns `Result<T>`.
@@ -130,7 +130,7 @@ impl<'a> UserBufReader<'a> {
         self.check_remaining_len(size_of::<T>())?;
 
         let value = match &self.buf.inner {
-            Inner::Slice(src) => unsafe { *(src.as_ptr().add(self.pos) as *const T) },
+            Inner::Slice(src) => kevlar_platform::pod::read_copy_from_slice(src, self.pos),
             Inner::User { base, .. } => base.add(self.pos).read()?,
         };
 
@@ -256,8 +256,7 @@ impl<'a> UserBufWriter<'a> {
     }
 
     pub fn write<T: Copy>(&mut self, value: T) -> Result<usize> {
-        let bytes =
-            unsafe { slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>()) };
+        let bytes = kevlar_platform::pod::copy_as_bytes(&value);
         self.write_bytes(bytes)
     }
 

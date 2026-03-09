@@ -2,7 +2,7 @@
 //! Unnamed pipe (`pipe(2)`).
 use core::fmt;
 
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::{once::Once, ring_buffer::RingBuffer};
 
 use crate::{

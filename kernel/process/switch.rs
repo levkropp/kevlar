@@ -53,12 +53,8 @@ pub fn switch() {
     // - Their parent processes's list of children.
     //
     // To cheat the borrow checker we do so by `Arc::decrement_strong_count`.
-    debug_assert!(Arc::strong_count(&prev) > 1);
-    debug_assert!(Arc::strong_count(&next) > 1);
-    unsafe {
-        Arc::decrement_strong_count(Arc::as_ptr(&prev));
-        Arc::decrement_strong_count(Arc::as_ptr(&next));
-    }
+    kevlar_platform::sync::arc_leak_one_ref(&prev);
+    kevlar_platform::sync::arc_leak_one_ref(&next);
 
     // Switch into the next thread.
     CURRENT.as_mut().set(next.clone());

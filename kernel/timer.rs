@@ -5,7 +5,7 @@ use crate::{
     process::{self, current_process, Process, ProcessState},
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kevlar_runtime::{arch::TICK_HZ, spinlock::SpinLock};
+use kevlar_platform::{arch::TICK_HZ, spinlock::SpinLock};
 use process::switch;
 
 const PREEMPT_PER_TICKS: usize = 30;

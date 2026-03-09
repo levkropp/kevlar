@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use kevlar_runtime::arch::halt;
+use kevlar_platform::arch::halt;
 
 use crate::{ctypes::c_int, result::Result, syscalls::SyscallHandler};
 

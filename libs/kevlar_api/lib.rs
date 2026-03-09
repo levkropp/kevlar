@@ -11,21 +11,21 @@ pub mod driver;
 pub mod kernel_ops;
 pub mod net;
 
-pub use kevlar_runtime::{debug_warn, warn_if_err, warn_once};
+pub use kevlar_platform::{debug_warn, warn_if_err, warn_once};
 pub use log::{debug, error, info, trace, warn};
 
 pub mod address {
-    pub use kevlar_runtime::address::{PAddr, VAddr};
+    pub use kevlar_platform::address::{PAddr, VAddr};
 }
 
 pub mod mm {
-    pub use kevlar_runtime::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
+    pub use kevlar_platform::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
 }
 
 pub mod sync {
-    pub use kevlar_runtime::spinlock::{SpinLock, SpinLockGuard};
+    pub use kevlar_platform::spinlock::{SpinLock, SpinLockGuard};
 }
 
 pub mod arch {
-    pub use kevlar_runtime::arch::PAGE_SIZE;
+    pub use kevlar_platform::arch::PAGE_SIZE;
 }

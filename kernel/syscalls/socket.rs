@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use crate::fs::inode::{FileLike, INode};
-use crate::net::{socket::*, TcpSocket, UdpSocket, UnixSocket};
+use crate::fs::inode::INode;
+use crate::net::socket::*;
 use crate::result::{Errno, Result};
 use crate::{
     ctypes::*,
     fs::opened_file::{OpenOptions, PathComponent},
+    services,
 };
 use crate::{process::current_process, syscalls::SyscallHandler};
-use alloc::sync::Arc;
 use bitflags::bitflags;
 
 bitflags! {
@@ -35,13 +35,14 @@ impl<'a> SyscallHandler<'a> {
         let socket_type = type_ & SOCKET_TYPE_MASK;
         let flags = bitflags_from_user!(SocketFlags, type_ & !SOCKET_TYPE_MASK)?;
 
+        let net = services::network_stack();
         let socket = match (domain, socket_type, protocol) {
-            (AF_UNIX, SOCK_STREAM, 0) => UnixSocket::new() as Arc<dyn FileLike>,
+            (AF_UNIX, SOCK_STREAM, 0) => net.create_unix_socket()?,
             (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
-                UdpSocket::new() as Arc<dyn FileLike>
+                net.create_udp_socket()?
             }
             (AF_INET, SOCK_STREAM, 0) | (AF_INET, SOCK_STREAM, IPPROTO_TCP) => {
-                TcpSocket::new() as Arc<dyn FileLike>
+                net.create_tcp_socket()?
             }
             (_, _, _) => {
                 debug_warn!(

@@ -7,7 +7,7 @@ use crate::{
 };
 use crate::{process::current_process, syscalls::SyscallHandler};
 use core::cmp::min;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_sendto(

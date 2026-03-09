@@ -5,7 +5,7 @@
 use core::panic::PanicInfo;
 use core::sync::atomic::Ordering;
 
-use kevlar_runtime::arch::{semihosting_halt, SemihostingExitStatus};
+use kevlar_platform::arch::{semihosting_halt, SemihostingExitStatus};
 
 pub trait Testable {
     fn run(&self);

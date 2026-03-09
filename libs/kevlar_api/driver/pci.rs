@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use arrayvec::ArrayVec;
 use core::convert::TryInto;
 use core::{mem::size_of, mem::MaybeUninit};
-use kevlar_runtime::address::PAddr;
+use kevlar_platform::address::PAddr;
 use kevlar_utils::alignment::is_aligned;
 use x86::io::{inl, outl};
 

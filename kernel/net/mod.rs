@@ -8,14 +8,15 @@ use alloc::vec::Vec;
 use atomic_refcell::AtomicRefCell;
 use crossbeam::queue::ArrayQueue;
 use kevlar_api::driver::net::EthernetDriver;
-use kevlar_runtime::bootinfo::BootInfo;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::bootinfo::BootInfo;
+use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::once::Once;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 use smoltcp::wire::{self, EthernetAddress, EthernetFrame, HardwareAddress, IpCidr};
 
+pub mod service;
 pub mod socket;
 mod tcp_socket;
 mod udp_socket;
@@ -36,7 +37,7 @@ pub fn receive_ethernet_frame(frame: &[u8]) {
     }
 
     PACKET_PROCESS_JOB.run_later(|| {
-        process_packets();
+        crate::services::network_stack().process_packets();
     });
 }
 
@@ -246,4 +247,25 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
     SOCKETS.init(|| SpinLock::new(sockets));
 
     process_packets();
+}
+
+/// The smoltcp-based network stack, implementing `NetworkStackService`.
+pub struct SmoltcpNetworkStack;
+
+impl service::NetworkStackService for SmoltcpNetworkStack {
+    fn create_tcp_socket(&self) -> crate::result::Result<alloc::sync::Arc<dyn crate::fs::inode::FileLike>> {
+        Ok(TcpSocket::new() as alloc::sync::Arc<dyn crate::fs::inode::FileLike>)
+    }
+
+    fn create_udp_socket(&self) -> crate::result::Result<alloc::sync::Arc<dyn crate::fs::inode::FileLike>> {
+        Ok(UdpSocket::new() as alloc::sync::Arc<dyn crate::fs::inode::FileLike>)
+    }
+
+    fn create_unix_socket(&self) -> crate::result::Result<alloc::sync::Arc<dyn crate::fs::inode::FileLike>> {
+        Ok(UnixSocket::new() as alloc::sync::Arc<dyn crate::fs::inode::FileLike>)
+    }
+
+    fn process_packets(&self) {
+        process_packets();
+    }
 }

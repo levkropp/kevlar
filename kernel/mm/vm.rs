@@ -7,7 +7,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use kevlar_runtime::{
+use kevlar_platform::{
     address::UserVAddr,
     arch::{PageTable, PAGE_SIZE},
 };

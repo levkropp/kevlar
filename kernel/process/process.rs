@@ -18,7 +18,7 @@ use crate::{
         init_stack::{estimate_user_init_stack_size, init_user_stack, Auxv},
         process_group::{PgId, ProcessGroup},
         signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL},
-        switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER,
+        switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER, SchedulerPolicy,
     },
     random::read_secure_random,
     result::Errno,
@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
-use kevlar_runtime::{
+use kevlar_platform::{
     arch::{PtRegs, PAGE_SIZE},
     page_allocator::{alloc_pages, AllocPageFlags},
     spinlock::{SpinLock, SpinLockGuard},
@@ -507,9 +507,7 @@ impl Process {
                     SigAction::Handler { handler } => {
                         trace!("delivering {:?} to {:?}", signal, current.pid,);
                         current.signaled_frame.store(Some(*frame));
-                        unsafe {
-                            current.arch.setup_signal_stack(frame, signal, handler)?;
-                        }
+                        current.arch.setup_signal_stack(frame, signal, handler)?;
                     }
                 }
             }
@@ -558,7 +556,7 @@ impl Process {
 
         current
             .arch
-            .setup_execve_stack(frame, entry.ip, entry.user_sp)?;
+            .setup_execve_stack(frame, entry.ip, entry.user_sp);
 
         Ok(())
     }
@@ -569,7 +567,7 @@ impl Process {
         let parent_weak = Arc::downgrade(parent);
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
-        let arch = parent.arch.fork(parent_frame)?;
+        let arch = parent.arch.fork(parent_frame);
         let vm = parent.vm().as_ref().unwrap().lock().fork()?;
         let opened_files = parent.opened_files().lock().clone(); // TODO: #88 has to address this
         let process_group = parent.process_group();
@@ -863,6 +861,7 @@ fn do_elf_binfmt(
 
         // Read interpreter's ELF header.
         let interp_header_pages = alloc_pages(1, AllocPageFlags::KERNEL)?;
+        #[allow(unsafe_code)]
         let interp_buf = unsafe {
             core::slice::from_raw_parts_mut(interp_header_pages.as_mut_ptr(), PAGE_SIZE)
         };
@@ -1013,6 +1012,7 @@ fn do_setup_userspace(
     // Read the ELF header in the executable file.
     let file_header_len = PAGE_SIZE;
     let file_header_pages = alloc_pages(file_header_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
+    #[allow(unsafe_code)]
     let buf =
         unsafe { core::slice::from_raw_parts_mut(file_header_pages.as_mut_ptr(), file_header_len) };
 

@@ -5,7 +5,7 @@ use core::{cmp::min, fmt};
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::id_table::IdTable;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
     result::{Errno, Error, Result},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 use super::line_discipline::{LineControl, LineDiscipline, Termios, WinSize};
 

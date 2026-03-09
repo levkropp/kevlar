@@ -3,7 +3,7 @@ use crate::result::*;
 use bitflags::bitflags;
 use core::convert::TryFrom;
 use core::mem::size_of;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 use smoltcp::wire::{IpAddress, IpEndpoint, Ipv4Address};
 
 bitflags! {

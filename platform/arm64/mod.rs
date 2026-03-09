@@ -4,6 +4,7 @@ use core::arch::global_asm;
 global_asm!(include_str!("boot.S"));
 global_asm!(include_str!("trap.S"));
 global_asm!(include_str!("usercopy.S"));
+global_asm!(include_str!("usermode.S"));
 
 #[macro_use]
 mod cpu_local;
@@ -19,6 +20,7 @@ mod profile;
 mod semihosting;
 mod serial;
 mod syscall;
+pub mod task;
 mod timer;
 
 pub use backtrace::Backtrace;
@@ -32,6 +34,10 @@ pub use syscall::PtRegs;
 
 pub mod arm64_specific {
     pub use super::cpu_local::cpu_local_head;
+    pub use super::task::{
+        ArchTask, switch_task, write_tls_base,
+        KERNEL_STACK_SIZE, USER_VALLOC_END, USER_VALLOC_BASE, USER_STACK_TOP,
+    };
 }
 
 pub const PAGE_SIZE: usize = 4096;

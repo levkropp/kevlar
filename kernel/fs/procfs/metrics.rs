@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::fmt;
 
-use kevlar_runtime::page_allocator::read_allocator_stats;
+use kevlar_platform::page_allocator::read_allocator_stats;
 
 use crate::{
     fs::{

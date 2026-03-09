@@ -1,27 +1,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+//! Architecture-specific task (process) context for ARM64.
+//!
+//! This module was moved from kernel/arch/arm64/process.rs to consolidate
+//! all unsafe code in the platform crate.
 use core::cell::UnsafeCell;
 
-use crate::result::Result;
-use crate::{arch::KERNEL_STACK_SIZE, process::signal::Signal};
+use crate::address::{AccessError, UserVAddr, VAddr};
+use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
+use crate::arch::PAGE_SIZE;
+use crate::arch::arm64_specific::cpu_local_head;
+use crate::arch::PtRegs;
 use crossbeam::atomic::AtomicCell;
-use kevlar_runtime::address::{UserVAddr, VAddr};
-use kevlar_runtime::page_allocator::{alloc_pages_owned, OwnedPages};
-use kevlar_runtime::{
-    arch::arm64_specific::cpu_local_head,
-    arch::PtRegs,
-    arch::PAGE_SIZE,
-    page_allocator::AllocPageFlags,
-};
 
-pub struct Process {
+/// Kernel stack size: 256 pages = 1 MiB.
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 256;
+
+/// End of the user virtual address allocation region.
+pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
+
+/// Start of the user virtual address allocation region.
+pub const USER_VALLOC_BASE: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_000a_0000_0000) };
+
+/// Top of the user stack (grows downward from USER_VALLOC_BASE).
+pub const USER_STACK_TOP: UserVAddr = USER_VALLOC_BASE;
+
+/// Architecture-specific process/task context for ARM64.
+///
+/// Contains the kernel stack pointer, TLS base, and allocated stacks.
+pub struct ArchTask {
     sp: UnsafeCell<u64>,
-    pub(super) tpidr_el0: AtomicCell<u64>, // User TLS base (equivalent of fsbase)
+    pub tpidr_el0: AtomicCell<u64>, // User TLS base (equivalent of fsbase)
     kernel_stack: OwnedPages,
     interrupt_stack: OwnedPages,
     syscall_stack: OwnedPages,
 }
 
-unsafe impl Sync for Process {}
+unsafe impl Sync for ArchTask {}
 
 unsafe extern "C" {
     fn kthread_entry();
@@ -38,9 +52,9 @@ unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
     sp
 }
 
-impl Process {
+impl ArchTask {
     #[allow(unused)]
-    pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> Process {
+    pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -82,7 +96,7 @@ impl Process {
             sp
         };
 
-        Process {
+        ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
@@ -91,7 +105,7 @@ impl Process {
         }
     }
 
-    pub fn new_user_thread(ip: UserVAddr, user_sp: UserVAddr) -> Process {
+    pub fn new_user_thread(ip: UserVAddr, user_sp: UserVAddr) -> ArchTask {
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -150,7 +164,7 @@ impl Process {
             sp
         };
 
-        Process {
+        ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
@@ -159,7 +173,7 @@ impl Process {
         }
     }
 
-    pub fn new_idle_thread() -> Process {
+    pub fn new_idle_thread() -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -176,7 +190,7 @@ impl Process {
         )
         .expect("failed to allocate kernel stack");
 
-        Process {
+        ArchTask {
             sp: UnsafeCell::new(0),
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
@@ -185,7 +199,7 @@ impl Process {
         }
     }
 
-    pub fn fork(&self, frame: &PtRegs) -> Result<Process> {
+    pub fn fork(&self, frame: &PtRegs) -> ArchTask {
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -238,13 +252,13 @@ impl Process {
         )
         .expect("failed to allocate syscall stack");
 
-        Ok(Process {
+        ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(self.tpidr_el0.load()),
             interrupt_stack,
             syscall_stack,
             kernel_stack,
-        })
+        }
     }
 
     pub fn setup_execve_stack(
@@ -252,25 +266,24 @@ impl Process {
         frame: &mut PtRegs,
         ip: UserVAddr,
         user_sp: UserVAddr,
-    ) -> Result<()> {
+    ) {
         frame.pc = ip.as_isize() as u64;
         frame.sp = user_sp.as_isize() as u64;
-        Ok(())
     }
 
-    pub unsafe fn setup_signal_stack(
+    pub fn setup_signal_stack(
         &self,
         frame: &mut PtRegs,
-        signal: Signal,
+        signal: i32,
         sa_handler: UserVAddr,
-    ) -> Result<()> {
+    ) -> Result<(), AccessError> {
         // ARM64 signal trampoline: SVC #0 with x8 = __NR_rt_sigreturn (139).
         const TRAMPOLINE: &[u8] = &[
             0x88, 0x11, 0x80, 0xd2, // mov x8, #139 (__NR_rt_sigreturn)
             0x01, 0x00, 0x00, 0xd4, // svc #0
         ];
 
-        fn push_to_user_stack(sp: UserVAddr, value: u64) -> Result<UserVAddr> {
+        fn push_to_user_stack(sp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let sp = sp.sub(8);
             sp.write::<u64>(&value)?;
             Ok(sp)
@@ -300,7 +313,11 @@ impl Process {
     }
 }
 
-pub fn switch_thread(prev: &Process, next: &Process) {
+/// Switch from `prev` task to `next` task (ARM64).
+///
+/// Updates the kernel stack pointer and TLS base, then calls the
+/// assembly context switch routine.
+pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     let head = cpu_local_head();
 
     // Set kernel stack for next thread's exception entry.
@@ -310,5 +327,12 @@ pub fn switch_thread(prev: &Process, next: &Process) {
     unsafe {
         core::arch::asm!("msr tpidr_el0, {}", in(reg) next.tpidr_el0.load());
         do_switch_thread(prev.sp.get(), next.sp.get());
+    }
+}
+
+/// Set the ARM64 TLS base register (TPIDR_EL0).
+pub fn write_tls_base(value: u64) {
+    unsafe {
+        core::arch::asm!("msr tpidr_el0, {}", in(reg) value);
     }
 }

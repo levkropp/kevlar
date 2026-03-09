@@ -328,30 +328,25 @@ what Platform resources they can access.
 The ringkernel architecture will be implemented incrementally, without
 breaking the existing kernel. The plan has four phases:
 
-### Phase 1: Extract the Platform
+### Phase 1: Extract the Platform ✓
 
-Move all unsafe code from `kernel/` and `runtime/` into a new
-`kevlar_platform` crate. Create safe wrapper APIs. Add
-`#![forbid(unsafe_code)]` to the kernel crate.
+Completed. All unsafe code moved from `kernel/` into `kevlar_platform`.
+Safe wrapper APIs created (`pod.rs`, `page_ops.rs`, `sync.rs`, `random.rs`,
+`mem.rs`). The kernel crate enforces `#![deny(unsafe_code)]` with only 7
+annotated exceptions across 4 files.
 
-This is the critical phase — it establishes the safety boundary.
+### Phase 2: Define Core Traits ✓
 
-**Files to move:**
-- `runtime/x64/paging.rs` → `platform/arch/x64/paging.rs`
-- `runtime/x64/boot.rs` → `platform/arch/x64/boot.rs`
-- `runtime/x64/interrupt.rs` → `platform/arch/x64/interrupt.rs`
-- `runtime/x64/usercopy.S` → `platform/arch/x64/usercopy.S`
-- `runtime/address.rs` (unsafe parts) → `platform/address.rs`
-- `kernel/arch/x64/process.rs` (context switch) → `platform/arch/x64/task.rs`
-- `kernel/lang_items.rs` (memcpy/memset) → `platform/mem.rs`
+Completed. Service traits defined at the Ring 2 boundaries:
 
-**Estimated effort:** ~2,000 lines moved, ~500 lines of new safe wrappers.
-
-### Phase 2: Define Core Traits
-
-Create trait interfaces for VFS, scheduler, process manager, and signal
-delivery. The existing implementations stay in place but now implement
-traits rather than being called directly.
+- `NetworkStackService` trait (`kernel/net/service.rs`) — socket creation
+  and packet processing. `SmoltcpNetworkStack` implements it.
+- `SchedulerPolicy` trait (`kernel/process/scheduler.rs`) — pluggable
+  scheduling algorithms. `Scheduler` (round-robin) implements it.
+- `ServiceRegistry` (`kernel/services.rs`) — centralized access to Ring 2
+  services. Socket creation in syscalls now goes through the registry.
+- VFS traits (`FileSystem`, `Directory`, `FileLike`, `Symlink`) were already
+  well-defined; documented with Ring 2 boundary annotations.
 
 ### Phase 3: Extract Services
 

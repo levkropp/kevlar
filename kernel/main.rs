@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
@@ -15,7 +16,7 @@ extern crate alloc;
 extern crate log;
 
 #[macro_use]
-extern crate kevlar_runtime;
+extern crate kevlar_platform;
 
 #[macro_use]
 mod logger;
@@ -37,6 +38,7 @@ mod poll;
 mod prelude;
 mod process;
 mod random;
+mod services;
 mod syscalls;
 mod test_runner;
 mod timer;
@@ -57,7 +59,7 @@ use crate::{
 use alloc::{boxed::Box, sync::Arc};
 use interrupt::attach_irq;
 use kevlar_api::kernel_ops::KernelOps;
-use kevlar_runtime::{
+use kevlar_platform::{
     arch::{idle, PageFaultReason, PtRegs},
     bootinfo::BootInfo,
     profile::StopWatch,
@@ -72,7 +74,7 @@ use crate::test_runner::end_tests;
 
 struct Handler;
 
-impl kevlar_runtime::Handler for Handler {
+impl kevlar_platform::Handler for Handler {
     fn handle_console_rx(&self, ch: u8) {
         SERIAL_TTY.input_char(ch);
     }
@@ -87,7 +89,7 @@ impl kevlar_runtime::Handler for Handler {
 
     fn handle_page_fault(
         &self,
-        unaligned_vaddr: Option<kevlar_runtime::address::UserVAddr>,
+        unaligned_vaddr: Option<kevlar_platform::address::UserVAddr>,
         ip: usize,
         reason: PageFaultReason,
     ) {
@@ -105,7 +107,9 @@ impl kevlar_runtime::Handler for Handler {
         n: usize,
         frame: *mut PtRegs,
     ) -> isize {
-        let mut handler = SyscallHandler::new(unsafe { &mut *frame });
+        #[allow(unsafe_code)]
+        let frame_ref = unsafe { &mut *frame };
+        let mut handler = SyscallHandler::new(frame_ref);
         handler
             .dispatch(a1, a2, a3, a4, a5, a6, n)
             .unwrap_or_else(|err| -(err.errno() as isize))
@@ -140,6 +144,7 @@ impl KernelOps for ApiOps {
 pub static INITIAL_ROOT_FS: Once<Arc<SpinLock<RootFs>>> = Once::new();
 
 #[unsafe(no_mangle)]
+#[allow(unsafe_code)]
 #[cfg_attr(test, allow(unreachable_code))]
 pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootInfo) -> ! {
     logger::init();
@@ -147,7 +152,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     info!("Booting Kevlar...");
     let mut profiler = StopWatch::start();
 
-    kevlar_runtime::set_handler(&Handler);
+    kevlar_platform::set_handler(&Handler);
 
     // Initialize memory allocators first.
     interrupt::init();
@@ -190,6 +195,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
 
     // Connect to the network.
     net::init_and_start_dhcp_discover(bootinfo);
+    services::register_network_stack(Arc::new(net::SmoltcpNetworkStack));
     profiler.lap_time("net init");
 
     // Prepare the root file system.

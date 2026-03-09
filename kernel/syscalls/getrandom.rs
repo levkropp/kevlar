@@ -5,7 +5,7 @@ use crate::syscalls::SyscallHandler;
 use crate::{ctypes::c_uint, user_buffer::UserBufferMut};
 use bitflags::bitflags;
 use core::cmp::min;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 const GETRANDOM_LEN_MAX: usize = 256;
 

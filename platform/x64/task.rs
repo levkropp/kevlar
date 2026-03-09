@@ -1,25 +1,39 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+//! Architecture-specific task (process) context for x86_64.
+//!
+//! This module was moved from kernel/arch/x64/process.rs to consolidate
+//! all unsafe code in the platform crate.
 use core::cell::UnsafeCell;
 
-use crate::result::Result;
-use crate::{arch::KERNEL_STACK_SIZE, process::signal::Signal};
+use crate::address::{AccessError, UserVAddr, VAddr};
+use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
+use crate::arch::PAGE_SIZE;
+use crate::arch::x64_specific::{cpu_local_head, TSS, USER_CS64, USER_DS, USER_RPL};
+use crate::arch::PtRegs;
 use crossbeam::atomic::AtomicCell;
-use kevlar_runtime::address::{UserVAddr, VAddr};
-use kevlar_runtime::page_allocator::{alloc_pages_owned, OwnedPages};
-use kevlar_runtime::{
-    arch::x64_specific::{cpu_local_head, TSS, USER_CS64, USER_DS, USER_RPL},
-    arch::PtRegs,
-    arch::PAGE_SIZE,
-    page_allocator::AllocPageFlags,
-};
 use x86::current::segmentation::wrfsbase;
 
-pub struct Process {
+/// Kernel stack size: 256 pages = 1 MiB.
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 256;
+
+/// End of the user virtual address allocation region.
+pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
+
+/// Start of the user virtual address allocation region.
+pub const USER_VALLOC_BASE: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_000a_0000_0000) };
+
+/// Top of the user stack (grows downward from USER_VALLOC_BASE).
+pub const USER_STACK_TOP: UserVAddr = USER_VALLOC_BASE;
+
+/// Architecture-specific process/task context for x86_64.
+///
+/// Contains the kernel stack pointer, FPU state, and allocated stacks.
+pub struct ArchTask {
     rsp: UnsafeCell<u64>,
-    pub(super) fsbase: AtomicCell<u64>,
-    pub(super) xsave_area: Option<OwnedPages>,
+    pub fsbase: AtomicCell<u64>,
+    pub xsave_area: Option<OwnedPages>,
     // This appears dead, but really we're keeping the pages referenced from the
-    // rsp from being dropped until the Process is dropped.
+    // rsp from being dropped until the ArchTask is dropped.
     #[allow(dead_code)]
     kernel_stack: OwnedPages,
     // FIXME: Do we really need these stacks?
@@ -27,7 +41,7 @@ pub struct Process {
     syscall_stack: OwnedPages,
 }
 
-unsafe impl Sync for Process {}
+unsafe impl Sync for ArchTask {}
 
 unsafe extern "C" {
     fn kthread_entry();
@@ -44,9 +58,9 @@ unsafe fn push_stack(mut rsp: *mut u64, value: u64) -> *mut u64 {
     rsp
 }
 
-impl Process {
+impl ArchTask {
     #[allow(unused)]
-    pub fn new_kthread(ip: VAddr, sp: VAddr) -> Process {
+    pub fn new_kthread(ip: VAddr, sp: VAddr) -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -82,7 +96,7 @@ impl Process {
             rsp
         };
 
-        Process {
+        ArchTask {
             rsp: UnsafeCell::new(rsp as u64),
             fsbase: AtomicCell::new(0),
             xsave_area: None,
@@ -92,7 +106,7 @@ impl Process {
         }
     }
 
-    pub fn new_user_thread(ip: UserVAddr, sp: UserVAddr) -> Process {
+    pub fn new_user_thread(ip: UserVAddr, sp: UserVAddr) -> ArchTask {
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -135,7 +149,7 @@ impl Process {
             rsp
         };
 
-        Process {
+        ArchTask {
             rsp: UnsafeCell::new(rsp as u64),
             fsbase: AtomicCell::new(0),
             xsave_area: Some(xsave_area),
@@ -145,7 +159,7 @@ impl Process {
         }
     }
 
-    pub fn new_idle_thread() -> Process {
+    pub fn new_idle_thread() -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -162,7 +176,7 @@ impl Process {
         )
         .expect("failed to allocat kernel stack");
 
-        Process {
+        ArchTask {
             rsp: UnsafeCell::new(0),
             fsbase: AtomicCell::new(0),
             xsave_area: None,
@@ -172,7 +186,7 @@ impl Process {
         }
     }
 
-    pub fn fork(&self, frame: &PtRegs) -> Result<Process> {
+    pub fn fork(&self, frame: &PtRegs) -> ArchTask {
         let xsave_area =
             alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
         let kernel_stack = alloc_pages_owned(
@@ -225,14 +239,14 @@ impl Process {
         )
         .expect("failed allocate syscall stack");
 
-        Ok(Process {
+        ArchTask {
             rsp: UnsafeCell::new(rsp as u64),
             fsbase: AtomicCell::new(self.fsbase.load()),
             xsave_area: Some(xsave_area),
             interrupt_stack,
             syscall_stack,
             kernel_stack,
-        })
+        }
     }
 
     pub fn setup_execve_stack(
@@ -240,25 +254,24 @@ impl Process {
         frame: &mut PtRegs,
         ip: UserVAddr,
         user_sp: UserVAddr,
-    ) -> Result<()> {
+    ) {
         frame.rip = ip.as_isize() as u64;
         frame.rsp = user_sp.as_isize() as u64;
-        Ok(())
     }
 
-    pub unsafe fn setup_signal_stack(
+    pub fn setup_signal_stack(
         &self,
         frame: &mut PtRegs,
-        signal: Signal,
+        signal: i32,
         sa_handler: UserVAddr,
-    ) -> Result<()> {
+    ) -> Result<(), AccessError> {
         const TRAMPOLINE: &[u8] = &[
             0xb8, 0x0f, 0x00, 0x00, 0x00, // mov eax, 15
             0x0f, 0x05, // syscall
             0x90, // nop (for alignment)
         ];
 
-        fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr> {
+        fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let rsp = rsp.sub(8);
             rsp.write::<u64>(&value)?;
             Ok(rsp)
@@ -290,7 +303,11 @@ impl Process {
     }
 }
 
-pub fn switch_thread(prev: &Process, next: &Process) {
+/// Switch from `prev` task to `next` task (x86_64).
+///
+/// Saves and restores kernel stacks, XSAVE state, FS base, and calls
+/// the assembly context switch routine.
+pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     let head = cpu_local_head();
 
     // Switch the kernel stack.
@@ -298,7 +315,7 @@ pub fn switch_thread(prev: &Process, next: &Process) {
     TSS.as_mut()
         .set_rsp0((next.interrupt_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64);
 
-    // Save and restore the XSAVE area (i.e. XMM/YMM registrers).
+    // Save and restore the XSAVE area (i.e. XMM/YMM registers).
     unsafe {
         use core::arch::x86_64::{_xrstor64, _xsave64};
 
@@ -317,5 +334,12 @@ pub fn switch_thread(prev: &Process, next: &Process) {
     unsafe {
         wrfsbase(next.fsbase.load());
         do_switch_thread(prev.rsp.get(), next.rsp.get());
+    }
+}
+
+/// Set the x86_64 FS base register (wrfsbase instruction).
+pub fn write_fsbase(value: u64) {
+    unsafe {
+        wrfsbase(value);
     }
 }

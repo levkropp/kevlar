@@ -4,7 +4,7 @@ use crate::prelude::*;
 use crate::process::current_process;
 use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIG_DFL, SIG_IGN};
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 // Provenance: Own (POSIX sigaction(2) man page).
 impl<'a> SyscallHandler<'a> {

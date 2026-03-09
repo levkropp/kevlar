@@ -5,7 +5,7 @@
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::{
+use kevlar_platform::{
     address::UserVAddr,
     arch::PAGE_SIZE,
     page_allocator::free_pages,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::result::Result;
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 use crate::user_buffer::UserBufWriter;
 

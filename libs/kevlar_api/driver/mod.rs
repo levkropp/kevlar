@@ -10,10 +10,10 @@ pub mod net;
 #[cfg(target_arch = "x86_64")]
 pub mod pci;
 
-pub use kevlar_runtime::bootinfo::VirtioMmioDevice;
+pub use kevlar_platform::bootinfo::VirtioMmioDevice;
 
 use alloc::boxed::Box;
-use kevlar_runtime::{bootinfo::AllowedPciDevice, spinlock::SpinLock};
+use kevlar_platform::{bootinfo::AllowedPciDevice, spinlock::SpinLock};
 
 #[cfg(target_arch = "x86_64")]
 use self::pci::PciDevice;

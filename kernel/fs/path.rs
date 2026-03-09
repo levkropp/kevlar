@@ -5,6 +5,7 @@ use core::ops::Deref;
 
 /// A path string reference (akin to `std::path::Path`).
 #[derive(Debug, Eq, PartialEq, Hash)]
+#[repr(transparent)]
 pub struct Path {
     /// A path string. Trailing slashes are removed unless it points to the root
     /// directory (`"/"`).
@@ -20,7 +21,7 @@ impl Path {
             path.trim_end_matches('/')
         };
 
-        unsafe { &*(path as *const str as *const Path) }
+        kevlar_platform::pod::str_newtype_ref(path)
     }
 
     pub fn as_str(&self) -> &str {

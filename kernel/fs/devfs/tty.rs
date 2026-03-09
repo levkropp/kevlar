@@ -16,7 +16,7 @@ use crate::{
     user_buffer::UserBuffer,
     user_buffer::{UserBufReader, UserBufferMut},
 };
-use kevlar_runtime::{address::UserVAddr, print::get_printer, spinlock::SpinLock};
+use kevlar_platform::{address::UserVAddr, print::get_printer, spinlock::SpinLock};
 
 pub struct Tty {
     name: ArrayString<8>,

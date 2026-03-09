@@ -15,7 +15,7 @@ use crate::{
     user_buffer::UserCStr,
 };
 use bitflags::bitflags;
-use kevlar_runtime::{address::UserVAddr, arch::PtRegs};
+use kevlar_platform::{address::UserVAddr, arch::PtRegs};
 
 mod accept;
 mod arch_prctl;

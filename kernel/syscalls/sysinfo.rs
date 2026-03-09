@@ -8,11 +8,12 @@ use crate::process::process_count;
 use crate::syscalls::SyscallHandler;
 use crate::timer::read_monotonic_clock;
 use crate::user_buffer::UserBufWriter;
-use kevlar_runtime::arch::PAGE_SIZE;
-use kevlar_runtime::page_allocator::read_allocator_stats;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::arch::PAGE_SIZE;
+use kevlar_platform::page_allocator::read_allocator_stats;
+use kevlar_platform::address::UserVAddr;
 
 /// Matches Linux's struct sysinfo layout on x86-64.
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct SysInfo {
     uptime: c_long,
@@ -56,12 +57,7 @@ impl<'a> SyscallHandler<'a> {
         };
 
         // Write as raw bytes.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                &info as *const SysInfo as *const u8,
-                core::mem::size_of::<SysInfo>(),
-            )
-        };
+        let bytes = kevlar_platform::pod::copy_as_bytes(&info);
 
         let mut writer = UserBufWriter::from_uaddr(buf, bytes.len());
         writer.write_bytes(bytes)?;

@@ -7,7 +7,7 @@ use crate::{
     process::{current_process, signal::SigSet},
     syscalls::SyscallHandler,
 };
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_rt_sigsuspend(&mut self, mask_ptr: UserVAddr, _sigsetsize: usize) -> Result<isize> {

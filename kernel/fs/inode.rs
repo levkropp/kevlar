@@ -40,10 +40,21 @@ bitflags! {
     }
 }
 
-/// A file-like object.
+/// A file-like object (Ring 2 service boundary).
 ///
 /// This trait represents an object which behaves like a file such as files on
 /// disks (aka. regular files), UDP/TCP sockets, device files like tty, etc.
+///
+/// # Ringkernel notes
+///
+/// This trait is the primary Ring 2 service boundary for I/O. Filesystem and
+/// network implementations provide concrete types implementing this trait.
+/// In Phase 4, Core calls into `FileLike` methods will be wrapped in
+/// `catch_unwind` for panic containment.
+///
+/// Methods below `fsync` are **socket-specific** (bind, listen, connect, etc.)
+/// and will move to a separate `SocketOps` trait in Phase 3 when the network
+/// stack is extracted into its own service crate.
 pub trait FileLike: Debug + Send + Sync + Downcastable {
     /// `open(2)`.
     fn open(&self, _options: &OpenOptions) -> Result<Option<Arc<dyn FileLike>>> {
@@ -90,6 +101,8 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     fn truncate(&self, _length: usize) -> Result<()> {
         Err(Error::new(Errno::EINVAL))
     }
+
+    // --- Socket-specific methods (Phase 3: move to SocketOps trait) ---
 
     /// `bind(2)`.
     fn bind(&self, _sockaddr: SockAddr) -> Result<()> {
@@ -173,7 +186,10 @@ pub struct DirEntry {
     pub name: String,
 }
 
-/// Represents a directory.
+/// Represents a directory (Ring 2 service boundary).
+///
+/// Filesystem services implement this trait. In Phase 4, Core calls into
+/// `Directory` methods will be wrapped in `catch_unwind` for panic containment.
 pub trait Directory: Debug + Send + Sync + Downcastable {
     /// Looks for an existing file.
     fn lookup(&self, name: &str) -> Result<INode>;

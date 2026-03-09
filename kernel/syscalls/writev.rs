@@ -4,7 +4,7 @@ use crate::prelude::*;
 use crate::{fs::opened_file::Fd, user_buffer::UserBuffer};
 use crate::{process::current_process, syscalls::SyscallHandler};
 use core::cmp::min;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 use core::mem::size_of;
 

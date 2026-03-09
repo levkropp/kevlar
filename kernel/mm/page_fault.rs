@@ -11,11 +11,11 @@ use crate::{
     },
 };
 use core::cmp::min;
-use core::slice;
-use kevlar_runtime::{
+use kevlar_platform::{
     address::UserVAddr,
     arch::{PageFaultReason, PAGE_SIZE},
     page_allocator::{alloc_pages, AllocPageFlags},
+    page_ops::{zero_page, page_as_slice_mut},
 };
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
@@ -66,9 +66,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Allocate and fill the page.
     let paddr = alloc_pages(1, AllocPageFlags::USER).expect("failed to allocate an anonymous page");
-    unsafe {
-        paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
-    }
+    zero_page(paddr);
     match vma.area_type() {
         VmAreaType::Anonymous => { /* The page is already filled with zeros. Nothing to do. */ }
         VmAreaType::File {
@@ -76,7 +74,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             offset,
             file_size,
         } => {
-            let buf = unsafe { slice::from_raw_parts_mut(paddr.as_mut_ptr(), PAGE_SIZE) };
+            let buf = page_as_slice_mut(paddr);
             let offset_in_page;
             let offset_in_file;
             let copy_len;

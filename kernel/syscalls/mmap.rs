@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use kevlar_runtime::{
+use kevlar_platform::{
     address::UserVAddr,
     arch::PAGE_SIZE,
     page_allocator::free_pages,

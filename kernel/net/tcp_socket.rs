@@ -17,7 +17,7 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 use crossbeam::atomic::AtomicCell;
-use kevlar_runtime::spinlock::{SpinLock, SpinLockGuard};
+use kevlar_platform::spinlock::{SpinLock, SpinLockGuard};
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
 use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};

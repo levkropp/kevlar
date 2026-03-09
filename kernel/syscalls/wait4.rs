@@ -9,7 +9,7 @@ use crate::{
 };
 
 use bitflags::bitflags;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

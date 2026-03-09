@@ -6,7 +6,7 @@ use crate::ctypes::{c_long, c_time};
 use crate::prelude::*;
 use crate::syscalls::SyscallHandler;
 use crate::timer::_sleep_ms;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 #[repr(C)]
 struct Timespec {

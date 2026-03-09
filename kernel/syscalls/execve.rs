@@ -5,7 +5,7 @@ use crate::process::Process;
 use crate::user_buffer::UserCStr;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use core::mem::size_of;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 const ARG_MAX: usize = 512;
 const ARG_LEN_MAX: usize = 4096;

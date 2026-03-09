@@ -2,7 +2,7 @@
 //! Interrupt handling.
 
 use alloc::{boxed::Box, vec::Vec};
-use kevlar_runtime::{arch::enable_irq, spinlock::SpinLock};
+use kevlar_platform::{arch::enable_irq, spinlock::SpinLock};
 
 use crate::{deferred_job::run_deferred_jobs, interval_work};
 

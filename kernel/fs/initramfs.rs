@@ -12,7 +12,7 @@ use crate::{
     prelude::*,
     user_buffer::{UserBufWriter, UserBuffer, UserBufferMut},
 };
-use core::{fmt, str::from_utf8_unchecked};
+use core::fmt;
 use hashbrown::HashMap;
 use kevlar_utils::byte_size::ByteSize;
 use kevlar_utils::bytes_parser::BytesParser;
@@ -21,7 +21,7 @@ use kevlar_utils::once::Once;
 use super::{inode::Symlink, opened_file::OpenOptions, path::PathBuf};
 
 fn parse_str_field(bytes: &[u8]) -> &str {
-    unsafe { from_utf8_unchecked(bytes) }
+    core::str::from_utf8(bytes).expect("initramfs: invalid UTF-8 in cpio header")
 }
 
 fn parse_hex_field(bytes: &[u8]) -> usize {

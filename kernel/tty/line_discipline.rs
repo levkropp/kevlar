@@ -9,7 +9,7 @@ use crate::{
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 use bitflags::bitflags;
-use kevlar_runtime::spinlock::SpinLock;
+use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::ring_buffer::RingBuffer;
 
 // c_cc indices (Linux ABI, from asm-generic/termbits.h)

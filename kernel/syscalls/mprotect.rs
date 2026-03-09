@@ -6,7 +6,7 @@ use crate::ctypes::MMapProt;
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::syscalls::SyscallHandler;
-use kevlar_runtime::{address::UserVAddr, arch::PAGE_SIZE};
+use kevlar_platform::{address::UserVAddr, arch::PAGE_SIZE};
 use kevlar_utils::alignment::is_aligned;
 
 impl<'a> SyscallHandler<'a> {

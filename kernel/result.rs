@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::fmt;
 
-use kevlar_runtime::{
+use kevlar_platform::{
     address::{AccessError, NullUserPointerError},
     page_allocator::PageAllocError,
 };
 
 #[cfg(debug_assertions)]
-use kevlar_runtime::backtrace::CapturedBacktrace;
+use kevlar_platform::backtrace::CapturedBacktrace;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(i32)]

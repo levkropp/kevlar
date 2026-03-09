@@ -2,7 +2,7 @@
 use core::mem::size_of;
 
 use alloc::sync::Arc;
-use kevlar_runtime::address::UserVAddr;
+use kevlar_platform::address::UserVAddr;
 
 use crate::{
     ctypes::*,
