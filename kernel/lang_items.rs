@@ -58,6 +58,42 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
 
     PANICKED.store(true, Ordering::SeqCst);
+
+    // Emit structured panic event for LLM/MCP consumption.
+    {
+        use crate::debug::{self, DebugEvent, DebugFilter};
+        use core::fmt::Write;
+
+        // Build a compact panic message on the stack.
+        let mut msg_buf = arrayvec::ArrayString::<512>::new();
+        let _ = write!(msg_buf, "{}", info);
+
+        // Capture backtrace frames into stack-allocated array.
+        let bt_frames = kevlar_platform::backtrace::capture_frames();
+        let mut event_frames = [crate::debug::event::BtFrame {
+            addr: 0,
+            symbol: "",
+            offset: 0,
+        }; 16];
+        let frame_count = core::cmp::min(bt_frames.len(), 16);
+        for (i, f) in bt_frames.iter().take(16).enumerate() {
+            event_frames[i] = crate::debug::event::BtFrame {
+                addr: f.addr,
+                symbol: f.symbol,
+                offset: f.offset,
+            };
+        }
+
+        // Force-enable panic filter for this one event.
+        let old_filter = debug::emit::get_filter();
+        debug::set_filter(old_filter | DebugFilter::PANIC);
+        debug::emit(DebugFilter::PANIC, &DebugEvent::Panic {
+            message: msg_buf.as_str(),
+            backtrace: &event_frames[..frame_count],
+        });
+        debug::set_filter(old_filter);
+    }
+
     error!("{}", info);
     kevlar_platform::backtrace::backtrace();
 

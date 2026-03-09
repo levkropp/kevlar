@@ -10,6 +10,7 @@ use kevlar_utils::id_table::IdTable;
 
 use crate::{
     ctypes::c_int,
+    debug,
     fs::{
         inode::{FileLike, INodeNo, PollStatus},
         opened_file::OpenOptions,
@@ -124,30 +125,43 @@ impl FileLike for PtyMaster {
             TCGETS => {
                 let termios = self.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<Termios>(&termios)?;
+                debug::usercopy::set_context("pty_master:TCGETS");
+                let r = arg.write::<Termios>(&termios);
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let termios = arg.read::<Termios>()?;
-                self.discipline.set_termios(termios);
+                debug::usercopy::set_context("pty_master:TCSETS");
+                let termios = arg.read::<Termios>();
+                debug::usercopy::clear_context();
+                self.discipline.set_termios(termios?);
                 Ok(0)
             }
             TIOCGPTN => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<u32>(&(self.index as u32))?;
+                debug::usercopy::set_context("pty_master:TIOCGPTN");
+                let r = arg.write::<u32>(&(self.index as u32));
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TIOCGWINSZ => {
                 let ws = self.discipline.winsize();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<WinSize>(&ws)?;
+                debug::usercopy::set_context("pty_master:TIOCGWINSZ");
+                let r = arg.write::<WinSize>(&ws);
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TIOCSWINSZ => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let ws = arg.read::<WinSize>()?;
-                self.discipline.set_winsize(ws);
+                debug::usercopy::set_context("pty_master:TIOCSWINSZ");
+                let ws = arg.read::<WinSize>();
+                debug::usercopy::clear_context();
+                self.discipline.set_winsize(ws?);
                 Ok(0)
             }
             TIOCSPTLCK => Ok(0),
@@ -267,13 +281,18 @@ impl FileLike for PtySlave {
             TCGETS => {
                 let termios = self.master.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<Termios>(&termios)?;
+                debug::usercopy::set_context("pty_slave:TCGETS");
+                let r = arg.write::<Termios>(&termios);
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let termios = arg.read::<Termios>()?;
-                self.master.discipline.set_termios(termios);
+                debug::usercopy::set_context("pty_slave:TCSETS");
+                let termios = arg.read::<Termios>();
+                debug::usercopy::clear_context();
+                self.master.discipline.set_termios(termios?);
                 Ok(0)
             }
             TIOCGPGRP => {
@@ -282,13 +301,18 @@ impl FileLike for PtySlave {
                     .ok_or_else(|| Error::new(Errno::ENOENT))?;
                 let pgid = pg.lock().pgid().as_i32();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<c_int>(&pgid)?;
+                debug::usercopy::set_context("pty_slave:TIOCGPGRP");
+                let r = arg.write::<c_int>(&pgid);
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TIOCSPGRP => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let pgid = arg.read::<c_int>()?;
-                let pg = ProcessGroup::find_by_pgid(PgId::new(pgid))
+                debug::usercopy::set_context("pty_slave:TIOCSPGRP");
+                let pgid = arg.read::<c_int>();
+                debug::usercopy::clear_context();
+                let pg = ProcessGroup::find_by_pgid(PgId::new(pgid?))
                     .ok_or_else(|| Error::new(Errno::ESRCH))?;
                 self.master.discipline
                     .set_foreground_process_group(Arc::downgrade(&pg));
@@ -297,13 +321,18 @@ impl FileLike for PtySlave {
             TIOCGWINSZ => {
                 let ws = self.master.discipline.winsize();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<WinSize>(&ws)?;
+                debug::usercopy::set_context("pty_slave:TIOCGWINSZ");
+                let r = arg.write::<WinSize>(&ws);
+                debug::usercopy::clear_context();
+                r?;
                 Ok(0)
             }
             TIOCSWINSZ => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let ws = arg.read::<WinSize>()?;
-                self.master.discipline.set_winsize(ws);
+                debug::usercopy::set_context("pty_slave:TIOCSWINSZ");
+                let ws = arg.read::<WinSize>();
+                debug::usercopy::clear_context();
+                self.master.discipline.set_winsize(ws?);
                 Ok(0)
             }
             TIOCSPTLCK => Ok(0),

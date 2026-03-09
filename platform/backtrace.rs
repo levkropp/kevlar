@@ -124,6 +124,36 @@ impl CapturedBacktrace {
     }
 }
 
+/// A lightweight backtrace frame for structured debug output.
+/// Unlike CapturedBacktrace, this is stack-allocated and safe for panic paths.
+pub struct LightFrame {
+    pub addr: usize,
+    pub symbol: &'static str,
+    pub offset: usize,
+}
+
+/// Capture backtrace frames into a stack-allocated array.
+/// Returns a (frames, count) tuple. Safe for use in panic handlers.
+pub fn capture_frames() -> ArrayVec<LightFrame, 16> {
+    let mut frames = ArrayVec::new();
+    Backtrace::current_frame().traverse(|_, vaddr| {
+        if let Some(symbol) = resolve_symbol(vaddr) {
+            let _ = frames.try_push(LightFrame {
+                addr: vaddr.value(),
+                symbol: symbol.name,
+                offset: vaddr.value() - symbol.addr.value(),
+            });
+        } else {
+            let _ = frames.try_push(LightFrame {
+                addr: vaddr.value(),
+                symbol: "(unknown)",
+                offset: 0,
+            });
+        }
+    });
+    frames
+}
+
 impl fmt::Debug for CapturedBacktrace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, frame) in self.trace.iter().enumerate() {

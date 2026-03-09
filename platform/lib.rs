@@ -35,6 +35,7 @@ pub mod logger;
 pub mod page_allocator;
 pub mod profile;
 pub mod spinlock;
+pub mod usercopy_trace;
 
 #[cfg(target_arch = "x86_64")]
 mod x64;

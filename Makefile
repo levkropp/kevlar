@@ -92,6 +92,7 @@ TESTCARGOFLAGS += --package kevlar_kernel -Z unstable-options
 TESTCARGOFLAGS += --config "target.$(ARCH).runner = './tools/run-unittests.sh'"
 WATCHFLAGS += --clear
 
+export KEVLAR_DEBUG ?=
 export CARGO_FROM_MAKE=1
 export INITRAMFS_PATH
 export ARCH
@@ -229,6 +230,43 @@ bench-all:
 .PHONY: bench-compare
 bench-compare:
 	$(PYTHON3) benchmarks/run-benchmarks.py compare $(BENCH_FILES)
+
+# Debug mode: boots with structured debug events and GDB enabled.
+.PHONY: debug
+debug: build
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH)                                                 \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(KVM),--kvm,)                                            \
+		--gdb                                                          \
+		--log-serial "file:debug.jsonl"                                \
+		--append-cmdline "debug=all"                                   \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(kernel_elf) -- $(QEMU_ARGS)
+
+# Start the MCP debug server (run alongside `make debug`).
+.PHONY: mcp-debug
+mcp-debug:
+	$(PYTHON3) tools/mcp-debug-server/server.py                            \
+		--gdb-port 7789                                                \
+		--elf $(kernel_elf)                                            \
+		--symbols $(kernel_symbols)                                    \
+		--debug-log debug.jsonl
+
+# Analyze a crash dump.
+.PHONY: analyze-crash
+analyze-crash:
+	$(PYTHON3) tools/crash-analyzer/analyzer.py                            \
+		--symbols $(kernel_symbols)                                    \
+		dump kevlar.dump | $(PYTHON3) -m json.tool
+
+# Analyze the most recent serial log.
+.PHONY: analyze-log
+analyze-log:
+	$(PYTHON3) tools/crash-analyzer/analyzer.py                            \
+		--symbols $(kernel_symbols)                                    \
+		log /tmp/kevlar-bench-$(PROFILE).log | $(PYTHON3) -m json.tool
 
 .PHONY: print-stack-sizes
 print-stack-sizes: build

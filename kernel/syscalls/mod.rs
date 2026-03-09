@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::{
     ctypes::*,
+    debug::{self, DebugEvent, DebugFilter},
     fs::path::PathBuf,
     fs::{
         opened_file::{Fd, OpenFlags},
@@ -448,31 +449,81 @@ impl<'a> SyscallHandler<'a> {
         a6: usize,
         n: usize,
     ) -> Result<isize> {
+        let current = current_process();
+        let pid = current.pid().as_i32();
+        let name = syscall_name_by_number(n);
+
+        // Emit structured syscall entry event.
+        if debug::is_enabled(DebugFilter::SYSCALL) {
+            // Skip high-frequency stdio to avoid flooding the debug channel.
+            let is_stdio = (n == SYS_READ && a1 == 0)
+                || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
+            if !is_stdio {
+                debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallEntry {
+                    pid,
+                    name,
+                    number: n,
+                    args: [a1, a2, a3, a4, a5, a6],
+                });
+            }
+        }
+
+        // Also emit the standard trace log for non-stdio syscalls.
         if !((n == SYS_READ && a1 == 0)
             || (n == SYS_WRITE) && (a1 == 1)
             || (n == SYS_WRITE) && (a1 == 2)
             || (n == SYS_WRITEV) && (a1 == 1)
             || (n == SYS_WRITEV) && (a1 == 2))
         {
-            let current = current_process();
             trace!(
                 "[{}:{}] syscall: {}({:x}, {:x}, {:x}, {:x}, {:x}, {:x})",
-                current.pid().as_i32(),
+                pid,
                 current.cmdline().argv0(),
-                syscall_name_by_number(n),
-                a1,
-                a2,
-                a3,
-                a4,
-                a5,
-                a6,
+                name, a1, a2, a3, a4, a5, a6,
             );
         }
 
+        // Stack canary check (pre-syscall).
+        let pre_canary = if debug::is_enabled(DebugFilter::CANARY) {
+            let fsbase = current.arch().fsbase.load() as usize;
+            debug::canary::check_and_emit(pid, fsbase, None, "pre_syscall", name)
+        } else {
+            None
+        };
+
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
-            debug_warn!("{}: error: {:?}", syscall_name_by_number(n), err);
+            if debug::is_enabled(DebugFilter::SYSCALL) {
+                debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
+                    pid,
+                    name,
+                    number: n,
+                    result: -(err.errno() as isize),
+                    errno: Some(err.errno_name()),
+                });
+            }
             err
         });
+
+        // Stack canary check (post-syscall).
+        if debug::is_enabled(DebugFilter::CANARY) {
+            let fsbase = current_process().arch().fsbase.load() as usize;
+            debug::canary::check_and_emit(pid, fsbase, pre_canary, "post_syscall", name);
+        }
+
+        // Emit success result.
+        if ret.is_ok() && debug::is_enabled(DebugFilter::SYSCALL) {
+            let is_stdio = (n == SYS_READ && a1 == 0)
+                || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
+            if !is_stdio {
+                debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
+                    pid,
+                    name,
+                    number: n,
+                    result: *ret.as_ref().unwrap(),
+                    errno: None,
+                });
+            }
+        }
 
         if let Err(err) = Process::try_delivering_signal(self.frame) {
             debug_warn!("failed to setup the signal stack: {:?}", err);
@@ -752,6 +803,12 @@ impl<'a> SyscallHandler<'a> {
             SYS_ALARM => self.sys_alarm(a1 as u32),
             SYS_GETGROUPS => self.sys_getgroups(a1, a2),
             _ => {
+                let pid = current_process().pid().as_i32();
+                debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
+                    pid,
+                    name: syscall_name_by_number(n),
+                    number: n,
+                });
                 debug_warn!(
                     "unimplemented system call: {} (n={})",
                     syscall_name_by_number(n),

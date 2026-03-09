@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+use crate::debug;
 use crate::result::Result;
 use crate::syscalls::SyscallHandler;
 use kevlar_platform::address::UserVAddr;
@@ -11,6 +12,7 @@ const UTS_FIELD_LEN: usize = 65;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_uname(&mut self, buf: UserVAddr) -> Result<isize> {
+        debug::usercopy::set_context("sys_uname");
         let mut writer = UserBufWriter::from_uaddr(buf, 6 * UTS_FIELD_LEN);
         // sysname
         writer.write_bytes_or_zeroes(b"Linux", UTS_FIELD_LEN)?;
@@ -27,6 +29,7 @@ impl<'a> SyscallHandler<'a> {
         writer.write_bytes_or_zeroes(b"", UTS_FIELD_LEN)?;
         // domainname
         writer.write_bytes_or_zeroes(b"", UTS_FIELD_LEN)?;
+        debug::usercopy::clear_context();
         Ok(0)
     }
 }

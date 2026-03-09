@@ -4,6 +4,7 @@ use core::fmt;
 
 use crate::{
     ctypes::*,
+    debug,
     fs::{
         inode::{FileLike, INodeNo},
         opened_file::OpenOptions,
@@ -76,12 +77,17 @@ impl FileLike for Tty {
             TCGETS => {
                 let termios = self.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<Termios>(&termios)?;
+                debug::usercopy::set_context("ioctl:TCGETS");
+                let r = arg.write::<Termios>(&termios);
+                debug::usercopy::clear_context();
+                r?;
             }
             TCSETS | TCSETSW | TCSETSF => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let termios = arg.read::<Termios>()?;
-                self.discipline.set_termios(termios);
+                debug::usercopy::set_context("ioctl:TCSETS");
+                let termios = arg.read::<Termios>();
+                debug::usercopy::clear_context();
+                self.discipline.set_termios(termios?);
             }
             TIOCGPGRP => {
                 let process_group = self
@@ -91,12 +97,17 @@ impl FileLike for Tty {
 
                 let pgid = process_group.lock().pgid().as_i32();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<c_int>(&pgid)?;
+                debug::usercopy::set_context("ioctl:TIOCGPGRP");
+                let r = arg.write::<c_int>(&pgid);
+                debug::usercopy::clear_context();
+                r?;
             }
             TIOCSPGRP => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let pgid = arg.read::<c_int>()?;
-                let pg = ProcessGroup::find_by_pgid(PgId::new(pgid))
+                debug::usercopy::set_context("ioctl:TIOCSPGRP");
+                let pgid = arg.read::<c_int>();
+                debug::usercopy::clear_context();
+                let pg = ProcessGroup::find_by_pgid(PgId::new(pgid?))
                     .ok_or_else(|| Error::new(Errno::ESRCH))?;
                 self.discipline
                     .set_foreground_process_group(Arc::downgrade(&pg));
@@ -104,12 +115,17 @@ impl FileLike for Tty {
             TIOCGWINSZ => {
                 let ws = self.discipline.winsize();
                 let arg = UserVAddr::new_nonnull(arg)?;
-                arg.write::<WinSize>(&ws)?;
+                debug::usercopy::set_context("ioctl:TIOCGWINSZ");
+                let r = arg.write::<WinSize>(&ws);
+                debug::usercopy::clear_context();
+                r?;
             }
             TIOCSWINSZ => {
                 let arg = UserVAddr::new_nonnull(arg)?;
-                let ws = arg.read::<WinSize>()?;
-                self.discipline.set_winsize(ws);
+                debug::usercopy::set_context("ioctl:TIOCSWINSZ");
+                let ws = arg.read::<WinSize>();
+                debug::usercopy::clear_context();
+                self.discipline.set_winsize(ws?);
             }
             _ => return Err(Errno::ENOSYS.into()),
         }

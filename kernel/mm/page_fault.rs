@@ -3,6 +3,7 @@ use kevlar_utils::alignment::align_down;
 
 use super::vm::VmAreaType;
 use crate::{
+    debug::{self, DebugEvent, DebugFilter},
     fs::opened_file::OpenOptions,
     process::{
         current_process,
@@ -23,12 +24,50 @@ use kevlar_platform::page_ops::page_as_slice_mut;
 use kevlar_platform::page_ops::PageFrame;
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
+    // Check if this fault occurred during a usercopy operation.
+    // If so, emit an enhanced debug event with the usercopy context tag.
+    #[cfg(target_arch = "x86_64")]
+    if debug::is_enabled(DebugFilter::FAULT) || debug::is_enabled(DebugFilter::USERCOPY) {
+        #[allow(unsafe_code)]
+        unsafe extern "C" {
+            fn usercopy1();
+            fn usercopy1b();
+            fn usercopy1c();
+            fn usercopy1d();
+            fn usercopy2();
+            fn usercopy3();
+        }
+        let ip_val = ip as u64;
+        let in_usercopy = ip_val == usercopy1 as u64
+            || ip_val == usercopy1b as u64
+            || ip_val == usercopy1c as u64
+            || ip_val == usercopy1d as u64
+            || ip_val == usercopy2 as u64
+            || ip_val == usercopy3 as u64;
+        if in_usercopy {
+            let pid = current_process().pid().as_i32();
+            let fault_addr = unaligned_vaddr.map(|v| v.value()).unwrap_or(0);
+            debug::emit_usercopy_fault(pid, fault_addr, ip);
+        }
+    }
+
     let unaligned_vaddr = match unaligned_vaddr {
         Some(unaligned_vaddr) => unaligned_vaddr,
         None => {
+            let pid = current_process().pid().as_i32();
+            debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
+                pid,
+                vaddr: 0,
+                ip,
+                reason: "null_pointer",
+                resolved: false,
+                vma_start: None,
+                vma_end: None,
+                vma_type: None,
+            });
             debug_warn!(
-                "null pointer access (ip={:x}), killing the current process...",
-                ip
+                "null pointer access (pid={}, ip={:x}), killing the current process...",
+                pid, ip
             );
             Process::exit_by_signal(signal::SIGSEGV);
         }
@@ -58,9 +97,20 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     {
         Some(vma) => vma,
         None => {
+            let pid = current.pid().as_i32();
+            debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
+                pid,
+                vaddr: unaligned_vaddr.value(),
+                ip,
+                reason: "no_vma",
+                resolved: false,
+                vma_start: None,
+                vma_end: None,
+                vma_type: None,
+            });
             debug_warn!(
                 "pid={}: no VMAs for address {} (ip={:x}, reason={:?}), killing the current process...",
-                current.pid().as_i32(), unaligned_vaddr, ip, _reason
+                pid, unaligned_vaddr, ip, _reason
             );
             drop(vm);
             drop(vm_ref);
@@ -135,6 +185,25 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Map the page in the page table, respecting VMA protection flags.
     let prot_flags = vma.prot().bits();
+
+    // Emit successful fault resolution event.
+    if debug::is_enabled(DebugFilter::FAULT) {
+        let vma_type_str = match vma.area_type() {
+            VmAreaType::Anonymous => "anonymous",
+            VmAreaType::File { .. } => "file",
+        };
+        debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
+            pid: current.pid().as_i32(),
+            vaddr: unaligned_vaddr.value(),
+            ip,
+            reason: "demand_page",
+            resolved: true,
+            vma_start: Some(vma.start().value()),
+            vma_end: Some(vma.end().value()),
+            vma_type: Some(vma_type_str),
+        });
+    }
+
     vm.page_table_mut()
         .map_user_page_with_prot(aligned_vaddr, paddr, prot_flags);
 }

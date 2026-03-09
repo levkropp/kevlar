@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "kevlar-debug": {
+      "command": "python3",
+      "args": [
+        "tools/mcp-debug-server/server.py",
+        "--elf", "kevlar.x64.elf",
+        "--symbols", "kevlar.x64.symbols",
+        "--debug-log", "debug.jsonl"
+      ],
+      "cwd": "/home/fw/kevlar"
+    }
+  }
+}

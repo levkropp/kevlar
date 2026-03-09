@@ -4,6 +4,7 @@ use kevlar_utils::alignment::align_up;
 
 use crate::{
     ctypes::c_int,
+    debug,
     fs::{inode::PollStatus, opened_file::Fd},
     poll::POLL_WAIT_QUEUE,
     prelude::*,
@@ -41,7 +42,10 @@ where
     }
 
     if ready_fds > 0 {
-        fds.write_bytes(&fds_vec)?;
+        debug::usercopy::set_context("sys_select:fd_set");
+        let r = fds.write_bytes(&fds_vec);
+        debug::usercopy::clear_context();
+        r?;
     }
 
     Ok(ready_fds)

@@ -3,6 +3,7 @@
 // Provenance: Own (POSIX wait(2)/waitpid(2) man pages, Linux wait status encoding).
 use crate::{
     ctypes::*,
+    debug,
     prelude::*,
     process::{current_process, PId, ProcessState, JOIN_WAIT_QUEUE},
     syscalls::SyscallHandler,
@@ -36,7 +37,19 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let (got_pid, encoded_status) = JOIN_WAIT_QUEUE.sleep_signalable_until(|| {
             let current = current_process();
-            for child in current.children().iter() {
+            let children = current.children();
+
+            // No children at all (or all auto-reaped): ECHILD.
+            let has_matching = if pid.as_i32() > 0 {
+                children.iter().any(|c| c.pid() == pid)
+            } else {
+                !children.is_empty()
+            };
+            if !has_matching {
+                return Err(Errno::ECHILD.into());
+            }
+
+            for child in children.iter() {
                 if pid.as_i32() > 0 && child.pid() != pid {
                     continue;
                 }
@@ -82,7 +95,10 @@ impl<'a> SyscallHandler<'a> {
         }
 
         if let Some(status) = status {
-            status.write::<c_int>(&encoded_status)?;
+            debug::usercopy::set_context("sys_wait4:status");
+            let r = status.write::<c_int>(&encoded_status);
+            debug::usercopy::clear_context();
+            r?;
         }
         Ok(got_pid.as_i32() as isize)
     }

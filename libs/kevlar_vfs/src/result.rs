@@ -65,6 +65,61 @@ pub enum Errno {
     ENOTCONN = 107,
 }
 
+impl Errno {
+    /// Return the errno variant name as a static string.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Errno::EPERM => "EPERM",
+            Errno::ENOENT => "ENOENT",
+            Errno::ESRCH => "ESRCH",
+            Errno::EINTR => "EINTR",
+            Errno::EIO => "EIO",
+            Errno::ENXIO => "ENXIO",
+            Errno::E2BIG => "E2BIG",
+            Errno::ENOEXEC => "ENOEXEC",
+            Errno::EBADF => "EBADF",
+            Errno::ECHILD => "ECHILD",
+            Errno::EAGAIN => "EAGAIN",
+            Errno::ENOMEM => "ENOMEM",
+            Errno::EACCES => "EACCES",
+            Errno::EFAULT => "EFAULT",
+            Errno::ENOTBLK => "ENOTBLK",
+            Errno::EBUSY => "EBUSY",
+            Errno::EEXIST => "EEXIST",
+            Errno::EXDEV => "EXDEV",
+            Errno::ENODEV => "ENODEV",
+            Errno::ENOTDIR => "ENOTDIR",
+            Errno::EISDIR => "EISDIR",
+            Errno::EINVAL => "EINVAL",
+            Errno::ENFILE => "ENFILE",
+            Errno::EMFILE => "EMFILE",
+            Errno::ENOTTY => "ENOTTY",
+            Errno::ETXTBSY => "ETXTBSY",
+            Errno::EFBIG => "EFBIG",
+            Errno::ENOSPC => "ENOSPC",
+            Errno::ESPIPE => "ESPIPE",
+            Errno::EROFS => "EROFS",
+            Errno::EMLINK => "EMLINK",
+            Errno::EPIPE => "EPIPE",
+            Errno::EDOM => "EDOM",
+            Errno::ERANGE => "ERANGE",
+            Errno::ENOSYS => "ENOSYS",
+            Errno::ENOTEMPTY => "ENOTEMPTY",
+            Errno::ELOOP => "ELOOP",
+            Errno::EADDRINUSE => "EADDRINUSE",
+            Errno::EADDRNOTAVAIL => "EADDRNOTAVAIL",
+            Errno::ENETDOWN => "ENETDOWN",
+            Errno::ENETUNREACH => "ENETUNREACH",
+            Errno::ENETRESET => "ENETRESET",
+            Errno::ECONNABORTED => "ECONNABORTED",
+            Errno::ECONNRESET => "ECONNRESET",
+            Errno::ENOBUFS => "ENOBUFS",
+            Errno::EISCONN => "EISCONN",
+            Errno::ENOTCONN => "ENOTCONN",
+        }
+    }
+}
+
 pub type Result<T> = ::core::result::Result<T, Error>;
 
 enum ErrorMessage {
@@ -108,6 +163,12 @@ impl Error {
 
     pub fn errno(&self) -> Errno {
         self.errno
+    }
+
+    /// Return the errno name as a static string (e.g. "ENOENT").
+    /// Used by the structured debug event system.
+    pub fn errno_name(&self) -> &'static str {
+        self.errno.name()
     }
 }
 

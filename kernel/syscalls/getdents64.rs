@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+use crate::debug;
 use crate::fs::opened_file::Fd;
 use crate::result::Result;
 use crate::{process::current_process, syscalls::SyscallHandler};
@@ -13,6 +14,7 @@ impl<'a> SyscallHandler<'a> {
         let current = current_process();
         let opened_files = current.opened_files().lock();
         let dir = opened_files.get(fd)?;
+        debug::usercopy::set_context("sys_getdents64");
         let mut writer = UserBufWriter::from_uaddr(dirp, len);
         while let Some(entry) = dir.readdir()? {
             let alignment = size_of::<u64>();
@@ -42,6 +44,7 @@ impl<'a> SyscallHandler<'a> {
             writer.skip_until_alignment(alignment)?;
         }
 
+        debug::usercopy::clear_context();
         Ok(writer.pos() as isize)
     }
 }

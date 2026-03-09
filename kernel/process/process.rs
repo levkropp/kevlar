@@ -2,6 +2,7 @@
 use crate::{
     arch::{self, USER_STACK_TOP},
     ctypes::*,
+    debug::{self, DebugEvent, DebugFilter},
     fs::{
         devfs::SERIAL_TTY,
         inode::FileLike,
@@ -400,18 +401,22 @@ impl Process {
             kevlar_platform::arch::halt();
         }
 
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExit {
+            pid: current.pid().as_i32(),
+            status,
+            by_signal: false,
+        });
+
         current.set_state(ProcessState::ExitedWith(status));
         if let Some(parent) = current.parent.upgrade() {
-            if parent.signals().lock().get_action(SIGCHLD) == SigAction::Ignore {
-                // If the parent process is not waiting for a child,
-                // remove the child from its list.
+            if parent.signals().lock().nocldwait() {
+                // Parent explicitly set SIGCHLD to SIG_IGN (or SA_NOCLDWAIT):
+                // auto-reap the child without creating a zombie.
                 parent.children().retain(|p| p.pid() != current.pid);
-
-                // Keep the reference because we're using its kernel stack. Postpone
-                // freeing the stack until we move from the current thread.
                 EXITED_PROCESSES.lock().push(current.clone());
             } else {
-                parent.send_signal(SIGCHLD)
+                // Normal case: keep zombie for wait(), notify parent.
+                parent.send_signal(SIGCHLD);
             }
         }
 
@@ -434,6 +439,11 @@ impl Process {
 
     /// Terminates the **current** process by a signal.
     pub fn exit_by_signal(_signal: Signal) -> ! {
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExit {
+            pid: current_process().pid().as_i32(),
+            status: 128 + _signal,
+            by_signal: true,
+        });
         Process::exit(1 /* FIXME: how should we compute the exit status? */);
     }
 
@@ -489,26 +499,92 @@ impl Process {
         if let Some((signal, sigaction)) = current.signals.lock().pop_pending() {
             let sigset = current.sigset.lock();
             if !sigset.get(signal as usize).as_deref().unwrap_or(&true) {
+                let pid = current.pid().as_i32();
+                let sig_name = debug::signal_name(signal);
+
                 match sigaction {
-                    SigAction::Ignore => {}
+                    SigAction::Ignore => {
+                        debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
+                            pid,
+                            signal,
+                            signal_name: sig_name,
+                            action: "ignore",
+                            handler_addr: None,
+                            ip: 0,
+                        });
+                    }
                     SigAction::Terminate => {
+                        debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
+                            pid,
+                            signal,
+                            signal_name: sig_name,
+                            action: "terminate",
+                            handler_addr: None,
+                            ip: 0,
+                        });
                         trace!("terminating {:?} by {:?}", current.pid, signal,);
                         Process::exit(1 /* FIXME: */);
                     }
                     SigAction::Stop => {
+                        debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
+                            pid,
+                            signal,
+                            signal_name: sig_name,
+                            action: "stop",
+                            handler_addr: None,
+                            ip: 0,
+                        });
                         trace!("stopping {:?} by signal {:?}", current.pid, signal);
                         drop(sigset);
                         Process::stop(signal);
                     }
                     SigAction::Continue => {
-                        // SIGCONT is handled in send_signal; nothing to do here
-                        // if the process is already running.
+                        debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
+                            pid,
+                            signal,
+                            signal_name: sig_name,
+                            action: "continue",
+                            handler_addr: None,
+                            ip: 0,
+                        });
                         trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
                     SigAction::Handler { handler } => {
-                        trace!("delivering {:?} to {:?}", signal, current.pid,);
+                        let rsp_before = frame.rsp as usize;
+                        debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
+                            pid,
+                            signal,
+                            signal_name: sig_name,
+                            action: "handler",
+                            handler_addr: Some(handler.value()),
+                            ip: 0,
+                        });
+                        trace!(
+                            "delivering signal {} to pid={} via handler at {:#x}",
+                            signal, pid, handler.value()
+                        );
                         current.signaled_frame.store(Some(*frame));
-                        current.arch.setup_signal_stack(frame, signal, handler)?;
+
+                        // Set usercopy context for fault attribution.
+                        debug::usercopy::set_context("signal_stack_setup");
+                        let result = current.arch.setup_signal_stack(frame, signal, handler);
+                        debug::usercopy::clear_context();
+
+                        // Emit detailed signal stack write trace.
+                        if debug::is_enabled(DebugFilter::USERCOPY) || debug::is_enabled(DebugFilter::SIGNAL) {
+                            let rsp_after = frame.rsp as usize;
+                            debug::emit(DebugFilter::SIGNAL, &DebugEvent::SignalStackWrite {
+                                pid,
+                                signal,
+                                write_what: "trampoline+retaddr",
+                                user_addr: rsp_after,
+                                len: rsp_before - rsp_after,
+                                user_rsp_before: rsp_before,
+                                user_rsp_after: rsp_after,
+                            });
+                        }
+
+                        result?;
                     }
                 }
             }
@@ -549,7 +625,15 @@ impl Process {
 
         let entry = setup_userspace(executable_path, argv, envp, &current.root_fs)?;
 
-        // FIXME: Should we prevent try_delivering_signal()?
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExec {
+            pid: current.pid().as_i32(),
+            argv0: core::str::from_utf8(argv.first().copied().unwrap_or(b"?")).unwrap_or("?"),
+            entry: entry.ip.value(),
+        });
+
+        // Per POSIX, reset signal handlers to SIG_DFL on exec (handler
+        // function pointers from the old address space are no longer valid).
+        current.signals.lock().reset_on_exec();
         current.signaled_frame.store(None);
 
         entry.vm.page_table().switch();
@@ -599,6 +683,12 @@ impl Process {
         SCHEDULER.lock().enqueue(pid);
 
         FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessFork {
+            parent_pid: parent.pid().as_i32(),
+            child_pid: pid.as_i32(),
+        });
+
         Ok(child)
     }
 }

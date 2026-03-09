@@ -28,6 +28,7 @@ mod arch;
 #[macro_use]
 mod user_buffer;
 mod ctypes;
+mod debug;
 mod deferred_job;
 mod fs;
 mod interrupt;
@@ -98,9 +99,19 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_user_fault(&self, exception: &str, ip: usize) {
+        let pid = crate::process::current_process().pid().as_i32();
+        crate::debug::emit(
+            crate::debug::DebugFilter::FAULT,
+            &crate::debug::DebugEvent::UserFault {
+                pid,
+                exception,
+                ip,
+                signal_delivered: crate::process::signal::SIGSEGV,
+            },
+        );
         debug_warn!(
-            "{} in userspace (ip={:x}), killing the current process...",
-            exception, ip
+            "{} in userspace (pid={}, ip={:x}), killing the current process...",
+            exception, pid, ip
         );
         crate::process::Process::exit_by_signal(crate::process::signal::SIGSEGV);
     }
@@ -162,6 +173,11 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     let mut profiler = StopWatch::start();
 
     kevlar_platform::set_handler(&Handler);
+
+    // Initialize structured debug event system.
+    // In the future, parse "debug=..." from the bootinfo command line.
+    // For now, use the compile-time default (debug builds: panic+canary+fault).
+    debug::init(option_env!("KEVLAR_DEBUG"));
 
     // Initialize memory allocators first.
     interrupt::init();
