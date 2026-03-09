@@ -188,9 +188,12 @@ bare-metal unwinding. `call_service()` wrapper with `catch_unwind`.
 Balanced: zero-cost newtype. Performance/Ludicrous: compiled away.
 `Cap<NetAccess>` minted at network stack registration.
 
-### Phase 7: Benchmarks and CI
-Syscall latency, usercopy throughput, page fault latency, tmpfs I/O.
-CI matrix: 4 profiles × 2 architectures × debug/release.
+### Phase 7: Benchmarks and CI ✓
+Micro-benchmark suite (`benchmarks/bench.c`): 8 tests covering syscall latency,
+pipe throughput, fork, mmap page faults, stat. Python runner with comparison
+tables. CI matrix: 4 profiles with `cargo check` per profile, plus clippy and
+rustfmt jobs. QEMU port conflict auto-cleanup. `INIT_SCRIPT` override and
+`build.rs` env tracking.
 
 ## Comparison with Other Approaches
 

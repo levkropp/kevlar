@@ -1,0 +1,12 @@
+target/
+build/
+*.elf
+*.iso
+*.bin
+*.symbols
+*.map
+*.pcap
+*.dump
+*.dtb
+isofiles/
+.git/

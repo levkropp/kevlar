@@ -43,3 +43,4 @@
 - [Configurable Safety: Choose Your Own Tradeoff](blog/010-safety-profiles.md)
 - [Optimized Usercopy and Copy-Semantic Frames](blog/011-safety-profiles-phase-3-4.md)
 - [Panic Containment and Capability Tokens](blog/012-catch-unwind-and-capabilities.md)
+- [Benchmarks, CI Matrix, and Smarter Tooling](blog/013-benchmarks-and-ci.md)

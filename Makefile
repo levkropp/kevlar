@@ -29,7 +29,11 @@ INITRAMFS_PATH := build/testing.arm64.initramfs
 else
 INITRAMFS_PATH := build/testing.initramfs
 endif
+ifeq ($(INIT_SCRIPT),)
 export INIT_SCRIPT := /bin/sh
+else
+export INIT_SCRIPT
+endif
 else
 IMAGE_FILENAME := $(subst /,.s,$(IMAGE))
 INITRAMFS_PATH := build/$(IMAGE_FILENAME).initramfs
@@ -208,6 +212,23 @@ lint-and-fix:
 	$(MAKE) $(DUMMY_INITRAMFS_PATH)
 	INITRAMFS_PATH=$(DUMMY_INITRAMFS_PATH) RUSTFLAGS="-C panic=abort -Z panic_abort_tests" $(CARGO) clippy --fix -Z unstable-options
 
+.PHONY: bench
+bench:
+	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_elf) 2>&1 \
+		| tee /tmp/kevlar-bench-$(PROFILE).log; true
+	@grep 'BENCH' /tmp/kevlar-bench-$(PROFILE).log || echo "(no BENCH output found)"
+
+.PHONY: bench-all
+bench-all:
+	$(PYTHON3) benchmarks/run-benchmarks.py all-profiles
+
+.PHONY: bench-compare
+bench-compare:
+	$(PYTHON3) benchmarks/run-benchmarks.py compare $(BENCH_FILES)
+
 .PHONY: print-stack-sizes
 print-stack-sizes: build
 	$(READELF) --stack-sizes $(kernel_elf) | sort -n | rustfilt
@@ -220,9 +241,9 @@ clean:
 #
 #  Build Rules
 #
-build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) Makefile
+build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard benchmarks/*) Makefile
 	$(PROGRESS) "BUILD" testing
-	cd testing && docker build -t kevlar-testing .
+	docker build -t kevlar-testing -f testing/Dockerfile .
 	$(PROGRESS) "EXPORT" testing
 	mkdir -p build
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing

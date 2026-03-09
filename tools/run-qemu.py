@@ -2,10 +2,10 @@
 import argparse
 import signal
 import shutil
+import socket
 from tempfile import NamedTemporaryFile
 import os
 import subprocess
-import shlex
 import sys
 
 COMMON_ARGS = [
@@ -13,6 +13,9 @@ COMMON_ARGS = [
     "mon:stdio",
     "-no-reboot",
 ]
+
+# Ports used by QEMU for host forwarding.
+FORWARDED_PORTS = [20022, 20080]
 
 ARCHS = {
     "x64": {
@@ -60,6 +63,41 @@ ARCHS = {
 }
 
 
+def kill_stale_qemu_on_ports(ports):
+    """Kill any QEMU processes holding our forwarded ports."""
+    for port in ports:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+            s.close()
+        except OSError:
+            s.close()
+            # Port is in use. Try to find and kill the holder.
+            try:
+                result = subprocess.run(
+                    ["ss", "-tlnp", f"sport = :{port}"],
+                    capture_output=True, text=True,
+                )
+                for line in result.stdout.splitlines():
+                    if "qemu" in line:
+                        # Extract pid from users:(("qemu-...",pid=12345,fd=10))
+                        import re
+                        m = re.search(r"pid=(\d+)", line)
+                        if m:
+                            pid = int(m.group(1))
+                            print(
+                                f"run-qemu.py: killing stale QEMU (pid={pid}) "
+                                f"holding port {port}",
+                                file=sys.stderr,
+                            )
+                            os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+    # Brief wait for ports to free up.
+    import time
+    time.sleep(0.5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=["x64", "arm64"])
@@ -72,6 +110,9 @@ def main():
     parser.add_argument("kernel_elf", help="The kernel ELF executable.")
     parser.add_argument("qemu_args", nargs="*")
     args = parser.parse_args()
+
+    # Kill any stale QEMU sessions that might be holding our ports.
+    kill_stale_qemu_on_ports(FORWARDED_PORTS)
 
     if args.arch == "x64":
         #  Because QEMU denies a x86_64 multiboot ELF file (GRUB2 accept it, btw),

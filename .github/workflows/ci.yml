@@ -6,8 +6,17 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [fortress, balanced, performance, ludicrous]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -16,22 +25,51 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.profile }}-
 
-      - name: Show toolchain
-        run: rustc --version && cargo --version
-
-      - name: Create dummy initramfs for type checking
+      - name: Create dummy initramfs
         run: mkdir -p build && touch build/dummy-for-lint.initramfs
 
-      - name: cargo check
-        run: INITRAMFS_PATH=build/dummy-for-lint.initramfs cargo check
+      - name: cargo check (${{ matrix.profile }})
+        run: make check PROFILE=${{ matrix.profile }}
 
-      - name: clippy
-        run: INITRAMFS_PATH=build/dummy-for-lint.initramfs cargo clippy -- -D warnings
-        continue-on-error: true  # TODO: fix all warnings then make this strict
-
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
       - name: rustfmt
         run: cargo fmt --check
-        continue-on-error: true  # TODO: format codebase then make this strict
+        continue-on-error: true
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-
+
+      - name: Create dummy initramfs
+        run: mkdir -p build && touch build/dummy-for-lint.initramfs
+
+      - name: clippy (balanced)
+        run: make check PROFILE=balanced
+        env:
+          RUSTFLAGS: "-Z emit-stack-sizes -W clippy::all"
+        continue-on-error: true

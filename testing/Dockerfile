@@ -7,7 +7,7 @@ RUN apt-get install -qy musl-tools
 RUN curl -fsSL --output tarball.tar.bz2 "https://busybox.net/downloads/busybox-1.31.1.tar.bz2"
 RUN mkdir /build && tar xf tarball.tar.bz2 --strip-components=1 -C /build
 WORKDIR /build
-ADD busybox/config /build/.config
+ADD testing/busybox/config /build/.config
 RUN yes n | make oldconfig \
     && ln -s /usr/bin/ar /usr/bin/musl-ar \
     && ln -s /usr/bin/strip /usr/bin/musl-strip \
@@ -33,8 +33,8 @@ RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools
 RUN curl -fsSL --output tarball.tar.bz2 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2020.81.tar.bz2"
 RUN mkdir /build && tar xf tarball.tar.bz2 --strip-components=1 -C /build
-ADD dropbear/accept-empty-password-root-login.patch /build/accept-empty-password-root-login.patch
-ADD dropbear/localoptions.h /build/localoptions.h
+ADD testing/dropbear/accept-empty-password-root-login.patch /build/accept-empty-password-root-login.patch
+ADD testing/dropbear/localoptions.h /build/localoptions.h
 WORKDIR /build
 RUN sh -c 'patch --ignore-whitespace -p1 < accept-empty-password-root-login.patch'
 RUN ./configure CC=musl-gcc --enable-static --disable-largefile --disable-zlib --disable-syslog --disable-wtmp --disable-wtmpx --disable-utmp --disable-utmpx --disable-loginfunc
@@ -48,6 +48,14 @@ RUN apt-get update && apt-get install -qy musl-tools
 RUN echo '#include <unistd.h>\nint main(){const char m[]="hello from dynamic linking!\\n";write(1,m,sizeof(m)-1);return 0;}' > /hello.c
 RUN musl-gcc -o /hello-dynamic /hello.c
 RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
+
+#
+#  Micro-benchmark suite (musl static)
+#
+FROM ubuntu:20.04 as benchsuite
+RUN apt-get update && apt-get install -qy musl-tools
+COPY benchmarks/bench.c /bench.c
+RUN musl-gcc -static -O2 -o /bench /bench.c
 
 #
 #  Initramfs
@@ -68,14 +76,15 @@ COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
 COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
 COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=benchsuite /bench /bin/bench
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /var/www/html
-ADD etc/banner /etc
-ADD etc/group /etc
-ADD etc/passwd /etc
-ADD etc/profile /etc
-ADD integration_tests /integration_tests
-ADD var/www/html/index.html /var/www/html/index.html
+ADD testing/etc/banner /etc
+ADD testing/etc/group /etc
+ADD testing/etc/passwd /etc
+ADD testing/etc/profile /etc
+ADD testing/integration_tests /integration_tests
+ADD testing/var/www/html/index.html /var/www/html/index.html
 
 CMD ["/bin/sh"]
