@@ -59,7 +59,7 @@ impl<'a> SyscallHandler<'a> {
         // Determine the virtual address space to map.
         let current = current_process();
         let vm_ref = current.vm();
-        let mut vm = vm_ref.as_ref().unwrap().lock();
+        let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
         let mapped_uaddr = if flags.contains(MMapFlags::MAP_FIXED) {
             match addr_hint {
                 Some(addr) => {

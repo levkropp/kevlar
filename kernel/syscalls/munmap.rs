@@ -26,7 +26,7 @@ impl<'a> SyscallHandler<'a> {
 
         let current = current_process();
         let vm_ref = current.vm();
-        let mut vm = vm_ref.as_ref().unwrap().lock();
+        let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
 
         // Remove VMAs in the range (splits at boundaries).
         vm.remove_vma_range(addr, len)?;

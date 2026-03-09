@@ -91,7 +91,7 @@ impl Drop for OwnedPages {
 // TODO: Use alloc_page
 pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     let order = num_pages_to_order(num_pages);
-    let mut zones = ZONES.lock();
+    let mut zones = ZONES.lock_no_irq();
     for zone in zones.iter_mut() {
         if let Some(paddr) = zone.alloc_pages(order).map(PAddr::new) {
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
@@ -115,7 +115,7 @@ pub fn alloc_pages_owned(
     flags: AllocPageFlags,
 ) -> Result<OwnedPages, PageAllocError> {
     let order = num_pages_to_order(num_pages);
-    let mut zones = ZONES.lock();
+    let mut zones = ZONES.lock_no_irq();
     for zone in zones.iter_mut() {
         if let Some(paddr) = zone.alloc_pages(order).map(PAddr::new) {
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
@@ -147,7 +147,7 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     }
 
     let order = num_pages_to_order(num_pages);
-    let mut zones = ZONES.lock();
+    let mut zones = ZONES.lock_no_irq();
     for zone in zones.iter_mut() {
         if zone.includes(paddr.value()) {
             zone.free_pages(paddr.value(), order);
@@ -158,7 +158,7 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
 }
 
 pub fn init(areas: &[RamArea]) {
-    let mut zones = ZONES.lock();
+    let mut zones = ZONES.lock_no_irq();
     for area in areas {
         info!(
             "available RAM: base={:x}, size={}",
