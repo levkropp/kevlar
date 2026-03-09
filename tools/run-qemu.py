@@ -7,6 +7,7 @@ from tempfile import NamedTemporaryFile
 import os
 import subprocess
 import sys
+import platform
 
 COMMON_ARGS = [
     "-serial",
@@ -65,6 +66,8 @@ ARCHS = {
 
 def kill_stale_qemu_on_ports(ports):
     """Kill any QEMU processes holding our forwarded ports."""
+    is_windows = platform.system() == "Windows"
+
     for port in ports:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -74,23 +77,51 @@ def kill_stale_qemu_on_ports(ports):
             s.close()
             # Port is in use. Try to find and kill the holder.
             try:
-                result = subprocess.run(
-                    ["ss", "-tlnp", f"sport = :{port}"],
-                    capture_output=True, text=True,
-                )
-                for line in result.stdout.splitlines():
-                    if "qemu" in line:
-                        # Extract pid from users:(("qemu-...",pid=12345,fd=10))
-                        import re
-                        m = re.search(r"pid=(\d+)", line)
-                        if m:
-                            pid = int(m.group(1))
-                            print(
-                                f"run-qemu.py: killing stale QEMU (pid={pid}) "
-                                f"holding port {port}",
-                                file=sys.stderr,
-                            )
-                            os.kill(pid, signal.SIGTERM)
+                if is_windows:
+                    # Windows: use netstat to find the process
+                    result = subprocess.run(
+                        ["netstat", "-ano"],
+                        capture_output=True, text=True,
+                    )
+                    for line in result.stdout.splitlines():
+                        if f":{port}" in line and "LISTENING" in line:
+                            parts = line.split()
+                            if parts:
+                                pid = int(parts[-1])
+                                # Check if it's a QEMU process
+                                try:
+                                    tasklist = subprocess.run(
+                                        ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                        capture_output=True, text=True,
+                                    )
+                                    if "qemu" in tasklist.stdout.lower():
+                                        print(
+                                            f"run-qemu.py: killing stale QEMU (pid={pid}) "
+                                            f"holding port {port}",
+                                            file=sys.stderr,
+                                        )
+                                        subprocess.run(["taskkill", "/F", "/PID", str(pid)], check=False)
+                                except Exception:
+                                    pass
+                else:
+                    # Linux: use ss command
+                    result = subprocess.run(
+                        ["ss", "-tlnp", f"sport = :{port}"],
+                        capture_output=True, text=True,
+                    )
+                    for line in result.stdout.splitlines():
+                        if "qemu" in line:
+                            # Extract pid from users:(("qemu-...",pid=12345,fd=10))
+                            import re
+                            m = re.search(r"pid=(\d+)", line)
+                            if m:
+                                pid = int(m.group(1))
+                                print(
+                                    f"run-qemu.py: killing stale QEMU (pid={pid}) "
+                                    f"holding port {port}",
+                                    file=sys.stderr,
+                                )
+                                os.kill(pid, signal.SIGTERM)
             except Exception:
                 pass
     # Brief wait for ports to free up.
@@ -120,11 +151,13 @@ def main():
         #
         #  https://github.com/qemu/qemu/blob/950c4e6c94b15cd0d8b63891dddd7a8dbf458e6a/hw/i386/multiboot.c#L197
         # Set EM_386 (0x0003) to em_machine.
-        elf = NamedTemporaryFile()
+        # On Windows, use delete=False to avoid permission issues
+        elf = NamedTemporaryFile(delete=False)
         shutil.copyfileobj(open(args.kernel_elf, "rb"), elf.file)
         elf.seek(18)
         elf.write(bytes([0x03, 0x00]))
         elf.flush()
+        elf.close()  # Close before QEMU opens it (important on Windows)
         kernel_elf = elf.name
     else:
         kernel_elf = args.kernel_elf
@@ -134,8 +167,16 @@ def main():
         qemu_bin = args.qemu
     else:
         qemu_bin = qemu["bin"]
+        # On Windows, use QEMU_PATH if set (from Makefile detection)
+        if platform.system() == "Windows" and "QEMU_PATH" in os.environ:
+            qemu_path = os.environ["QEMU_PATH"]
+            if os.path.exists(qemu_path):
+                qemu_bin = qemu_path
 
-    argv = [qemu_bin] + qemu["args"] + ["-kernel", kernel_elf]
+    # On Windows, convert paths to forward slashes for QEMU
+    kernel_path = kernel_elf.replace('\\', '/') if platform.system() == "Windows" else kernel_elf
+
+    argv = [qemu_bin] + qemu["args"] + ["-kernel", kernel_path]
     cmdline = []
     if not args.gui:
         argv += ["-nographic"]
@@ -154,19 +195,37 @@ def main():
     if cmdline:
         argv += ["-append", " ".join(cmdline)]
 
-    p = subprocess.Popen(argv, preexec_fn=os.setsid)
+    # Windows doesn't support preexec_fn with os.setsid
+    is_windows = platform.system() == "Windows"
+    if is_windows:
+        p = subprocess.Popen(argv)
+    else:
+        p = subprocess.Popen(argv, preexec_fn=os.setsid)
 
     def _forward_signal(signum, _frame):
         """Forward signal to QEMU's process group so it shuts down cleanly."""
         try:
-            os.killpg(p.pid, signum)
-        except ProcessLookupError:
+            if is_windows:
+                # Windows: just terminate the process
+                p.terminate()
+            else:
+                # Unix: kill the entire process group
+                os.killpg(p.pid, signum)
+        except (ProcessLookupError, OSError):
             pass
 
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
 
     p.wait()
+
+    # Clean up temp file if we created one (multiboot mode on x64)
+    if args.arch == "x64":
+        try:
+            os.unlink(kernel_elf)
+        except OSError:
+            pass
+
     if p.returncode != 33:
         sys.exit(
             f"\nrun-qemu.py: qemu exited with failure status (status={p.returncode})"

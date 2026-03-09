@@ -30,6 +30,10 @@ else
 INITRAMFS_PATH := build/testing.initramfs
 endif
 ifeq ($(INIT_SCRIPT),)
+# On Windows with Git Bash, disable MSYS path conversion for /bin/sh
+ifeq ($(OS),Windows_NT)
+export MSYS_NO_PATHCONV := 1
+endif
 export INIT_SCRIPT := /bin/sh
 else
 export INIT_SCRIPT
@@ -62,19 +66,63 @@ kernel_elf := kevlar.$(ARCH).elf
 stripped_kernel_elf := kevlar.$(ARCH).stripped.elf
 kernel_symbols := $(kernel_elf:.elf=.symbols)
 
-PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
-PYTHON3    ?= python3
-CARGO      ?= cargo
-BOCHS      ?= bochs
-LLVM_BIN_DIR := $(shell rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
-ifeq ($(ARCH),arm64)
-NM         ?= $(LLVM_BIN_DIR)/llvm-nm
-READELF    ?= $(LLVM_BIN_DIR)/llvm-readelf
-STRIP      ?= $(LLVM_BIN_DIR)/llvm-strip
+# Windows compatibility: detect OS and adjust tools
+ifeq ($(OS),Windows_NT)
+    # Windows - works from PowerShell, CMD, or Git Bash
+    # Use Python for all path detection (cross-terminal compatible)
+    PYTHON3    ?= python
+
+    # Detect cargo using Python (works from any terminal)
+    CARGO_PATH := $(shell $(PYTHON3) -c "import os, shutil; cargo = shutil.which('cargo'); print(cargo if cargo else os.path.join(os.path.expanduser('~'), '.cargo', 'bin', 'cargo.exe'))" 2>nul)
+    CARGO      ?= "$(CARGO_PATH)"
+    BOCHS      ?= bochs
+
+    # Detect Docker using Python
+    DOCKER_PATH := $(shell $(PYTHON3) -c "import os, shutil; docker = shutil.which('docker'); print(docker if docker else os.path.join('C:', os.sep, 'Program Files', 'Docker', 'Docker', 'resources', 'bin', 'docker.exe'))" 2>nul)
+    DOCKER     ?= "$(DOCKER_PATH)"
+
+    # Detect QEMU using Python (Chocolatey installs to C:\Program Files\qemu)
+    QEMU_PATH := $(shell $(PYTHON3) -c "import os, shutil; qemu = shutil.which('qemu-system-x86_64'); print(qemu if qemu else os.path.join('C:', os.sep, 'Program Files', 'qemu', 'qemu-system-x86_64.exe'))" 2>nul)
+
+    # Detect rustc sysroot using Python
+    RUSTC_SYSROOT := $(shell $(PYTHON3) -c "import subprocess, os, shutil; rustc = shutil.which('rustc') or os.path.join(os.path.expanduser('~'), '.cargo', 'bin', 'rustc.exe'); print(subprocess.check_output([rustc, '--print', 'sysroot'], text=True).strip().replace(chr(92), '/')) if os.path.exists(rustc) else ''" 2>nul)
+    LLVM_BIN_DIR := $(if $(RUSTC_SYSROOT),$(RUSTC_SYSROOT)/lib/rustlib/x86_64-pc-windows-msvc/bin,)
+
+    # Windows: use echo instead of printf (no ANSI colors)
+    PROGRESS   := echo
+    # Windows: use Python for file operations
+    CP         := $(PYTHON3) -c "import shutil, sys; shutil.copy2(sys.argv[1], sys.argv[2])"
 else
-NM         ?= nm
-READELF    ?= readelf
-STRIP      ?= strip
+    # Linux/macOS
+    # Prefer uv if available, fall back to python3
+    PYTHON3    ?= $(shell command -v uv >/dev/null 2>&1 && echo "uv run python" || echo "python3")
+    CARGO      ?= cargo
+    BOCHS      ?= bochs
+    LLVM_BIN_DIR := $(shell rustc --print sysroot 2>/dev/null || echo "")/lib/rustlib/x86_64-unknown-linux-gnu/bin
+    # Unix: use printf with ANSI colors
+    PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
+    # Unix: use standard cp command
+    CP         := cp
+endif
+
+# Tool selection: Use LLVM tools on Windows or for arm64
+ifeq ($(OS),Windows_NT)
+    # Windows always uses LLVM tools (GNU binutils not available)
+    # Executables need .exe extension on Windows
+    # Quote paths to handle spaces and special characters
+    NM         ?= "$(LLVM_BIN_DIR)/llvm-nm.exe"
+    READELF    ?= "$(LLVM_BIN_DIR)/llvm-readelf.exe"
+    STRIP      ?= "$(LLVM_BIN_DIR)/llvm-strip.exe"
+else ifeq ($(ARCH),arm64)
+    # arm64 uses LLVM tools on Unix too
+    NM         ?= $(LLVM_BIN_DIR)/llvm-nm
+    READELF    ?= $(LLVM_BIN_DIR)/llvm-readelf
+    STRIP      ?= $(LLVM_BIN_DIR)/llvm-strip
+else
+    # x64 on Unix uses standard GNU binutils
+    NM         ?= nm
+    READELF    ?= readelf
+    STRIP      ?= strip
 endif
 DRAWIO     ?= /Applications/draw.io.app/Contents/MacOS/draw.io
 
@@ -98,6 +146,9 @@ export INITRAMFS_PATH
 export ARCH
 export PYTHON3
 export NM
+export DOCKER
+export CARGO
+export QEMU_PATH
 
 #
 #  Build Commands
@@ -105,10 +156,14 @@ export NM
 .PHONY: build
 build:
 	$(MAKE) build-crate
-	cp target/$(target_dir)/$(build_mode)/kevlar_kernel $(kernel_elf)
+	$(CP) target/$(target_dir)/$(build_mode)/kevlar_kernel $(kernel_elf)
 
 	$(PROGRESS) "NM" $(kernel_symbols)
+ifeq ($(OS),Windows_NT)
+	$(NM) $(kernel_elf) | $(PYTHON3) -c "import sys; [print(' '.join([parts[0]] + parts[2:])) for line in sys.stdin if (parts := line.strip().split()) and len(parts) >= 2]" > $(kernel_symbols)
+else
 	$(NM) $(kernel_elf) | rustfilt | awk '{ $$2=""; print $$0 }' > $(kernel_symbols)
+endif
 
 	$(PROGRESS) "SYMBOLS" $(kernel_elf)
 	$(PYTHON3) tools/embed-symbol-table.py $(kernel_symbols) $(kernel_elf)
@@ -133,9 +188,9 @@ buildw:
 .PHONY: iso
 iso: build
 	$(PROGRESS) MKISO kevlar.iso
-	mkdir -p isofiles/boot/grub
-	cp boot/grub.cfg isofiles/boot/grub/grub.cfg
-	cp $(stripped_kernel_elf) isofiles/kevlar.elf
+	$(PYTHON3) -c "import os; os.makedirs('isofiles/boot/grub', exist_ok=True)"
+	$(CP) boot/grub.cfg isofiles/boot/grub/grub.cfg
+	$(CP) $(stripped_kernel_elf) isofiles/kevlar.elf
 	grub-mkrescue -o kevlar.iso isofiles
 
 .PHONY: run
@@ -282,18 +337,22 @@ clean:
 #
 build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard benchmarks/*) Makefile
 	$(PROGRESS) "BUILD" testing
-	docker build -t kevlar-testing -f testing/Dockerfile .
+ifeq ($(OS),Windows_NT)
+	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"
+else
+	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile .
+endif
 	$(PROGRESS) "EXPORT" testing
-	mkdir -p build
+	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing
 
 build/$(IMAGE_FILENAME).initramfs: tools/docker2initramfs.py Makefile
 	$(PROGRESS) "EXPORT" $(IMAGE)
-	mkdir -p build
+	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	$(PYTHON3) tools/docker2initramfs.py $@ $(IMAGE)
 
 $(DUMMY_INITRAMFS_PATH):
-	mkdir -p $(@D)
+	$(PYTHON3) -c "import os; os.makedirs('$(@D)', exist_ok=True)"
 	touch $@
 
 %.svg: %.drawio
