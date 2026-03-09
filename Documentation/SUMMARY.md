@@ -45,3 +45,4 @@
 - [Panic Containment and Capability Tokens](blog/012-catch-unwind-and-capabilities.md)
 - [Benchmarks, CI Matrix, and Smarter Tooling](blog/013-benchmarks-and-ci.md)
 - [Fixing Fork: Two Bugs, One Wild Pointer](blog/014-fixing-fork.md)
+- [The 8-Byte Copy That Should Have Been 4](blog/015-debug-tooling-and-usercopy-fix.md)
