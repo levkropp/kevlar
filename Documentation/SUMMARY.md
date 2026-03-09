@@ -7,6 +7,7 @@
 # Architecture
 
 - [Overview](architecture.md)
+- [The Ringkernel Architecture](architecture/ringkernel.md)
 - [HAL / Kernel Split](architecture/hal.md)
 - [Memory Management](architecture/memory.md)
 - [Process & Thread Model](architecture/process.md)

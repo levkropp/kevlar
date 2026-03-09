@@ -35,8 +35,9 @@ After completing M2 and M3 preparation, the kernel boots static musl BusyBox, ru
 
 1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
 2. **Permissive licensing** — All code is MIT/Apache-2.0/BSD-2-Clause or compatible
-3. **Clean-room provenance** — Syscall semantics informed by FreeBSD's linuxulator (BSD-2-Clause); VFS abstractions adapted from OSv (BSD-3-Clause); design inspired by Asterinas (studied, not copied)
-4. **170+ syscalls** — Full coverage for threading, signals, memory management, filesystems, and networking
+3. **Ringkernel architecture** — Three-ring safety design: unsafe Platform (<10% TCB), safe Core, panic-contained Services. Near-monolithic performance with microkernel-style fault isolation via `catch_unwind` at ring boundaries
+4. **Clean-room provenance** — Syscall semantics informed by FreeBSD's linuxulator (BSD-2-Clause); VFS abstractions adapted from OSv (BSD-3-Clause); safety architecture informed by Asterinas (studied, not copied)
+5. **170+ syscalls** — Full coverage for threading, signals, memory management, filesystems, and networking
 
 ## Roadmap
 

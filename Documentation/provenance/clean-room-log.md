@@ -199,4 +199,38 @@ tgkill, rt_sigsuspend, pause, alarm, fchmod/fchmodat/fchownat, getgroups.
 
 ---
 
+## Ringkernel Architecture Design - 2026-03-08
+
+### Reference materials consulted (design concepts only, no code)
+- Asterinas framekernel paper (USENIX ATC 2025, arxiv.org/abs/2506.03876) — MPL-2.0
+  - Studied: crate-level unsafe confinement, OSTD API categories, TCB measurement
+  - NOT copied: any code, API signatures, or module structure
+- RedLeaf paper (OSDI 2020, University of Utah) — MIT
+  - Studied: language domain concept, fault containment via type system
+- Tock OS design documentation (tockos.org) — MIT/Apache-2.0
+  - Studied: capability-based capsule design for driver isolation
+- Theseus OS paper (OSDI 2020, Rice/Yale) — MIT
+  - Studied: intralingual OS design, safe-Rust-only component model
+
+### Implementation approach
+Original three-ring architecture ("ringkernel") designed for Kevlar:
+- Ring 0 (Platform): all unsafe code, <10% TCB target
+- Ring 1 (Core): safe Rust, trusted OS policies
+- Ring 2 (Services): safe Rust, panic-contained, restartable
+
+Key original contributions distinct from prior work:
+- Three-ring trust hierarchy (vs Asterinas's two-tier framework/service)
+- catch_unwind-based fault containment (vs Asterinas's no containment)
+- enter_usermode → UserEvent return pattern (vs callback-based)
+- OwnedFrame with copy-only access (vs reference-based frame access)
+- Pod-constrained UserPtr for user-kernel boundary
+- Capability-token service registration
+
+### Attribution
+- Architecture is original to Kevlar
+- Design informed by publicly available papers and documentation listed above
+- No source code from any reference was consulted
+
+---
+
 *Subsequent phases will add entries here as subsystems are implemented.*
