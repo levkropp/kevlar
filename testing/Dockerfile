@@ -1,37 +1,51 @@
 #
 #  Busybox
 #
-FROM ubuntu:20.04 as busybox
+FROM ubuntu:20.04 AS busybox
 RUN apt-get update && apt-get install -qy build-essential curl sed
-RUN apt-get install -qy musl-tools
-RUN curl -fsSL --output tarball.tar.bz2 "https://busybox.net/downloads/busybox-1.31.1.tar.bz2"
+RUN apt-get install -qy musl-tools linux-libc-dev
+# Make Linux headers available to musl-gcc
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+RUN curl -fsSL --output tarball.tar.bz2 "https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
 RUN mkdir /build && tar xf tarball.tar.bz2 --strip-components=1 -C /build
 WORKDIR /build
-ADD testing/busybox/config /build/.config
-RUN yes n | make oldconfig \
-    && ln -s /usr/bin/ar /usr/bin/musl-ar \
+RUN ln -s /usr/bin/ar /usr/bin/musl-ar \
     && ln -s /usr/bin/strip /usr/bin/musl-strip \
-    && make -j$(nproc)
+    && make defconfig \
+    && sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config \
+    && sed -i 's/^CONFIG_CROSS_COMPILER_PREFIX=""/CONFIG_CROSS_COMPILER_PREFIX="musl-"/' .config \
+    && sed -i 's/^CONFIG_NANDWRITE=y/# CONFIG_NANDWRITE is not set/' .config \
+    && sed -i 's/^CONFIG_NANDDUMP=y/# CONFIG_NANDDUMP is not set/' .config \
+    && sed -i 's/^CONFIG_UBIATTACH=y/# CONFIG_UBIATTACH is not set/' .config \
+    && sed -i 's/^CONFIG_UBIDETACH=y/# CONFIG_UBIDETACH is not set/' .config \
+    && sed -i 's/^CONFIG_UBIMKVOL=y/# CONFIG_UBIMKVOL is not set/' .config \
+    && sed -i 's/^CONFIG_UBIRMVOL=y/# CONFIG_UBIRMVOL is not set/' .config \
+    && sed -i 's/^CONFIG_UBIRSVOL=y/# CONFIG_UBIRSVOL is not set/' .config \
+    && sed -i 's/^CONFIG_UBIUPDATEVOL=y/# CONFIG_UBIUPDATEVOL is not set/' .config \
+    && sed -i 's/^CONFIG_UBIRENAME=y/# CONFIG_UBIRENAME is not set/' .config
+RUN make -j$(nproc)
 
 #
 #  Curl
 #
-FROM ubuntu:20.04 as curl
+FROM ubuntu:20.04 AS curl
 RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools
-RUN curl -fsSL --output tarball.tar.xz "https://curl.se/download/curl-7.76.1.tar.xz"
+RUN curl -fsSL --output tarball.tar.xz "https://curl.se/download/curl-8.10.1.tar.xz"
 RUN mkdir /build && tar xf tarball.tar.xz --strip-components=1 -C /build
 WORKDIR /build
-RUN ./configure CC=musl-gcc --disable-shared --disable-pthreads --disable-threaded-resolver --disable-rtsp --disable-alt-svc --disable-libcurl-option --disable-telnet --disable-gopher --disable-dict --disable-file --disable-ftp --disable-tftp --disable-imap --disable-pop3 --disable-smtp --disable-mqtt --disable-unix-sockets
+RUN ./configure CC=musl-gcc --without-ssl --without-libpsl --disable-shared --disable-pthreads --disable-threaded-resolver --disable-rtsp --disable-alt-svc --disable-libcurl-option --disable-telnet --disable-gopher --disable-dict --disable-file --disable-ftp --disable-tftp --disable-imap --disable-pop3 --disable-smtp --disable-mqtt --disable-unix-sockets --disable-ldap
 RUN make -j$(nproc) curl_LDFLAGS=-all-static
 
 #
 #  Dropbear SSH server
 #
-FROM ubuntu:20.04 as dropbear
+FROM ubuntu:20.04 AS dropbear
 RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools
-RUN curl -fsSL --output tarball.tar.bz2 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2020.81.tar.bz2"
+RUN curl -fsSL --output tarball.tar.bz2 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2024.85.tar.bz2"
 RUN mkdir /build && tar xf tarball.tar.bz2 --strip-components=1 -C /build
 ADD testing/dropbear/accept-empty-password-root-login.patch /build/accept-empty-password-root-login.patch
 ADD testing/dropbear/localoptions.h /build/localoptions.h
@@ -43,7 +57,7 @@ RUN make -j$(nproc)
 #
 #  Dynamic linking test binary (musl)
 #
-FROM ubuntu:20.04 as dyntest
+FROM ubuntu:20.04 AS dyntest
 RUN apt-get update && apt-get install -qy musl-tools
 RUN echo '#include <unistd.h>\nint main(){const char m[]="hello from dynamic linking!\\n";write(1,m,sizeof(m)-1);return 0;}' > /hello.c
 RUN musl-gcc -o /hello-dynamic /hello.c
@@ -52,9 +66,9 @@ RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
 #
 #  Bash (static musl)
 #
-FROM ubuntu:20.04 as bash
+FROM ubuntu:20.04 AS bash
 RUN apt-get update && apt-get install -qy build-essential curl musl-tools
-RUN curl -fsSL --output tarball.tar.gz "https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz"
+RUN curl -fsSL --output tarball.tar.gz "https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz"
 RUN mkdir /build && tar xf tarball.tar.gz --strip-components=1 -C /build
 WORKDIR /build
 # Static musl build: disable everything that needs pthreads, curses, or dlopen.
@@ -71,7 +85,7 @@ RUN make -j$(nproc) LDFLAGS="-static -Wl,--allow-multiple-definition"
 #
 #  Micro-benchmark suite (musl static)
 #
-FROM ubuntu:20.04 as benchsuite
+FROM ubuntu:20.04 AS benchsuite
 RUN apt-get update && apt-get install -qy musl-tools
 COPY benchmarks/bench.c /bench.c
 RUN musl-gcc -static -O2 -o /bench /bench.c
@@ -79,7 +93,7 @@ RUN musl-gcc -static -O2 -o /bench /bench.c
 #
 #  Initramfs
 #
-FROM busybox as empty_dir
+FROM busybox AS empty_dir
 RUN mkdir /empty_dir
 
 FROM scratch

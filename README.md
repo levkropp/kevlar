@@ -70,6 +70,8 @@ See [NOTICE](NOTICE) for full attribution details.
 
 ## Building
 
+### Linux/macOS
+
 Kevlar uses Rust nightly. To build:
 
 ```bash
@@ -81,6 +83,21 @@ make run
 
 # Build and run on ARM64 (release required for TCG performance)
 RELEASE=1 ARCH=arm64 make run
+```
+
+### Windows
+
+See [WINDOWS-SETUP.md](WINDOWS-SETUP.md) for detailed Windows build instructions.
+
+Quick setup:
+
+```bash
+# 1. Install dependencies (run setup-windows.ps1 in PowerShell as Admin)
+# 2. Verify setup
+./verify-windows-setup.sh
+
+# 3. Build and run
+make run
 ```
 
 ## Documentation
