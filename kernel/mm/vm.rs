@@ -66,6 +66,7 @@ pub struct Vm {
     page_table: PageTable,
     vm_areas: Vec<VmArea>,
     valloc_next: UserVAddr,
+    last_fault_vma_idx: Option<usize>,
 }
 
 impl Vm {
@@ -93,6 +94,7 @@ impl Vm {
             // and `heap_vma_mut` depends on it.
             vm_areas: vec![stack_vma, heap_vma],
             valloc_next: USER_VALLOC_BASE,
+            last_fault_vma_idx: None,
         })
     }
 
@@ -106,6 +108,26 @@ impl Vm {
 
     pub fn vm_areas(&self) -> &[VmArea] {
         &self.vm_areas
+    }
+
+    pub fn find_vma_cached(&mut self, vaddr: UserVAddr) -> Option<&VmArea> {
+        // Try last successful VMA first (temporal locality optimization)
+        if let Some(idx) = self.last_fault_vma_idx {
+            if idx < self.vm_areas.len() && self.vm_areas[idx].contains(vaddr) {
+                return Some(&self.vm_areas[idx]);
+            }
+        }
+
+        // Cache miss - do full linear search
+        for (i, vma) in self.vm_areas.iter().enumerate() {
+            if vma.contains(vaddr) {
+                self.last_fault_vma_idx = Some(i);
+                return Some(vma);
+            }
+        }
+
+        self.last_fault_vma_idx = None;
+        None
     }
 
     fn stack_vma(&self) -> &VmArea {
@@ -189,6 +211,7 @@ impl Vm {
             page_table: PageTable::duplicate_from(&self.page_table)?,
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
+            last_fault_vma_idx: self.last_fault_vma_idx,
         })
     }
 

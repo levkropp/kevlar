@@ -6,9 +6,10 @@ use crate::alignment::align_up;
 const PAGE_SIZE: usize = 4096;
 
 pub struct BitMapAllocator {
-    bitmap: spin::Mutex<&'static mut BitSlice<u8, LocalBits>>,
+    bitmap: &'static mut BitSlice<u8, LocalBits>,
     base: usize,
     end: usize,
+    next_hint: usize,
 }
 
 impl BitMapAllocator {
@@ -27,9 +28,10 @@ impl BitMapAllocator {
         bitmap.fill(false);
 
         BitMapAllocator {
-            bitmap: spin::Mutex::new(bitmap),
+            bitmap,
             base: base_paddr + bitmap_reserved_len,
             end: base_paddr + len - bitmap_reserved_len,
+            next_hint: 0,
         }
     }
 
@@ -43,31 +45,50 @@ impl BitMapAllocator {
 
     pub fn alloc_pages(&mut self, order: usize) -> Option<usize> {
         let num_pages = 1 << order;
-        let mut bitmap = self.bitmap.lock();
-        let mut off = 0;
-        while let Some(first_zero) = bitmap[off..].first_zero() {
-            let start = off + first_zero;
-            let end = off + first_zero + num_pages;
-            if end > bitmap.len() {
-                break;
-            }
+        let bitmap = &mut *self.bitmap;
 
-            if bitmap[start..end].not_any() {
-                bitmap[start..end].fill(true);
-                return Some(self.base + start * PAGE_SIZE);
-            }
+        // Next-fit allocation: start from hint position for better cache behavior
+        let mut off = self.next_hint;
+        let mut wrapped = false;
 
-            off += first_zero + 1;
+        loop {
+            if let Some(first_zero) = bitmap[off..].first_zero() {
+                let start = off + first_zero;
+                let end = start + num_pages;
+
+                if end > bitmap.len() {
+                    // Hit end - wrap around to beginning if not tried yet
+                    if wrapped {
+                        return None;
+                    }
+                    off = 0;
+                    wrapped = true;
+                    continue;
+                }
+
+                if bitmap[start..end].not_any() {
+                    bitmap[start..end].fill(true);
+                    self.next_hint = end;  // Update hint to just after allocation
+                    return Some(self.base + start * PAGE_SIZE);
+                }
+
+                off = start + 1;
+            } else {
+                // No zeros from current position - wrap if not tried yet
+                if wrapped {
+                    return None;
+                }
+                off = 0;
+                wrapped = true;
+            }
         }
-
-        None
     }
 
     pub fn free_pages(&mut self, ptr: usize, order: usize) {
         let num_pages = 1 << order;
         let off = (ptr - self.base) / PAGE_SIZE;
 
-        let mut bitmap = self.bitmap.lock();
+        let bitmap = &mut *self.bitmap;
 
         debug_assert!(bitmap[off..(off + num_pages)].all(), "double free");
         bitmap[off..(off + num_pages)].fill(false);

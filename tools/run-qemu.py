@@ -167,11 +167,26 @@ def main():
         qemu_bin = args.qemu
     else:
         qemu_bin = qemu["bin"]
-        # On Windows, use QEMU_PATH if set (from Makefile detection)
-        if platform.system() == "Windows" and "QEMU_PATH" in os.environ:
-            qemu_path = os.environ["QEMU_PATH"]
-            if os.path.exists(qemu_path):
-                qemu_bin = qemu_path
+        # On Windows, try multiple detection methods
+        if platform.system() == "Windows":
+            # 1. Check QEMU_PATH environment variable
+            if "QEMU_PATH" in os.environ and os.path.exists(os.environ["QEMU_PATH"]):
+                qemu_bin = os.environ["QEMU_PATH"]
+            else:
+                # 2. Try shutil.which (searches PATH)
+                which_qemu = shutil.which(qemu["bin"])
+                if which_qemu:
+                    qemu_bin = which_qemu
+                else:
+                    # 3. Check common install locations
+                    common_paths = [
+                        rf"C:\Program Files\qemu\{qemu['bin']}.exe",
+                        rf"C:\qemu\{qemu['bin']}.exe",
+                    ]
+                    for path in common_paths:
+                        if os.path.exists(path):
+                            qemu_bin = path
+                            break
 
     # On Windows, convert paths to forward slashes for QEMU
     kernel_path = kernel_elf.replace('\\', '/') if platform.system() == "Windows" else kernel_elf
