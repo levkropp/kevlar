@@ -43,6 +43,7 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
     idt::init();
     // Calibrate TSC before PIT channel 0 is configured for timer IRQs.
     super::tsc::calibrate();
+    super::vdso::init();
     pit::init();
     syscall::init();
 }

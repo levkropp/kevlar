@@ -11,29 +11,21 @@ use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_rt_sigsuspend(&mut self, mask_ptr: UserVAddr, _sigsetsize: usize) -> Result<isize> {
-        let new_mask = mask_ptr.read::<[u8; 128]>()?;
-        let new_mask = SigSet::new(new_mask);
+        let new_bytes = mask_ptr.read::<[u8; 8]>()?;
+        let new_mask = SigSet::from_bytes(&new_bytes);
 
         let current = current_process();
 
-        // Save old mask and set new one.
-        let old_mask = {
-            let mut sigset = current.sigset_lock();
-            let old = *sigset;
-            *sigset = new_mask;
-            old
-        };
+        // Save old mask and set new one (lock-free).
+        let old_mask = current.sigset_load();
+        current.sigset_store(new_mask);
 
-        // Sleep until a signal arrives. We use a simple yield loop:
-        // the signal will be delivered in try_delivering_signal on return
-        // from the syscall.
+        // Sleep until a signal arrives. The signal will be delivered in
+        // try_delivering_signal on return from the syscall.
         crate::process::switch();
 
         // Restore old mask.
-        {
-            let mut sigset = current.sigset_lock();
-            *sigset = old_mask;
-        }
+        current.sigset_store(old_mask);
 
         // sigsuspend always returns EINTR.
         Err(Errno::EINTR.into())
