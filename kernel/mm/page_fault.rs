@@ -87,9 +87,15 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     };
 
+    // Allocate and zero the page BEFORE acquiring the VM lock.
+    // This keeps the lock hold time minimal (just VMA lookup + PTE write).
+    let paddr = alloc_pages(1, AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
+        .expect("failed to allocate an anonymous page");
+    zero_page(paddr);
+
     // Look for the associated vma area.
     let vm_ref = current.vm();
-    let mut vm = vm_ref.as_ref().unwrap().lock();
+    let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
     let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
         None => {
@@ -108,17 +114,14 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                 "pid={}: no VMAs for address {} (ip={:x}, reason={:?}), killing the current process...",
                 pid, unaligned_vaddr, ip, _reason
             );
+            // Free the page we allocated since we're killing the process.
+            kevlar_platform::page_allocator::free_pages(paddr, 1);
             drop(vm);
             drop(vm_ref);
             Process::exit_by_signal(SIGSEGV);
         }
     };
 
-    // Allocate and fill the page.  Use DIRTY_OK to skip redundant zeroing
-    // inside the allocator (which holds the ZONES lock); we zero once here.
-    let paddr = alloc_pages(1, AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
-        .expect("failed to allocate an anonymous page");
-    zero_page(paddr);
     match vma.area_type() {
         VmAreaType::Anonymous => { /* The page is already filled with zeros. Nothing to do. */ }
         VmAreaType::File {
