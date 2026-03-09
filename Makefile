@@ -45,7 +45,14 @@ endif
 
 topdir      := $(PWD)
 build_mode  := $(if $(RELEASE),release,debug)
+
+# Fortress and Balanced use the unwind target spec for catch_unwind support.
+# Performance and Ludicrous use the abort target spec.
+ifeq ($(filter $(PROFILE),fortress balanced),$(PROFILE))
+target_json := kernel/arch/$(ARCH)/$(ARCH)-unwind.json
+else
 target_json := kernel/arch/$(ARCH)/$(ARCH).json
+endif
 kernel_elf := kevlar.$(ARCH).elf
 stripped_kernel_elf := kevlar.$(ARCH).stripped.elf
 kernel_symbols := $(kernel_elf:.elf=.symbols)

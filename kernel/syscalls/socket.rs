@@ -37,24 +37,26 @@ impl<'a> SyscallHandler<'a> {
         let flags = bitflags_from_user!(SocketFlags, type_ & !SOCKET_TYPE_MASK)?;
 
         let net = services::network_stack();
-        let socket = match (domain, socket_type, protocol) {
-            (AF_UNIX, SOCK_STREAM, 0) => net.create_unix_socket()?,
-            (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
-                net.create_udp_socket()?
+        let socket = services::call_service(|| {
+            match (domain, socket_type, protocol) {
+                (AF_UNIX, SOCK_STREAM, 0) => net.create_unix_socket(),
+                (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
+                    net.create_udp_socket()
+                }
+                (AF_INET, SOCK_STREAM, 0) | (AF_INET, SOCK_STREAM, IPPROTO_TCP) => {
+                    net.create_tcp_socket()
+                }
+                (_, _, _) => {
+                    debug_warn!(
+                        "unsupported socket type: domain={}, type={}, protocol={}",
+                        domain,
+                        type_,
+                        protocol
+                    );
+                    Err(Errno::ENOSYS.into())
+                }
             }
-            (AF_INET, SOCK_STREAM, 0) | (AF_INET, SOCK_STREAM, IPPROTO_TCP) => {
-                net.create_tcp_socket()?
-            }
-            (_, _, _) => {
-                debug_warn!(
-                    "unsupported socket type: domain={}, type={}, protocol={}",
-                    domain,
-                    type_,
-                    protocol
-                );
-                return Err(Errno::ENOSYS.into());
-            }
-        };
+        })?;
 
         let fd = current_process().opened_files().lock().open(
             PathComponent::new_anonymous(INode::FileLike(socket)),

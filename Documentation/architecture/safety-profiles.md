@@ -158,39 +158,35 @@ requires an `eh_personality` lang item and the `unwinding` crate (MIT/Apache-2.0
 | `OwnedFrame` | `platform/page_ops.rs` | required | optional | N/A | N/A |
 | Capability tokens | `platform/capabilities.rs` | runtime | compile-time | absent | absent |
 | Panic strategy | target spec JSON | unwind | unwind | abort | abort |
-| Usercopy | `platform/x64/usercopy.S` | byte-loop | optimized | optimized | optimized |
+| Usercopy | `platform/x64/usercopy.S` | optimized | optimized | optimized | optimized |
+| Capability tokens | `platform/capabilities.rs` | runtime nonce | zero-cost | compiled away | compiled away |
 
 ## Implementation Phases
 
-### Phase 0: Feature flag infrastructure
-Add Cargo features, `compile_error!` guard, Makefile `PROFILE` variable.
-All four profiles compile to identical behavior (current code). Pure plumbing.
+### Phase 0: Feature flag infrastructure ✓
+Cargo features, `compile_error!` guard, Makefile `PROFILE` variable.
 
-### Phase 1: Performance profile (easiest measurable win)
-Concrete service types behind `cfg`. `network_stack()` returns
-`Arc<SmoltcpNetworkStack>` instead of `Arc<dyn NetworkStackService>`.
-Eliminates vtable dispatch on every socket operation.
+### Phase 1: Performance profile ✓
+Concrete service types behind `cfg`. No vtable dispatch.
 
-### Phase 2: Ludicrous profile
-Skip `access_ok()` behind `cfg`. Allow `unsafe_code` behind `cfg`.
-`get_unchecked()` on profiled hot paths with safety comments.
+### Phase 2: Ludicrous profile ✓
+Skip `access_ok()`, `#![allow(unsafe_code)]`.
 
-### Phase 3: Optimized usercopy (Balanced/Performance/Ludicrous)
-Alignment-aware `rep movsq` bulk copy. Replaces current `rep movsb`.
-SMAP `stac`/`clac` toggle around usercopy.
+### Phase 3: Optimized usercopy ✓
+Alignment-aware `rep movsq` bulk copy in `platform/x64/usercopy.S`.
 
-### Phase 4: Fortress profile — copy-semantic frames
-`OwnedFrame` with `read()`/`write()`. Remove `page_as_slice_mut` under
-Fortress. Only one call site in the kernel (`kernel/mm/page_fault.rs`).
+### Phase 4: Fortress copy-semantic frames ✓
+`PageFrame` with `read()`/`write()`. `page_as_slice_mut` removed under Fortress.
 
-### Phase 5: Fortress/Balanced — catch_unwind
-Unwind-capable target specs. `eh_personality` lang item. `unwinding` crate.
-`call_service()` wrapper with `catch_unwind`. **Highest risk** — requires
-bare-metal unwinder validation.
+### Phase 5: catch_unwind ✓
+Dual target specs (`x64.json` abort, `x64-unwind.json` unwind). Dual linker
+scripts (`.eh_frame` preserved for unwind). `unwinding` crate (v0.2) for
+bare-metal unwinding. `call_service()` wrapper with `catch_unwind`.
 
-### Phase 6: Capability tokens
-Zero-cost newtypes (Balanced) or runtime-validated tokens (Fortress).
-Services receive capabilities at registration time.
+### Phase 6: Capability tokens ✓
+`Cap<T>` in `platform/capabilities.rs`. Fortress: runtime-validated nonce.
+Balanced: zero-cost newtype. Performance/Ludicrous: compiled away.
+`Cap<NetAccess>` minted at network stack registration.
 
 ### Phase 7: Benchmarks and CI
 Syscall latency, usercopy throughput, page fault latency, tmpfs I/O.

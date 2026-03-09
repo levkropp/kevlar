@@ -43,6 +43,20 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         kevlar_platform::arch::halt();
     }
 
+    // Under Fortress/Balanced: try to unwind to a catch_unwind frame.
+    // If a service triggered this panic, execution will resume at the
+    // catch_unwind call site in services.rs, returning Err.
+    // If no catch frame exists, begin_panic returns and we fall through
+    // to the crash dump below.
+    #[cfg(any(feature = "profile-fortress", feature = "profile-balanced"))]
+    {
+        use alloc::boxed::Box;
+        use alloc::string::ToString;
+        let msg = info.to_string();
+        let _ = unwinding::panic::begin_panic(Box::new(msg));
+        // begin_panic returned — no catch frame found, this is a core panic.
+    }
+
     PANICKED.store(true, Ordering::SeqCst);
     error!("{}", info);
     kevlar_platform::backtrace::backtrace();

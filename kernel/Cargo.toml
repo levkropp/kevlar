@@ -11,8 +11,8 @@ path = "main.rs"
 
 [features]
 default = ["profile-balanced"]
-profile-fortress = ["kevlar_platform/profile-fortress"]
-profile-balanced = ["kevlar_platform/profile-balanced"]
+profile-fortress = ["kevlar_platform/profile-fortress", "unwinding"]
+profile-balanced = ["kevlar_platform/profile-balanced", "unwinding"]
 profile-performance = ["kevlar_platform/profile-performance"]
 profile-ludicrous = ["kevlar_platform/profile-ludicrous"]
 
@@ -38,6 +38,9 @@ kevlar_utils = { path = "../libs/kevlar_utils", features = ["no_std"] }
 kevlar_vfs = { path = "../libs/kevlar_vfs" }
 kevlar_tmpfs = { path = "../services/kevlar_tmpfs" }
 kevlar_initramfs = { path = "../services/kevlar_initramfs" }
+
+# Unwinding support for catch_unwind (Fortress/Balanced profiles).
+unwinding = { version = "0.2", default-features = false, features = ["unwinder", "fde-static", "personality", "panic"], optional = true }
 
 # Kernel Extensions.
 virtio_net = { path = "../exts/virtio_net" }

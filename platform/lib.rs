@@ -23,6 +23,7 @@ pub mod print;
 
 pub mod address;
 pub mod backtrace;
+pub mod capabilities;
 mod mem;
 pub mod page_ops;
 pub mod pod;
