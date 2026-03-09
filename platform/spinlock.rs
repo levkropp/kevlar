@@ -88,7 +88,9 @@ impl<T: ?Sized> SpinLock<T> {
     /// Use for locks that are never accessed from interrupt context (e.g. fd
     /// tables, root_fs).  Saves the pushfq/cli/sti overhead on every
     /// acquire/release cycle.
+    #[inline(always)]
     pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
+        #[cfg(debug_assertions)]
         if self.inner.is_locked() {
             cfg_if! {
                 if #[cfg(debug_assertions)] {
@@ -177,12 +179,14 @@ impl<'a, T: ?Sized> Drop for SpinLockGuardNoIrq<'a, T> {
 
 impl<'a, T: ?Sized> Deref for SpinLockGuardNoIrq<'a, T> {
     type Target = T;
+    #[inline(always)]
     fn deref(&self) -> &T {
         &self.inner
     }
 }
 
 impl<'a, T: ?Sized> DerefMut for SpinLockGuardNoIrq<'a, T> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
         &mut self.inner
     }
