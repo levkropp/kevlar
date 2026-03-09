@@ -121,6 +121,10 @@ pub const DEFAULT_ACTIONS: [SigAction; SIGMAX as usize] = [
 pub struct SignalDelivery {
     pending: u32,
     actions: [SigAction; SIGMAX as usize],
+    /// True when the user explicitly called `sigaction(SIGCHLD, SIG_IGN)` or
+    /// set `SA_NOCLDWAIT`.  This enables auto-reaping of child zombies.
+    /// The default SIGCHLD disposition (`Ignore`) does NOT set this flag.
+    nocldwait: bool,
 }
 
 impl SignalDelivery {
@@ -128,11 +132,18 @@ impl SignalDelivery {
         SignalDelivery {
             pending: 0,
             actions: DEFAULT_ACTIONS,
+            nocldwait: false,
         }
     }
 
     pub fn get_action(&self, signal: Signal) -> SigAction {
         self.actions[signal as usize]
+    }
+
+    /// Whether the process has explicitly requested auto-reaping of children
+    /// (via `sigaction(SIGCHLD, SIG_IGN)` or `SA_NOCLDWAIT`).
+    pub fn nocldwait(&self) -> bool {
+        self.nocldwait
     }
 
     pub fn set_action(&mut self, signal: Signal, action: SigAction) -> Result<()> {
@@ -142,6 +153,11 @@ impl SignalDelivery {
 
         self.actions[signal as usize] = action;
         Ok(())
+    }
+
+    /// Called from `rt_sigaction` when SIGCHLD disposition changes.
+    pub fn set_nocldwait(&mut self, value: bool) {
+        self.nocldwait = value;
     }
 
     pub fn is_pending(&self) -> bool {
@@ -160,6 +176,18 @@ impl SignalDelivery {
 
     pub fn signal(&mut self, signal: Signal) {
         self.pending |= 1 << (signal);
+    }
+
+    /// Reset signal dispositions for execve: per POSIX, all signals with
+    /// handler functions are reset to SIG_DFL.  SIG_IGN dispositions are
+    /// preserved.  Pending signals are preserved.
+    pub fn reset_on_exec(&mut self) {
+        for i in 0..SIGMAX as usize {
+            if matches!(self.actions[i], SigAction::Handler { .. }) {
+                self.actions[i] = DEFAULT_ACTIONS[i];
+            }
+        }
+        self.nocldwait = false;
     }
 }
 

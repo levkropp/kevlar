@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::ctypes::*;
+use crate::debug;
 use crate::prelude::*;
 use crate::process::current_process;
-use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIG_DFL, SIG_IGN};
+use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIGCHLD, SIG_DFL, SIG_IGN};
 use crate::syscalls::SyscallHandler;
 use kevlar_platform::address::UserVAddr;
 
@@ -24,7 +25,10 @@ impl<'a> SyscallHandler<'a> {
                 SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
                 SigAction::Handler { handler } => handler.value(),
             };
-            oldact_ptr.write::<usize>(&handler_value)?;
+            debug::usercopy::set_context("sys_rt_sigaction:oldact");
+            let r = oldact_ptr.write::<usize>(&handler_value);
+            debug::usercopy::clear_context();
+            r?;
         }
 
         if let Some(act) = UserVAddr::new(act) {
@@ -40,7 +44,13 @@ impl<'a> SyscallHandler<'a> {
                 },
             };
 
-            signals.lock().set_action(signum, new_action)?;
+            let mut signals = signals.lock();
+            signals.set_action(signum, new_action)?;
+
+            // Track explicit SIG_IGN on SIGCHLD for auto-reap semantics.
+            if signum == SIGCHLD {
+                signals.set_nocldwait(handler == SIG_IGN);
+            }
         }
 
         Ok(0)

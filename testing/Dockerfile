@@ -50,6 +50,25 @@ RUN musl-gcc -o /hello-dynamic /hello.c
 RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
 
 #
+#  Bash (static musl)
+#
+FROM ubuntu:20.04 as bash
+RUN apt-get update && apt-get install -qy build-essential curl musl-tools
+RUN curl -fsSL --output tarball.tar.gz "https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz"
+RUN mkdir /build && tar xf tarball.tar.gz --strip-components=1 -C /build
+WORKDIR /build
+# Static musl build: disable everything that needs pthreads, curses, or dlopen.
+RUN CC=musl-gcc ./configure \
+        --without-bash-malloc \
+        --enable-static-link \
+        --disable-nls \
+        --without-curses \
+        --disable-readline
+RUN make -j$(nproc) LDFLAGS="-static -Wl,--allow-multiple-definition"
+# Keep symbols for debugging; strip later once stable.
+# RUN strip bash
+
+#
 #  Micro-benchmark suite (musl static)
 #
 FROM ubuntu:20.04 as benchsuite
@@ -76,6 +95,7 @@ COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
 COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
 COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
+COPY --from=bash       /build/bash /bin/bash
 COPY --from=benchsuite /bench /bin/bench
 
 RUN ["/bin/busybox", "--install", "-s"]

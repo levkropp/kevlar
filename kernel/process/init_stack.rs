@@ -132,12 +132,14 @@ pub(super) fn init_user_stack(
         user_stack_top.sub(offset)
     };
 
-    // Write auxv data.
+    // Write auxv data (pushed in reverse so first entry is at highest address).
+    // auxv_ptrs must match the forward order of auxv, so we reverse after building.
     let mut auxv_ptrs = Vec::with_capacity(auxv.len());
     for auxv in auxv.iter().rev() {
         push_aux_data_to_stack(&mut sp, stack_bottom, auxv)?;
         auxv_ptrs.push(Some(kernel_sp_to_user_sp(sp)));
     }
+    auxv_ptrs.reverse();
 
     // Write envp strings.
     let mut envp_ptrs = Vec::with_capacity(envp.len());
@@ -160,8 +162,8 @@ pub(super) fn init_user_stack(
 
     // Push auxiliary vector entries.
     push_auxv_entry_to_stack(&mut sp, stack_bottom, &Auxv::Null, None)?;
-    for (aux, data) in auxv.iter().zip(auxv_ptrs) {
-        push_auxv_entry_to_stack(&mut sp, stack_bottom, aux, data)?;
+    for (aux, data) in auxv.iter().zip(auxv_ptrs.iter()) {
+        push_auxv_entry_to_stack(&mut sp, stack_bottom, aux, *data)?;
     }
 
     // Push environment pointers (`const char **envp`).
