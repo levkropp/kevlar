@@ -34,38 +34,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct OpenOptions {
-    pub nonblock: bool,
-    pub close_on_exec: bool,
-    pub append: bool,
-}
-
-impl OpenOptions {
-    pub fn new(nonblock: bool, cloexec: bool) -> OpenOptions {
-        OpenOptions {
-            nonblock,
-            close_on_exec: cloexec,
-            append: false,
-        }
-    }
-
-    pub fn empty() -> OpenOptions {
-        OpenOptions {
-            nonblock: false,
-            close_on_exec: false,
-            append: false,
-        }
-    }
-
-    pub fn readwrite() -> OpenOptions {
-        OpenOptions {
-            nonblock: false,
-            close_on_exec: false,
-            append: false,
-        }
-    }
-}
+pub use kevlar_vfs::inode::OpenOptions;
 
 impl From<OpenFlags> for OpenOptions {
     fn from(flags: OpenFlags) -> OpenOptions {

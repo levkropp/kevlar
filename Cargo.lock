@@ -216,6 +216,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kevlar_initramfs"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
+ "kevlar_utils",
+ "kevlar_vfs",
+ "log",
+]
+
+[[package]]
 name = "kevlar_kernel"
 version = "0.1.0"
 dependencies = [
@@ -228,8 +238,11 @@ dependencies = [
  "goblin",
  "hashbrown",
  "kevlar_api",
+ "kevlar_initramfs",
  "kevlar_platform",
+ "kevlar_tmpfs",
  "kevlar_utils",
+ "kevlar_vfs",
  "log",
  "smoltcp",
  "spin 0.10.0",
@@ -256,6 +269,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kevlar_tmpfs"
+version = "0.1.0"
+dependencies = [
+ "hashbrown",
+ "kevlar_platform",
+ "kevlar_utils",
+ "kevlar_vfs",
+]
+
+[[package]]
 name = "kevlar_utils"
 version = "0.1.0"
 dependencies = [
@@ -263,6 +286,15 @@ dependencies = [
  "crossbeam",
  "log",
  "spin 0.10.0",
+]
+
+[[package]]
+name = "kevlar_vfs"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.11.0",
+ "kevlar_platform",
+ "kevlar_utils",
 ]
 
 [[package]]

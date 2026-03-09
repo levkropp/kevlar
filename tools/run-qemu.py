@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import signal
 import shutil
 from tempfile import NamedTemporaryFile
 import os
@@ -112,7 +113,19 @@ def main():
     if cmdline:
         argv += ["-append", " ".join(cmdline)]
 
-    p = subprocess.run(argv, preexec_fn=os.setsid)
+    p = subprocess.Popen(argv, preexec_fn=os.setsid)
+
+    def _forward_signal(signum, _frame):
+        """Forward signal to QEMU's process group so it shuts down cleanly."""
+        try:
+            os.killpg(p.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    signal.signal(signal.SIGTERM, _forward_signal)
+    signal.signal(signal.SIGINT, _forward_signal)
+
+    p.wait()
     if p.returncode != 33:
         sys.exit(
             f"\nrun-qemu.py: qemu exited with failure status (status={p.returncode})"

@@ -12,7 +12,6 @@ use crate::{
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use core::{
     cmp::min,
-    convert::TryInto,
     fmt,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -142,7 +141,7 @@ impl FileLike for TcpSocket {
 
                     Ok(Some((
                         socket as Arc<dyn FileLike>,
-                        remote.into(),
+                        super::socket::endpoint_to_sockaddr(remote),
                     )))
                 }
                 None => {
@@ -156,7 +155,7 @@ impl FileLike for TcpSocket {
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
         // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
         //       does not check that.
-        self.local_endpoint.store(Some(sockaddr.try_into()?));
+        self.local_endpoint.store(Some(super::sockaddr_to_endpoint(sockaddr)?));
         Ok(())
     }
 
@@ -176,7 +175,7 @@ impl FileLike for TcpSocket {
         let endpoint = smol_socket.local_endpoint();
 
         match endpoint {
-            Some(ep) => Ok(ep.into()),
+            Some(ep) => Ok(super::socket::endpoint_to_sockaddr(ep)),
             None => Err(Errno::ENOTCONN.into()),
         }
     }
@@ -187,13 +186,13 @@ impl FileLike for TcpSocket {
         let endpoint = smol_socket.remote_endpoint();
 
         match endpoint {
-            Some(ep) => Ok(ep.into()),
+            Some(ep) => Ok(super::socket::endpoint_to_sockaddr(ep)),
             None => Err(Errno::ENOTCONN.into()),
         }
     }
 
     fn connect(&self, sockaddr: SockAddr, _options: &OpenOptions) -> Result<()> {
-        let remote_endpoint: IpEndpoint = sockaddr.try_into()?;
+        let remote_endpoint: IpEndpoint = super::sockaddr_to_endpoint(sockaddr)?;
 
         // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
         //       does not check that.

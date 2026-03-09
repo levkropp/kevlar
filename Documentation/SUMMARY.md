@@ -38,3 +38,4 @@
 - [Milestone 3: Terminal Control, Job Control, and the Road to Bash](blog/006-milestone-3-job-control-and-terminal.md)
 - [Ringkernel Phase 1: Extracting the Platform](blog/007-ringkernel-phase-1-platform-extraction.md)
 - [Ringkernel Phase 2: Core Traits and the Service Registry](blog/008-ringkernel-phase-2-core-traits.md)
+- [Ringkernel Phase 3: Extracting Services](blog/009-ringkernel-phase-3-service-extraction.md)

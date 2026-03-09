@@ -348,10 +348,20 @@ Completed. Service traits defined at the Ring 2 boundaries:
 - VFS traits (`FileSystem`, `Directory`, `FileLike`, `Symlink`) were already
   well-defined; documented with Ring 2 boundary annotations.
 
-### Phase 3: Extract Services
+### Phase 3: Extract Services ✓
 
-Move tmpfs, procfs, devfs, smoltcp, and virtio into separate service crates.
-Each gets `#![forbid(unsafe_code)]`.
+Completed. Shared VFS types extracted to `libs/kevlar_vfs` crate
+(`#![forbid(unsafe_code)]`). First two service crates created:
+
+- `services/kevlar_tmpfs` — in-memory temporary filesystem, `#![forbid(unsafe_code)]`
+- `services/kevlar_initramfs` — cpio newc initramfs parser, `#![forbid(unsafe_code)]`
+
+Kernel modules re-export from the service crates so all existing imports
+continue working. `SockAddr`/`IpEndpoint` conversions converted from orphan
+trait impls to freestanding functions.
+
+Deferred: smoltcp, devfs, procfs — too tightly coupled to kernel internals
+for now (wait queue, IRQ handling, process state).
 
 ### Phase 4: Add Panic Containment
 

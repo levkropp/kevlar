@@ -1,0 +1,10 @@
+[package]
+name = "kevlar_vfs"
+version = "0.1.0"
+edition = "2024"
+description = "VFS trait definitions and shared types for the Kevlar kernel."
+
+[dependencies]
+bitflags = "2"
+kevlar_platform = { path = "../../platform" }
+kevlar_utils = { path = "../kevlar_utils" }

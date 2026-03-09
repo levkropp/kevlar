@@ -1,0 +1,12 @@
+[package]
+name = "kevlar_tmpfs"
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0 OR BSD-2-Clause"
+
+[dependencies]
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+kevlar_platform = { path = "../../platform" }
+kevlar_utils = { path = "../../libs/kevlar_utils", features = ["no_std"] }
+kevlar_vfs = { path = "../../libs/kevlar_vfs" }

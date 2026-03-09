@@ -5,6 +5,7 @@ members = [
     "kernel",
     "libs/*",
     "exts/*",
+    "services/*",
 ]
 
 [profile.dev]

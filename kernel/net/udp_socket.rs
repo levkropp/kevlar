@@ -9,7 +9,7 @@ use crate::{
     user_buffer::{UserBufReader, UserBufWriter, UserBufferMut},
 };
 use alloc::{collections::BTreeSet, sync::Arc};
-use core::{convert::TryInto, fmt};
+use core::fmt;
 use kevlar_platform::spinlock::SpinLock;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::udp;
@@ -35,7 +35,7 @@ impl UdpSocket {
 
 impl FileLike for UdpSocket {
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
-        let mut endpoint: IpEndpoint = sockaddr.try_into()?;
+        let mut endpoint: IpEndpoint = super::sockaddr_to_endpoint(sockaddr)?;
         // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
         //       does not check that.
         let mut inuse_endpoints = INUSE_ENDPOINTS.lock();
@@ -70,9 +70,9 @@ impl FileLike for UdpSocket {
         sockaddr: Option<SockAddr>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        let endpoint: IpEndpoint = sockaddr
-            .ok_or_else(|| Error::new(Errno::EINVAL))?
-            .try_into()?;
+        let endpoint = super::sockaddr_to_endpoint(
+            sockaddr.ok_or_else(|| Error::new(Errno::EINVAL))?,
+        )?;
         let mut sockets = SOCKETS.lock();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
         let mut reader = UserBufReader::from(buf);
@@ -99,7 +99,7 @@ impl FileLike for UdpSocket {
             match socket.recv() {
                 Ok((payload, meta)) => {
                     writer.write_bytes(payload)?;
-                    Ok(Some((writer.written_len(), meta.endpoint.into())))
+                    Ok(Some((writer.written_len(), super::socket::endpoint_to_sockaddr(meta.endpoint))))
                 }
                 Err(udp::RecvError::Exhausted) if options.nonblock => Err(Errno::EAGAIN.into()),
                 Err(udp::RecvError::Exhausted) => {
