@@ -231,6 +231,12 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode>;
     /// `stat(2)`.
     fn stat(&self) -> Result<Stat>;
+    /// Returns the inode number without acquiring locks.
+    /// Default implementation calls stat(), but filesystems can override
+    /// for lock-free access when inode_no is immutable.
+    fn inode_no(&self) -> Result<INodeNo> {
+        self.stat().map(|s| s.inode_no)
+    }
     /// `readdir(2)`.
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>>;
     /// `link(2)`.

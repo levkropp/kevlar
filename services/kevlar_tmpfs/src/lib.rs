@@ -36,7 +36,7 @@ fn alloc_inode_no() -> INodeNo {
     // Inode #1 is reserved for the root dir.
     static NEXT_INODE_NO: AtomicUsize = AtomicUsize::new(2);
 
-    INodeNo::new(NEXT_INODE_NO.fetch_add(1, Ordering::SeqCst))
+    INodeNo::new(NEXT_INODE_NO.fetch_add(1, Ordering::Relaxed))
 }
 
 pub struct TmpFs {
@@ -75,35 +75,41 @@ enum TmpFsINode {
 
 struct DirInner {
     files: HashMap<String, TmpFsINode>,
-    stat: Stat,
 }
 
-pub struct Dir(SpinLock<DirInner>);
+pub struct Dir {
+    inode_no: INodeNo,
+    stat: Stat,
+    inner: SpinLock<DirInner>,
+}
 
 impl Dir {
     pub fn new(inode_no: INodeNo) -> Dir {
-        Dir(SpinLock::new(DirInner {
-            files: HashMap::new(),
+        Dir {
+            inode_no,
             stat: Stat {
                 inode_no,
                 mode: FileMode::new(S_IFDIR | 0o755),
                 ..Stat::zeroed()
             },
-        }))
+            inner: SpinLock::new(DirInner {
+                files: HashMap::new(),
+            }),
+        }
     }
 
     pub fn add_dir(&self, name: &str) -> Arc<Dir> {
         let dir = Arc::new(Dir::new(alloc_inode_no()));
-        self.0
-            .lock()
+        self.inner
+            .lock_no_irq()
             .files
             .insert(name.into(), TmpFsINode::Directory(dir.clone()));
         dir
     }
 
     pub fn add_file(&self, name: &str, file: Arc<dyn FileLike>) {
-        self.0
-            .lock()
+        self.inner
+            .lock_no_irq()
             .files
             .insert(name.into(), TmpFsINode::File(file));
     }
@@ -111,8 +117,8 @@ impl Dir {
 
 impl Directory for Dir {
     fn lookup(&self, name: &str) -> Result<INode> {
-        self.0
-            .lock()
+        self.inner
+            .lock_no_irq()
             .files
             .get(name)
             .map(|tmpfs_inode| match tmpfs_inode {
@@ -124,7 +130,7 @@ impl Directory for Dir {
     }
 
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {
-        let dir_lock = self.0.lock();
+        let dir_lock = self.inner.lock_no_irq();
         let (name, inode) = match dir_lock.files.iter().nth(index) {
             Some(entry) => entry,
             None => {
@@ -134,9 +140,8 @@ impl Directory for Dir {
 
         let entry = match inode {
             TmpFsINode::Directory(dir) => {
-                let dir = dir.0.lock();
                 DirEntry {
-                    inode_no: dir.stat.inode_no,
+                    inode_no: dir.inode_no,
                     file_type: FileType::Directory,
                     name: name.clone(),
                 }
@@ -157,7 +162,11 @@ impl Directory for Dir {
     }
 
     fn stat(&self) -> Result<Stat> {
-        Ok(self.0.lock().stat)
+        Ok(self.stat)
+    }
+
+    fn inode_no(&self) -> Result<INodeNo> {
+        Ok(self.inode_no)
     }
 
     fn link(&self, name: &str, link_to: &INode) -> Result<()> {
@@ -173,12 +182,12 @@ impl Directory for Dir {
             }
         };
 
-        self.0.lock().files.insert(name.into(), tmpfs_inode);
+        self.inner.lock_no_irq().files.insert(name.into(), tmpfs_inode);
         Ok(())
     }
 
     fn create_file(&self, name: &str, _mode: FileMode) -> Result<INode> {
-        let mut dir_lock = self.0.lock();
+        let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
@@ -192,7 +201,7 @@ impl Directory for Dir {
     }
 
     fn create_symlink(&self, name: &str, target: &str) -> Result<INode> {
-        let mut dir_lock = self.0.lock();
+        let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
@@ -213,8 +222,8 @@ impl Directory for Dir {
 
     fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
         let inode = Arc::new(Dir::new(alloc_inode_no()));
-        self.0
-            .lock()
+        self.inner
+            .lock_no_irq()
             .files
             .insert(name.into(), TmpFsINode::Directory(inode.clone()));
 
@@ -222,7 +231,7 @@ impl Directory for Dir {
     }
 
     fn unlink(&self, name: &str) -> Result<()> {
-        let mut dir_lock = self.0.lock();
+        let mut dir_lock = self.inner.lock_no_irq();
         match dir_lock.files.get(name) {
             Some(TmpFsINode::Directory(_)) => return Err(Errno::EISDIR.into()),
             Some(TmpFsINode::File(_)) | Some(TmpFsINode::Symlink(_)) => {}
@@ -233,10 +242,10 @@ impl Directory for Dir {
     }
 
     fn rmdir(&self, name: &str) -> Result<()> {
-        let mut dir_lock = self.0.lock();
+        let mut dir_lock = self.inner.lock_no_irq();
         match dir_lock.files.get(name) {
             Some(TmpFsINode::Directory(dir)) => {
-                if !dir.0.lock().files.is_empty() {
+                if !dir.inner.lock_no_irq().files.is_empty() {
                     return Err(Errno::ENOTEMPTY.into());
                 }
             }
@@ -256,7 +265,7 @@ impl Directory for Dir {
 
         // Handle same-directory rename without deadlock.
         if self_ptr == new_ptr {
-            let mut dir_lock = self.0.lock();
+            let mut dir_lock = self.inner.lock_no_irq();
             let entry = dir_lock
                 .files
                 .remove(old_name)
@@ -267,16 +276,16 @@ impl Directory for Dir {
 
         // Cross-directory: lock in pointer order to avoid deadlock.
         if self_ptr < new_ptr {
-            let mut old_lock = self.0.lock();
-            let mut new_lock = new_dir.0.lock();
+            let mut old_lock = self.inner.lock_no_irq();
+            let mut new_lock = new_dir.inner.lock_no_irq();
             let entry = old_lock
                 .files
                 .remove(old_name)
                 .ok_or_else(|| Error::new(Errno::ENOENT))?;
             new_lock.files.insert(new_name.into(), entry);
         } else {
-            let mut new_lock = new_dir.0.lock();
-            let mut old_lock = self.0.lock();
+            let mut new_lock = new_dir.inner.lock_no_irq();
+            let mut old_lock = self.inner.lock_no_irq();
             let entry = old_lock
                 .files
                 .remove(old_name)
@@ -315,12 +324,12 @@ impl FileLike for File {
     fn stat(&self) -> Result<Stat> {
         use kevlar_vfs::stat::FileSize;
         let mut stat = self.stat;
-        stat.size = FileSize(self.data.lock().len() as isize);
+        stat.size = FileSize(self.data.lock_no_irq().len() as isize);
         Ok(stat)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
-        let data = self.data.lock();
+        let data = self.data.lock_no_irq();
         if offset > data.len() {
             return Ok(0);
         }
@@ -335,14 +344,14 @@ impl FileLike for File {
         buf: UserBuffer<'_>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        let mut data = self.data.lock();
+        let mut data = self.data.lock_no_irq();
         let mut reader = UserBufReader::from(buf);
         data.resize(offset + reader.remaining_len(), 0);
         reader.read_bytes(&mut data[offset..])
     }
 
     fn truncate(&self, length: usize) -> Result<()> {
-        self.data.lock().resize(length, 0);
+        self.data.lock_no_irq().resize(length, 0);
         Ok(())
     }
 }

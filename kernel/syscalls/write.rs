@@ -10,7 +10,9 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_write(&mut self, fd: Fd, uaddr: UserVAddr, len: usize) -> Result<isize> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
-        let opened_file = current_process().get_opened_file_by_fd(fd)?;
+        // Hold the fd table guard across the write to avoid Arc::clone/drop.
+        let opened_files = current_process().opened_files_no_irq();
+        let opened_file = opened_files.get(fd)?;
         let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
 
         // MAX_READ_WRITE_LEN limit guarantees total_len is in the range of isize.

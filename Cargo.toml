@@ -9,6 +9,8 @@ members = [
 ]
 
 [profile.dev]
+opt-level = 2
+debug-assertions = false
 panic = "abort"
 
 [profile.release]

@@ -424,6 +424,36 @@ mod syscall_numbers {
 
 use syscall_numbers::*;
 
+/// Stack-allocated path buffer for syscall path arguments.
+///
+/// Avoids 3 heap allocations per path-taking syscall (512-byte Vec for
+/// UserCStr, String for owned copy, String for PathBuf).
+struct StackPathBuf {
+    buf: [u8; 256],
+    len: usize,
+}
+
+impl StackPathBuf {
+    fn from_user(uaddr: usize) -> Result<StackPathBuf> {
+        let mut spb = StackPathBuf {
+            buf: [0u8; 256],
+            len: 0,
+        };
+        let va = UserVAddr::new_nonnull(uaddr)?;
+        spb.len = va.read_cstr(&mut spb.buf)?;
+        // Validate UTF-8.
+        core::str::from_utf8(&spb.buf[..spb.len])
+            .map_err(|_| Error::new(Errno::EINVAL))?;
+        Ok(spb)
+    }
+
+    fn as_path(&self) -> &Path {
+        // Safety: we validated UTF-8 in from_user.
+        let s = core::str::from_utf8(&self.buf[..self.len]).unwrap();
+        Path::new(s)
+    }
+}
+
 fn resolve_path(uaddr: usize) -> Result<PathBuf> {
     const PATH_MAX: usize = 512;
     Ok(Path::new(UserCStr::new(UserVAddr::new_nonnull(uaddr)?, PATH_MAX)?.as_str()).to_path_buf())
@@ -449,32 +479,41 @@ impl<'a> SyscallHandler<'a> {
         a6: usize,
         n: usize,
     ) -> Result<isize> {
-        let current = current_process();
-        let pid = current.pid().as_i32();
-        let name = syscall_name_by_number(n);
+        // Single atomic load for all debug checks — avoids 5 separate
+        // atomic loads on the fast path when debugging is disabled.
+        let dbg = debug::get_filter();
+        let dbg_syscall = dbg.contains(DebugFilter::SYSCALL);
+        let dbg_canary = dbg.contains(DebugFilter::CANARY);
 
-        // Emit structured syscall entry event.
-        if debug::is_enabled(DebugFilter::SYSCALL) {
-            // Skip high-frequency stdio to avoid flooding the debug channel.
-            let is_stdio = (n == SYS_READ && a1 == 0)
-                || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
-            if !is_stdio {
-                debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallEntry {
-                    pid,
-                    name,
-                    number: n,
-                    args: [a1, a2, a3, a4, a5, a6],
-                });
+        // Syscall name is only needed for debug output — skip the 100-arm
+        // match on the fast path.
+        let pid;
+        let name;
+        if dbg_syscall || dbg_canary {
+            let current = current_process();
+            pid = current.pid().as_i32();
+            name = syscall_name_by_number(n);
+
+            if dbg_syscall {
+                let is_stdio = (n == SYS_READ && a1 == 0)
+                    || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
+                if !is_stdio {
+                    debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallEntry {
+                        pid,
+                        name,
+                        number: n,
+                        args: [a1, a2, a3, a4, a5, a6],
+                    });
+                }
             }
+        } else {
+            pid = 0;
+            name = "";
         }
 
-        // Syscall trace logging now handled by the structured debug event
-        // system above (when debug=syscall is enabled).  The old trace!()
-        // here ran unconditionally, causing serial I/O on every syscall.
-
         // Stack canary check (pre-syscall).
-        let pre_canary = if debug::is_enabled(DebugFilter::CANARY) {
-            let fsbase = current.arch().fsbase.load() as usize;
+        let pre_canary = if dbg_canary {
+            let fsbase = current_process().arch().fsbase.load() as usize;
             debug::canary::check_and_emit(pid, fsbase, None, "pre_syscall", name)
         } else {
             None
@@ -484,7 +523,7 @@ impl<'a> SyscallHandler<'a> {
         let prof_start = debug::profiler::syscall_enter();
 
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
-            if debug::is_enabled(DebugFilter::SYSCALL) {
+            if dbg_syscall {
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
                     pid,
                     name,
@@ -500,23 +539,25 @@ impl<'a> SyscallHandler<'a> {
         debug::profiler::syscall_exit(n, prof_start);
 
         // Stack canary check (post-syscall).
-        if debug::is_enabled(DebugFilter::CANARY) {
+        if dbg_canary {
             let fsbase = current_process().arch().fsbase.load() as usize;
             debug::canary::check_and_emit(pid, fsbase, pre_canary, "post_syscall", name);
         }
 
         // Emit success result.
-        if ret.is_ok() && debug::is_enabled(DebugFilter::SYSCALL) {
-            let is_stdio = (n == SYS_READ && a1 == 0)
-                || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
-            if !is_stdio {
-                debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
-                    pid,
-                    name,
-                    number: n,
-                    result: *ret.as_ref().unwrap(),
-                    errno: None,
-                });
+        if dbg_syscall {
+            if let Ok(result) = &ret {
+                let is_stdio = (n == SYS_READ && a1 == 0)
+                    || ((n == SYS_WRITE || n == SYS_WRITEV) && (a1 == 1 || a1 == 2));
+                if !is_stdio {
+                    debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
+                        pid,
+                        name,
+                        number: n,
+                        result: *result,
+                        errno: None,
+                    });
+                }
             }
         }
 
@@ -539,11 +580,14 @@ impl<'a> SyscallHandler<'a> {
         n: usize,
     ) -> Result<isize> {
         match n {
-            SYS_OPEN => self.sys_open(
-                &resolve_path(a1)?,
-                bitflags_from_user!(OpenFlags, a2 as i32)?,
-                FileMode::new(a3 as u32),
-            ),
+            SYS_OPEN => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_open(
+                    p.as_path(),
+                    bitflags_from_user!(OpenFlags, a2 as i32)?,
+                    FileMode::new(a3 as u32),
+                )
+            }
             SYS_CLOSE => self.sys_close(Fd::new(a1 as i32)),
             SYS_READ => self.sys_read(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?, a3),
             SYS_WRITE => self.sys_write(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?, a3),
@@ -556,9 +600,15 @@ impl<'a> SyscallHandler<'a> {
                 Fd::new(a5 as i32),
                 a6 as c_off,
             ),
-            SYS_STAT => self.sys_stat(&resolve_path(a1)?, UserVAddr::new_nonnull(a2)?),
+            SYS_STAT => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_stat(p.as_path(), UserVAddr::new_nonnull(a2)?)
+            }
             SYS_FSTAT => self.sys_fstat(Fd::new(a1 as c_int), UserVAddr::new_nonnull(a2)?),
-            SYS_LSTAT => self.sys_lstat(&resolve_path(a1)?, UserVAddr::new_nonnull(a2)?),
+            SYS_LSTAT => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_lstat(p.as_path(), UserVAddr::new_nonnull(a2)?)
+            }
             SYS_FCNTL => self.sys_fcntl(Fd::new(a1 as i32), a2 as c_int, a3),
             SYS_LINK => self.sys_link(&resolve_path(a1)?, &resolve_path(a2)?),
             SYS_LINKAT => self.sys_linkat(
@@ -691,19 +741,28 @@ impl<'a> SyscallHandler<'a> {
             SYS_PIPE2 => self.sys_pipe2(UserVAddr::new_nonnull(a1)?, a2 as c_int),
             // M1 Phase 3: *at syscalls + file ops
             SYS_LSEEK => self.sys_lseek(Fd::new(a1 as c_int), a2 as i64, a3 as c_int),
-            SYS_ACCESS => self.sys_access(&resolve_path(a1)?),
-            SYS_OPENAT => self.sys_openat(
-                CwdOrFd::parse(a1 as c_int),
-                &resolve_path(a2)?,
-                bitflags_from_user!(OpenFlags, a3 as i32)?,
-                FileMode::new(a4 as u32),
-            ),
-            SYS_NEWFSTATAT => self.sys_newfstatat(
-                CwdOrFd::parse(a1 as c_int),
-                &resolve_path(a2)?,
-                UserVAddr::new_nonnull(a3)?,
-                a4 as c_int,
-            ),
+            SYS_ACCESS => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_access(p.as_path())
+            }
+            SYS_OPENAT => {
+                let p = StackPathBuf::from_user(a2)?;
+                self.sys_openat(
+                    CwdOrFd::parse(a1 as c_int),
+                    p.as_path(),
+                    bitflags_from_user!(OpenFlags, a3 as i32)?,
+                    FileMode::new(a4 as u32),
+                )
+            }
+            SYS_NEWFSTATAT => {
+                let p = StackPathBuf::from_user(a2)?;
+                self.sys_newfstatat(
+                    CwdOrFd::parse(a1 as c_int),
+                    p.as_path(),
+                    UserVAddr::new_nonnull(a3)?,
+                    a4 as c_int,
+                )
+            }
             // M1 Phase 6: Memory management
             SYS_MPROTECT => self.sys_mprotect(
                 UserVAddr::new_nonnull(a1)?,
@@ -721,7 +780,10 @@ impl<'a> SyscallHandler<'a> {
             SYS_GETRLIMIT => self.sys_getrlimit(a1 as c_int, UserVAddr::new_nonnull(a2)?),
             SYS_SYSINFO => self.sys_sysinfo(UserVAddr::new_nonnull(a1)?),
             // ARM64-specific *at syscalls (also available on x86_64)
-            SYS_FACCESSAT => self.sys_access(&resolve_path(a2)?),
+            SYS_FACCESSAT => {
+                let p = StackPathBuf::from_user(a2)?;
+                self.sys_access(p.as_path())
+            }
             SYS_PPOLL => self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int),
             SYS_PRLIMIT64 => self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?),
             // M2: Dynamic linking

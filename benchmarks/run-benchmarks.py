@@ -50,8 +50,13 @@ def run_kevlar_bench(profile="balanced", timeout_secs=120, arch="x64"):
         "python3", "tools/run-qemu.py",
         "--arch", arch,
         "--append-cmdline", "init=/bin/bench",
-        kernel_elf,
     ]
+
+    # Use KVM when available for realistic performance numbers.
+    if os.path.exists("/dev/kvm"):
+        qemu_cmd.append("--kvm")
+
+    qemu_cmd.append(kernel_elf)
 
     try:
         result = subprocess.run(

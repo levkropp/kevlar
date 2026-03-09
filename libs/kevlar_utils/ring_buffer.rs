@@ -91,6 +91,34 @@ impl<T, const CAP: usize> RingBuffer<T, CAP> {
         Some(self.slice(range))
     }
 
+    /// Returns a mutable slice of the next contiguous free space.
+    /// After writing into it, call `advance_write(n)` to commit `n` elements.
+    pub fn writable_contiguous(&mut self) -> &mut [T] {
+        if self.full {
+            return &mut [];
+        }
+        let end = if self.wp >= self.rp { CAP } else { self.rp };
+        self.slice_mut(self.wp..end)
+    }
+
+    /// Advances the write pointer by `n` after filling via `writable_contiguous`.
+    pub fn advance_write(&mut self, n: usize) {
+        debug_assert!(n <= if self.wp >= self.rp { CAP - self.wp } else { self.rp - self.wp });
+        self.wp = (self.wp + n) % CAP;
+        self.full = self.wp == self.rp;
+    }
+
+    /// Returns the number of free bytes.
+    pub fn free(&self) -> usize {
+        if self.full {
+            0
+        } else if self.wp >= self.rp {
+            (CAP - self.wp) + self.rp
+        } else {
+            self.rp - self.wp
+        }
+    }
+
     fn slice(&self, range: Range<usize>) -> &[T] {
         debug_assert!(range.end <= CAP);
         unsafe {

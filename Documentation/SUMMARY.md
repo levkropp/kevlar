@@ -47,3 +47,4 @@
 - [Fixing Fork: Two Bugs, One Wild Pointer](blog/014-fixing-fork.md)
 - [The 8-Byte Copy That Should Have Been 4](blog/015-debug-tooling-and-usercopy-fix.md)
 - [From 13µs to 200ns: Closing the KVM Performance Gap](blog/016-kvm-performance.md)
+- [Beating Linux: Syscall Performance in a Rust Kernel](blog/017-beating-linux-syscall-performance.md)

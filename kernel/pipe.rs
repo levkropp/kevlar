@@ -17,7 +17,7 @@ use crate::{
 
 const PIPE_SIZE: usize = 4096;
 
-// TODO: Fine-granined wait queue, say, embed a queue in every pipes.
+// TODO: Fine-grained wait queue, say, embed a queue in every pipe.
 static PIPE_WAIT_QUEUE: Once<WaitQueue> = Once::new();
 
 struct PipeInner {
@@ -46,34 +46,64 @@ impl Pipe {
     }
 }
 
+/// Copy from user buffer directly into the pipe's ring buffer.
+/// Avoids the intermediate stack buffer by writing into the ring buffer's
+/// contiguous free space directly.
+fn copy_user_to_pipe(
+    ring: &mut RingBuffer<u8, PIPE_SIZE>,
+    buf: &UserBuffer<'_>,
+) -> Result<usize> {
+    let mut reader = UserBufReader::from(buf.clone());
+    let mut written_len = 0;
+    loop {
+        let dst = ring.writable_contiguous();
+        if dst.is_empty() || reader.remaining_len() == 0 {
+            break;
+        }
+        let copied = reader.read_bytes(dst)?;
+        if copied == 0 {
+            break;
+        }
+        ring.advance_write(copied);
+        written_len += copied;
+    }
+    Ok(written_len)
+}
+
 pub struct PipeWriter(Arc<SpinLock<PipeInner>>);
 
 impl FileLike for PipeWriter {
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, options: &OpenOptions) -> Result<usize> {
-        let ret_value = PIPE_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut pipe = self.0.lock();
+        // Fast path: try writing without wait queue overhead.
+        // Avoids process enqueue/dequeue + 3 lock cycles when data fits immediately.
+        {
+            let mut pipe = self.0.lock_no_irq();
             if pipe.closed_by_reader {
-                // TODO: SIGPIPE?
                 return Err(Errno::EPIPE.into());
             }
 
-            let mut written_len = 0;
-            let mut reader = UserBufReader::from(buf.clone());
-            loop {
-                let mut tmp = [0; 512];
-                let copied_len = reader.read_bytes(&mut tmp)?;
-                if copied_len == 0 {
-                    break;
-                }
-
-                match pipe.buf.push_slice(&tmp[..copied_len]) {
-                    0 => break,
-                    len => {
-                        written_len += len;
-                    }
+            if pipe.buf.is_writable() {
+                let written_len = copy_user_to_pipe(&mut pipe.buf, &buf)?;
+                if written_len > 0 {
+                    drop(pipe);
+                    PIPE_WAIT_QUEUE.wake_all();
+                    return Ok(written_len);
                 }
             }
 
+            if options.nonblock {
+                return Ok(0);
+            }
+        }
+
+        // Slow path: buffer full, wait for reader to drain.
+        let ret_value = PIPE_WAIT_QUEUE.sleep_signalable_until(|| {
+            let mut pipe = self.0.lock_no_irq();
+            if pipe.closed_by_reader {
+                return Err(Errno::EPIPE.into());
+            }
+
+            let written_len = copy_user_to_pipe(&mut pipe.buf, &buf)?;
             if written_len > 0 {
                 Ok(Some(written_len))
             } else if options.nonblock {
@@ -83,7 +113,6 @@ impl FileLike for PipeWriter {
             }
         });
 
-        // Try waking readers...
         PIPE_WAIT_QUEUE.wake_all();
         ret_value
     }
@@ -99,7 +128,7 @@ impl FileLike for PipeWriter {
 
     fn poll(&self) -> Result<PollStatus> {
         let mut status = PollStatus::empty();
-        let inner = self.0.lock();
+        let inner = self.0.lock_no_irq();
 
         if inner.buf.is_writable() {
             status |= PollStatus::POLLOUT;
@@ -117,7 +146,7 @@ impl fmt::Debug for PipeWriter {
 
 impl Drop for PipeWriter {
     fn drop(&mut self) {
-        self.0.lock().closed_by_writer = true;
+        self.0.lock_no_irq().closed_by_writer = true;
         PIPE_WAIT_QUEUE.wake_all();
     }
 }
@@ -131,8 +160,28 @@ impl FileLike for PipeReader {
 
     fn read(&self, _offset: usize, buf: UserBufferMut<'_>, options: &OpenOptions) -> Result<usize> {
         let mut writer = UserBufWriter::from(buf);
+
+        // Fast path: try reading without wait queue overhead.
+        {
+            let mut pipe = self.0.lock_no_irq();
+            while let Some(src) = pipe.buf.pop_slice(writer.remaining_len()) {
+                writer.write_bytes(src)?;
+            }
+
+            if writer.written_len() > 0 {
+                drop(pipe);
+                PIPE_WAIT_QUEUE.wake_all();
+                return Ok(writer.written_len());
+            }
+
+            if options.nonblock || pipe.closed_by_writer {
+                return Ok(0);
+            }
+        }
+
+        // Slow path: buffer empty, wait for writer.
         let ret_value = PIPE_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut pipe = self.0.lock();
+            let mut pipe = self.0.lock_no_irq();
 
             while let Some(src) = pipe.buf.pop_slice(writer.remaining_len()) {
                 writer.write_bytes(src)?;
@@ -147,14 +196,13 @@ impl FileLike for PipeReader {
             }
         });
 
-        // Try waking writers...
         PIPE_WAIT_QUEUE.wake_all();
         ret_value
     }
 
     fn poll(&self) -> Result<PollStatus> {
         let mut status = PollStatus::empty();
-        let inner = self.0.lock();
+        let inner = self.0.lock_no_irq();
 
         if inner.buf.is_readable() {
             status |= PollStatus::POLLIN;
@@ -172,7 +220,7 @@ impl fmt::Debug for PipeReader {
 
 impl Drop for PipeReader {
     fn drop(&mut self) {
-        self.0.lock().closed_by_reader = false;
+        self.0.lock_no_irq().closed_by_reader = true;
         PIPE_WAIT_QUEUE.wake_all();
     }
 }

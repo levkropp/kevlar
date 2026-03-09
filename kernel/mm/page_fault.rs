@@ -118,8 +118,10 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     };
 
-    // Allocate and fill the page.
-    let paddr = alloc_pages(1, AllocPageFlags::USER).expect("failed to allocate an anonymous page");
+    // Allocate and fill the page.  Use DIRTY_OK to skip redundant zeroing
+    // inside the allocator (which holds the ZONES lock); we zero once here.
+    let paddr = alloc_pages(1, AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
+        .expect("failed to allocate an anonymous page");
     zero_page(paddr);
     match vma.area_type() {
         VmAreaType::Anonymous => { /* The page is already filled with zeros. Nothing to do. */ }

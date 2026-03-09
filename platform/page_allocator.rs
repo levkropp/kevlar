@@ -41,8 +41,8 @@ pub struct Stats {
 
 pub fn read_allocator_stats() -> Stats {
     Stats {
-        num_free_pages: NUM_FREE_PAGES.load(Ordering::SeqCst),
-        num_total_pages: NUM_TOTAL_PAGES.load(Ordering::SeqCst),
+        num_free_pages: NUM_FREE_PAGES.load(Ordering::Relaxed),
+        num_total_pages: NUM_TOTAL_PAGES.load(Ordering::Relaxed),
     }
 }
 
@@ -102,7 +102,7 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
                 }
             }
 
-            NUM_FREE_PAGES.fetch_sub(num_pages, Ordering::SeqCst);
+            NUM_FREE_PAGES.fetch_sub(num_pages, Ordering::Relaxed);
             return Ok(paddr);
         }
     }
@@ -126,7 +126,7 @@ pub fn alloc_pages_owned(
                 }
             }
 
-            NUM_FREE_PAGES.fetch_sub(num_pages, Ordering::SeqCst);
+            NUM_FREE_PAGES.fetch_sub(num_pages, Ordering::Relaxed);
             return Ok(OwnedPages::new(paddr, num_pages));
         }
     }
@@ -151,7 +151,7 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     for zone in zones.iter_mut() {
         if zone.includes(paddr.value()) {
             zone.free_pages(paddr.value(), order);
-            NUM_FREE_PAGES.fetch_add(num_pages, Ordering::SeqCst);
+            NUM_FREE_PAGES.fetch_add(num_pages, Ordering::Relaxed);
             return;
         }
     }
@@ -169,8 +169,8 @@ pub fn init(areas: &[RamArea]) {
         debug_assert!(is_aligned(area.base.value(), PAGE_SIZE));
         let allocator =
             unsafe { Allocator::new(area.base.as_mut_ptr(), area.base.value(), area.len) };
-        NUM_FREE_PAGES.fetch_add(allocator.num_total_pages(), Ordering::SeqCst);
-        NUM_TOTAL_PAGES.fetch_add(allocator.num_total_pages(), Ordering::SeqCst);
+        NUM_FREE_PAGES.fetch_add(allocator.num_total_pages(), Ordering::Relaxed);
+        NUM_TOTAL_PAGES.fetch_add(allocator.num_total_pages(), Ordering::Relaxed);
         zones.push(allocator);
     }
 }

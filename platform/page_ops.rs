@@ -4,8 +4,20 @@
 use crate::address::PAddr;
 use crate::arch::PAGE_SIZE;
 
-/// Zero-fill a physical page.
+/// Zero-fill a physical page using `rep stosq` for hardware-optimized bulk fill.
 pub fn zero_page(paddr: PAddr) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let ptr = paddr.as_mut_ptr::<u64>();
+        core::arch::asm!(
+            "rep stosq",
+            inout("rdi") ptr => _,
+            inout("rcx") (PAGE_SIZE / 8) => _,
+            in("rax") 0u64,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
     unsafe {
         paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
     }

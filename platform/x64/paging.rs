@@ -65,8 +65,8 @@ fn traverse(
 
             let new_table =
                 alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            // alloc_pages already zeroes the page (no DIRTY_OK flag).
             unsafe {
-                new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
                 *entry = new_table.value() as u64 | attrs.bits()
             };
 

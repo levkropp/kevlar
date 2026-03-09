@@ -89,15 +89,78 @@ impl RootFs {
     }
 
     /// Resolves a path into an inode. If `follow_symlink` is `true`, symbolic
-    /// linked are resolved and will never return `INode::Symlink`.
+    /// links are resolved and will never return `INode::Symlink`.
+    ///
+    /// Fast path: avoids PathComponent/String heap allocations by walking
+    /// the directory tree directly.  Falls back to `lookup_path` for paths
+    /// containing ".." or symlinks in intermediate components.
     pub fn lookup_inode(&self, path: &Path, follow_symlink: bool) -> Result<INode> {
-        self.lookup_path(path, follow_symlink)
-            .map(|path_comp| path_comp.inode.clone())
+        if path.is_empty() {
+            return Err(Error::new(Errno::ENOENT));
+        }
+
+        let start = if path.is_absolute() {
+            self.root_path.inode.clone()
+        } else {
+            self.cwd_path.inode.clone()
+        };
+
+        let mut current = start;
+        let mut components = path.components().peekable();
+        while let Some(name) = components.next() {
+            match name {
+                "." => continue,
+                ".." => {
+                    // Fall back to full lookup for ".."
+                    return self.lookup_path(path, follow_symlink)
+                        .map(|pc| pc.inode.clone());
+                }
+                _ => {
+                    let dir = match &current {
+                        INode::Directory(d) => d,
+                        _ => return Err(Error::new(Errno::ENOTDIR)),
+                    };
+
+                    let mut inode = dir.lookup(name)?;
+
+                    // Check mount points.
+                    if let INode::Directory(ref dir) = inode {
+                        if let Some(mp) = self.lookup_mount_point(dir)? {
+                            inode = mp.fs.root_dir()?.into();
+                        }
+                    }
+
+                    if components.peek().is_some() {
+                        // Intermediate component.
+                        match &inode {
+                            INode::Directory(_) => { current = inode; }
+                            INode::Symlink(_) => {
+                                // Fall back for symlinks in intermediate path.
+                                return self.lookup_path(path, follow_symlink)
+                                    .map(|pc| pc.inode.clone());
+                            }
+                            _ => return Err(Error::new(Errno::ENOTDIR)),
+                        }
+                    } else {
+                        // Last component.
+                        if follow_symlink {
+                            if let INode::Symlink(symlink) = &inode {
+                                let linked_to = symlink.linked_to()?;
+                                return self.lookup_inode(&linked_to, follow_symlink);
+                            }
+                        }
+                        return Ok(inode);
+                    }
+                }
+            }
+        }
+
+        // Path is "/" or ends with "."
+        Ok(current)
     }
 
     fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<&MountPoint>> {
-        let stat = dir.stat()?;
-        let inode_no = stat.inode_no; // Move out of unaligned
+        let inode_no = dir.inode_no()?;
         Ok(self.mount_points.get(&inode_no))
     }
 

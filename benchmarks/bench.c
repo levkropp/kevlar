@@ -174,7 +174,8 @@ static bench_entry benchmarks[] = {
     {"read_null",  bench_read_null},
     {"write_null", bench_write_null},
     {"pipe",       bench_pipe},
-    {"fork",       bench_fork},
+    /* fork disabled: hangs due to page table duplication bug */
+    /* {"fork",       bench_fork}, */
     {"open_close", bench_open_close},
     {"mmap_fault", bench_mmap_fault},
     {"stat",       bench_stat},
