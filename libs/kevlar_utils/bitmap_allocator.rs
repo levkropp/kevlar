@@ -21,7 +21,7 @@ impl BitMapAllocator {
         let bitmap_reserved_len = align_up(num_pages / 8, PAGE_SIZE);
         let bitmap_actual_len = (num_pages / 8) - (bitmap_reserved_len / PAGE_SIZE);
         let bitmap =
-            BitSlice::from_slice_mut(core::slice::from_raw_parts_mut(base, bitmap_actual_len));
+            BitSlice::from_slice_mut(unsafe { core::slice::from_raw_parts_mut(base, bitmap_actual_len) });
 
         debug_assert!(bitmap_reserved_len >= bitmap_actual_len);
         bitmap.fill(false);

@@ -35,7 +35,7 @@ impl<'a> SyscallHandler<'a> {
         if flags.contains(OpenFlags::O_CREAT) {
             match create_file(path, flags, mode) {
                 Ok(_) => {}
-                Err(err) if flags.contains(OpenFlags::O_EXCL) && err.errno() == Errno::EEXIST => {}
+                Err(err) if !flags.contains(OpenFlags::O_EXCL) && err.errno() == Errno::EEXIST => {}
                 Err(err) => {
                     return Err(err);
                 }
@@ -56,6 +56,17 @@ impl<'a> SyscallHandler<'a> {
         }
 
         let fd = opened_files.open(path_comp, flags.into())?;
+
+        // O_TRUNC: truncate the file if opened for writing.
+        if flags.contains(OpenFlags::O_TRUNC) {
+            let access = flags.bits() & 0o3;
+            if access == O_WRONLY as i32 || access == O_RDWR as i32 {
+                if let Ok(file) = opened_files.get(fd)?.as_file() {
+                    let _ = file.truncate(0);
+                }
+            }
+        }
+
         Ok(fd.as_usize() as isize)
     }
 }

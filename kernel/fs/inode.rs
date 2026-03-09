@@ -86,6 +86,11 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         Err(Error::new(Errno::EBADF))
     }
 
+    /// `ftruncate(2)`.
+    fn truncate(&self, _length: usize) -> Result<()> {
+        Err(Error::new(Errno::EINVAL))
+    }
+
     /// `bind(2)`.
     fn bind(&self, _sockaddr: SockAddr) -> Result<()> {
         Err(Error::new(Errno::EBADF))
@@ -182,6 +187,10 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>>;
     /// `link(2)`.
     fn link(&self, _name: &str, _link_to: &INode) -> Result<()>;
+    /// `symlink(2)` — create a symbolic link in this directory.
+    fn create_symlink(&self, _name: &str, _target: &str) -> Result<INode> {
+        Err(Error::new(Errno::ENOSYS))
+    }
     /// `unlink(2)` — remove a file entry from this directory.
     fn unlink(&self, _name: &str) -> Result<()> {
         Err(Error::new(Errno::ENOSYS))

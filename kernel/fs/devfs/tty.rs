@@ -12,7 +12,7 @@ use crate::{
     prelude::*,
     process::process_group::{PgId, ProcessGroup},
     result::Result,
-    tty::line_discipline::*,
+    tty::line_discipline::{LineControl, LineDiscipline, Termios, WinSize},
     user_buffer::UserBuffer,
     user_buffer::{UserBufReader, UserBufferMut},
 };
@@ -55,9 +55,14 @@ impl Tty {
     }
 }
 
+const TCGETS: usize = 0x5401;
+const TCSETS: usize = 0x5402;
+const TCSETSW: usize = 0x5403;
+const TCSETSF: usize = 0x5404;
 const TIOCGPGRP: usize = 0x540f;
 const TIOCSPGRP: usize = 0x5410;
 const TIOCGWINSZ: usize = 0x5413;
+const TIOCSWINSZ: usize = 0x5414;
 
 impl fmt::Debug for Tty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -68,6 +73,16 @@ impl fmt::Debug for Tty {
 impl FileLike for Tty {
     fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
         match cmd {
+            TCGETS => {
+                let termios = self.discipline.termios();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<Termios>(&termios)?;
+            }
+            TCSETS | TCSETSW | TCSETSF => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let termios = arg.read::<Termios>()?;
+                self.discipline.set_termios(termios);
+            }
             TIOCGPGRP => {
                 let process_group = self
                     .discipline
@@ -87,8 +102,14 @@ impl FileLike for Tty {
                     .set_foreground_process_group(Arc::downgrade(&pg));
             }
             TIOCGWINSZ => {
-                // TODO: It's not yet implemented but should return a successful
-                //       value since it is used in musl's isatty(3).
+                let ws = self.discipline.winsize();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<WinSize>(&ws)?;
+            }
+            TIOCSWINSZ => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let ws = arg.read::<WinSize>()?;
+                self.discipline.set_winsize(ws);
             }
             _ => return Err(Errno::ENOSYS.into()),
         }

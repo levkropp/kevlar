@@ -37,8 +37,10 @@ unsafe extern "C" {
 }
 
 unsafe fn push_stack(mut rsp: *mut u64, value: u64) -> *mut u64 {
-    rsp = rsp.sub(1);
-    rsp.write(value);
+    unsafe {
+        rsp = rsp.sub(1);
+        rsp.write(value);
+    }
     rsp
 }
 

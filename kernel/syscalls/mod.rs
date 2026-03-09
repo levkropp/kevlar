@@ -115,6 +115,30 @@ mod madvise;
 mod pread64;
 mod set_robust_list;
 
+// M3: Terminal control, session management, *at syscalls, file ops
+mod fchdir;
+mod ftruncate;
+mod getrusage;
+mod mkdirat;
+mod pwrite64;
+mod readlinkat;
+mod readv;
+mod renameat;
+mod getsid;
+mod setsid;
+mod sigaltstack;
+mod symlinkat;
+mod unlinkat;
+
+// M3 Phase 5: Job control, clone, additional stubs
+mod alarm;
+mod clone;
+mod fchmod;
+mod getgroups;
+mod pause;
+mod rt_sigsuspend;
+mod tgkill;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -221,8 +245,23 @@ mod syscall_numbers {
     pub const SYS_SETPGID: usize = 109;
     pub const SYS_GETPPID: usize = 110;
     pub const SYS_GETPGRP: usize = 111;
+    pub const SYS_SETSID: usize = 112;
     pub const SYS_SETGROUPS: usize = 116;
     pub const SYS_GETPGID: usize = 121;
+    pub const SYS_FCHDIR: usize = 81;
+    pub const SYS_FTRUNCATE: usize = 77;
+    pub const SYS_GETRUSAGE: usize = 98;
+    pub const SYS_READV: usize = 19;
+    pub const SYS_PWRITE64: usize = 18;
+    pub const SYS_READLINKAT: usize = 267;
+    pub const SYS_UNLINKAT: usize = 263;
+    pub const SYS_MKDIRAT: usize = 258;
+    pub const SYS_RENAMEAT: usize = 264;
+    pub const SYS_RENAMEAT2: usize = 316;
+    pub const SYS_SYMLINK: usize = 88;
+    pub const SYS_SYMLINKAT: usize = 266;
+    pub const SYS_GETSID: usize = 124;
+    pub const SYS_SIGALTSTACK: usize = 131;
     pub const SYS_ARCH_PRCTL: usize = 158;
     pub const SYS_REBOOT: usize = 169;
     pub const SYS_GETTID: usize = 186;
@@ -245,6 +284,13 @@ mod syscall_numbers {
     pub const SYS_FUTEX: usize = 202;
     pub const SYS_SET_ROBUST_LIST: usize = 273;
     pub const SYS_GETRANDOM: usize = 318;
+    pub const SYS_TGKILL: usize = 234;
+    pub const SYS_RT_SIGSUSPEND: usize = 130;
+    pub const SYS_FCHMOD: usize = 91;
+    pub const SYS_FCHOWN: usize = 93;
+    pub const SYS_PAUSE: usize = 34;
+    pub const SYS_ALARM: usize = 37;
+    pub const SYS_GETGROUPS: usize = 115;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -329,7 +375,18 @@ mod syscall_numbers {
     pub const SYS_UNAME: usize = 160;
     pub const SYS_SETPGID: usize = 154;
     pub const SYS_GETPGID: usize = 155;
+    pub const SYS_SETSID: usize = 157;
     pub const SYS_GETPGRP: usize = 1060; // compat
+    pub const SYS_FCHDIR: usize = 50;
+    pub const SYS_FTRUNCATE: usize = 46;
+    pub const SYS_GETRUSAGE: usize = 165;
+    pub const SYS_READV: usize = 65;
+    pub const SYS_PWRITE64: usize = 68;
+    pub const SYS_RENAMEAT2: usize = 276;
+    pub const SYS_SYMLINK: usize = 0xF00F; // compat (arm64 uses symlinkat)
+    pub const SYS_SYMLINKAT: usize = 36;
+    pub const SYS_GETSID: usize = 156;
+    pub const SYS_SIGALTSTACK: usize = 132;
     pub const SYS_SETUID: usize = 146;
     pub const SYS_SETGID: usize = 144;
     pub const SYS_SETGROUPS: usize = 159;
@@ -353,6 +410,15 @@ mod syscall_numbers {
     pub const SYS_SET_ROBUST_LIST: usize = 99;
     // ARM64 doesn't have arch_prctl; use a dummy value that won't conflict.
     pub const SYS_ARCH_PRCTL: usize = 0xFFFF;
+    pub const SYS_TGKILL: usize = 131;
+    pub const SYS_RT_SIGSUSPEND: usize = 133;
+    // ARM64 only has fchmodat(53)/fchownat(55), not fchmod/fchown.
+    pub const SYS_FCHMOD: usize = 0xF010;
+    pub const SYS_FCHOWN: usize = 0xF011;
+    // ARM64 doesn't have pause/alarm natively.
+    pub const SYS_PAUSE: usize = 0xF012;
+    pub const SYS_ALARM: usize = 0xF013;
+    pub const SYS_GETGROUPS: usize = 158;
 }
 
 use syscall_numbers::*;
@@ -500,10 +566,7 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new_nonnull(a3)?,
             ),
             SYS_FORK => self.sys_fork(),
-            SYS_CLONE => {
-                // Treat clone(SIGCHLD, 0, ...) as fork. This covers musl's fork().
-                self.sys_fork()
-            }
+            SYS_CLONE => self.sys_clone(a1, a2, a3, a4, a5),
             SYS_WAIT4 => self.sys_wait4(
                 PId::new(a1 as i32),
                 UserVAddr::new(a2),
@@ -625,6 +688,69 @@ impl<'a> SyscallHandler<'a> {
             SYS_MADVISE => self.sys_madvise(a1, a2, a3 as i32),
             SYS_FUTEX => self.sys_futex(a1, a2 as i32, a3 as u32, a4, a5, a6 as u32),
             SYS_SET_ROBUST_LIST => self.sys_set_robust_list(a1, a2),
+            // M3: Terminal control, session management, *at syscalls, file ops
+            SYS_SETSID => self.sys_setsid(),
+            SYS_FCHDIR => self.sys_fchdir(Fd::new(a1 as c_int)),
+            SYS_FTRUNCATE => self.sys_ftruncate(Fd::new(a1 as c_int), a2),
+            SYS_GETRUSAGE => self.sys_getrusage(a1 as c_int, UserVAddr::new_nonnull(a2)?),
+            SYS_READV => self.sys_readv(Fd::new(a1 as c_int), UserVAddr::new_nonnull(a2)?, a3),
+            SYS_PWRITE64 => self.sys_pwrite64(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3,
+                a4,
+            ),
+            SYS_READLINKAT => self.sys_readlinkat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+                a4,
+            ),
+            SYS_UNLINKAT => self.sys_unlinkat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                a3 as i32,
+            ),
+            SYS_MKDIRAT => self.sys_mkdirat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                FileMode::new(a3 as u32),
+            ),
+            SYS_GETSID => self.sys_getsid(PId::new(a1 as i32)),
+            SYS_SIGALTSTACK => self.sys_sigaltstack(a1, a2),
+            SYS_SYMLINK => self.sys_symlink(&resolve_path(a1)?, &resolve_path(a2)?),
+            SYS_SYMLINKAT => self.sys_symlinkat(
+                &resolve_path(a1)?,
+                CwdOrFd::parse(a2 as c_int),
+                &resolve_path(a3)?,
+            ),
+            SYS_RENAMEAT | SYS_RENAMEAT2 => self.sys_renameat(
+                CwdOrFd::parse(a1 as c_int),
+                &resolve_path(a2)?,
+                CwdOrFd::parse(a3 as c_int),
+                &resolve_path(a4)?,
+            ),
+            // M3 Phase 5: Job control + additional stubs
+            SYS_TGKILL => self.sys_tgkill(a1 as c_int, a2 as c_int, a3 as c_int),
+            SYS_RT_SIGSUSPEND => self.sys_rt_sigsuspend(UserVAddr::new_nonnull(a1)?, a2),
+            SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
+            SYS_FCHOWN => Ok(0), // stub
+            SYS_FCHMODAT => self.sys_fchmodat(
+                a1 as i32,
+                &resolve_path(a2)?,
+                a3 as u32,
+                a4 as i32,
+            ),
+            SYS_FCHOWNAT => self.sys_fchownat(
+                a1 as i32,
+                &resolve_path(a2)?,
+                a3 as u32,
+                a4 as u32,
+                a5 as i32,
+            ),
+            SYS_PAUSE => self.sys_pause(),
+            SYS_ALARM => self.sys_alarm(a1 as u32),
+            SYS_GETGROUPS => self.sys_getgroups(a1, a2),
             _ => {
                 debug_warn!(
                     "unimplemented system call: {} (n={})",
@@ -733,6 +859,30 @@ fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_MADVISE => "madvise",
         SYS_FUTEX => "futex",
         SYS_SET_ROBUST_LIST => "set_robust_list",
+        SYS_SETSID => "setsid",
+        SYS_FCHDIR => "fchdir",
+        SYS_FTRUNCATE => "ftruncate",
+        SYS_GETRUSAGE => "getrusage",
+        SYS_READV => "readv",
+        SYS_PWRITE64 => "pwrite64",
+        SYS_READLINKAT => "readlinkat",
+        SYS_UNLINKAT => "unlinkat",
+        SYS_MKDIRAT => "mkdirat",
+        SYS_RENAMEAT => "renameat",
+        SYS_RENAMEAT2 => "renameat2",
+        SYS_SYMLINK => "symlink",
+        SYS_SYMLINKAT => "symlinkat",
+        SYS_GETSID => "getsid",
+        SYS_SIGALTSTACK => "sigaltstack",
+        SYS_TGKILL => "tgkill",
+        SYS_RT_SIGSUSPEND => "rt_sigsuspend",
+        SYS_FCHMOD => "fchmod",
+        SYS_FCHOWN => "fchown",
+        SYS_FCHMODAT => "fchmodat",
+        SYS_FCHOWNAT => "fchownat",
+        SYS_PAUSE => "pause",
+        SYS_ALARM => "alarm",
+        SYS_GETGROUPS => "getgroups",
         _ => "(unknown)",
     }
 }

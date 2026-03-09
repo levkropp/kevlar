@@ -2,6 +2,7 @@
 //! An OS-agnostic bootstrap and runtime support library for operating system
 //! kernels.
 #![no_std]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 

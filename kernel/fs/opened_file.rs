@@ -38,6 +38,7 @@ bitflags! {
 pub struct OpenOptions {
     pub nonblock: bool,
     pub close_on_exec: bool,
+    pub append: bool,
 }
 
 impl OpenOptions {
@@ -45,6 +46,7 @@ impl OpenOptions {
         OpenOptions {
             nonblock,
             close_on_exec: cloexec,
+            append: false,
         }
     }
 
@@ -52,6 +54,7 @@ impl OpenOptions {
         OpenOptions {
             nonblock: false,
             close_on_exec: false,
+            append: false,
         }
     }
 
@@ -59,6 +62,7 @@ impl OpenOptions {
         OpenOptions {
             nonblock: false,
             close_on_exec: false,
+            append: false,
         }
     }
 }
@@ -68,6 +72,7 @@ impl From<OpenFlags> for OpenOptions {
         OpenOptions {
             nonblock: flags.contains(OpenFlags::O_NONBLOCK),
             close_on_exec: flags.contains(OpenFlags::O_CLOEXEC),
+            append: flags.contains(OpenFlags::O_APPEND),
         }
     }
 }
@@ -200,9 +205,15 @@ impl OpenedFile {
     }
 
     pub fn write(&self, buf: UserBuffer<'_>) -> Result<usize> {
-        // Avoid holding self.options and self.pos locks by copying.
         let options = self.options();
-        let pos = self.pos();
+        let pos = if options.append {
+            // O_APPEND: always write at the end of the file.
+            let size = self.as_file()?.stat()?.size.0 as usize;
+            self.pos.store(size);
+            size
+        } else {
+            self.pos()
+        };
 
         let written_len = self.as_file()?.write(pos, buf, &options)?;
         self.pos.fetch_add(written_len);

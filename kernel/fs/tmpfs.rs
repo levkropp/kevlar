@@ -10,9 +10,10 @@ use core::{
 
 use super::{
     file_system::FileSystem,
-    inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo},
+    inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, Symlink as SymlinkTrait},
     opened_file::OpenOptions,
-    stat::{FileMode, Stat, S_IFDIR, S_IFREG},
+    path::PathBuf,
+    stat::{FileMode, Stat, S_IFDIR, S_IFLNK, S_IFREG},
 };
 use crate::{
     result::{Errno, Error, Result},
@@ -57,6 +58,7 @@ impl FileSystem for TmpFs {
 enum TmpFsINode {
     File(Arc<dyn FileLike>),
     Directory(Arc<Dir>),
+    Symlink(Arc<TmpFsSymlink>),
 }
 
 struct DirInner {
@@ -104,6 +106,7 @@ impl Directory for Dir {
             .map(|tmpfs_inode| match tmpfs_inode {
                 TmpFsINode::File(file) => file.clone().into(),
                 TmpFsINode::Directory(dir) => (dir.clone() as Arc<dyn Directory>).into(),
+                TmpFsINode::Symlink(sym) => (sym.clone() as Arc<dyn SymlinkTrait>).into(),
             })
             .ok_or_else(|| Error::new(Errno::ENOENT))
     }
@@ -131,6 +134,11 @@ impl Directory for Dir {
                 file_type: FileType::Regular,
                 name: name.clone(),
             },
+            TmpFsINode::Symlink(sym) => DirEntry {
+                inode_no: sym.stat.inode_no,
+                file_type: FileType::Link,
+                name: name.clone(),
+            },
         };
 
         Ok(Some(entry))
@@ -147,7 +155,10 @@ impl Directory for Dir {
                 let dir: &Arc<Dir> = downcast(dir).unwrap();
                 TmpFsINode::Directory(dir.clone())
             }
-            INode::Symlink(_) => unreachable!(), /* symblic links are not supported yet */
+            INode::Symlink(sym) => {
+                let sym: &Arc<TmpFsSymlink> = downcast(sym).unwrap();
+                TmpFsINode::Symlink(sym.clone())
+            }
         };
 
         self.0.lock().files.insert(name.to_owned(), tmpfs_inode);
@@ -168,6 +179,24 @@ impl Directory for Dir {
         Ok((inode as Arc<dyn FileLike>).into())
     }
 
+    fn create_symlink(&self, name: &str, target: &str) -> Result<INode> {
+        let mut dir_lock = self.0.lock();
+        if dir_lock.files.contains_key(name) {
+            return Err(Errno::EEXIST.into());
+        }
+
+        let inode = Arc::new(TmpFsSymlink {
+            target: target.into(),
+            stat: Stat {
+                inode_no: alloc_inode_no(),
+                mode: FileMode::new(S_IFLNK | 0o777),
+                ..Stat::zeroed()
+            },
+        });
+        dir_lock.files.insert(name.to_owned(), TmpFsINode::Symlink(inode.clone()));
+        Ok((inode as Arc<dyn SymlinkTrait>).into())
+    }
+
     fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
         let inode = Arc::new(Dir::new(alloc_inode_no()));
         self.0
@@ -182,7 +211,7 @@ impl Directory for Dir {
         let mut dir_lock = self.0.lock();
         match dir_lock.files.get(name) {
             Some(TmpFsINode::Directory(_)) => return Err(Errno::EISDIR.into()),
-            Some(TmpFsINode::File(_)) => {}
+            Some(TmpFsINode::File(_)) | Some(TmpFsINode::Symlink(_)) => {}
             None => return Err(Errno::ENOENT.into()),
         }
         dir_lock.files.remove(name);
@@ -197,7 +226,7 @@ impl Directory for Dir {
                     return Err(Errno::ENOTEMPTY.into());
                 }
             }
-            Some(TmpFsINode::File(_)) => return Err(Errno::ENOTDIR.into()),
+            Some(TmpFsINode::File(_)) | Some(TmpFsINode::Symlink(_)) => return Err(Errno::ENOTDIR.into()),
             None => return Err(Errno::ENOENT.into()),
         }
         dir_lock.files.remove(name);
@@ -290,11 +319,39 @@ impl FileLike for File {
         data.resize(offset + reader.remaining_len(), 0);
         reader.read_bytes(&mut data[offset..])
     }
+
+    fn truncate(&self, length: usize) -> Result<()> {
+        self.data.lock().resize(length, 0);
+        Ok(())
+    }
 }
 
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TmpFsFile").finish()
+    }
+}
+
+struct TmpFsSymlink {
+    target: String,
+    stat: Stat,
+}
+
+impl SymlinkTrait for TmpFsSymlink {
+    fn stat(&self) -> Result<Stat> {
+        Ok(self.stat)
+    }
+
+    fn linked_to(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(self.target.clone()))
+    }
+}
+
+impl fmt::Debug for TmpFsSymlink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TmpFsSymlink")
+            .field("target", &self.target)
+            .finish()
     }
 }
 

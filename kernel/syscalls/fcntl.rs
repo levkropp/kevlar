@@ -4,7 +4,7 @@ use crate::result::{Errno, Result};
 use crate::syscalls::SyscallHandler;
 use crate::{ctypes::*, process::current_process};
 
-const _F_DUPFD: c_int = 0;
+const F_DUPFD: c_int = 0;
 const F_GETFD: c_int = 1;
 const F_SETFD: c_int = 2;
 const F_GETFL: c_int = 3;
@@ -41,6 +41,10 @@ impl<'a> SyscallHandler<'a> {
                     .get(fd)?
                     .set_flags(OpenFlags::from_bits_truncate(arg as i32))?;
                 Ok(0)
+            }
+            F_DUPFD => {
+                let fd = opened_files.dup(fd, Some(arg as i32), OpenOptions::new(false, false))?;
+                Ok(fd.as_int() as isize)
             }
             F_DUPFD_CLOEXEC => {
                 let fd = opened_files.dup(fd, Some(arg as i32), OpenOptions::new(false, true))?;

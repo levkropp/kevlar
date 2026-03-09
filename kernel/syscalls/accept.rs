@@ -22,6 +22,7 @@ impl<'a> SyscallHandler<'a> {
         let options = OpenOptions {
             nonblock: false,
             close_on_exec: false,
+            append: false,
         };
         let fd = current_process()
             .opened_files()

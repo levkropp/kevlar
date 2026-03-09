@@ -6,13 +6,27 @@ use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIG_DFL, SIG_IGN};
 use crate::syscalls::SyscallHandler;
 use kevlar_runtime::address::UserVAddr;
 
+// Provenance: Own (POSIX sigaction(2) man page).
 impl<'a> SyscallHandler<'a> {
     pub fn sys_rt_sigaction(
         &mut self,
         signum: c_int,
         act: usize,
-        _oldact: Option<UserVAddr>,
+        oldact: Option<UserVAddr>,
     ) -> Result<isize> {
+        let signals = current_process().signals();
+
+        // Return the old action before overwriting it.
+        if let Some(oldact_ptr) = oldact {
+            let old_action = signals.lock().get_action(signum);
+            let handler_value: usize = match old_action {
+                SigAction::Ignore => SIG_IGN,
+                SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
+                SigAction::Handler { handler } => handler.value(),
+            };
+            oldact_ptr.write::<usize>(&handler_value)?;
+        }
+
         if let Some(act) = UserVAddr::new(act) {
             let handler = act.read::<usize>()?;
             let new_action = match handler {
@@ -26,13 +40,9 @@ impl<'a> SyscallHandler<'a> {
                 },
             };
 
-            current_process()
-                .signals()
-                .lock()
-                .set_action(signum, new_action)?;
+            signals.lock().set_action(signum, new_action)?;
         }
 
-        // TODO: Support oldact
         Ok(0)
     }
 }

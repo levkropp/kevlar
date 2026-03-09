@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 #![no_std]
 #![no_main]
+#![allow(unsafe_op_in_unsafe_fn)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
-#![feature(array_methods)]
 #![test_runner(crate::test_runner::run_tests)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(trait_alias)]

@@ -9,6 +9,7 @@ use kevlar_runtime::spinlock::SpinLock;
 use kevlar_utils::id_table::IdTable;
 
 use crate::{
+    ctypes::c_int,
     fs::{
         inode::{FileLike, INodeNo, PollStatus},
         opened_file::OpenOptions,
@@ -16,12 +17,13 @@ use crate::{
         tmpfs,
     },
     poll::POLL_WAIT_QUEUE,
-    process::WaitQueue,
+    process::{process_group::{PgId, ProcessGroup}, WaitQueue},
     result::{Errno, Error, Result},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
+use kevlar_runtime::address::UserVAddr;
 
-use super::line_discipline::{LineControl, LineDiscipline};
+use super::line_discipline::{LineControl, LineDiscipline, Termios, WinSize};
 
 static PTY_INDEX_TABLE: SpinLock<IdTable<16>> = SpinLock::new(IdTable::new());
 
@@ -108,9 +110,52 @@ impl FileLike for PtyMaster {
         Ok(written_len)
     }
 
-    fn ioctl(&self, cmd: usize, _arg: usize) -> Result<isize> {
-        debug_warn!("pty_master: unknown cmd={:x}", cmd);
-        Ok(0)
+    fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
+        const TCGETS: usize = 0x5401;
+        const TCSETS: usize = 0x5402;
+        const TCSETSW: usize = 0x5403;
+        const TCSETSF: usize = 0x5404;
+        const TIOCGWINSZ: usize = 0x5413;
+        const TIOCSWINSZ: usize = 0x5414;
+        const TIOCSPTLCK: usize = 0x40045431;
+        const TIOCGPTN: usize = 0x80045430;
+
+        match cmd {
+            TCGETS => {
+                let termios = self.discipline.termios();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<Termios>(&termios)?;
+                Ok(0)
+            }
+            TCSETS | TCSETSW | TCSETSF => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let termios = arg.read::<Termios>()?;
+                self.discipline.set_termios(termios);
+                Ok(0)
+            }
+            TIOCGPTN => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<u32>(&(self.index as u32))?;
+                Ok(0)
+            }
+            TIOCGWINSZ => {
+                let ws = self.discipline.winsize();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<WinSize>(&ws)?;
+                Ok(0)
+            }
+            TIOCSWINSZ => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let ws = arg.read::<WinSize>()?;
+                self.discipline.set_winsize(ws);
+                Ok(0)
+            }
+            TIOCSPTLCK => Ok(0),
+            _ => {
+                debug_warn!("pty_master: unknown cmd={:x}", cmd);
+                Ok(0)
+            }
+        }
     }
 
     fn stat(&self) -> Result<Stat> {
@@ -207,9 +252,60 @@ impl FileLike for PtySlave {
         })
     }
 
-    fn ioctl(&self, cmd: usize, _arg: usize) -> Result<isize> {
+    fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
+        const TCGETS: usize = 0x5401;
+        const TCSETS: usize = 0x5402;
+        const TCSETSW: usize = 0x5403;
+        const TCSETSF: usize = 0x5404;
+        const TIOCGPGRP: usize = 0x540f;
+        const TIOCSPGRP: usize = 0x5410;
+        const TIOCGWINSZ: usize = 0x5413;
+        const TIOCSWINSZ: usize = 0x5414;
         const TIOCSPTLCK: usize = 0x40045431;
+
         match cmd {
+            TCGETS => {
+                let termios = self.master.discipline.termios();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<Termios>(&termios)?;
+                Ok(0)
+            }
+            TCSETS | TCSETSW | TCSETSF => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let termios = arg.read::<Termios>()?;
+                self.master.discipline.set_termios(termios);
+                Ok(0)
+            }
+            TIOCGPGRP => {
+                let pg = self.master.discipline
+                    .foreground_process_group()
+                    .ok_or_else(|| Error::new(Errno::ENOENT))?;
+                let pgid = pg.lock().pgid().as_i32();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<c_int>(&pgid)?;
+                Ok(0)
+            }
+            TIOCSPGRP => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let pgid = arg.read::<c_int>()?;
+                let pg = ProcessGroup::find_by_pgid(PgId::new(pgid))
+                    .ok_or_else(|| Error::new(Errno::ESRCH))?;
+                self.master.discipline
+                    .set_foreground_process_group(Arc::downgrade(&pg));
+                Ok(0)
+            }
+            TIOCGWINSZ => {
+                let ws = self.master.discipline.winsize();
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write::<WinSize>(&ws)?;
+                Ok(0)
+            }
+            TIOCSWINSZ => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let ws = arg.read::<WinSize>()?;
+                self.master.discipline.set_winsize(ws);
+                Ok(0)
+            }
             TIOCSPTLCK => Ok(0),
             _ => {
                 debug_warn!("pty_slave: unknown cmd={:x}", cmd);

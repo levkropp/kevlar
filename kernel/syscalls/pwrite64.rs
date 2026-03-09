@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+//
+// Provenance: Own (POSIX pwrite(2) man page).
+use super::MAX_READ_WRITE_LEN;
+use crate::{fs::opened_file::Fd, prelude::*, user_buffer::UserBuffer};
+use crate::{process::current_process, syscalls::SyscallHandler};
+use core::cmp::min;
+use kevlar_runtime::address::UserVAddr;
+
+impl<'a> SyscallHandler<'a> {
+    pub fn sys_pwrite64(
+        &mut self,
+        fd: Fd,
+        uaddr: UserVAddr,
+        len: usize,
+        offset: usize,
+    ) -> Result<isize> {
+        let len = min(len, MAX_READ_WRITE_LEN);
+
+        let opened_file = current_process().get_opened_file_by_fd(fd)?;
+        let written_len = opened_file
+            .as_file()?
+            .write(offset, UserBuffer::from_uaddr(uaddr, len), &opened_file.options())?;
+
+        Ok(written_len as isize)
+    }
+}

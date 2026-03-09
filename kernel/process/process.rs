@@ -17,7 +17,7 @@ use crate::{
         elf::{Elf, ProgramHeader},
         init_stack::{estimate_user_init_stack_size, init_user_stack, Auxv},
         process_group::{PgId, ProcessGroup},
-        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGKILL},
+        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL},
         switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER,
     },
     random::read_secure_random,
@@ -106,6 +106,8 @@ pub enum ProcessState {
     Runnable,
     /// The process is sleeping. It can be resumed by signals.
     BlockedSignalable,
+    /// The process has been stopped by a signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU).
+    Stopped(Signal),
     /// The process has exited.
     ExitedWith(c_int),
 }
@@ -294,6 +296,11 @@ impl Process {
         &self.signals
     }
 
+    /// The signal mask lock.
+    pub fn sigset_lock(&self) -> SpinLockGuard<'_, SigSet> {
+        self.sigset.lock()
+    }
+
     /// Gets the current umask.
     #[allow(dead_code)]
     pub fn umask(&self) -> u32 {
@@ -331,7 +338,9 @@ impl Process {
         self.state.store(new_state);
         match new_state {
             ProcessState::Runnable => {}
-            ProcessState::BlockedSignalable | ProcessState::ExitedWith(_) => {
+            ProcessState::BlockedSignalable
+            | ProcessState::Stopped(_)
+            | ProcessState::ExitedWith(_) => {
                 scheduler.remove(self.pid);
             }
         }
@@ -348,6 +357,34 @@ impl Process {
         }
 
         SCHEDULER.lock().enqueue(self.pid);
+    }
+
+    /// Stops the current process with the given signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU).
+    /// The process is removed from the run queue and the parent is notified via SIGCHLD.
+    pub fn stop(signal: Signal) {
+        let current = current_process();
+        current.set_state(ProcessState::Stopped(signal));
+
+        // Wake parent so it can collect stopped status via wait4(WUNTRACED).
+        if let Some(parent) = current.parent.upgrade() {
+            parent.send_signal(SIGCHLD);
+        }
+        JOIN_WAIT_QUEUE.wake_all();
+        switch();
+    }
+
+    /// Continues a stopped process (SIGCONT handling).
+    pub fn continue_process(&self) {
+        if let ProcessState::Stopped(_) = self.state.load() {
+            self.state.store(ProcessState::Runnable);
+            SCHEDULER.lock().enqueue(self.pid);
+
+            // Wake parent so it can collect continued status via wait4(WCONTINUED).
+            if let Some(parent) = self.parent.upgrade() {
+                parent.send_signal(SIGCHLD);
+            }
+            JOIN_WAIT_QUEUE.wake_all();
+        }
     }
 
     /// Searches the opned file table by the file descriptor.
@@ -401,6 +438,11 @@ impl Process {
 
     /// Sends a signal.
     pub fn send_signal(&self, signal: Signal) {
+        // SIGCONT always continues a stopped process, even if SIGCONT is blocked.
+        if signal == SIGCONT {
+            self.continue_process();
+        }
+
         self.signals.lock().signal(signal);
         self.resume();
     }
@@ -451,6 +493,16 @@ impl Process {
                     SigAction::Terminate => {
                         trace!("terminating {:?} by {:?}", current.pid, signal,);
                         Process::exit(1 /* FIXME: */);
+                    }
+                    SigAction::Stop => {
+                        trace!("stopping {:?} by signal {:?}", current.pid, signal);
+                        drop(sigset);
+                        Process::stop(signal);
+                    }
+                    SigAction::Continue => {
+                        // SIGCONT is handled in send_signal; nothing to do here
+                        // if the process is already running.
+                        trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
                     SigAction::Handler { handler } => {
                         trace!("delivering {:?} to {:?}", signal, current.pid,);

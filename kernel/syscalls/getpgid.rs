@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use crate::{process::current_process, syscalls::SyscallHandler};
+//
+// Provenance: Own (POSIX getpgid(2) man page).
+use crate::prelude::*;
+use crate::{process::{current_process, Process}, syscalls::SyscallHandler};
 use crate::{process::PId, result::Result};
 
 impl<'a> SyscallHandler<'a> {
@@ -7,7 +10,9 @@ impl<'a> SyscallHandler<'a> {
         let pgid = if pid.as_i32() == 0 {
             current_process().process_group().lock().pgid()
         } else {
-            todo!()
+            let proc = Process::find_by_pid(pid)
+                .ok_or_else(|| Error::new(Errno::ESRCH))?;
+            proc.process_group().lock().pgid()
         };
 
         Ok(pgid.as_i32() as isize)
