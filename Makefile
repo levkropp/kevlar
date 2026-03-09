@@ -57,6 +57,7 @@ target_json := kernel/arch/$(ARCH)/$(ARCH)-unwind.json
 else
 target_json := kernel/arch/$(ARCH)/$(ARCH).json
 endif
+target_dir := $(basename $(notdir $(target_json)))
 kernel_elf := kevlar.$(ARCH).elf
 stripped_kernel_elf := kevlar.$(ARCH).stripped.elf
 kernel_symbols := $(kernel_elf:.elf=.symbols)
@@ -103,7 +104,7 @@ export NM
 .PHONY: build
 build:
 	$(MAKE) build-crate
-	cp target/$(ARCH)/$(build_mode)/kevlar_kernel $(kernel_elf)
+	cp target/$(target_dir)/$(build_mode)/kevlar_kernel $(kernel_elf)
 
 	$(PROGRESS) "NM" $(kernel_symbols)
 	$(NM) $(kernel_elf) | rustfilt | awk '{ $$2=""; print $$0 }' > $(kernel_symbols)

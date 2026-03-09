@@ -97,6 +97,14 @@ impl kevlar_platform::Handler for Handler {
         crate::mm::page_fault::handle_page_fault(unaligned_vaddr, ip, reason);
     }
 
+    fn handle_user_fault(&self, exception: &str, ip: usize) {
+        debug_warn!(
+            "{} in userspace (ip={:x}), killing the current process...",
+            exception, ip
+        );
+        crate::process::Process::exit_by_signal(crate::process::signal::SIGSEGV);
+    }
+
     fn handle_syscall(
         &self,
         a1: usize,

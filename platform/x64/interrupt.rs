@@ -101,9 +101,33 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
                 }
             }
         }
-        DIVIDE_ERROR_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: DIVIDE_ERROR\n{:?}", frame);
+        // Exceptions that should deliver a signal when caused by userspace.
+        // CPL is stored in the low 2 bits of CS; non-zero means userspace.
+        DIVIDE_ERROR_VECTOR
+        | OVERFLOW_VECTOR
+        | BOUND_RANGE_EXCEEDED_VECTOR
+        | INVALID_OPCODE_VECTOR
+        | GENERAL_PROTECTION_FAULT_VECTOR
+        | STACK_SEGEMENT_FAULT_VECTOR
+        | SEGMENT_NOT_PRESENT_VECTOR => {
+            if frame.cs & 3 != 0 {
+                let name = match vec {
+                    DIVIDE_ERROR_VECTOR => "DIVIDE_ERROR",
+                    OVERFLOW_VECTOR => "OVERFLOW",
+                    BOUND_RANGE_EXCEEDED_VECTOR => "BOUND_RANGE_EXCEEDED",
+                    INVALID_OPCODE_VECTOR => "INVALID_OPCODE",
+                    GENERAL_PROTECTION_FAULT_VECTOR => "GENERAL_PROTECTION_FAULT",
+                    STACK_SEGEMENT_FAULT_VECTOR => "STACK_SEGMENT_FAULT",
+                    SEGMENT_NOT_PRESENT_VECTOR => "SEGMENT_NOT_PRESENT",
+                    _ => unreachable!(),
+                };
+                handler().handle_user_fault(name, frame.rip as usize);
+            } else {
+                panic!(
+                    "kernel exception: vec={}, {:?}",
+                    vec, frame
+                );
+            }
         }
         DEBUG_VECTOR => {
             // TODO:
@@ -116,18 +140,6 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
         BREAKPOINT_VECTOR => {
             // TODO:
             panic!("unsupported exception: BREAKPOINT\n{:?}", frame);
-        }
-        OVERFLOW_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: OVERFLOW\n{:?}", frame);
-        }
-        BOUND_RANGE_EXCEEDED_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: BOUND_RANGE_EXCEEDED\n{:?}", frame);
-        }
-        INVALID_OPCODE_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: INVALID_OPCODE\n{:?}", frame);
         }
         DEVICE_NOT_AVAILABLE_VECTOR => {
             // TODO:
@@ -147,21 +159,6 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
         INVALID_TSS_VECTOR => {
             // TODO:
             panic!("unsupported exception: INVALID_TSS\n{:?}", frame);
-        }
-        SEGMENT_NOT_PRESENT_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: SEGMENT_NOT_PRESENT\n{:?}", frame);
-        }
-        STACK_SEGEMENT_FAULT_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: STACK_SEGEMENT_FAULT\n{:?}", frame);
-        }
-        GENERAL_PROTECTION_FAULT_VECTOR => {
-            // TODO:
-            panic!(
-                "unsupported exception: GENERAL_PROTECTION_FAULT\n{:?}",
-                frame
-            );
         }
         PAGE_FAULT_VECTOR => {
             let reason = PageFaultReason::from_bits_truncate(frame.error as u32);

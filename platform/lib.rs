@@ -71,6 +71,10 @@ pub trait Handler: Sync {
         _reason: arch::PageFaultReason,
     );
 
+    /// Called when a non-page-fault exception (GPF, invalid opcode, etc.)
+    /// occurs in userspace.  The kernel should deliver a fatal signal.
+    fn handle_user_fault(&self, exception: &str, ip: usize);
+
     #[allow(clippy::too_many_arguments)]
     fn handle_syscall(
         &self,
@@ -104,6 +108,8 @@ impl Handler for NopHandler {
         _reason: arch::PageFaultReason,
     ) {
     }
+
+    fn handle_user_fault(&self, _exception: &str, _ip: usize) {}
 
     fn handle_syscall(
         &self,
