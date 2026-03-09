@@ -86,7 +86,10 @@ RUN make -j$(nproc) LDFLAGS="-static -Wl,--allow-multiple-definition"
 #  Micro-benchmark suite (musl static)
 #
 FROM ubuntu:20.04 AS benchsuite
-RUN apt-get update && apt-get install -qy musl-tools
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
 COPY benchmarks/bench.c /bench.c
 RUN musl-gcc -static -O2 -o /bench /bench.c
 
