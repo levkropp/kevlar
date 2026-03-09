@@ -53,6 +53,8 @@ impl fmt::Debug for InterruptFrame {
 
 unsafe extern "C" {
     fn usercopy1();
+    fn usercopy1b();
+    fn usercopy1c();
     fn usercopy2();
     fn usercopy3();
 }
@@ -167,6 +169,8 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
             // Panic if it's occurred in the kernel space.
             let occurred_in_user = reason.contains(PageFaultReason::CAUSED_BY_USER)
                 || frame.rip == usercopy1 as *const u8 as u64
+                || frame.rip == usercopy1b as *const u8 as u64
+                || frame.rip == usercopy1c as *const u8 as u64
                 || frame.rip == usercopy2 as *const u8 as u64
                 || frame.rip == usercopy3 as *const u8 as u64;
             if !occurred_in_user {

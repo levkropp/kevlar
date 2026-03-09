@@ -41,3 +41,4 @@
 - [Ringkernel Phase 2: Core Traits and the Service Registry](blog/008-ringkernel-phase-2-core-traits.md)
 - [Ringkernel Phase 3: Extracting Services](blog/009-ringkernel-phase-3-service-extraction.md)
 - [Configurable Safety: Choose Your Own Tradeoff](blog/010-safety-profiles.md)
+- [Optimized Usercopy and Copy-Semantic Frames](blog/011-safety-profiles-phase-3-4.md)

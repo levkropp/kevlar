@@ -15,8 +15,12 @@ use kevlar_platform::{
     address::UserVAddr,
     arch::{PageFaultReason, PAGE_SIZE},
     page_allocator::{alloc_pages, AllocPageFlags},
-    page_ops::{zero_page, page_as_slice_mut},
+    page_ops::zero_page,
 };
+#[cfg(not(feature = "profile-fortress"))]
+use kevlar_platform::page_ops::page_as_slice_mut;
+#[cfg(feature = "profile-fortress")]
+use kevlar_platform::page_ops::PageFrame;
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
     let unaligned_vaddr = match unaligned_vaddr {
@@ -74,7 +78,6 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             offset,
             file_size,
         } => {
-            let buf = page_as_slice_mut(paddr);
             let offset_in_page;
             let offset_in_file;
             let copy_len;
@@ -97,12 +100,35 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             }
 
             if copy_len > 0 {
-                file.read(
-                    offset_in_file,
-                    (&mut buf[offset_in_page..(offset_in_page + copy_len)]).into(),
-                    &OpenOptions::readwrite(),
-                )
-                .expect("failed to read file");
+                // Fortress: read file into a stack buffer, then copy to
+                // the page frame without exposing a raw &mut [u8] to
+                // physical memory.
+                #[cfg(feature = "profile-fortress")]
+                {
+                    let mut tmp = [0u8; PAGE_SIZE];
+                    let dst = &mut tmp[..copy_len];
+                    file.read(
+                        offset_in_file,
+                        dst.into(),
+                        &OpenOptions::readwrite(),
+                    )
+                    .expect("failed to read file");
+                    let mut frame = PageFrame::new(paddr);
+                    frame.write(offset_in_page, dst);
+                }
+
+                // Other profiles: write directly into the page via
+                // page_as_slice_mut for zero-copy performance.
+                #[cfg(not(feature = "profile-fortress"))]
+                {
+                    let buf = page_as_slice_mut(paddr);
+                    file.read(
+                        offset_in_file,
+                        (&mut buf[offset_in_page..(offset_in_page + copy_len)]).into(),
+                        &OpenOptions::readwrite(),
+                    )
+                    .expect("failed to read file");
+                }
             }
         }
     }
