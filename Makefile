@@ -103,6 +103,7 @@ else
     PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
     # Unix: use standard cp command
     CP         := cp
+    DOCKER     ?= docker
 endif
 
 # Tool selection: Use LLVM tools on Windows or for arm64
