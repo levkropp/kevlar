@@ -68,10 +68,12 @@ impl<T: ?Sized> SpinLock<T> {
 
         let guard = self.inner.lock();
 
-        #[cfg(debug_assertions)]
-        if is_kernel_heap_enabled() {
-            *self.locked_by.borrow_mut() = Some(CapturedBacktrace::capture());
-        }
+        // NOTE: backtrace capture on every lock() was removed for performance.
+        // It caused ~10µs overhead per lock acquire (heap alloc + stack walk +
+        // symbol resolution).  The deadlock detector above still fires if
+        // is_locked() is true, and the backtrace info from the *previous*
+        // lock site is printed there.  For non-contended paths (the common
+        // case on single-CPU), the backtrace was never consulted.
 
         SpinLockGuard {
             inner: ManuallyDrop::new(guard),

@@ -25,12 +25,6 @@ fn create_file(path: &Path, flags: OpenFlags, mode: FileMode) -> Result<INode> {
 impl<'a> SyscallHandler<'a> {
     pub fn sys_open(&mut self, path: &Path, flags: OpenFlags, mode: FileMode) -> Result<isize> {
         let current = current_process();
-        trace!(
-            "[{}:{}] open(\"{}\")",
-            current.pid().as_i32(),
-            current.cmdline().argv0(),
-            path.as_str()
-        );
 
         if flags.contains(OpenFlags::O_CREAT) {
             match create_file(path, flags, mode) {

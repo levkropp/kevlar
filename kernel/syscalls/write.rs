@@ -11,14 +11,6 @@ impl<'a> SyscallHandler<'a> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
         let opened_file = current_process().get_opened_file_by_fd(fd)?;
-        trace!(
-            "[{}:{}] write(file={:?}, len={})",
-            current_process().pid().as_i32(),
-            current_process().cmdline().argv0(),
-            opened_file.inode(),
-            len
-        );
-
         let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
 
         // MAX_READ_WRITE_LEN limit guarantees total_len is in the range of isize.
