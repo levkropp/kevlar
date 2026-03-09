@@ -298,8 +298,13 @@ bench-compare:
 
 .PHONY: benchmark
 benchmark:
-	$(PROGRESS) "BENCHMARK" "Kevlar vs Linux vs Native"
-	$(PYTHON3) tools/run-all-benchmarks.py
+	$(PROGRESS) "BENCHMARK" "Kevlar vs Linux vs Native (all profiles)"
+	$(PYTHON3) tools/run-all-benchmarks.py $(BENCH_ARGS)
+
+.PHONY: benchmark-quick
+benchmark-quick:
+	$(PROGRESS) "BENCHMARK" "Quick benchmark (balanced only)"
+	$(PYTHON3) tools/run-all-benchmarks.py --profile balanced --quick
 
 # Debug mode: boots with structured debug events and GDB enabled.
 .PHONY: debug

@@ -35,6 +35,8 @@ pub enum Auxv {
     Secure(usize),
     /// 16 random bytes. Used for stack canary.
     Random([u8; 16]),
+    /// Address of the vDSO ELF header (AT_SYSINFO_EHDR).
+    SysinfoEhdr(UserVAddr),
 }
 
 fn push_bytes_to_stack(sp: &mut VAddr, stack_bottom: VAddr, buf: &[u8]) -> Result<()> {
@@ -86,6 +88,7 @@ fn push_auxv_entry_to_stack(
         Auxv::Egid(value) => (14, *value),
         Auxv::Secure(value) => (23, *value),
         Auxv::Random(_) => (25, data_ptr.unwrap().as_isize() as usize),
+        Auxv::SysinfoEhdr(uaddr) => (33, uaddr.value()),
     };
 
     push_usize_to_stack(sp, stack_bottom, value)?;

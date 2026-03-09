@@ -29,7 +29,6 @@ arrayvec = { version = "0.7", default-features = false }
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
 crossbeam = { version = "0.8", default-features = false, features = ["alloc"] }
 atomic_refcell = "0.1"
-bitvec = { version = "1", default-features = false, features = ["atomic", "alloc"] }
 
 # Local dependencies.
 kevlar_platform = { path = "../platform", default-features = false }

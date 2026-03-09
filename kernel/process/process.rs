@@ -30,7 +30,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
@@ -131,7 +131,7 @@ pub struct Process {
     /// every syscall exit when no signals are pending (the common case).
     signal_pending: AtomicU32,
     signaled_frame: AtomicCell<Option<PtRegs>>,
-    sigset: SpinLock<SigSet>,
+    sigset: AtomicU64,
     umask: AtomicCell<u32>,
 }
 
@@ -157,7 +157,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
-            sigset: SpinLock::new(SigSet::ZERO),
+            sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
         });
 
@@ -220,7 +220,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
-            sigset: SpinLock::new(SigSet::ZERO),
+            sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
         });
 
@@ -309,9 +309,16 @@ impl Process {
         &self.signals
     }
 
-    /// The signal mask lock.
-    pub fn sigset_lock(&self) -> SpinLockGuard<'_, SigSet> {
-        self.sigset.lock()
+    /// Loads the current signal mask (lock-free).
+    #[inline(always)]
+    pub fn sigset_load(&self) -> SigSet {
+        SigSet::from_raw(self.sigset.load(Ordering::Relaxed))
+    }
+
+    /// Stores a new signal mask (lock-free).
+    #[inline(always)]
+    pub fn sigset_store(&self, set: SigSet) {
+        self.sigset.store(set.bits(), Ordering::Relaxed);
     }
 
     /// Gets the current umask.
@@ -485,7 +492,8 @@ impl Process {
         self.signal_pending.load(Ordering::Relaxed) != 0
     }
 
-    /// Sets signal mask.
+    /// Sets signal mask (lock-free via atomic u64).
+    #[inline(always)]
     pub fn set_signal_mask(
         &self,
         how: SignalMask,
@@ -493,20 +501,21 @@ impl Process {
         oldset: Option<UserVAddr>,
         _length: usize,
     ) -> Result<()> {
-        let mut sigset = self.sigset.lock();
+        let mut current = self.sigset_load();
 
         if let Some(old) = oldset {
-            old.write_bytes(sigset.as_raw_slice())?;
+            old.write_bytes(&current.to_bytes())?;
         }
 
         if let Some(new) = set {
-            let new_set = new.read::<[u8; 128]>()?;
-            let new_set = SigSet::new(new_set);
+            let new_bytes = new.read::<[u8; 8]>()?;
+            let new_set = SigSet::from_bytes(&new_bytes);
             match how {
-                SignalMask::Block => *sigset |= new_set,
-                SignalMask::Unblock => *sigset &= !new_set,
-                SignalMask::Set => *sigset = new_set,
+                SignalMask::Block => current |= new_set,
+                SignalMask::Unblock => current &= !new_set,
+                SignalMask::Set => current = new_set,
             }
+            self.sigset_store(current);
         }
 
         Ok(())
@@ -534,8 +543,8 @@ impl Process {
             result
         };
         if let Some((signal, sigaction)) = popped {
-            let sigset = current.sigset.lock();
-            if !sigset.get(signal as usize).as_deref().unwrap_or(&true) {
+            let sigset = current.sigset_load();
+            if !sigset.is_blocked(signal as usize) {
                 let pid = current.pid().as_i32();
                 let sig_name = debug::signal_name(signal);
 
@@ -572,7 +581,6 @@ impl Process {
                             ip: 0,
                         });
                         trace!("stopping {:?} by signal {:?}", current.pid, signal);
-                        drop(sigset);
                         Process::stop(signal);
                     }
                     SigAction::Continue => {
@@ -693,7 +701,7 @@ impl Process {
         let vm = parent.vm().as_ref().unwrap().lock().fork()?;
         let opened_files = parent.opened_files().lock().clone(); // TODO: #88 has to address this
         let process_group = parent.process_group();
-        let sig_set = parent.sigset.lock();
+        let sig_set = parent.sigset_load();
         let parent_umask = parent.umask.load();
 
         let child = Arc::new(Process {
@@ -711,7 +719,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
-            sigset: SpinLock::new(*sig_set),
+            sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
         });
 
@@ -963,6 +971,13 @@ fn do_elf_binfmt(
     auxv.push(Auxv::Secure(0));
     auxv.push(Auxv::Random(random_bytes));
 
+    // vDSO: map a shared page with __vdso_clock_gettime for fast userspace clocks.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(_vdso_paddr) = kevlar_platform::arch::vdso::page_paddr() {
+        let vdso_vaddr = kevlar_platform::arch::vdso::VDSO_VADDR;
+        auxv.push(Auxv::SysinfoEhdr(UserVAddr::new(vdso_vaddr).unwrap()));
+    }
+
     // Determine base offset for main executable.
     // ET_EXEC: segments are at fixed addresses (main_base_offset = 0).
     // ET_DYN (PIE): segments need relocation; we choose a base.
@@ -1106,6 +1121,13 @@ fn do_elf_binfmt(
         load_elf_segments(&mut vm, elf.program_headers(), 0, executable)?;
 
         ip = elf.entry()?;
+    }
+
+    // Map vDSO page (read + execute, no write) into the new address space.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(vdso_paddr) = kevlar_platform::arch::vdso::page_paddr() {
+        let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
+        vm.page_table_mut().map_user_page_with_prot(vdso_uaddr, vdso_paddr, 5); // PROT_READ|PROT_EXEC
     }
 
     // Build init stack.

@@ -111,3 +111,15 @@ pub fn nanoseconds_since_boot() -> u64 {
 pub fn frequency_hz() -> u64 {
     TSC_FREQ_HZ.load(Ordering::Relaxed)
 }
+
+/// Return the TSC origin (value at calibration time).
+#[inline]
+pub fn tsc_origin() -> u64 {
+    TSC_ORIGIN.load(Ordering::Relaxed)
+}
+
+/// Return the precomputed fixed-point multiplier for TSC→ns conversion.
+#[inline]
+pub fn ns_mult() -> u64 {
+    NS_MULT.load(Ordering::Relaxed)
+}

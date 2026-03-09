@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::{ctypes::c_int, prelude::*};
-use bitvec::prelude::*;
 use kevlar_platform::address::UserVAddr;
 
 pub type Signal = c_int;
@@ -191,8 +190,57 @@ impl SignalDelivery {
     }
 }
 
-//pub type SigSet = BitMap<128 /* 1024 / 8 */>;
-pub type SigSet = BitArray<[u8; 1024 / 8], LocalBits>;
+/// Compact 64-bit signal mask. Bit N is set iff signal N is blocked.
+/// Supports signals 1–63 (POSIX only defines 1–31 for standard signals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigSet(u64);
+
+impl SigSet {
+    pub const ZERO: Self = SigSet(0);
+
+    #[inline(always)]
+    pub fn from_raw(v: u64) -> Self { SigSet(v) }
+
+    /// Create a SigSet from the first 8 bytes of a userspace sigset_t buffer.
+    /// Linux sigset_t is 8 bytes on x86_64; we ignore any trailing bytes.
+    #[inline(always)]
+    pub fn from_bytes(bytes: &[u8; 8]) -> Self {
+        SigSet(u64::from_le_bytes(*bytes))
+    }
+
+    #[inline(always)]
+    pub fn to_bytes(self) -> [u8; 8] {
+        self.0.to_le_bytes()
+    }
+
+    /// Returns true if signal `sig` is blocked (bit set).
+    #[inline(always)]
+    pub fn is_blocked(self, sig: usize) -> bool {
+        if sig >= 64 { return false; }
+        (self.0 & (1u64 << sig)) != 0
+    }
+
+    #[inline(always)]
+    pub fn bits(self) -> u64 {
+        self.0
+    }
+}
+
+impl core::ops::BitOrAssign for SigSet {
+    #[inline(always)]
+    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+}
+
+impl core::ops::BitAndAssign for SigSet {
+    #[inline(always)]
+    fn bitand_assign(&mut self, rhs: Self) { self.0 &= rhs.0; }
+}
+
+impl core::ops::Not for SigSet {
+    type Output = Self;
+    #[inline(always)]
+    fn not(self) -> Self { SigSet(!self.0) }
+}
 pub enum SignalMask {
     Block,
     Unblock,

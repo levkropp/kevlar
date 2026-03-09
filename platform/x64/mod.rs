@@ -26,6 +26,7 @@ mod serial;
 mod syscall;
 pub mod tsc;
 mod tss;
+pub mod vdso;
 pub mod task;
 mod vga;
 
