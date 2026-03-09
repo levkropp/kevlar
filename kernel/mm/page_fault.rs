@@ -90,11 +90,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     // Look for the associated vma area.
     let vm_ref = current.vm();
     let mut vm = vm_ref.as_ref().unwrap().lock();
-    let vma = match vm
-        .vm_areas()
-        .iter()
-        .find(|vma| vma.contains(unaligned_vaddr))
-    {
+    let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
         None => {
             let pid = current.pid().as_i32();

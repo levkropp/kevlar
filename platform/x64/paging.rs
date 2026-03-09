@@ -73,7 +73,13 @@ fn traverse(
             table_paddr = new_table;
         }
 
-        unsafe { *entry = table_paddr.value() as u64 | attrs.bits() };
+        // Only write if value changed to avoid unnecessary cache line invalidation
+        let new_entry = table_paddr.value() as u64 | attrs.bits();
+        unsafe {
+            if *entry != new_entry {
+                *entry = new_entry;
+            }
+        }
         table = table_paddr.as_mut_ptr::<PageTableEntry>();
     }
 

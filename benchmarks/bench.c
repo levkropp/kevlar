@@ -25,9 +25,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <linux/reboot.h>
 
 static long long now_ns(void) {
     struct timespec ts;
@@ -184,6 +186,12 @@ static bench_entry benchmarks[] = {
 
 int main(int argc, char **argv) {
     const char *filter = "all";
+
+    /* Auto-enable quick mode when running as init (PID 1) in QEMU */
+    if (getpid() == 1) {
+        quick_mode = 1;
+    }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--quick") == 0 || strcmp(argv[i], "-q") == 0)
             quick_mode = 1;
@@ -203,5 +211,14 @@ int main(int argc, char **argv) {
     }
     printf("BENCH_END\n");
     fflush(stdout);
+
+    /* If running as init (PID 1), power off the system */
+    if (getpid() == 1) {
+        sync();
+        /* Use reboot syscall with POWER_OFF command */
+        syscall(SYS_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+                LINUX_REBOOT_CMD_POWER_OFF, NULL);
+    }
+
     return 0;
 }
