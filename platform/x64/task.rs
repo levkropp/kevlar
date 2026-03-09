@@ -43,6 +43,25 @@ pub struct ArchTask {
 
 unsafe impl Sync for ArchTask {}
 
+/// Initialize an xsave area with valid default FPU/SSE state.
+///
+/// The XSAVE legacy region (bytes 0-511) mirrors the FXSAVE layout:
+/// - Offset 0: FCW (x87 control word) = 0x037F (default)
+/// - Offset 24: MXCSR = 0x1F80 (all SSE exceptions masked)
+///
+/// Without this, a zeroed xsave area has MXCSR=0 (all exceptions unmasked),
+/// causing SIMD_FLOATING_POINT (#XM) on the first SSE operation.
+#[allow(unsafe_code)]
+fn init_xsave_area(xsave: &OwnedPages) {
+    unsafe {
+        let ptr = xsave.as_mut_ptr::<u8>();
+        // FCW: x87 FPU control word — mask all x87 exceptions
+        *(ptr.add(0) as *mut u16) = 0x037F;
+        // MXCSR: SSE control/status — mask all SSE exceptions
+        *(ptr.add(24) as *mut u32) = 0x1F80;
+    }
+}
+
 unsafe extern "C" {
     fn kthread_entry();
     fn userland_entry();
@@ -124,6 +143,7 @@ impl ArchTask {
         .expect("failed to allocate kernel stack");
         let xsave_area =
             alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+        init_xsave_area(&xsave_area);
 
         let rsp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -189,6 +209,18 @@ impl ArchTask {
     pub fn fork(&self, frame: &PtRegs) -> ArchTask {
         let xsave_area =
             alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+        // Copy the parent's FPU/SSE state to the child.
+        if let Some(parent_xsave) = self.xsave_area.as_ref() {
+            unsafe {
+                core::ptr::copy_nonoverlapping::<u8>(
+                    parent_xsave.as_mut_ptr(),
+                    xsave_area.as_mut_ptr(),
+                    PAGE_SIZE,
+                );
+            }
+        } else {
+            init_xsave_area(&xsave_area);
+        }
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,

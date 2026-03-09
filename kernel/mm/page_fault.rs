@@ -59,8 +59,8 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         Some(vma) => vma,
         None => {
             debug_warn!(
-                "no VMAs for address {} (ip={:x}), killing the current process...",
-                unaligned_vaddr, ip
+                "pid={}: no VMAs for address {} (ip={:x}, reason={:?}), killing the current process...",
+                current.pid().as_i32(), unaligned_vaddr, ip, _reason
             );
             drop(vm);
             drop(vm_ref);

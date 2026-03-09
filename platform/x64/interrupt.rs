@@ -109,7 +109,9 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
         | INVALID_OPCODE_VECTOR
         | GENERAL_PROTECTION_FAULT_VECTOR
         | STACK_SEGEMENT_FAULT_VECTOR
-        | SEGMENT_NOT_PRESENT_VECTOR => {
+        | SEGMENT_NOT_PRESENT_VECTOR
+        | X87_FPU_VECTOR
+        | SIMD_FLOATING_POINT_VECTOR => {
             if frame.cs & 3 != 0 {
                 let name = match vec {
                     DIVIDE_ERROR_VECTOR => "DIVIDE_ERROR",
@@ -119,6 +121,8 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
                     GENERAL_PROTECTION_FAULT_VECTOR => "GENERAL_PROTECTION_FAULT",
                     STACK_SEGEMENT_FAULT_VECTOR => "STACK_SEGMENT_FAULT",
                     SEGMENT_NOT_PRESENT_VECTOR => "SEGMENT_NOT_PRESENT",
+                    X87_FPU_VECTOR => "X87_FPU",
+                    SIMD_FLOATING_POINT_VECTOR => "SIMD_FLOATING_POINT",
                     _ => unreachable!(),
                 };
                 handler().handle_user_fault(name, frame.rip as usize);
@@ -185,10 +189,6 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
             let unaligned_vaddr = UserVAddr::new(cr2());
             handler().handle_page_fault(unaligned_vaddr, frame.rip as usize, reason);
         }
-        X87_FPU_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: X87_FPU\n{:?}", frame);
-        }
         ALIGNMENT_CHECK_VECTOR => {
             // TODO:
             panic!("unsupported exception: ALIGNMENT_CHECK\n{:?}", frame);
@@ -196,10 +196,6 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
         MACHINE_CHECK_VECTOR => {
             // TODO:
             panic!("unsupported exception: MACHINE_CHECK\n{:?}", frame);
-        }
-        SIMD_FLOATING_POINT_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: SIMD_FLOATING_POINT\n{:?}", frame);
         }
         VIRTUALIZATION_VECTOR => {
             // TODO:
