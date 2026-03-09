@@ -402,6 +402,12 @@ impl Process {
     pub fn exit(status: c_int) -> ! {
         let current = current_process();
         if current.pid == PId::new(1) {
+            // Dump syscall profile before halting (if profiling was enabled).
+            if debug::profiler::is_enabled() {
+                debug::profiler::dump_syscall_profile(
+                    crate::syscalls::syscall_name_by_number,
+                );
+            }
             info!("init exited with status {}, halting system", status);
             kevlar_platform::arch::halt();
         }

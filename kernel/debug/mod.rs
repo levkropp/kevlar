@@ -40,6 +40,7 @@ pub mod canary;
 pub mod emit;
 pub mod event;
 pub mod filter;
+pub mod profiler;
 pub mod usercopy;
 
 // Re-export commonly used items.
@@ -73,6 +74,11 @@ pub fn init(debug_cmdline: Option<&str>) {
     // call, written directly by the assembly probe.
     if filter.intersects(DebugFilter::CANARY | DebugFilter::USERCOPY | DebugFilter::FAULT) {
         kevlar_platform::usercopy_trace::enable();
+    }
+
+    // Enable per-syscall cycle profiler when profile flag is set.
+    if filter.contains(DebugFilter::PROFILE) {
+        profiler::enable();
     }
 
     if !filter.is_empty() {

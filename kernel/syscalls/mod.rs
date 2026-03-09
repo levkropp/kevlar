@@ -480,6 +480,9 @@ impl<'a> SyscallHandler<'a> {
             None
         };
 
+        // Per-syscall cycle profiler: record TSC at entry.
+        let prof_start = debug::profiler::syscall_enter();
+
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if debug::is_enabled(DebugFilter::SYSCALL) {
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
@@ -492,6 +495,9 @@ impl<'a> SyscallHandler<'a> {
             }
             err
         });
+
+        // Per-syscall cycle profiler: record TSC at exit.
+        debug::profiler::syscall_exit(n, prof_start);
 
         // Stack canary check (post-syscall).
         if debug::is_enabled(DebugFilter::CANARY) {
@@ -809,7 +815,7 @@ impl<'a> SyscallHandler<'a> {
     }
 }
 
-fn syscall_name_by_number(n: usize) -> &'static str {
+pub fn syscall_name_by_number(n: usize) -> &'static str {
     match n {
         SYS_READ => "read",
         SYS_WRITE => "write",

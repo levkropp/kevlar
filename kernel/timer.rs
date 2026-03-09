@@ -62,20 +62,29 @@ pub struct MonotonicClock {
 
 impl MonotonicClock {
     pub fn secs(self) -> usize {
-        self.ticks / TICK_HZ
+        self.nanosecs() / 1_000_000_000
     }
 
     pub fn msecs(self) -> usize {
-        self.ticks * 1000 / TICK_HZ
+        self.nanosecs() / 1_000_000
     }
 
     pub fn nanosecs(self) -> usize {
-        self.msecs() * 1_000_000
+        // Use TSC for nanosecond resolution when available.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if kevlar_platform::arch::tsc::is_calibrated() {
+                return kevlar_platform::arch::tsc::nanoseconds_since_boot() as usize;
+            }
+        }
+        // Fallback to tick-based timing.
+        self.ticks * 1_000_000_000 / TICK_HZ
     }
 
     pub fn elapsed_msecs(self) -> usize {
-        // FIXME: Consider wrapping.
-        (read_monotonic_clock().ticks - self.ticks) * 1000 / TICK_HZ
+        let now_ns = read_monotonic_clock().nanosecs();
+        let self_ns = self.nanosecs();
+        (now_ns - self_ns) / 1_000_000
     }
 }
 

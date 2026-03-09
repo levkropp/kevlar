@@ -24,6 +24,7 @@ mod profile;
 mod semihosting;
 mod serial;
 mod syscall;
+pub mod tsc;
 mod tss;
 pub mod task;
 mod vga;

@@ -27,5 +27,7 @@ bitflags! {
         /// Individual copy_to_user/copy_from_user calls (very high volume).
         /// Use for diagnosing which specific usercopy is faulting.
         const USERCOPY = 0x80;
+        /// Per-syscall cycle profiling (low overhead: 2x rdtsc per syscall).
+        const PROFILE  = 0x100;
     }
 }

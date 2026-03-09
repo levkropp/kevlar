@@ -94,6 +94,7 @@ pub fn parse_cmdline_filter(value: &str) -> DebugFilter {
             "memory" | "mem" => filter |= DebugFilter::MEMORY,
             "panic" => filter |= DebugFilter::PANIC,
             "usercopy" | "ucopy" => filter |= DebugFilter::USERCOPY,
+            "profile" | "prof" => filter |= DebugFilter::PROFILE,
             _ => {} // ignore unknown tokens
         }
     }
