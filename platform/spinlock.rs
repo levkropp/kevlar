@@ -83,6 +83,42 @@ impl<T: ?Sized> SpinLock<T> {
         }
     }
 
+    /// Acquires the lock **without** disabling interrupts (no cli/sti).
+    ///
+    /// Use for locks that are never accessed from interrupt context (e.g. fd
+    /// tables, root_fs).  Saves the pushfq/cli/sti overhead on every
+    /// acquire/release cycle.
+    pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
+        if self.inner.is_locked() {
+            cfg_if! {
+                if #[cfg(debug_assertions)] {
+                    let trace = self.locked_by.borrow();
+                    if let Some(trace) = trace.as_ref() {
+                        debug_warn!(
+                            "DEAD LOCK: already locked from the following context\n{:?}",
+                            trace
+                        );
+                    } else {
+                        debug_warn!("DEAD LOCK: already locked");
+                    }
+                } else {
+                    debug_warn!("DEAD LOCK: already locked");
+                }
+            }
+
+            debug_warn!("Tried to lock from:");
+            backtrace();
+        }
+
+        let guard = self.inner.lock();
+
+        SpinLockGuardNoIrq {
+            inner: ManuallyDrop::new(guard),
+            #[cfg(debug_assertions)]
+            locked_by: &self.locked_by,
+        }
+    }
+
     pub fn is_locked(&self) -> bool {
         self.inner.is_locked()
     }
@@ -113,6 +149,42 @@ impl<'a, T: ?Sized> Drop for SpinLockGuard<'a, T> {
         unsafe {
             ManuallyDrop::drop(&mut self.saved_intr_status);
         }
+    }
+}
+
+/// A lock guard that does NOT restore interrupt status on drop.
+///
+/// Created by [`SpinLock::lock_no_irq`].
+pub struct SpinLockGuardNoIrq<'a, T: ?Sized> {
+    inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
+    #[cfg(debug_assertions)]
+    locked_by: &'a AtomicRefCell<Option<CapturedBacktrace>>,
+}
+
+impl<'a, T: ?Sized> Drop for SpinLockGuardNoIrq<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.inner);
+        }
+
+        cfg_if! {
+            if #[cfg(debug_assertions)] {
+                *self.locked_by.borrow_mut() = None;
+            }
+        }
+    }
+}
+
+impl<'a, T: ?Sized> Deref for SpinLockGuardNoIrq<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for SpinLockGuardNoIrq<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
     }
 }
 

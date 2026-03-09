@@ -18,8 +18,8 @@ fn create_file_at(cwd_or_fd: &CwdOrFd, path: &Path, flags: OpenFlags, mode: File
         .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
 
     let current = current_process();
-    let opened_files = current.opened_files().lock();
-    let root_fs = current.root_fs().lock();
+    let opened_files = current.opened_files_no_irq();
+    let root_fs = current.root_fs().lock_no_irq();
     let parent_path = root_fs.lookup_path_at(&opened_files, cwd_or_fd, parent_dir, true)?;
     parent_path.inode.as_dir()?.create_file(name, mode)
 }
@@ -42,8 +42,8 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        let root_fs = current.root_fs().lock();
-        let mut opened_files = current.opened_files().lock();
+        let root_fs = current.root_fs().lock_no_irq();
+        let mut opened_files = current.opened_files_no_irq();
 
         let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, true)?;
         if flags.contains(OpenFlags::O_DIRECTORY) && !path_comp.inode.is_dir() {

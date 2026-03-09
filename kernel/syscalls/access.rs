@@ -11,7 +11,7 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_access(&mut self, path: &Path) -> Result<isize> {
         // Resolve the path — if it doesn't exist, lookup returns ENOENT.
         // We don't check real permissions since we run as root (uid 0).
-        let _inode = current_process().root_fs().lock().lookup(path)?;
+        let _inode = current_process().root_fs().lock_no_irq().lookup(path)?;
         Ok(0)
     }
 }

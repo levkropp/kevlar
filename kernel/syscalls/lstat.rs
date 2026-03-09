@@ -8,7 +8,7 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_lstat(&mut self, path: &Path, buf: UserVAddr) -> Result<isize> {
         let stat = current_process()
             .root_fs()
-            .lock()
+            .lock_no_irq()
             .lookup_no_symlink_follow(path)?
             .stat()?;
         buf.write(&stat)?;

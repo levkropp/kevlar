@@ -18,6 +18,11 @@ static TSC_FREQ_HZ: AtomicU64 = AtomicU64::new(0);
 /// TSC value at the moment calibration completed (our time origin).
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
 
+/// Precomputed fixed-point multiplier: (10^9 << 32) / freq.
+/// Allows converting TSC delta → nanoseconds via a single u128 multiply
+/// instead of two u64 divisions.
+static NS_MULT: AtomicU64 = AtomicU64::new(0);
+
 /// Calibrate the TSC against the PIT.
 ///
 /// Uses PIT channel 2 in one-shot mode to measure a ~10 ms window.
@@ -61,7 +66,12 @@ pub unsafe fn calibrate() {
     // freq = tsc_delta * PIT_HZ / pit_count
     let freq = tsc_delta * PIT_HZ / pit_count as u64;
 
+    // Precompute fixed-point multiplier: (10^9 << 32) / freq.
+    // At 3 GHz this is ~1,431,655,765 — fits easily in u64.
+    let mult = (1_000_000_000u128 << 32) / freq as u128;
+
     TSC_FREQ_HZ.store(freq, Ordering::Release);
+    NS_MULT.store(mult as u64, Ordering::Release);
     TSC_ORIGIN.store(tsc_end, Ordering::Release);
 
     info!("tsc: calibrated frequency = {} MHz", freq / 1_000_000);
@@ -78,8 +88,8 @@ pub fn is_calibrated() -> bool {
 /// Returns 0 if the TSC has not been calibrated yet.
 #[inline]
 pub fn nanoseconds_since_boot() -> u64 {
-    let freq = TSC_FREQ_HZ.load(Ordering::Relaxed);
-    if freq == 0 {
+    let mult = NS_MULT.load(Ordering::Relaxed);
+    if mult == 0 {
         return 0;
     }
 
@@ -87,14 +97,13 @@ pub fn nanoseconds_since_boot() -> u64 {
     let now = unsafe { x86::time::rdtscp().0 };
     let delta = now.wrapping_sub(origin);
 
-    // Convert TSC ticks to nanoseconds:
-    //   ns = delta * 1_000_000_000 / freq
+    // Convert TSC ticks to nanoseconds via fixed-point multiply:
+    //   ns = (delta * mult) >> 32
     //
-    // To avoid u64 overflow for large delta values (~18 seconds at 3 GHz),
-    // split into seconds and remainder.
-    let secs = delta / freq;
-    let remainder = delta % freq;
-    secs * 1_000_000_000 + remainder * 1_000_000_000 / freq
+    // This replaces two u64 divisions (~60-160 cycles) with one u128
+    // multiply (~6 cycles).  Precision is <1 ppb for typical TSC
+    // frequencies.
+    ((delta as u128 * mult as u128) >> 32) as u64
 }
 
 /// Return the calibrated TSC frequency in Hz.

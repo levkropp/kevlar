@@ -37,7 +37,7 @@ use goblin::elf64::program_header::PT_LOAD;
 use kevlar_platform::{
     arch::{PtRegs, PAGE_SIZE},
     page_allocator::{alloc_pages, AllocPageFlags},
-    spinlock::{SpinLock, SpinLockGuard},
+    spinlock::{SpinLock, SpinLockGuard, SpinLockGuardNoIrq},
 };
 use kevlar_utils::alignment::align_up;
 
@@ -287,9 +287,16 @@ impl Process {
         &self.root_fs
     }
 
-    /// The ppened files table.
+    /// The opened files table (full lock with interrupt disable).
     pub fn opened_files(&self) -> &Arc<SpinLock<OpenedFileTable>> {
         &self.opened_files
+    }
+
+    /// The opened files table, locked without cli/sti.
+    ///
+    /// Safe because the fd table is never accessed from interrupt context.
+    pub fn opened_files_no_irq(&self) -> SpinLockGuardNoIrq<'_, OpenedFileTable> {
+        self.opened_files.lock_no_irq()
     }
 
     /// The virtual memory space. It's `None` if the process is a kernel thread.
@@ -393,9 +400,12 @@ impl Process {
         }
     }
 
-    /// Searches the opned file table by the file descriptor.
+    /// Searches the opened file table by the file descriptor.
+    ///
+    /// Uses `lock_no_irq` — the fd table is never accessed from interrupt
+    /// context, so we skip the cli/sti overhead.
     pub fn get_opened_file_by_fd(&self, fd: Fd) -> Result<Arc<OpenedFile>> {
-        Ok(self.opened_files.lock().get(fd)?.clone())
+        Ok(self.opened_files.lock_no_irq().get(fd)?.clone())
     }
 
     /// Terminates the **current** process.

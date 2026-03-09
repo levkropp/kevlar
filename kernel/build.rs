@@ -4,4 +4,5 @@ fn main() {
     // since they are read via option_env!() / env!() in the kernel.
     println!("cargo::rerun-if-env-changed=INIT_SCRIPT");
     println!("cargo::rerun-if-env-changed=INITRAMFS_PATH");
+    println!("cargo::rerun-if-env-changed=KEVLAR_DEBUG");
 }
