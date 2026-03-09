@@ -30,7 +30,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
@@ -127,6 +127,9 @@ pub struct Process {
     opened_files: Arc<SpinLock<OpenedFileTable>>,
     root_fs: Arc<SpinLock<RootFs>>,
     signals: Arc<SpinLock<SignalDelivery>>,
+    /// Lock-free mirror of `signals.pending`.  Avoids taking the spinlock on
+    /// every syscall exit when no signals are pending (the common case).
+    signal_pending: AtomicU32,
     signaled_frame: AtomicCell<Option<PtRegs>>,
     sigset: SpinLock<SigSet>,
     umask: AtomicCell<u32>,
@@ -152,6 +155,7 @@ impl Process {
             root_fs: INITIAL_ROOT_FS.clone(),
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
+            signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(SigSet::ZERO),
             umask: AtomicCell::new(0o022),
@@ -214,6 +218,7 @@ impl Process {
             opened_files: Arc::new(SpinLock::new(opened_files)),
             root_fs,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
+            signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(SigSet::ZERO),
             umask: AtomicCell::new(0o022),
@@ -455,12 +460,13 @@ impl Process {
         }
 
         self.signals.lock().signal(signal);
+        self.signal_pending.fetch_or(1 << signal, Ordering::Release);
         self.resume();
     }
 
     /// Returns `true` if there's a pending signal.
     pub fn has_pending_signals(&self) -> bool {
-        self.signals.lock().is_pending()
+        self.signal_pending.load(Ordering::Relaxed) != 0
     }
 
     /// Sets signal mask.
@@ -496,7 +502,22 @@ impl Process {
     /// address and stack pointer) to call the registered user's signal handler.
     pub fn try_delivering_signal(frame: &mut PtRegs) -> Result<()> {
         let current = current_process();
-        if let Some((signal, sigaction)) = current.signals.lock().pop_pending() {
+        // Fast path: skip the spinlock when no signals are pending.
+        if current.signal_pending.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        let popped = {
+            let mut sigs = current.signals.lock();
+            let result = sigs.pop_pending();
+            // Sync the atomic mirror with the actual pending state.
+            if sigs.is_pending() {
+                // Still more signals pending — leave the flag set.
+            } else {
+                current.signal_pending.store(0, Ordering::Relaxed);
+            }
+            result
+        };
+        if let Some((signal, sigaction)) = popped {
             let sigset = current.sigset.lock();
             if !sigset.get(signal as usize).as_deref().unwrap_or(&true) {
                 let pid = current.pid().as_i32();
@@ -672,6 +693,7 @@ impl Process {
             root_fs: parent.root_fs().clone(),
             arch,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
+            signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: SpinLock::new(*sig_set),
             umask: AtomicCell::new(parent_umask),

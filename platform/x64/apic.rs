@@ -46,9 +46,21 @@ impl LocalApic {
     }
 }
 
+/// Acknowledge the current interrupt.
+///
+/// This is called from the interrupt handler on every IRQ.  We write the
+/// EOI register directly instead of going through the SpinLock — this
+/// kernel is single-CPU and the interrupt handler runs with interrupts
+/// disabled, so the lock acquire/release was pure overhead (cli/sti +
+/// deadlock check + backtrace capture in debug builds).
+#[inline(always)]
 pub fn ack_interrupt() {
     unsafe {
-        APIC.lock().write_eoi();
+        // Safety: single-CPU, interrupts disabled in this context.
+        // The APIC base (0xfee00000) is a hardware-fixed address that
+        // never changes.  EOI register is at offset 0xb0.
+        let eoi_addr = PAddr::new(0xfee0_00b0).as_vaddr();
+        core::ptr::write_volatile(eoi_addr.as_mut_ptr::<u32>(), 0);
     }
 }
 

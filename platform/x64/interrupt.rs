@@ -67,23 +67,11 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
     // FIXME: Check "Legacy replacement" mapping
     const TIMER_IRQ: u8 = 0;
     const TIMER_IRQ2: u8 = 2;
-    if vec != VECTOR_IRQ_BASE + TIMER_IRQ
-        && vec != VECTOR_IRQ_BASE + TIMER_IRQ2
-        && vec != 14
-        && vec != 36
-    {
-        let rip = frame.rip;
-        let rsp = frame.rsp;
-        let error = frame.error;
-        trace!(
-            "interrupt({}): rip={:x}, rsp={:x}, err={:x}, cr2={:x}",
-            vec,
-            rip,
-            rsp,
-            error,
-            x86::controlregs::cr2()
-        );
-    }
+    // Interrupt tracing moved behind the debug event system.
+    // The old trace!() here wrote to the serial port on every non-timer
+    // interrupt, causing ~6 VM exits per interrupt (serial busy-wait +
+    // VGA cursor updates).  This was the single largest source of KVM
+    // overhead.  Use `debug=irq` at the kernel command line if needed.
 
     match vec {
         _ if vec >= VECTOR_IRQ_BASE => {

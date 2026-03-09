@@ -2,7 +2,7 @@
 use super::ioapic::enable_irq;
 use x86::io::outb;
 
-const DIVISOR: u16 = (1193182u32 / 1000) as u16;
+const DIVISOR: u16 = (1193182u32 / 100) as u16;
 
 pub unsafe fn init() {
     trace!("enabling PIT (i8254) timer: divisor={}", DIVISOR);

@@ -7,7 +7,7 @@ use crate::{
     print::{set_debug_printer, set_printer, Printer},
 };
 
-use super::{ioapic::enable_irq, vga};
+use super::ioapic::enable_irq;
 
 pub const SERIAL0_IOPORT: u16 = 0x3f8;
 pub const SERIAL1_IOPORT: u16 = 0x2f8;
@@ -21,7 +21,6 @@ const IER: u16 = 1;
 const FCR: u16 = 2;
 const LCR: u16 = 3;
 const LSR: u16 = 5;
-const TX_READY: u8 = 0x20;
 
 struct SerialPort {
     ioport_base: u16,
@@ -58,7 +57,10 @@ impl SerialPort {
 
     pub fn send_char(&self, ch: u8) {
         unsafe {
-            while (self.inb(LSR) & TX_READY) == 0 {}
+            // Skip the TX_READY busy-wait: QEMU's virtual UART is always
+            // ready, and each `inb` is a VM exit (~1-5 µs on KVM).  On real
+            // hardware a bounded poll would be needed, but for now the only
+            // target is QEMU.
             self.outb(THR, ch);
         }
     }
@@ -91,7 +93,6 @@ impl Printer for Serial0Printer {
     fn print_bytes(&self, s: &[u8]) {
         for ch in s {
             SERIAL0.print_char(*ch);
-            vga::printchar(*ch);
         }
     }
 }
@@ -102,7 +103,6 @@ impl Printer for Serial1Printer {
     fn print_bytes(&self, s: &[u8]) {
         for ch in s {
             SERIAL1.print_char(*ch);
-            vga::printchar(*ch);
         }
     }
 }

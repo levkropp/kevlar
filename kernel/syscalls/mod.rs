@@ -468,20 +468,9 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        // Also emit the standard trace log for non-stdio syscalls.
-        if !((n == SYS_READ && a1 == 0)
-            || (n == SYS_WRITE) && (a1 == 1)
-            || (n == SYS_WRITE) && (a1 == 2)
-            || (n == SYS_WRITEV) && (a1 == 1)
-            || (n == SYS_WRITEV) && (a1 == 2))
-        {
-            trace!(
-                "[{}:{}] syscall: {}({:x}, {:x}, {:x}, {:x}, {:x}, {:x})",
-                pid,
-                current.cmdline().argv0(),
-                name, a1, a2, a3, a4, a5, a6,
-            );
-        }
+        // Syscall trace logging now handled by the structured debug event
+        // system above (when debug=syscall is enabled).  The old trace!()
+        // here ran unconditionally, causing serial I/O on every syscall.
 
         // Stack canary check (pre-syscall).
         let pre_canary = if debug::is_enabled(DebugFilter::CANARY) {

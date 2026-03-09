@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use kevlar_platform::{arch::TICK_HZ, spinlock::SpinLock};
 use process::switch;
 
-const PREEMPT_PER_TICKS: usize = 30;
+const PREEMPT_PER_TICKS: usize = 3;
 static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Ticks from the epoch (00:00:00 on 1 January 1970, UTC).
 static WALLCLOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
