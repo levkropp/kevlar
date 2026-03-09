@@ -7,7 +7,7 @@ use crate::{
     fs::opened_file::OpenOptions,
     process::{
         current_process,
-        signal::{self, SIGSEGV},
+        signal::{self, SIGKILL, SIGSEGV},
         Process,
     },
 };
@@ -89,8 +89,16 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Allocate and zero the page BEFORE acquiring the VM lock.
     // This keeps the lock hold time minimal (just VMA lookup + PTE write).
-    let paddr = alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK)
-        .expect("failed to allocate an anonymous page");
+    let paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+        Ok(p) => p,
+        Err(_) => {
+            debug_warn!(
+                "pid={}: OOM during page fault at {} (ip={:x}), killing process",
+                current.pid().as_i32(), unaligned_vaddr, ip
+            );
+            Process::exit_by_signal(SIGKILL);
+        }
+    };
     zero_page(paddr);
 
     // Look for the associated vma area.
@@ -217,7 +225,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     // Batch-allocate pages to amortize allocator lock overhead.
     if is_anonymous {
         use kevlar_platform::address::PAddr;
-        const FAULT_AROUND_PAGES: usize = 64;
+        const FAULT_AROUND_PAGES: usize = 16;
 
         // Count how many pages we can prefault.
         let mut num_prefault = 0;
