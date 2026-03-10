@@ -290,7 +290,10 @@ impl FileLike for ProcPidComm {
         }
 
         let comm = Process::find_by_pid(self.pid)
-            .map(|p| p.cmdline().argv0().to_string())
+            .map(|p| {
+                let c = p.get_comm();
+                alloc::string::String::from_utf8_lossy(&c).into_owned()
+            })
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
         let s = alloc::format!("{}\n", comm);
 
