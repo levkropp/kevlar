@@ -63,6 +63,7 @@ pub enum Errno {
     ENOBUFS = 105,
     EISCONN = 106,
     ENOTCONN = 107,
+    ECONNREFUSED = 111,
 }
 
 impl Errno {
@@ -116,6 +117,7 @@ impl Errno {
             Errno::ENOBUFS => "ENOBUFS",
             Errno::EISCONN => "EISCONN",
             Errno::ENOTCONN => "ENOTCONN",
+            Errno::ECONNREFUSED => "ECONNREFUSED",
         }
     }
 }
