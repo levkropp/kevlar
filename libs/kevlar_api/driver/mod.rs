@@ -4,6 +4,7 @@ use crate::kernel_ops::kernel_ops;
 
 use alloc::vec::Vec;
 
+pub mod block;
 #[cfg(target_arch = "x86_64")]
 pub mod ioport;
 pub mod net;

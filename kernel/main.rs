@@ -209,6 +209,9 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("kevlar_api init");
 
     // Load kernel extensions.
+    info!("kext: Loading virtio_blk...");
+    virtio_blk::init();
+    profiler.lap_time("virtio_blk init");
     info!("kext: Loading virtio_net...");
     virtio_net::init();
     profiler.lap_time("virtio_net init");

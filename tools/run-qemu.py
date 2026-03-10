@@ -136,6 +136,7 @@ def main():
     parser.add_argument("--gdb", action="store_true")
     parser.add_argument("--kvm", action="store_true")
     parser.add_argument("--append-cmdline", action="append")
+    parser.add_argument("--disk", help="VirtIO block device disk image file")
     parser.add_argument("--log-serial")
     parser.add_argument("--qemu")
     parser.add_argument("kernel_elf", help="The kernel ELF executable.")
@@ -199,6 +200,13 @@ def main():
         argv += ["-gdb", "tcp::7789", "-S"]
     if args.kvm:
         argv += ["-accel", "kvm"]
+    if args.disk:
+        disk_path = args.disk.replace('\\', '/') if platform.system() == "Windows" else args.disk
+        if args.arch == "arm64":
+            argv += ["-drive", f"file={disk_path},format=raw,if=none,id=drive0",
+                     "-device", "virtio-blk-device,drive=drive0"]
+        else:
+            argv += ["-drive", f"file={disk_path},format=raw,if=virtio"]
     if args.append_cmdline:
         cmdline += args.append_cmdline
     if args.log_serial:
