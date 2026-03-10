@@ -45,14 +45,16 @@ mod arm64;
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
-        enable_irq, halt, idle, read_clock_counter, semihosting_halt, x64_specific, tsc, vdso,
+        enable_irq, halt, idle, num_online_cpus, read_clock_counter, semihosting_halt,
+        x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
     };
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
-        enable_irq, halt, idle, read_clock_counter, semihosting_halt, arm64_specific, Backtrace,
+        enable_irq, halt, idle, num_online_cpus, read_clock_counter, semihosting_halt,
+        arm64_specific, Backtrace,
         PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
     };

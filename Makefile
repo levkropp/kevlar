@@ -338,6 +338,15 @@ test-storage: build/disk.img
 		echo "ALL STORAGE TESTS PASSED"; \
 	fi
 
+.PHONY: test-smp
+test-smp:
+	$(PROGRESS) "TEST" "M6 SMP boot (4 CPUs)"
+	$(MAKE) build PROFILE=$(PROFILE)
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_elf) -- -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-smp-$(PROFILE).log; true
+	@grep -E 'CPU \(LAPIC|smp:|online' /tmp/kevlar-test-smp-$(PROFILE).log || echo "(no SMP output found)"
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"

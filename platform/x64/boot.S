@@ -221,8 +221,18 @@ long_mode:
     jz  setup_bsp
 
 setup_ap:
-    // TODO: SMP
-    ud2
+    // EAX = LAPIC ID (bits 31:24 of LAPIC ID register, shifted by 24 above).
+    // RSP = AP kernel stack top (set by the trampoline from ap_tram_stack).
+    xor rbp, rbp
+    // Call ap_rust_entry(lapic_id: u32).  First argument in EDI per SysV ABI.
+    mov edi, eax
+    lea rax, [rip + ap_rust_entry]
+    call rax
+    // ap_rust_entry is diverging (!), but just in case:
+halt_ap:
+    cli
+    hlt
+    jmp halt_ap
 
 setup_bsp:
     // Clear .bss section
