@@ -6,10 +6,7 @@
 //! Provenance: Own (Linux recvmsg(2), cmsg(3) man pages).
 use crate::{
     ctypes::c_int,
-    fs::{
-        inode::INode,
-        opened_file::{Fd, OpenOptions, PathComponent},
-    },
+    fs::opened_file::{Fd, OpenOptions},
     net::{AncillaryData, UnixSocket, UnixStream},
     prelude::*,
     process::current_process,

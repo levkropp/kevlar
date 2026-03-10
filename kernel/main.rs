@@ -51,9 +51,10 @@ use crate::{
     fs::{
         devfs::{self, DEV_FS},
         initramfs::{self, INITRAM_FS},
-        mount::RootFs,
+        mount::{MountTable, RootFs},
         path::Path,
         procfs::{self, PROC_FS},
+        sysfs,
     },
     process::{switch, Process},
     syscalls::SyscallHandler,
@@ -198,6 +199,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("procfs init");
     devfs::init();
     profiler.lap_time("devfs init");
+    sysfs::init();
+    profiler.lap_time("sysfs init");
     tmpfs::init();
     profiler.lap_time("tmpfs init");
     initramfs::init();
@@ -243,6 +246,9 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     root_fs
         .mount(tmp_dir, TMP_FS.clone())
         .expect("failed to mount tmpfs");
+
+    // Initialize mount table for /proc/mounts.
+    MountTable::init();
 
     // Open /dev/console for the init process.
     let console = root_fs

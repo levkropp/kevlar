@@ -11,5 +11,6 @@ pub mod path;
 pub mod procfs;
 pub mod signalfd;
 pub mod stat;
+pub mod sysfs;
 pub mod timerfd;
 pub mod tmpfs;
