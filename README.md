@@ -1,110 +1,95 @@
 # Kevlar
 
-A permissively licensed Rust kernel for running Linux binaries, informed by FreeBSD and OSv.
+A permissively licensed Rust kernel for running Linux binaries.
 
 ## Overview
 
-Kevlar is a monolithic operating system kernel written in Rust that aims for Linux ABI
-binary compatibility. It is a fork of [Kerla](https://github.com/nuta/kerla) (MIT/Apache-2.0),
-modernized, extended, and relicensed as MIT/Apache-2.0/BSD-2-Clause with the goal of becoming
-the most capable permissively licensed Rust kernel for running real Linux userspace software.
+Kevlar implements the Linux ABI so that unmodified Linux programs run directly
+on it — not through a compatibility shim, but because Kevlar *is* a Linux-ABI
+kernel. It is a fork of [Kerla](https://github.com/nuta/kerla) (MIT/Apache-2.0),
+modernized, extended, and relicensed as MIT/Apache-2.0/BSD-2-Clause.
+
+Kevlar uses the **ringkernel** architecture: a single-address-space kernel with
+three concentric trust zones enforced by Rust's type system. Unsafe code is
+confined to the `platform/` crate (<10% of the codebase). All syscall handlers,
+VFS logic, process management, and networking are written in safe Rust.
 
 **License:** MIT OR Apache-2.0 OR BSD-2-Clause
 
 ## Current Status
 
-After completing M2 and M3 preparation, the kernel boots static musl BusyBox, runs an interactive shell on both x86_64 and ARM64, supports dynamically linked musl PIE binaries, and has terminal control, job control, symlink support, and clone for Bash/coreutils.
+**M5 Phase 4 complete.** 107+ syscalls implemented.
 
-- **103 implemented syscalls** (116 dispatch entries)
-- **Dynamic linking:** PIE executables with PT_INTERP, dual ELF loading, auxiliary vectors
-- **Two architectures:** x86_64 and ARM64 (QEMU virt, cortex-a72)
-- Full memory management: mmap (MAP_FIXED), mprotect, munmap, madvise with NX bit support
-- File operations: openat, newfstatat, lseek, pread64, pwrite64, readv, ftruncate, O_TRUNC, O_APPEND
-- Filesystem: symlink/symlinkat, unlinkat, mkdirat, renameat, readlinkat, fchdir
-- Process control: fork, vfork, clone, execve, wait4 (WUNTRACED), signals (correct POSIX defaults), futex, setsid/getsid
-- Job control: SIGSTOP/SIGTSTP/SIGCONT, Stopped process state, tgkill
-- FD plumbing: dup, dup2, dup3, pipe, pipe2, fcntl (F_DUPFD/F_GETFD/F_SETFD/F_GETFL/F_SETFL)
-- Terminal: TCGETS/TCSETS, TIOCGWINSZ, ^C/^Z/^D handling, PTY support
-- Networking: TCP/UDP via smoltcp (virtio-net), socket, bind, listen, accept, connect
-- Time: clock_gettime, gettimeofday, nanosleep
-- System info: uname, sysinfo, getrlimit, syslog
-- Initramfs root filesystem (tmpfs with symlinks, basic procfs, devfs)
-- QEMU and Firecracker support (x86_64); QEMU virt (ARM64)
-
-## Goals
-
-1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
-2. **Permissive licensing** — All code is MIT/Apache-2.0/BSD-2-Clause or compatible
-3. **Ringkernel architecture** — Three-ring safety design: unsafe Platform (<10% TCB), safe Core, panic-contained Services. Near-monolithic performance with microkernel-style fault isolation via `catch_unwind` at ring boundaries
-4. **Clean-room provenance** — Syscall semantics informed by FreeBSD's linuxulator (BSD-2-Clause); VFS abstractions adapted from OSv (BSD-3-Clause); safety architecture informed by Asterinas (studied, not copied)
-5. **170+ syscalls** — Full coverage for threading, signals, memory management, filesystems, and networking
+- Static and dynamic (PIE) musl-linked binaries
+- BusyBox interactive shell on x86\_64 and ARM64 (QEMU)
+- TCP/UDP networking via virtio-net (smoltcp 0.12)
+- Unix domain sockets with SCM\_RIGHTS
+- Full POSIX signal semantics (SA\_SIGINFO, sigaltstack, lock-free sigprocmask)
+- Job control and terminal management (SIGTSTP, SIGCONT, tcsetpgrp)
+- epoll, eventfd, inotify, timerfd, signalfd
+- Mount namespace support (bind mounts)
+- procfs and devfs (/proc/[pid]/maps, /proc/[pid]/fd/, /proc/cpuinfo)
+- Process capabilities and prctl
+- vDSO for fast clock\_gettime (~10 ns; 2× faster than Linux KVM)
+- KVM performance at or above Linux for many syscalls (getpid: 200 ns)
 
 ## Roadmap
 
 | Milestone | Syscalls | Status | Description |
 |-----------|----------|--------|-------------|
 | M1: Static Busybox | ~50 | **Complete** | Core syscalls for static musl binaries |
-| M1.5: ARM64 | -- | **Complete** | ARM64 port; BusyBox boots on QEMU virt (cortex-a72) |
+| M1.5: ARM64 | -- | **Complete** | ARM64 port; BusyBox boots on QEMU virt |
 | M2: Dynamic linking | ~55 | **Complete** | PIE + musl ld-linux; pread64, futex, madvise |
-| M3: Coreutils + Bash | ~80 | **Complete** | Terminal, job control, symlinks, clone, 103 syscalls |
-| M4: systemd | ~110 | Planned | epoll, signalfd, timerfd, mount |
-| M5: apt/dpkg | ~120 | Planned | xattr, statx, splice |
-| M6: Full networking | ~130 | Planned | AF_NETLINK, accept4 |
+| M3: Terminal + Job Control | ~80 | **Complete** | Terminal, job control, symlinks, clone |
+| M4: systemd-compatible PID 1 | ~110 | **Complete** | epoll, unix sockets, mount, caps; 15/15 integration tests |
+| M5: Persistent Storage | ~120 | In Progress | statx, inotify, procfs done; VirtIO block + ext2 next |
+| M6: Full networking | ~130 | Planned | AF\_NETLINK, accept4 |
 | M7: Container runtime | ~145 | Planned | namespaces, seccomp, clone3 |
-| M8: Kubuntu 24.04 | ~170 | Planned | SysV IPC, ptrace, io_uring |
+| M8: Kubuntu 24.04 desktop | ~170 | Planned | SysV IPC, ptrace, io\_uring |
 
-See [Documentation/compatibility.md](Documentation/compatibility.md) for the full syscall-by-syscall status table.
+See [Documentation/compatibility.md](Documentation/compatibility.md) for the
+full syscall-by-syscall status.
 
-## Provenance & Attribution
+## Goals
 
-Kevlar is built from permissively licensed sources:
-
-| Source | License | Usage |
-|--------|---------|-------|
-| [Kerla](https://github.com/nuta/kerla) | MIT OR Apache-2.0 | Fork base (original kernel) |
-| [FreeBSD](https://github.com/freebsd/freebsd-src) | BSD-2-Clause | Primary reference for Linux syscall semantics (linuxulator: sys/compat/linux/) |
-| [OSv](https://github.com/cloudius-systems/osv) | BSD-3-Clause | Reference for VFS layer, filesystem abstractions |
-| [Asterinas](https://github.com/asterinas/asterinas) | MPL-2.0 | Design reference only (no code) |
-
-See [NOTICE](NOTICE) for full attribution details.
+1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
+2. **Permissive licensing** — All code is MIT/Apache-2.0/BSD-2-Clause or compatible
+3. **Ringkernel architecture** — Three-ring safety design: unsafe Platform (<10% TCB),
+   safe Core, panic-contained Services. Near-monolithic performance with
+   microkernel-style fault isolation via `catch_unwind` at ring boundaries
+4. **Configurable safety** — Four compile-time profiles from Fortress (maximum safety)
+   to Ludicrous (maximum performance)
+5. **Clean-room provenance** — Syscall semantics derived from FreeBSD's linuxulator
+   (BSD-2-Clause); no GPL code ever copied
 
 ## Building
 
-### Linux/macOS
-
-Kevlar uses Rust nightly. To build:
-
 ```bash
-# Install Rust nightly
 rustup install nightly
+rustup override set nightly
+rustup component add llvm-tools-preview rust-src
 
-# Build and run on x86_64
-make run
-
-# Build and run on ARM64 (release required for TCG performance)
-RELEASE=1 ARCH=arm64 make run
+make run               # Build and boot on x86_64
+make ARCH=arm64 RELEASE=1 run  # ARM64 (release for TCG performance)
 ```
 
-### Windows
+See [Documentation/quickstart.md](Documentation/quickstart.md) for full build
+instructions including Docker, prerequisites, and make targets.
 
-See [WINDOWS-SETUP.md](WINDOWS-SETUP.md) for detailed Windows build instructions.
+## Provenance & Attribution
 
-Quick setup:
+| Source | License | Usage |
+|--------|---------|-------|
+| [Kerla](https://github.com/nuta/kerla) | MIT OR Apache-2.0 | Fork base |
+| [FreeBSD](https://github.com/freebsd/freebsd-src) | BSD-2-Clause | Primary reference for Linux syscall semantics |
 
-```bash
-# 1. Install dependencies (run setup-windows.ps1 in PowerShell as Admin)
-# 2. Verify setup
-./verify-windows-setup.sh
-
-# 3. Build and run
-make run
-```
+See [Documentation/provenance/](Documentation/provenance/) for the full clean-room
+implementation log and attribution details.
 
 ## Documentation
 
-- [Documentation/](Documentation/) — The Kevlar Book (architecture, syscall coverage, provenance log)
-- [blog/](blog/) — Development milestone blog posts
-- [M1-PLAN.md](M1-PLAN.md) — Static Busybox implementation plan and status
+- [Documentation/](Documentation/) — Architecture, syscall coverage, provenance log
+- [Documentation/blog/](Documentation/blog/) — Development milestone blog posts
 
 ## License
 
@@ -118,5 +103,6 @@ at your option.
 
 ### Contribution
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
-in this project shall be tri-licensed as above, without any additional terms or conditions.
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this project shall be tri-licensed as above, without any
+additional terms or conditions.

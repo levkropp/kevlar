@@ -2,21 +2,56 @@
 
 ## License
 
-All contributions must be dual-licensed under MIT OR Apache-2.0.
+All contributions must be licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**.
+Add an SPDX header to every new `.rs` file:
+
+```rust
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+```
 
 ## Clean-Room Requirements
 
-When implementing new subsystems:
+Kevlar's permissive license depends on clean-room provenance. When implementing
+new subsystems:
 
 1. **Document your references** in [clean-room-log.md](provenance/clean-room-log.md)
-2. **Never copy** Asterinas (MPL-2.0) or Linux (GPL-2.0) code
-3. **OSv code** (BSD-3-Clause) may be ported to Rust with proper attribution
-4. **Add SPDX headers** to all new `.rs` files: `// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause`
+2. **Use FreeBSD linuxulator** (BSD-2-Clause) as the primary reference for Linux
+   syscall semantics — it is the cleanest BSD-licensed implementation of the
+   Linux ABI
+3. **Never copy** GPL-licensed kernel code (Linux, RTEMS, etc.)
+4. **Man pages** are always safe to reference for interface specifications
+
+See [Licensing](provenance/licensing.md) for the full rationale.
 
 ## Code Style
 
-- Safe Rust in `kernel/` (`#![deny(unsafe_code)]`)
-- All unsafe code goes in `runtime/` (HAL)
-- Every `unsafe` block requires a `// SAFETY:` comment
-- Use `log` crate macros for logging (no `println!`)
-- Error handling with `Result<T>` and `?` operator
+- **Safe Rust in `kernel/`** — the kernel crate enforces `#![deny(unsafe_code)]`
+- **All unsafe code goes in `platform/`** — every `unsafe` block requires a
+  `// SAFETY:` comment explaining the invariant
+- **Service crates** (`services/`, `libs/kevlar_vfs/`) use `#![forbid(unsafe_code)]`
+- Use `log` crate macros for logging — no `println!`
+- Error handling with `Result<T>` and the `?` operator
+- No `unwrap()` in kernel paths — propagate errors or use `expect` with a message
+
+## Architecture Rules
+
+Follow the ringkernel trust boundaries:
+
+- Hardware access only in `platform/` (Ring 0)
+- OS policies in `kernel/` (Ring 1)
+- Pluggable services in `services/` (Ring 2)
+- Shared VFS types in `libs/kevlar_vfs/` (no kernel dependencies)
+
+If a change requires adding `unsafe` code outside `platform/`, discuss it first.
+
+## Testing
+
+```
+make run                   # Boot and check the shell works
+make check                 # Quick type-check
+make check-all-profiles    # Verify all safety profiles build
+make bench                 # Run benchmarks (should not regress)
+```
+
+There is no automated test runner yet beyond the benchmarks. Boot the kernel and
+exercise the affected subsystem manually.

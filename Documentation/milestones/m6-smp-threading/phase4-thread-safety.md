@@ -150,7 +150,6 @@ Never acquire a higher-numbered lock while holding a lower-numbered one.
 
 - FreeBSD `sys/x86/x86/mp_x86.c` (BSD-2-Clause) — TLB shootdown
 - FreeBSD `sys/kern/kern_sig.c` (BSD-2-Clause) — thread group signals
-- OSv `core/mmu.cc` (BSD-3-Clause) — TLB management
 - Linux tgkill(2), signal(7) man pages — thread signal semantics
 
 ## Testing

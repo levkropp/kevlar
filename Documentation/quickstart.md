@@ -1,73 +1,102 @@
 # Quickstart
 
-### Prerequisites
-Make sure the following software is installed:
+## Prerequisites
 
-- Rust toolchain (nightly) - Use [rustup](https://rustup.rs/) to install
-- [cargo-binutils](https://crates.io/crates/cargo-binutils) and [rustfilt](https://crates.io/crates/rustfilt) crates
-- Docker
-  - Make sure `docker run hello-world` works without sudo.
-- Python 3
-- QEMU
+- **Rust nightly** — install via [rustup](https://rustup.rs/), then:
+  ```
+  rustup override set nightly
+  rustup component add llvm-tools-preview rust-src
+  ```
+- **cargo-binutils** and **rustfilt**:
+  ```
+  cargo install cargo-binutils rustfilt
+  ```
+- **Docker** — used to build the initramfs; `docker run hello-world` must work without sudo
+- **Python 3**
+- **QEMU** with x86\_64 and/or aarch64 targets
 
-#### macOS
-
+### Linux (Debian/Ubuntu)
 ```
-$ brew install qemu gdb python3
-$ brew install --cask docker
-```
-
-#### Ubuntu
-
-```
-$ sudo apt install qemu-system gdb python3
+sudo apt install qemu-system-x86 qemu-system-arm gdb python3
 ```
 
-## Building
+### macOS
 ```
-$ git clone https://github.com/levkropp/kevlar && cd kevlar
-$ rustup override set nightly
-$ rustup component add llvm-tools-preview rust-src
-$ cargo install cargo-watch cargo-binutils rustfilt
-$ make
+brew install qemu gdb python3
+brew install --cask docker
 ```
 
-### Make Commands
+## Building and Running
 
 ```
-$ make                # Build OS (debug build)
-$ make RELEASE=1      # Build OS (release build)
-$ make run            # Run on QEMU
-$ make run LOG=trace  # Run on QEMU w/ trace messages enabled
-$ make run GDB=1      # Run on QEMU with GDB connection enabled (listens on localhost:7789)
+git clone https://github.com/levkropp/kevlar && cd kevlar
+make run
 ```
 
-### Running OS on QEMU
-Once you boot the OS with `make run`, a Busybox shell shows up in your terminal.
+`make run` builds the kernel and initramfs, then boots in QEMU. A BusyBox shell
+appears in the terminal.
 
-The terminal running QEMU emulates a serial port connected to Kevlar. What you type on
-the terminal will be sent to the Kevlar and the foreground process.
+### Common Make Targets
 
-#### QEMU Commands
-Type <kbd>Ctrl + A</kbd> then <kbd>C</kbd> to switch the terminal into the QEMU monitor mode. The useful commands are:
+| Command | Description |
+|---|---|
+| `make` | Build (debug) |
+| `make RELEASE=1` | Build (release, optimized) |
+| `make run` | Build and boot in QEMU (x86\_64) |
+| `make run GDB=1` | Boot with GDB stub on `localhost:7789` |
+| `make run LOG=trace` | Boot with verbose trace logging |
+| `make check` | Fast type-check (no link step) |
+| `make bench` | Run micro-benchmarks in QEMU |
+| `make bench-kvm` | Run benchmarks with KVM acceleration |
+| `make debug` | Boot with GDB + structured debug events |
 
-- `q`: Quit the emulator.
-- `info registers`: Dump the CPU registers.
-- `info qtree`: List peripherals connected to the VM.
-
-### Startup Script
-Edit `initramfs/inittab.py` to run shell scripts automatically.
-
-### Running a Docker image
-You can run a Docker image as a root file system (not as a container!) on Kevlar Kernel instead of our initramfs built from `initramfs` directory.
-
-To run [nuta/helloworld](https://hub.docker.com/r/nuta/helloworld), type:
+### ARM64
 
 ```
-$ make IMAGE=nuta/helloworld run
+make ARCH=arm64 run
 ```
 
-This feature is in a very early stage and I guess **almost all images out there won't work** because:
+ARM64 uses `qemu-system-aarch64 -machine virt -cpu cortex-a72`. Debug builds are
+slow under TCG emulation; use `make ARCH=arm64 RELEASE=1 run` for reasonable speed.
 
-- They tend to be too large to be embedded into the kernel image.
-- They might use unimplemented features (e.g. position-independent executables used in Alpine Linux).
+### Safety Profiles
+
+```
+make run PROFILE=fortress      # Maximum safety (catch_unwind, copy-semantic frames)
+make run PROFILE=balanced      # Default (catch_unwind, optimized usercopy)
+make run PROFILE=performance   # No catch_unwind, concrete service dispatch
+make run PROFILE=ludicrous     # All safety layers off
+make check-all-profiles        # Type-check all four profiles
+```
+
+See [Safety Profiles](architecture/safety-profiles.md) for details.
+
+## QEMU Controls
+
+Type **Ctrl+A then C** to enter the QEMU monitor. Useful monitor commands:
+
+- `q` — quit
+- `info registers` — dump CPU registers
+- `info mem` — dump the active page table
+- `info qtree` — list peripherals
+
+## Customizing the Init Script
+
+Edit `testing/Dockerfile` to add binaries to the initramfs, or set `INIT_SCRIPT`
+to run a specific binary as PID 1:
+
+```
+make run INIT_SCRIPT=/bin/sh
+make run INIT_SCRIPT=/bin/bench
+```
+
+## Networking
+
+The VM gets a virtio-net interface. By default, DHCP is used (`ip=dhcp` kernel
+parameter). To use a static address:
+
+```
+make run CMDLINE="ip4=10.0.2.15/24"
+```
+
+The host can reach the VM on the port forwarded by QEMU's user-mode networking.

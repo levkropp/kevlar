@@ -1,26 +1,44 @@
 # Introduction
 
-Kevlar is a monolithic operating system kernel written in Rust which aims to be compatible
-with the Linux ABI — it runs Linux binaries without any modifications.
+Kevlar is a Rust kernel for running Linux binaries — it implements the Linux ABI so
+that unmodified Linux programs run on Kevlar directly. It is not a Linux fork or a
+translation layer; it is a clean-room implementation of the Linux syscall interface
+on a new kernel.
 
-Licensed under MIT OR Apache-2.0, Kevlar is strongly informed by FreeBSD's linuxulator
-(BSD-2-Clause) for Linux syscall semantics and OSv (BSD-3-Clause) for VFS abstractions.
-This gives Kevlar a provably clean-room path to Linux binary compatibility while remaining
-fully permissively licensed.
+Licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**, Kevlar draws on FreeBSD's
+linuxulator (BSD-2-Clause) as the primary reference for Linux syscall semantics.
+This gives Kevlar a provably clean-room path to Linux ABI compatibility while
+remaining fully permissively licensed.
 
 ## Current Status
 
-**Milestone 1 complete:** Static musl BusyBox boots on Kevlar in QEMU and runs an
-interactive shell. 79 syscalls are implemented across process management, file I/O,
-memory management, networking (TCP/UDP via smoltcp), signals, and TTY support.
+**M5 Phase 4 complete.** 107+ syscalls implemented. The following work:
+
+- Static and dynamic (PIE) musl-linked binaries
+- BusyBox interactive shell on x86\_64 and ARM64
+- TCP/UDP networking via virtio-net (smoltcp 0.12)
+- Unix domain sockets with SCM\_RIGHTS
+- Full POSIX signal semantics (SA\_SIGINFO, sigaltstack, sigprocmask)
+- Job control and terminal management (SIGTSTP, SIGCONT, tcsetpgrp)
+- epoll, eventfd, inotify, timerfd, signalfd
+- Mount namespace (bind mounts, pivot\_root)
+- procfs and devfs (including /proc/[pid]/maps, /proc/[pid]/fd/, /proc/cpuinfo)
+- Process capabilities and prctl
+- vDSO for fast clock\_gettime (10 ns, 2× faster than Linux KVM)
+- KVM-accelerated performance matching or exceeding Linux for many syscalls
+
+## Architecture
+
+Kevlar uses the **ringkernel** architecture: a single-address-space kernel with
+concentric trust zones enforced by Rust's type system, crate visibility, and panic
+containment at ring boundaries. See [The Ringkernel Architecture](architecture/ringkernel.md).
 
 ## Vision
 
-Kevlar occupies a unique position in the OS landscape: more Linux-native than FreeBSD's
-compatibility layer (Kevlar IS a Linux-ABI kernel, not a translation layer), but built
-on clean BSD/MIT-licensed Rust foundations. The goal is a kernel that Linux's ecosystem
-deserves — permissively licensed, memory-safe, with the correctness guarantees that come
-from FreeBSD's decades of POSIX expertise.
+Kevlar's goal is to run the Linux ecosystem — including Wine and complex desktop
+applications — on a permissively licensed, memory-safe kernel. It occupies a unique
+niche: more Linux-native than FreeBSD's linuxulator (Kevlar *is* a Linux-ABI kernel,
+not a compatibility shim), but built on clean BSD/MIT-licensed Rust foundations.
 
 ## Links
 

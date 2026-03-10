@@ -76,7 +76,6 @@ SMP is the most invasive change since ARM64 support. It touches:
 
 - FreeBSD SMP: `sys/x86/x86/mp_x86.c` (BSD-2-Clause) — AP startup
 - FreeBSD scheduler: `sys/kern/sched_ule.c` (BSD-2-Clause) — ULE scheduler
-- OSv: `arch/x64/smp.cc` (BSD-3-Clause) — SMP boot sequence
 - OSDev wiki: SMP, APIC, Inter-Processor Interrupts
 - Intel SDM Volume 3: Chapter 8 (Multiple-Processor Management)
 - ARM Architecture Reference Manual: PSCI, spin-table boot protocol

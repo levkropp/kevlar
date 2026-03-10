@@ -43,13 +43,13 @@ use `#![forbid(unsafe_code)]`. The platform crate exposes safe APIs that
 encapsulate all hardware interaction, page table manipulation, context switching,
 and user-kernel memory copying.
 
-**Target: <10% of kernel code is unsafe** (Asterinas achieves 14%; we aim lower
-by making the platform layer thinner).
+**Target: <10% of kernel code is unsafe.** The platform layer is kept thin so
+the unsafe surface area stays small and auditable.
 
 ### 2. Panic containment at ring boundaries
 
-Unlike Asterinas (where any panic kills the kernel) or microkernels (where
-fault isolation requires separate address spaces), Kevlar catches panics at
+Unlike monolithic kernels (where any panic kills the system) or microkernels (where
+fault isolation requires separate address spaces and IPC), Kevlar catches panics at
 ring boundaries using `catch_unwind`:
 
 - **Ring 2 → Ring 1:** A panicking service (filesystem, driver, network stack)
@@ -103,16 +103,16 @@ the performance cost.
 
 ## Comparison with Existing Approaches
 
-| Property              | Monolithic | Microkernel | Framekernel (Asterinas) | **Ringkernel (Kevlar)** |
-|-----------------------|------------|-------------|-------------------------|--------------------------|
-| Address space         | Single     | Multiple    | Single                  | **Single**               |
-| Isolation mechanism   | None       | HW (MMU)    | Type system (2 tiers)   | **Type system (3 tiers)**|
-| Fault containment     | None       | Process     | None                    | **catch_unwind at rings**|
-| IPC overhead          | N/A        | High        | None                    | **None**                 |
-| Driver restart        | No         | Yes         | No                      | **Yes (Ring 2)**         |
-| TCB (% of code)       | 100%       | ~5%         | ~14%                    | **<10% target**          |
-| Performance vs Linux  | Baseline   | -10-30%     | ~parity                 | **~parity target**       |
-| Panic behavior        | Kernel crash | Service crash | Kernel crash          | **Service restart**      |
+| Property              | Monolithic | Microkernel | Framekernel | **Ringkernel (Kevlar)** |
+|-----------------------|------------|-------------|-------------|--------------------------|
+| Address space         | Single     | Multiple    | Single      | **Single**               |
+| Isolation mechanism   | None       | HW (MMU)    | Type system (2 tiers) | **Type system (3 tiers)**|
+| Fault containment     | None       | Process     | None        | **catch_unwind at rings**|
+| IPC overhead          | N/A        | High        | None        | **None**                 |
+| Driver restart        | No         | Yes         | No          | **Yes (Ring 2)**         |
+| TCB (% of code)       | 100%       | ~5%         | ~10-15%     | **<10% target**          |
+| Performance vs Linux  | Baseline   | -10-30%     | ~parity     | **~parity target**       |
+| Panic behavior        | Kernel crash | Service crash | Kernel crash | **Service restart**   |
 
 ## Ring 0: The Platform (`kevlar_platform`)
 
@@ -372,12 +372,11 @@ time. See [Safety Profiles](safety-profiles.md) for the full design.
 
 ## Provenance
 
-This architecture is an original design for Kevlar. It was developed
-with awareness of the following prior work (design concepts only, no code):
+This architecture is an original design for Kevlar. It was informed by published
+research on safe OS design (design concepts only; no code from any source was copied):
 
 | Reference | License | What we studied | What we took |
 |-----------|---------|-----------------|--------------|
-| Asterinas | MPL-2.0 | Framekernel concept, OSTD API categories | The idea of crate-level unsafe confinement |
 | RedLeaf   | MIT     | Language domain concept | The idea of panic-based fault containment |
 | Tock OS   | MIT/Apache-2.0 | Capability-based capsule design | Capability tokens for service access control |
 | Theseus   | MIT     | Intralingual OS design | Confirmation that safe-Rust-only services are viable |

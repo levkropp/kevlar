@@ -165,7 +165,6 @@ fn idle_loop() -> ! {
 ## Reference Sources
 
 - FreeBSD `sys/kern/sched_ule.c` (BSD-2-Clause) — ULE scheduler
-- OSv `core/sched.cc` (BSD-3-Clause) — per-CPU scheduling
 - Linux CFS documentation (concepts only, not code)
 - OSDev wiki — SMP scheduling
 

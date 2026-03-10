@@ -1,36 +1,37 @@
 # Kernel Parameters
 
-Kernel parameters allows you to configure Kevlar at the boot time.
+Kernel parameters configure Kevlar at boot time.
 
 ## Available Parameters
 
-| Name                 | Description                                                                                                                     | Example                         |
-|----------------------|---------------------------------------------------------------------------------------------------------------------------------|---------------------------------|
-| `log`                | Logging configuration (see [Logging](logging)).                                                                                 | `log=trace`                     |
-| `serial1`            | If it's on, kernel log messages are sent to the secondary serial port (see [Logging](logging)).                                 | `serial1=on`                    |
-| `dhcp`               | If it's off, the in-kernel DHCP client won't start.                                                                             | `dhcp=off`                      |
-| `ip4`                | A static IPv4 address with the network prefix length.                                                                           | `ip4=10.0.0.123/24`             |
-| `gateway_ip4`        | A static gateway IPv4 address.                                                                                                  | `gateway_ip4=10.0.0.1`          |
-| `pci`                | If it's off, PCI devices are not discovered.                                                                                    | `pci=off`                       |
-| `pci_device`         | PCI devices (`bus:slot`) recognized by Kevlar. Multiple parameters are accepted. If it's not given, all PCI devices are allowed. | `pci_device=0:1`                |
-| `virtio_mmio.device` | The virtio devices connected over MMIO. Multiple parameters are accepted.                                                       | `virtio_mmio.device=@0xf000:12` |
+| Name | Description | Example |
+|------|-------------|---------|
+| `log` | Logging level (see [Logging](logging.md)) | `log=trace` |
+| `serial1` | Send kernel log to secondary serial port | `serial1=on` |
+| `dhcp` | Set to `off` to disable the DHCP client | `dhcp=off` |
+| `ip4` | Static IPv4 address with prefix length | `ip4=10.0.0.123/24` |
+| `gateway_ip4` | Static gateway IPv4 address | `gateway_ip4=10.0.0.1` |
+| `pci` | Set to `off` to skip PCI device discovery | `pci=off` |
+| `pci_device` | Allowlist specific PCI devices (`bus:slot`); repeatable | `pci_device=0:1` |
+| `virtio_mmio.device` | virtio devices connected over MMIO; repeatable | `virtio_mmio.device=@0xf000:12` |
+| `debug` | Enable structured debug events (see [Debugging 101](hacking/debugging-101.md)) | `debug=all` |
 
 ## How to Set Kernel Parameters
 
 ### make
 
-In `make`, you can specify kernel parameters through `CMDLINE=`:
+Pass parameters via `CMDLINE=`:
 
 ```
-make run CMDLINE="dhcp=off"
+make run CMDLINE="dhcp=off ip4=10.0.0.5/24"
 ```
 
 ### GRUB2
 
-In GRUB2, append kernel parameters after the kernel image path:
+Append parameters after the kernel image path:
 
 ```
 menuentry "Kevlar" {
-    multiboot2 /boot/kevlar.elf dhcp=off
+    multiboot2 /boot/kevlar.elf dhcp=off ip4=10.0.0.5/24
 }
 ```
