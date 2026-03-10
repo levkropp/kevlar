@@ -9,9 +9,66 @@ use super::{
 use crate::prelude::*;
 use crate::syscalls::CwdOrFd;
 
+use alloc::collections::VecDeque;
 use hashbrown::HashMap;
+use kevlar_platform::spinlock::SpinLock;
 
 const DEFAULT_SYMLINK_FOLLOW_MAX: usize = 8;
+
+// ── Mount table (for /proc/mounts) ──────────────────────────────────
+
+struct MountEntry {
+    fstype: String,
+    mountpoint: String,
+}
+
+static MOUNT_ENTRIES: SpinLock<VecDeque<MountEntry>> = SpinLock::new(VecDeque::new());
+
+/// Global mount table for /proc/mounts reporting.
+pub struct MountTable;
+
+impl MountTable {
+    /// Register initial boot-time mounts.
+    pub fn init() {
+        let mut entries = MOUNT_ENTRIES.lock();
+        entries.push_back(MountEntry {
+            fstype: String::from("initramfs"),
+            mountpoint: String::from("/"),
+        });
+        entries.push_back(MountEntry {
+            fstype: String::from("proc"),
+            mountpoint: String::from("/proc"),
+        });
+        entries.push_back(MountEntry {
+            fstype: String::from("devtmpfs"),
+            mountpoint: String::from("/dev"),
+        });
+        entries.push_back(MountEntry {
+            fstype: String::from("tmpfs"),
+            mountpoint: String::from("/tmp"),
+        });
+    }
+
+    pub fn add(fstype: &str, mountpoint: &str) {
+        MOUNT_ENTRIES.lock().push_back(MountEntry {
+            fstype: String::from(fstype),
+            mountpoint: String::from(mountpoint),
+        });
+    }
+
+    pub fn remove(mountpoint: &str) {
+        MOUNT_ENTRIES.lock().retain(|e| e.mountpoint != mountpoint);
+    }
+
+    /// Format /proc/mounts content.
+    pub fn format_mounts(buf: &mut String) {
+        use core::fmt::Write;
+        let entries = MOUNT_ENTRIES.lock();
+        for entry in entries.iter() {
+            let _ = writeln!(buf, "none {} {} rw 0 0", entry.mountpoint, entry.fstype);
+        }
+    }
+}
 
 pub struct MountPoint {
     fs: Arc<dyn FileSystem>,

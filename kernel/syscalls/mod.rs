@@ -143,6 +143,7 @@ mod tgkill;
 // M4: systemd support
 mod epoll;
 mod eventfd;
+mod mount;
 mod recvmsg;
 mod sendmsg;
 mod setsockopt;
@@ -304,6 +305,8 @@ mod syscall_numbers {
     pub const SYS_SENDMSG: usize = 46;
     pub const SYS_RECVMSG: usize = 47;
     pub const SYS_SETSOCKOPT: usize = 54;
+    pub const SYS_MOUNT: usize = 165;
+    pub const SYS_UMOUNT2: usize = 166;
     pub const SYS_ACCEPT4: usize = 288;
     // M4: epoll + event fds
     pub const SYS_EPOLL_WAIT: usize = 232;
@@ -445,6 +448,8 @@ mod syscall_numbers {
     pub const SYS_SENDMSG: usize = 211;
     pub const SYS_RECVMSG: usize = 212;
     pub const SYS_SETSOCKOPT: usize = 208;
+    pub const SYS_MOUNT: usize = 40;
+    pub const SYS_UMOUNT2: usize = 39;
     pub const SYS_ACCEPT4: usize = 242;
     // M4: epoll + event fds
     pub const SYS_EPOLL_CREATE1: usize = 20;
@@ -945,6 +950,18 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new(a3),
                 a4 as c_int,
             ),
+            // M4 Phase 4: Filesystem mounting
+            SYS_MOUNT => self.sys_mount(
+                UserVAddr::new_nonnull(a1)?,
+                UserVAddr::new_nonnull(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+                a4 as c_int,
+                a5,
+            ),
+            SYS_UMOUNT2 => self.sys_umount2(
+                UserVAddr::new_nonnull(a1)?,
+                a2 as c_int,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1095,6 +1112,8 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_RECVMSG => "recvmsg",
         SYS_SETSOCKOPT => "setsockopt",
         SYS_ACCEPT4 => "accept4",
+        SYS_MOUNT => "mount",
+        SYS_UMOUNT2 => "umount2",
         _ => "(unknown)",
     }
 }
