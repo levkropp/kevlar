@@ -109,8 +109,9 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     }
 
     /// `poll(2)` and `select(2)`.
+    /// Default: regular files are always ready for I/O (matches Linux behavior).
     fn poll(&self) -> Result<PollStatus> {
-        Err(Error::new(Errno::EBADF))
+        Ok(PollStatus::POLLIN | PollStatus::POLLOUT)
     }
 
     /// `ioctl(2)`.

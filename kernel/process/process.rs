@@ -563,8 +563,19 @@ impl Process {
             self.continue_process();
         }
 
-        self.signals.lock().signal(signal);
-        // Use 0-based bit position to match userspace sigset_t convention.
+        let mut sigs = self.signals.lock();
+        let action = sigs.get_action(signal);
+
+        // Signals with Ignore disposition (default SIGCHLD, SIGURG, SIGWINCH)
+        // should NOT be queued or interrupt sleep — matching POSIX/Linux behavior.
+        // If the user installs a handler (SigAction::Handler), we do queue it.
+        if matches!(action, SigAction::Ignore) {
+            return;
+        }
+
+        sigs.signal(signal);
+        drop(sigs);
+
         self.signal_pending.fetch_or(1 << (signal - 1), Ordering::Release);
         self.resume();
 

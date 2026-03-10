@@ -2,7 +2,7 @@
 //! /proc/self symlink and /proc/[pid]/ per-process directories.
 use core::fmt;
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 
 use kevlar_vfs::{
@@ -13,6 +13,7 @@ use kevlar_vfs::{
     user_buffer::{UserBufWriter, UserBufferMut},
 };
 
+use crate::mm::vm::VmAreaType;
 use crate::process::{current_process, Process, PId};
 
 // ── /proc/self → /proc/<pid> symlink ────────────────────────────────
@@ -59,6 +60,16 @@ impl fmt::Debug for ProcPidDir {
 }
 
 impl Directory for ProcPidDir {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            // Use a unique inode number so the VFS doesn't confuse this with
+            // a mount point (mount table is keyed by inode number).
+            inode_no: INodeNo::new(0x70000000 + self.pid.as_i32() as usize),
+            mode: FileMode::new(S_IFDIR | 0o555),
+            ..Stat::zeroed()
+        })
+    }
+
     fn lookup(&self, name: &str) -> Result<INode> {
         match name {
             "stat" => Ok(INode::FileLike(
@@ -73,11 +84,17 @@ impl Directory for ProcPidDir {
             "comm" => Ok(INode::FileLike(
                 Arc::new(ProcPidComm { pid: self.pid }) as Arc<dyn FileLike>
             )),
+            "maps" => Ok(INode::FileLike(
+                Arc::new(ProcPidMaps { pid: self.pid }) as Arc<dyn FileLike>
+            )),
+            "fd" => Ok(INode::Directory(
+                Arc::new(ProcPidFdDir { pid: self.pid }) as Arc<dyn Directory>
+            )),
             "exe" => {
                 // Symlink to executable (stub: returns /bin/unknown).
                 let cmdline = Process::find_by_pid(self.pid)
                     .map(|p| p.cmdline().argv0().to_string())
-                    .unwrap_or_else(|| alloc::string::String::from("/bin/unknown"));
+                    .unwrap_or_else(|| String::from("/bin/unknown"));
                 Ok(INode::FileLike(
                     Arc::new(ProcPidExeStub(cmdline)) as Arc<dyn FileLike>
                 ))
@@ -94,22 +111,23 @@ impl Directory for ProcPidDir {
         Err(Error::new(Errno::EPERM))
     }
 
-    fn stat(&self) -> Result<Stat> {
-        Ok(Stat {
-            mode: FileMode::new(S_IFDIR | 0o555),
-            ..Stat::zeroed()
-        })
-    }
-
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {
-        let entries = ["stat", "status", "cmdline", "comm", "exe"];
+        let entries: &[(&str, FileType)] = &[
+            ("stat", FileType::Regular),
+            ("status", FileType::Regular),
+            ("cmdline", FileType::Regular),
+            ("comm", FileType::Regular),
+            ("exe", FileType::Regular),
+            ("maps", FileType::Regular),
+            ("fd", FileType::Directory),
+        ];
         if index >= entries.len() {
             return Ok(None);
         }
         Ok(Some(DirEntry {
             inode_no: INodeNo::new(0),
-            file_type: FileType::Regular,
-            name: alloc::string::String::from(entries[index]),
+            file_type: entries[index].1,
+            name: String::from(entries[index].0),
         }))
     }
 
@@ -195,22 +213,53 @@ impl FileLike for ProcPidStatus {
         }
 
         use core::fmt::Write;
-        let mut s = alloc::string::String::new();
+        let mut s = String::new();
 
         let pid = self.pid.as_i32();
-        let comm = Process::find_by_pid(self.pid)
+        let proc = Process::find_by_pid(self.pid);
+
+        let comm = proc.as_ref()
             .map(|p| p.cmdline().argv0().to_string())
-            .unwrap_or_else(|| alloc::string::String::from("unknown"));
-        let ppid = Process::find_by_pid(self.pid)
+            .unwrap_or_else(|| String::from("unknown"));
+        let ppid = proc.as_ref()
             .map(|p| p.ppid().as_i32())
             .unwrap_or(0);
 
         let _ = write!(s, "Name:\t{comm}\n");
         let _ = write!(s, "State:\tS (sleeping)\n");
+        let _ = write!(s, "Tgid:\t{pid}\n");
         let _ = write!(s, "Pid:\t{pid}\n");
         let _ = write!(s, "PPid:\t{ppid}\n");
         let _ = write!(s, "Uid:\t0\t0\t0\t0\n");
         let _ = write!(s, "Gid:\t0\t0\t0\t0\n");
+
+        if let Some(ref p) = proc {
+            let (fd_size, num_open) = {
+                let ft = p.opened_files().lock();
+                (ft.table_size(), ft.count_open())
+            };
+            let _ = write!(s, "FDSize:\t{}\n", fd_size);
+
+            // VM stats: sum of VMA lengths.
+            if let Some(ref vm_arc) = *p.vm() {
+                let vm = vm_arc.lock();
+                let vm_size_kb: usize = vm.vm_areas().iter()
+                    .map(|vma| (vma.end().value() - vma.start().value()) / 1024)
+                    .sum();
+                let _ = write!(s, "VmSize:\t{} kB\n", vm_size_kb);
+                let _ = write!(s, "VmRSS:\t{} kB\n", vm_size_kb);
+            }
+
+            let _ = write!(s, "Threads:\t1\n");
+
+            // Signal masks.
+            let sig_pending = p.signal_pending_bits() as u64;
+            let sig_blocked = p.sigset_load().bits();
+            let _ = write!(s, "SigPnd:\t{:016x}\n", sig_pending);
+            let _ = write!(s, "SigBlk:\t{:016x}\n", sig_blocked);
+
+            let _ = num_open; // used above for FDSize context
+        }
 
         let bytes = s.as_bytes();
         let len = core::cmp::min(bytes.len(), buf.len());
@@ -304,9 +353,173 @@ impl FileLike for ProcPidComm {
     }
 }
 
+// ── /proc/<pid>/maps ────────────────────────────────────────────────
+
+struct ProcPidMaps {
+    pid: PId,
+}
+
+impl fmt::Debug for ProcPidMaps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcPidMaps({})", self.pid.as_i32())
+    }
+}
+
+impl FileLike for ProcPidMaps {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        use core::fmt::Write;
+        let mut s = String::new();
+
+        if let Some(proc) = Process::find_by_pid(self.pid) {
+            if let Some(ref vm_arc) = *proc.vm() {
+                let vm = vm_arc.lock();
+                for (i, vma) in vm.vm_areas().iter().enumerate() {
+                    let start = vma.start().value();
+                    let end = vma.end().value();
+                    let prot = vma.prot();
+
+                    let r = if prot.contains(crate::ctypes::MMapProt::PROT_READ) { 'r' } else { '-' };
+                    let w = if prot.contains(crate::ctypes::MMapProt::PROT_WRITE) { 'w' } else { '-' };
+                    let x = if prot.contains(crate::ctypes::MMapProt::PROT_EXEC) { 'x' } else { '-' };
+
+                    let (offset_val, name) = match vma.area_type() {
+                        VmAreaType::File { offset, .. } => {
+                            (*offset, String::new())
+                        }
+                        VmAreaType::Anonymous => {
+                            let label = if i == 0 {
+                                "[stack]"
+                            } else if i == 1 {
+                                "[heap]"
+                            } else {
+                                ""
+                            };
+                            (0, String::from(label))
+                        }
+                    };
+
+                    let _ = write!(
+                        s,
+                        "{:08x}-{:08x} {}{}{}p {:08x} 00:00 0",
+                        start, end, r, w, x, offset_val,
+                    );
+                    if !name.is_empty() {
+                        let _ = write!(s, "          {}", name);
+                    }
+                    let _ = write!(s, "\n");
+                }
+            }
+        }
+
+        let bytes = s.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
+    }
+}
+
+// ── /proc/<pid>/fd/ directory ───────────────────────────────────────
+
+struct ProcPidFdDir {
+    pid: PId,
+}
+
+impl fmt::Debug for ProcPidFdDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcPidFdDir({})", self.pid.as_i32())
+    }
+}
+
+impl Directory for ProcPidFdDir {
+    fn lookup(&self, name: &str) -> Result<INode> {
+        let fd_num: usize = name.parse().map_err(|_| Error::new(Errno::ENOENT))?;
+        let proc = Process::find_by_pid(self.pid).ok_or_else(|| Error::new(Errno::ENOENT))?;
+        let opened_files = proc.opened_files().lock();
+        let file = opened_files.get(crate::fs::opened_file::Fd::new(fd_num as i32))?;
+        let target = file.path().resolve_absolute_path();
+        Ok(INode::FileLike(
+            Arc::new(ProcFdSymlink(target.as_str().to_string())) as Arc<dyn FileLike>
+        ))
+    }
+
+    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+        Err(Error::new(Errno::EPERM))
+    }
+
+    fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+        Err(Error::new(Errno::EPERM))
+    }
+
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            inode_no: INodeNo::new(0x71000000 + self.pid.as_i32() as usize),
+            mode: FileMode::new(S_IFDIR | 0o555),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {
+        let proc = match Process::find_by_pid(self.pid) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let opened_files = proc.opened_files().lock();
+        let mut count = 0;
+        for (fd_num, _file) in opened_files.iter_open() {
+            if count == index {
+                return Ok(Some(DirEntry {
+                    inode_no: INodeNo::new(0),
+                    file_type: FileType::Link,
+                    name: alloc::format!("{}", fd_num),
+                }));
+            }
+            count += 1;
+        }
+        Ok(None)
+    }
+
+    fn link(&self, _name: &str, _link_to: &INode) -> Result<()> {
+        Err(Error::new(Errno::EPERM))
+    }
+}
+
+/// Symlink for /proc/[pid]/fd/N → target path.
+struct ProcFdSymlink(String);
+
+impl fmt::Debug for ProcFdSymlink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcFdSymlink({})", self.0)
+    }
+}
+
+impl FileLike for ProcFdSymlink {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFLNK | 0o777),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn readlink(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(self.0.clone()))
+    }
+}
+
 // ── /proc/<pid>/exe (stub) ──────────────────────────────────────────
 
-struct ProcPidExeStub(alloc::string::String);
+struct ProcPidExeStub(String);
 
 impl fmt::Debug for ProcPidExeStub {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

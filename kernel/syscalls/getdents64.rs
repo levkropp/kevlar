@@ -11,9 +11,10 @@ use crate::user_buffer::UserBufWriter;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_getdents64(&mut self, fd: Fd, dirp: UserVAddr, len: usize) -> Result<isize> {
-        let current = current_process();
-        let opened_files = current.opened_files().lock();
-        let dir = opened_files.get(fd)?;
+        // Clone the Arc to release the fd table lock before iterating.
+        // This avoids deadlock when a procfs directory re-locks the fd table
+        // (e.g. /proc/[pid]/fd/ enumerating open file descriptors).
+        let dir = current_process().get_opened_file_by_fd(fd)?;
         debug::usercopy::set_context("sys_getdents64");
         let mut writer = UserBufWriter::from_uaddr(dirp, len);
         while let Some(entry) = dir.readdir()? {

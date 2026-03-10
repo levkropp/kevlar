@@ -298,6 +298,23 @@ impl OpenedFileTable {
         }
     }
 
+    /// Returns the number of open file descriptors.
+    pub fn count_open(&self) -> usize {
+        self.files.iter().filter(|f| f.is_some()).count()
+    }
+
+    /// Returns the capacity (highest possible fd + 1).
+    pub fn table_size(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Iterates over open file descriptors, yielding (fd_number, &OpenedFile).
+    pub fn iter_open(&self) -> impl Iterator<Item = (usize, &Arc<OpenedFile>)> {
+        self.files.iter().enumerate().filter_map(|(i, slot)| {
+            slot.as_ref().map(|local| (i, &local.opened_file))
+        })
+    }
+
     /// Resolves the opened file by the file descriptor.
     pub fn get(&self, fd: Fd) -> Result<&Arc<OpenedFile>> {
         match self.files.get(fd.as_usize()) {

@@ -9,14 +9,12 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_read(&mut self, fd: Fd, uaddr: UserVAddr, len: usize) -> Result<isize> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
-        // Hold the fd table guard across the read to avoid Arc::clone/drop
-        // overhead (~20ns).  Safe on single-CPU: nothing can modify the fd
-        // table while this syscall is executing.
-        let opened_files = current_process().opened_files_no_irq();
-        let opened_file = opened_files.get(fd)?;
+        // Clone the Arc to release the fd table lock before calling read().
+        // This avoids deadlock when a procfs read re-locks the fd table
+        // (e.g. /proc/self/status reading FDSize).
+        let opened_file = current_process().get_opened_file_by_fd(fd)?;
         let read_len = opened_file.read(UserBufferMut::from_uaddr(uaddr, len))?;
 
-        // MAX_READ_WRITE_LEN limit guarantees total_len is in the range of isize.
         Ok(read_len as isize)
     }
 }
