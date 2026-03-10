@@ -111,7 +111,7 @@ mod mprotect;
 mod munmap;
 
 // M2: Dynamic linking
-mod futex;
+pub mod futex;
 mod madvise;
 mod pread64;
 mod set_robust_list;
@@ -612,13 +612,16 @@ impl<'a> SyscallHandler<'a> {
             name = "";
         }
 
-        // Stack canary check (pre-syscall).
+        // Stack canary check (pre-syscall, x86-64 only — reads FS.base TLS pointer).
+        #[cfg(target_arch = "x86_64")]
         let pre_canary = if dbg_canary {
             let fsbase = current_process().arch().fsbase.load() as usize;
             debug::canary::check_and_emit(pid, fsbase, None, "pre_syscall", name)
         } else {
             None
         };
+        #[cfg(not(target_arch = "x86_64"))]
+        let pre_canary: Option<u64> = None;
 
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
@@ -639,7 +642,8 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at exit.
         debug::profiler::syscall_exit(n, prof_start);
 
-        // Stack canary check (post-syscall).
+        // Stack canary check (post-syscall, x86-64 only).
+        #[cfg(target_arch = "x86_64")]
         if dbg_canary {
             let fsbase = current_process().arch().fsbase.load() as usize;
             debug::canary::check_and_emit(pid, fsbase, pre_canary, "post_syscall", name);

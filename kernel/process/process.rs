@@ -119,6 +119,9 @@ pub struct Process {
     is_idle: bool,
     process_group: AtomicRefCell<Weak<SpinLock<ProcessGroup>>>,
     pid: PId,
+    /// Thread group ID. For single-threaded processes and group leaders this
+    /// equals `pid`. All threads in the same thread group share the same TGID.
+    tgid: PId,
     state: AtomicCell<ProcessState>,
     parent: Weak<Process>,
     cmdline: AtomicRefCell<Cmdline>,
@@ -142,6 +145,9 @@ pub struct Process {
     is_child_subreaper: AtomicBool,
     /// Process name set via PR_SET_NAME (max 16 bytes including NUL).
     comm: SpinLock<Option<Vec<u8>>>,
+    /// Address to write 0 to (and then wake the futex) when this thread exits.
+    /// Set by `set_tid_address(2)`. Used by pthread_join via futex.
+    clear_child_tid: AtomicUsize,
 }
 
 impl Process {
@@ -161,6 +167,7 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(None),
             pid: PId::new(0),
+            tgid: PId::new(0),
             root_fs: INITIAL_ROOT_FS.clone(),
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
@@ -174,6 +181,7 @@ impl Process {
             egid: AtomicU32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
+            clear_child_tid: AtomicUsize::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -224,6 +232,7 @@ impl Process {
             is_idle: false,
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
+            tgid: pid,
             parent: Weak::new(),
             children: SpinLock::new(Vec::new()),
             state: AtomicCell::new(ProcessState::Runnable),
@@ -243,6 +252,7 @@ impl Process {
             egid: AtomicU32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
+            clear_child_tid: AtomicUsize::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -273,6 +283,17 @@ impl Process {
         // In a single-threaded process, the thread ID is equal to the process ID (PID).
         // https://man7.org/linux/man-pages/man2/gettid.2.html
         self.pid
+    }
+
+    /// The thread group ID. Threads in the same group share a TGID.
+    /// `getpid()` returns this; `gettid()` returns `pid`.
+    pub fn tgid(&self) -> PId {
+        self.tgid
+    }
+
+    /// Sets the `clear_child_tid` address (CLONE_CHILD_CLEARTID / set_tid_address).
+    pub fn set_clear_child_tid(&self, addr: usize) {
+        self.clear_child_tid.store(addr, Ordering::Relaxed);
     }
 
     /// The arch-specific information.
@@ -535,6 +556,17 @@ impl Process {
         current.opened_files.lock().close_all();
 
         PROCESSES.lock().remove(&current.pid);
+
+        // CLONE_CHILD_CLEARTID: write 0 to tid address and wake futex waiters
+        // so that pthread_join() (which sleeps via futex(FUTEX_WAIT)) is woken.
+        let ctid_addr = current.clear_child_tid.load(Ordering::Relaxed);
+        if ctid_addr != 0 {
+            if let Ok(uaddr) = crate::process::UserVAddr::new_nonnull(ctid_addr) {
+                let _ = uaddr.write::<i32>(&0);
+            }
+            crate::syscalls::futex::futex_wake_addr(ctid_addr, 1);
+        }
+
         JOIN_WAIT_QUEUE.wake_all();
         switch();
         unreachable!();
@@ -542,7 +574,20 @@ impl Process {
 
     /// Terminates the **current** thread and other threads belonging to the same thread group.
     pub fn exit_group(status: c_int) -> ! {
-        // TODO: Kill other threads belonging to the same thread group.
+        let current = current_process();
+        let tgid = current.tgid;
+        // Send SIGKILL to all other threads in the same thread group.
+        let siblings: Vec<Arc<Process>> = {
+            let table = PROCESSES.lock();
+            table.values()
+                .filter(|p| p.tgid == tgid && p.pid != current.pid)
+                .cloned()
+                .collect()
+        };
+        for sibling in siblings {
+            sibling.set_state(ProcessState::ExitedWith(status));
+            PROCESSES.lock().remove(&sibling.pid);
+        }
         Process::exit(status)
     }
 
@@ -688,7 +733,10 @@ impl Process {
                         trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
                     SigAction::Handler { handler } => {
+                        #[cfg(target_arch = "x86_64")]
                         let rsp_before = frame.rsp as usize;
+                        #[cfg(target_arch = "aarch64")]
+                        let rsp_before = frame.sp as usize;
                         debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {
                             pid,
                             signal,
@@ -710,7 +758,10 @@ impl Process {
 
                         // Emit detailed signal stack write trace.
                         if debug::is_enabled(DebugFilter::USERCOPY) || debug::is_enabled(DebugFilter::SIGNAL) {
+                            #[cfg(target_arch = "x86_64")]
                             let rsp_after = frame.rsp as usize;
+                            #[cfg(target_arch = "aarch64")]
+                            let rsp_after = frame.sp as usize;
                             debug::emit(DebugFilter::SIGNAL, &DebugEvent::SignalStackWrite {
                                 pid,
                                 signal,
@@ -800,6 +851,7 @@ impl Process {
             is_idle: false,
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
+            tgid: pid, // fork creates a new thread group; child becomes its own leader
             state: AtomicCell::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
@@ -819,10 +871,85 @@ impl Process {
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
+            clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
         });
 
         process_group.lock().add(Arc::downgrade(&child));
         parent.children().push(child.clone());
+        process_table.insert(pid, child.clone());
+        SCHEDULER.lock().enqueue(pid);
+
+        FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessFork {
+            parent_pid: parent.pid().as_i32(),
+            child_pid: pid.as_i32(),
+        });
+
+        Ok(child)
+    }
+
+    /// Creates a new thread in the same thread group as `parent`.
+    /// Called for clone(CLONE_VM | CLONE_THREAD | ...).
+    ///
+    /// The thread shares the parent's address space, file descriptors,
+    /// and signal handlers (all via Arc clone). It gets its own PID (= TID),
+    /// kernel stack, and register state starting from `child_stack` at the
+    /// clone() return address.
+    pub fn new_thread(
+        parent: &Arc<Process>,
+        frame: &PtRegs,
+        child_stack: u64,
+        newtls: u64,         // FS base for x86_64 / TPIDR_EL0 for ARM64 (0 = inherit parent's)
+        child_tidptr: usize, // CLONE_CHILD_SETTID address (0 = none)
+        set_child_tid: bool,
+        clear_child_tid: bool,
+    ) -> Result<Arc<Process>> {
+        let mut process_table = PROCESSES.lock();
+        let pid = alloc_pid(&mut process_table)?;
+
+        let fs_base = if newtls != 0 { newtls } else { parent.arch.fsbase() };
+        let arch = arch::Process::new_thread(frame, child_stack, fs_base);
+
+        let child = Arc::new(Process {
+            is_idle: false,
+            process_group: AtomicRefCell::new(parent.process_group.borrow().clone()),
+            pid,
+            tgid: parent.tgid,   // same thread group
+            state: AtomicCell::new(ProcessState::Runnable),
+            parent: Arc::downgrade(parent),
+            cmdline: AtomicRefCell::new(parent.cmdline().clone()),
+            children: SpinLock::new(Vec::new()),
+            // Share address space, fds, and signal handlers.
+            vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
+            opened_files: Arc::clone(&parent.opened_files),
+            root_fs: parent.root_fs.clone(),
+            signals: Arc::clone(&parent.signals),
+            signal_pending: AtomicU32::new(0),
+            signaled_frame: AtomicCell::new(None),
+            sigset: AtomicU64::new(parent.sigset_load().bits()),
+            umask: AtomicCell::new(parent.umask.load()),
+            uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
+            euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
+            egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
+            clear_child_tid: AtomicUsize::new(0),
+            arch,
+        });
+
+        if set_child_tid && child_tidptr != 0 {
+            // Write child TID to child's address space (CLONE_CHILD_SETTID).
+            if let Ok(uaddr) = UserVAddr::new_nonnull(child_tidptr) {
+                let _ = uaddr.write::<i32>(&pid.as_i32());
+            }
+        }
+        if clear_child_tid && child_tidptr != 0 {
+            child.clear_child_tid.store(child_tidptr, Ordering::Relaxed);
+        }
+
+        parent.process_group().lock().add(Arc::downgrade(&child));
         process_table.insert(pid, child.clone());
         SCHEDULER.lock().enqueue(pid);
 

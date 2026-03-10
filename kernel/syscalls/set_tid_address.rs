@@ -5,8 +5,8 @@ use crate::syscalls::SyscallHandler;
 use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
-    pub fn sys_set_tid_address(&mut self, _uaddr: UserVAddr) -> Result<isize> {
-        // TODO: Store uaddr as clear_child_tid for futex wake on exit.
+    pub fn sys_set_tid_address(&mut self, uaddr: UserVAddr) -> Result<isize> {
+        current_process().set_clear_child_tid(uaddr.value());
         Ok(current_process().pid().as_i32() as isize)
     }
 }
