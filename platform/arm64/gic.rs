@@ -63,6 +63,15 @@ pub unsafe fn init() {
     mmio_write(gicc + GICC_CTLR, 1);
 }
 
+/// Per-AP GIC CPU interface initialization.
+/// The distributor is already configured by the BSP; each AP only needs
+/// to enable its own CPU interface.
+pub unsafe fn init_ap() {
+    let gicc = gicc_base();
+    mmio_write(gicc + GICC_PMR, 0xFF);
+    mmio_write(gicc + GICC_CTLR, 1);
+}
+
 /// Enable a specific IRQ (SPI number, e.g. 33 for UART).
 pub fn enable_irq(irq: u8) {
     let gicd = gicd_base();

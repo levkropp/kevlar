@@ -57,7 +57,11 @@ build_mode  := $(if $(RELEASE),release,debug)
 # Fortress and Balanced use the unwind target spec for catch_unwind support.
 # Performance and Ludicrous use the abort target spec.
 ifeq ($(filter $(PROFILE),fortress balanced),$(PROFILE))
+ifeq ($(ARCH),x64)
 target_json := kernel/arch/$(ARCH)/$(ARCH)-unwind.json
+else
+target_json := kernel/arch/$(ARCH)/$(ARCH).json
+endif
 else
 target_json := kernel/arch/$(ARCH)/$(ARCH).json
 endif
@@ -65,6 +69,16 @@ target_dir := $(basename $(notdir $(target_json)))
 kernel_elf := kevlar.$(ARCH).elf
 stripped_kernel_elf := kevlar.$(ARCH).stripped.elf
 kernel_symbols := $(kernel_elf:.elf=.symbols)
+kernel_img := kevlar.$(ARCH).img
+# Argument passed to run-qemu.py:
+#   x64:  the ELF (run-qemu.py patches e_machine→EM_386 for QEMU multiboot)
+#   arm64: the flat Image (ARM64 Linux Image header, QEMU sets x0=DTB)
+# The bzImage (.img) is still built for real hardware (GRUB2, SYSLINUX, etc.).
+ifeq ($(ARCH),x64)
+kernel_qemu_arg := $(kernel_elf)
+else
+kernel_qemu_arg := $(kernel_img)
+endif
 
 # Windows compatibility: detect OS and adjust tools
 ifeq ($(OS),Windows_NT)
@@ -114,16 +128,19 @@ ifeq ($(OS),Windows_NT)
     NM         ?= "$(LLVM_BIN_DIR)/llvm-nm.exe"
     READELF    ?= "$(LLVM_BIN_DIR)/llvm-readelf.exe"
     STRIP      ?= "$(LLVM_BIN_DIR)/llvm-strip.exe"
+    OBJCOPY    ?= "$(LLVM_BIN_DIR)/llvm-objcopy.exe"
 else ifeq ($(ARCH),arm64)
     # arm64 uses LLVM tools on Unix too
     NM         ?= $(LLVM_BIN_DIR)/llvm-nm
     READELF    ?= $(LLVM_BIN_DIR)/llvm-readelf
     STRIP      ?= $(LLVM_BIN_DIR)/llvm-strip
+    OBJCOPY    ?= $(LLVM_BIN_DIR)/llvm-objcopy
 else
     # x64 on Unix uses standard GNU binutils
     NM         ?= nm
     READELF    ?= readelf
     STRIP      ?= strip
+    OBJCOPY    ?= objcopy
 endif
 DRAWIO     ?= /Applications/draw.io.app/Contents/MacOS/draw.io
 
@@ -172,6 +189,18 @@ endif
 	$(PROGRESS) "STRIP" $(stripped_kernel_elf)
 	$(STRIP) $(kernel_elf) -o $(stripped_kernel_elf)
 
+	$(PROGRESS) "IMAGE" $(kernel_img)
+ifeq ($(ARCH),arm64)
+	$(OBJCOPY) -O binary $(kernel_elf) $(kernel_img)
+else
+	$(OBJCOPY) -O binary \
+		--remove-section=.eh_frame \
+		--remove-section=.eh_frame_hdr \
+		$(kernel_elf) build/kevlar.x64.bin
+	$(PYTHON3) platform/x64/gen_setup.py build/kevlar.x64.bin $(kernel_img)
+	rm -f build/kevlar.x64.bin
+endif
+
 .PHONY: build-crate
 build-crate:
 	$(MAKE) initramfs
@@ -205,7 +234,7 @@ run: build
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
 		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
-		$(kernel_elf) -- $(QEMU_ARGS)
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
 .PHONY: disk
 disk: build/disk.img
@@ -230,7 +259,7 @@ run-disk: build disk
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
 		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
-		$(kernel_elf) -- $(QEMU_ARGS)
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
 .PHONY: bochs
 bochs: iso
@@ -296,11 +325,11 @@ lint-and-fix:
 	INITRAMFS_PATH=$(DUMMY_INITRAMFS_PATH) RUSTFLAGS="-C panic=abort -Z panic_abort_tests" $(CARGO) clippy --fix -Z unstable-options
 
 .PHONY: test
-test:
+test: disk
 	$(PROGRESS) "TEST" "syscall correctness tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_elf) 2>&1 \
+		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
 		| tee /tmp/kevlar-test-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-$(PROFILE).log || echo "(no TEST output found)"
 	@if grep -q '^FAIL' /tmp/kevlar-test-$(PROFILE).log; then \
@@ -314,7 +343,7 @@ test-ext2: disk
 	$(PROGRESS) "TEST" "ext2 filesystem tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/disk.img $(kernel_elf) 2>&1 \
+		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
 		| tee /tmp/kevlar-test-ext2-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-ext2-$(PROFILE).log || echo "(no TEST output found)"
 	@if grep -q '^FAIL' /tmp/kevlar-test-ext2-$(PROFILE).log; then \
@@ -328,7 +357,7 @@ test-storage: build/disk.img
 	$(PROGRESS) "TEST" "M5 storage integration tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-storage"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/disk.img $(kernel_elf) 2>&1 \
+		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
 		| tee /tmp/kevlar-test-storage-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
 		/tmp/kevlar-test-storage-$(PROFILE).log || echo "(no TEST output found)"
@@ -343,7 +372,7 @@ test-smp:
 	$(PROGRESS) "TEST" "M6 SMP boot (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE)
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_elf) -- -smp 4 2>&1 \
+		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-smp-$(PROFILE).log; true
 	@grep -E 'CPU \(LAPIC|smp:|online' /tmp/kevlar-test-smp-$(PROFILE).log || echo "(no SMP output found)"
 
@@ -352,7 +381,7 @@ bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_elf) 2>&1 \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
 		| tee /tmp/kevlar-bench-$(PROFILE).log; true
 	@grep 'BENCH' /tmp/kevlar-bench-$(PROFILE).log || echo "(no BENCH output found)"
 
@@ -361,7 +390,7 @@ bench-kvm:
 	$(PROGRESS) "BENCH-KVM" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--kvm --arch $(ARCH) $(kernel_elf) -- -mem-prealloc 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-kvm-$(PROFILE).log; true
 	@grep 'BENCH' /tmp/kevlar-bench-kvm-$(PROFILE).log || echo "(no BENCH output found)"
 
@@ -395,7 +424,7 @@ debug: build
 		--append-cmdline "debug=all"                                   \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
-		$(kernel_elf) -- $(QEMU_ARGS)
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
 # Start the MCP debug server (run alongside `make debug`).
 .PHONY: mcp-debug

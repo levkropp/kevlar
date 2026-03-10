@@ -1,6 +1,35 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
+//
+// x86-64 boot code for Kevlar.
+//
+// Supported boot protocols:
+//   Linux/x86 Boot Protocol (bzImage):
+//     QEMU/GRUB/UEFI detect the setup header (0xAA55 at 0x1FE, "HdrS" at
+//     0x202) in the flat image, load the kernel body at code32_start=0x100000,
+//     and enter here.  A bzImage flat binary is built by gen_setup.py, which
+//     prepends the 512-byte setup sector to the raw kernel binary.
+//   Multiboot2 / Multiboot1 (GRUB legacy, ELF image):
+//     The ELF image retains these headers for GRUB compatibility.
+//
+
 .section ".boot", "ax"
 
+// -----------------------------------------------------------------------
+// Physical 0x100000: kernel entry point.
+//
+// For the Linux/x86 Boot Protocol, code32_start = 0x100000 and QEMU enters
+// here in 32-bit protected mode.  We jump past the Multiboot headers to the
+// real boot code (boot_main).
+//
+// For Multiboot (GRUB), the ELF entry point is also 0x100000, so GRUB enters
+// here too and takes the same path.
+// -----------------------------------------------------------------------
 .code32
+.global boot
+boot:
+    jmp boot_main
+
+.align 8
 
 // Multiboot2 header
 // https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html
@@ -34,23 +63,27 @@ multiboot_header:
 .long 0x00000000
 .long -(0x1badb002 + 0x00000000)
 
-// The entry point jumped from the bootloader.
+// The main boot logic, reached via the jmp at physical 0x100000.
 .code64
-.global boot
-boot:
+boot_main:
     // Check if the CPU is in the 64-bit mode: this block must be valid for
     // both 64-bit and 32-bit modes.
     //
     // We support the following boot protocols:
     //
     //   GRUB: Multiboot 0.x or 2 (32-bit), EBX points to the multiboot info
-    //   Firecracker: Linux/x86 Boot Protocol (64-bit), ESI points to boot_params
-    mov edi, eax
+    //   Linux/x86 Boot Protocol (32-bit): ESI points to struct boot_params
+    //   Linux/x86 Boot Protocol (64-bit): RSI points to struct boot_params
+    //
+    // Save EAX and ESI early: rdmsr clobbers EDX:EAX, and ESI carries
+    // boot_params for the Linux 32-bit protocol.
+    mov edi, eax        // save EAX (multiboot magic or 0)
+    mov ebp, esi        // save ESI (boot_params ptr for Linux 32-bit protocol)
     mov ecx, 0xc0000080
     rdmsr
     test  eax, 0x0100
-    mov eax, edi
-    jz boot32
+    mov eax, edi        // restore EAX (mov doesn't affect flags)
+    jz boot32           // EFER.LME=0 → 32-bit protected mode entry
 
     // Booted directly in 64-bit mode. To simplify the boot code, we switch back
     // into the 32-bit mode and start executing the 32-bit boot code.
@@ -79,7 +112,31 @@ boot32:
     // Set the boot (later reused for the cpu-local idle thread) stack.
     mov esp, offset __boot_stack
 
-    // Save the multiboot magic and 64-bit physical address of multiboot info onto the stack.
+    // Detect Linux/x86 32-bit boot protocol.
+    //
+    // When a bzImage bootloader (QEMU, GRUB, UEFI stub) enters in 32-bit
+    // protected mode it sets ESI = physical address of struct boot_params.
+    // The Firecracker/64-bit path already converted that to EAX=0xb002b002 /
+    // EBX=boot_params before arriving here, so we only need to check the
+    // genuine 32-bit entry case.
+    //
+    // EBP = original ESI (saved before rdmsr clobbered registers).
+    // Skip the check if EAX is already a recognised Multiboot magic.
+    cmp eax, 0x2BADB002         // Multiboot v1 magic
+    je .Lboot_proto_done
+    cmp eax, 0x36D76289         // Multiboot v2 magic
+    je .Lboot_proto_done
+    // Check boot_params signature: 0xAA55 at +0x1FE, "HdrS" at +0x202.
+    cmp word ptr [ebp + 0x1fe], 0xaa55
+    jne .Lboot_proto_done
+    cmp dword ptr [ebp + 0x202], 0x53726448  // "HdrS"
+    jne .Lboot_proto_done
+    // Linux 32-bit boot protocol confirmed.
+    mov eax, 0xb002b002         // LINUXBOOT_MAGIC
+    mov ebx, ebp                // boot_params physical address
+.Lboot_proto_done:
+
+    // Save the boot magic and 64-bit physical address of boot info onto the stack.
     push 0      // Upper 32-bits.
     push eax
     push 0      // Upper 32-bits.

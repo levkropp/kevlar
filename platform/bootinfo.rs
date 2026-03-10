@@ -28,4 +28,6 @@ pub struct BootInfo {
     pub dhcp_enabled: bool,
     pub ip4: Option<ArrayString<18>>,
     pub gateway_ip4: Option<ArrayString<15>>,
+    /// CPU identifiers parsed from firmware (MPIDRs on ARM64, empty on x86).
+    pub cpu_mpdirs: ArrayVec<u64, 8>,
 }

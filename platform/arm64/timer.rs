@@ -32,6 +32,19 @@ pub unsafe fn init() {
     super::gic::enable_irq(TIMER_IRQ);
 }
 
+/// Per-AP timer initialization.
+/// TVAL is already set by the BSP; each AP just starts its own countdown
+/// and enables the PPI in the GIC CPU interface.
+/// Must be called after `gic::init_ap()` and `process::init_ap()`.
+pub unsafe fn init_ap() {
+    let tval = unsafe { TVAL };
+    // Set countdown and enable.
+    asm!("msr cntp_tval_el0, {}", in(reg) tval);
+    asm!("msr cntp_ctl_el0, {}", in(reg) 1u64);
+    // Enable the timer PPI in this CPU's GIC banked register.
+    super::gic::enable_irq(TIMER_IRQ);
+}
+
 /// Rearm the timer for the next tick.
 ///
 /// The timer is level-triggered: ISTATUS stays asserted until the compare

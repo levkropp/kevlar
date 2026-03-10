@@ -19,6 +19,7 @@ SECTIONS {
     .text : AT(ADDR(.text) - VMA_OFFSET) {
         *(.text);
         *(.text.*);
+        __etext = .;
     }
 
     .rodata : AT(ADDR(.rodata) - VMA_OFFSET) {
@@ -80,8 +81,14 @@ SECTIONS {
         __kernel_image_end = . - VMA_OFFSET; /* physical address */
     }
 
+    /* Keep .eh_frame as empty section so unwinding crate can find the symbols. */
+    .eh_frame : AT(ADDR(.eh_frame) - VMA_OFFSET) {
+        __eh_frame = .;
+        *(.eh_frame .eh_frame.*);
+        __eh_frame_end = .;
+    }
+
     /DISCARD/ : {
-        *(*.eh_frame);
         *(*.eh_frame_hdr);
     }
 }
