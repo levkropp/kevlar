@@ -14,7 +14,7 @@ use crate::{
     user_buffer::UserBuffer,
 };
 use kevlar_platform::address::UserVAddr;
-use kevlar_utils::downcast::Downcastable;
+
 
 // Linux cmsg constants.
 const SOL_SOCKET: i32 = 1;
@@ -123,9 +123,9 @@ impl<'a> SyscallHandler<'a> {
                     // Find the UnixStream to attach ancillary data.
                     let opened_file = current_process().get_opened_file_by_fd(fd)?;
                     let file = opened_file.as_file()?;
-                    if let Some(stream) = file.as_any().downcast_ref::<UnixStream>() {
+                    if let Some(stream) = (**file).as_any().downcast_ref::<UnixStream>() {
                         stream.send_ancillary(AncillaryData::Rights(files));
-                    } else if let Some(sock) = file.as_any().downcast_ref::<UnixSocket>() {
+                    } else if let Some(sock) = (**file).as_any().downcast_ref::<UnixSocket>() {
                         if let Some(stream) = sock.connected_stream() {
                             stream.send_ancillary(AncillaryData::Rights(files));
                         }

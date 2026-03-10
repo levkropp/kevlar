@@ -16,7 +16,6 @@ use crate::{
 };
 use alloc::vec::Vec;
 use kevlar_platform::address::UserVAddr;
-use kevlar_utils::downcast::Downcastable;
 
 /// Size of `struct epoll_event` (u32 events + u64 data, packed = 12 bytes).
 const EPOLL_EVENT_SIZE: usize = 12;
@@ -74,7 +73,9 @@ impl<'a> SyscallHandler<'a> {
 
         // Get the epoll instance from the epoll fd.
         let epoll_file = table.get(epfd)?.as_file()?;
-        let epoll = epoll_file.as_any().downcast_ref::<EpollInstance>()
+        // Deref through Arc so as_any() dispatches via the dyn FileLike vtable
+        // to the concrete type, not the blanket Downcastable impl on Arc itself.
+        let epoll = (**epoll_file).as_any().downcast_ref::<EpollInstance>()
             .ok_or(Error::new(Errno::EINVAL))?;
 
         match op {
@@ -113,7 +114,7 @@ impl<'a> SyscallHandler<'a> {
             let table = current_process().opened_files().lock();
             table.get(epfd)?.as_file()?.clone()
         };
-        let epoll = epoll_file.as_any().downcast_ref::<EpollInstance>()
+        let epoll = (*epoll_file).as_any().downcast_ref::<EpollInstance>()
             .ok_or(Error::new(Errno::EINVAL))?;
 
         let started_at = crate::timer::read_monotonic_clock();

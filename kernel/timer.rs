@@ -84,7 +84,7 @@ impl MonotonicClock {
     pub fn elapsed_msecs(self) -> usize {
         let now_ns = read_monotonic_clock().nanosecs();
         let self_ns = self.nanosecs();
-        (now_ns - self_ns) / 1_000_000
+        now_ns.saturating_sub(self_ns) / 1_000_000
     }
 }
 

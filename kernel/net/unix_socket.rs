@@ -94,7 +94,7 @@ pub struct UnixStream {
 
 impl UnixStream {
     /// Create a connected pair of Unix streams.
-    fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
+    pub fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
         let buf_a = Arc::new(SpinLock::new(StreamInner {
             buf: RingBuffer::new(),
             ancillary: VecDeque::new(),

@@ -168,9 +168,10 @@ impl SignalDelivery {
             return None;
         }
 
-        let signal = self.pending.trailing_zeros();
-        self.pending &= !(1 << signal);
-        Some((signal as Signal, self.actions[signal as usize]))
+        let bit = self.pending.trailing_zeros();
+        self.pending &= !(1 << bit);
+        let signal = (bit + 1) as Signal;
+        Some((signal, self.actions[signal as usize]))
     }
 
     /// Pop the lowest-numbered pending signal that is NOT blocked.
@@ -182,9 +183,10 @@ impl SignalDelivery {
         if deliverable == 0 {
             return None;
         }
-        let signal = deliverable.trailing_zeros();
-        self.pending &= !(1 << signal);
-        Some((signal as Signal, self.actions[signal as usize]))
+        let bit = deliverable.trailing_zeros();
+        self.pending &= !(1 << bit);
+        let signal = (bit + 1) as Signal;
+        Some((signal, self.actions[signal as usize]))
     }
 
     /// Pop a pending signal that matches the given bitmask.
@@ -194,9 +196,9 @@ impl SignalDelivery {
         if matching == 0 {
             return None;
         }
-        let signal = matching.trailing_zeros();
-        self.pending &= !(1 << signal);
-        Some(signal as Signal)
+        let bit = matching.trailing_zeros();
+        self.pending &= !(1 << bit);
+        Some((bit + 1) as Signal)
     }
 
     /// Return the raw pending bitmask (for syncing the atomic mirror).
@@ -205,7 +207,8 @@ impl SignalDelivery {
     }
 
     pub fn signal(&mut self, signal: Signal) {
-        self.pending |= 1 << (signal);
+        // Store using 0-based bit positions to match userspace sigset_t convention.
+        self.pending |= 1 << (signal - 1);
     }
 
     /// Reset signal dispositions for execve: per POSIX, all signals with
@@ -244,11 +247,11 @@ impl SigSet {
         self.0.to_le_bytes()
     }
 
-    /// Returns true if signal `sig` is blocked (bit set).
+    /// Returns true if signal `sig` (1-based signal number) is blocked.
     #[inline(always)]
     pub fn is_blocked(self, sig: usize) -> bool {
-        if sig >= 64 { return false; }
-        (self.0 & (1u64 << sig)) != 0
+        if sig == 0 || sig > 64 { return false; }
+        (self.0 & (1u64 << (sig - 1))) != 0
     }
 
     #[inline(always)]

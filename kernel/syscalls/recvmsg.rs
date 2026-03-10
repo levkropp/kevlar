@@ -14,7 +14,7 @@ use crate::{
     user_buffer::UserBufferMut,
 };
 use kevlar_platform::address::UserVAddr;
-use kevlar_utils::downcast::Downcastable;
+
 
 // Linux cmsg constants.
 const SOL_SOCKET: i32 = 1;
@@ -119,7 +119,7 @@ impl<'a> SyscallHandler<'a> {
 
         // Get the inner UnixStream. In practice, fds are always UnixSocket wrappers.
         let inner_stream: Option<Arc<UnixStream>> =
-            if let Some(sock) = file.as_any().downcast_ref::<UnixSocket>() {
+            if let Some(sock) = (**file).as_any().downcast_ref::<UnixSocket>() {
                 sock.connected_stream()
             } else {
                 None
