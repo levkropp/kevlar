@@ -224,6 +224,7 @@ mod syscall_numbers {
     pub const SYS_LISTEN: usize = 50;
     pub const SYS_GETSOCKNAME: usize = 51;
     pub const SYS_GETPEERNAME: usize = 52;
+    pub const SYS_SOCKETPAIR: usize = 53;
     pub const SYS_GETSOCKOPT: usize = 55;
     pub const SYS_FORK: usize = 57;
     pub const SYS_VFORK: usize = 58;
@@ -386,6 +387,7 @@ mod syscall_numbers {
     pub const SYS_GETEGID: usize = 177;
     pub const SYS_GETTID: usize = 178;
     pub const SYS_SOCKET: usize = 198;
+    pub const SYS_SOCKETPAIR: usize = 199;
     pub const SYS_BIND: usize = 200;
     pub const SYS_LISTEN: usize = 201;
     pub const SYS_ACCEPT: usize = 202;
@@ -729,6 +731,9 @@ impl<'a> SyscallHandler<'a> {
             SYS_EXIT => self.sys_exit(a1 as i32),
             SYS_EXIT_GROUP => self.sys_exit_group(a1 as i32),
             SYS_SOCKET => self.sys_socket(a1 as i32, a2 as i32, a3 as i32),
+            SYS_SOCKETPAIR => self.sys_socketpair(
+                a1 as i32, a2 as i32, a3 as i32, UserVAddr::new_nonnull(a4)?,
+            ),
             SYS_BIND => self.sys_bind(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?, a3),
             SYS_SHUTDOWN => self.sys_shutdown(Fd::new(a1 as i32), a2 as i32),
             SYS_CONNECT => self.sys_connect(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?, a3),
@@ -989,7 +994,7 @@ impl<'a> SyscallHandler<'a> {
                     name: syscall_name_by_number(n),
                     number: n,
                 });
-                debug_warn!(
+                info!(
                     "unimplemented system call: {} (n={})",
                     syscall_name_by_number(n),
                     n,
@@ -1029,6 +1034,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_NANOSLEEP => "nanosleep",
         SYS_GETPID => "getpid",
         SYS_SOCKET => "socket",
+        SYS_SOCKETPAIR => "socketpair",
         SYS_CONNECT => "connect",
         SYS_ACCEPT => "accept",
         SYS_SENDTO => "sendto",

@@ -564,7 +564,8 @@ impl Process {
         }
 
         self.signals.lock().signal(signal);
-        self.signal_pending.fetch_or(1 << signal, Ordering::Release);
+        // Use 0-based bit position to match userspace sigset_t convention.
+        self.signal_pending.fetch_or(1 << (signal - 1), Ordering::Release);
         self.resume();
 
         // Wake poll/epoll waiters so signalfd can detect the new signal.

@@ -94,6 +94,17 @@ COPY benchmarks/bench.c /bench.c
 RUN musl-gcc -static -O2 -o /bench /bench.c
 
 #
+#  M4 integration test (mini-systemd)
+#
+FROM ubuntu:20.04 AS mini_systemd
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/mini_systemd.c /mini_systemd.c
+RUN musl-gcc -static -O2 -o /mini-systemd /mini_systemd.c
+
+#
 #  Initramfs
 #
 FROM busybox AS empty_dir
@@ -114,6 +125,7 @@ COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
 COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 COPY --from=bash       /build/bash /bin/bash
 COPY --from=benchsuite /bench /bin/bench
+COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /var/www/html

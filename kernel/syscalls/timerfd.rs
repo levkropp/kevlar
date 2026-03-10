@@ -14,7 +14,6 @@ use crate::{
     syscalls::SyscallHandler,
 };
 use kevlar_platform::address::UserVAddr;
-use kevlar_utils::downcast::Downcastable;
 
 /// `struct itimerspec` layout: two `struct timespec` (sec: i64, nsec: i64).
 /// Total: 32 bytes.
@@ -60,7 +59,8 @@ impl<'a> SyscallHandler<'a> {
         // Get the TimerFd from the fd table.
         let table = current_process().opened_files().lock();
         let file = table.get(fd)?.as_file()?;
-        let timer = file.as_any().downcast_ref::<TimerFd>()
+        // Deref through Arc so as_any() dispatches via the dyn FileLike vtable.
+        let timer = (**file).as_any().downcast_ref::<TimerFd>()
             .ok_or(Error::new(Errno::EINVAL))?;
 
         timer.settime(value_sec, value_nsec, interval_sec, interval_nsec);
