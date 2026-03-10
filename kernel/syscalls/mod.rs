@@ -140,6 +140,9 @@ mod pause;
 mod rt_sigsuspend;
 mod tgkill;
 
+// M4: systemd support
+mod epoll;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -292,6 +295,11 @@ mod syscall_numbers {
     pub const SYS_PAUSE: usize = 34;
     pub const SYS_ALARM: usize = 37;
     pub const SYS_GETGROUPS: usize = 115;
+    // M4: epoll
+    pub const SYS_EPOLL_WAIT: usize = 232;
+    pub const SYS_EPOLL_CTL: usize = 233;
+    pub const SYS_EPOLL_PWAIT: usize = 281;
+    pub const SYS_EPOLL_CREATE1: usize = 291;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -420,6 +428,11 @@ mod syscall_numbers {
     pub const SYS_PAUSE: usize = 0xF012;
     pub const SYS_ALARM: usize = 0xF013;
     pub const SYS_GETGROUPS: usize = 158;
+    // M4: epoll (ARM64 uses epoll_pwait, not epoll_wait)
+    pub const SYS_EPOLL_CREATE1: usize = 20;
+    pub const SYS_EPOLL_CTL: usize = 21;
+    pub const SYS_EPOLL_PWAIT: usize = 22;
+    pub const SYS_EPOLL_WAIT: usize = 0xF014; // ARM64 doesn't have old epoll_wait
 }
 
 use syscall_numbers::*;
@@ -859,6 +872,20 @@ impl<'a> SyscallHandler<'a> {
             SYS_PAUSE => self.sys_pause(),
             SYS_ALARM => self.sys_alarm(a1 as u32),
             SYS_GETGROUPS => self.sys_getgroups(a1, a2),
+            // M4: epoll
+            SYS_EPOLL_CREATE1 => self.sys_epoll_create1(a1 as c_int),
+            SYS_EPOLL_CTL => self.sys_epoll_ctl(
+                Fd::new(a1 as i32),
+                a2 as c_int,
+                Fd::new(a3 as i32),
+                UserVAddr::new_nonnull(a4)?,
+            ),
+            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => self.sys_epoll_wait(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3 as c_int,
+                a4 as c_int,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -997,6 +1024,10 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_PAUSE => "pause",
         SYS_ALARM => "alarm",
         SYS_GETGROUPS => "getgroups",
+        SYS_EPOLL_CREATE1 => "epoll_create1",
+        SYS_EPOLL_CTL => "epoll_ctl",
+        SYS_EPOLL_WAIT => "epoll_wait",
+        SYS_EPOLL_PWAIT => "epoll_pwait",
         _ => "(unknown)",
     }
 }
