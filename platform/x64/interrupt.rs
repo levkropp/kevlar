@@ -3,7 +3,7 @@ use crate::{address::UserVAddr, handler};
 
 use core::fmt;
 
-use super::{apic::ack_interrupt, ioapic::VECTOR_IRQ_BASE, serial::SERIAL0_IRQ, PageFaultReason};
+use super::{apic::{ack_interrupt, LAPIC_PREEMPT_VECTOR}, ioapic::VECTOR_IRQ_BASE, serial::SERIAL0_IRQ, PageFaultReason};
 use x86::{
     controlregs::cr2,
     current::rflags::{self, RFlags},
@@ -74,6 +74,10 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *const InterruptFrame)
     // overhead.  Use `debug=irq` at the kernel command line if needed.
 
     match vec {
+        LAPIC_PREEMPT_VECTOR => {
+            ack_interrupt();
+            crate::handler().handle_ap_preempt();
+        }
         _ if vec >= VECTOR_IRQ_BASE => {
             ack_interrupt();
 

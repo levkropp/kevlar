@@ -60,10 +60,11 @@ use crate::{
     syscalls::SyscallHandler,
 };
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicBool, Ordering};
 use interrupt::attach_irq;
 use kevlar_api::kernel_ops::KernelOps;
 use kevlar_platform::{
-    arch::{idle, PageFaultReason, PtRegs},
+    arch::{idle, start_ap_preemption_timer, PageFaultReason, PtRegs},
     bootinfo::BootInfo,
     profile::StopWatch,
     spinlock::SpinLock,
@@ -71,6 +72,11 @@ use kevlar_platform::{
 use kevlar_utils::once::Once;
 use net::register_ethernet_driver;
 use tmpfs::TMP_FS;
+
+/// Set to `true` by the BSP after `process::init()` completes.
+/// APs spin on this in `ap_kernel_entry` before calling `process::init_ap()`,
+/// ensuring INITIAL_ROOT_FS and the global scheduler are ready.
+static KERNEL_READY: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 use crate::test_runner::end_tests;
@@ -88,6 +94,10 @@ impl kevlar_platform::Handler for Handler {
 
     fn handle_timer_irq(&self) {
         crate::timer::handle_timer_irq();
+    }
+
+    fn handle_ap_preempt(&self) {
+        process::switch();
     }
 
     fn handle_page_fault(
@@ -274,6 +284,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("root fs init");
 
     process::init();
+    // Signal to waiting APs that the kernel and scheduler are ready.
+    KERNEL_READY.store(true, Ordering::Release);
     profiler.lap_time("process init");
 
     // Create the init process.
@@ -300,6 +312,29 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
 
     // We're now in the idle thread context.
     idle_thread();
+}
+
+/// Entry point for Application Processors after the platform trampoline
+/// and per-CPU hardware setup are complete.  Waits for the BSP to finish
+/// kernel initialization, then sets up the per-AP idle thread and enters
+/// the scheduler.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub fn ap_kernel_entry() -> ! {
+    // Spin until BSP has initialized the global scheduler and INITIAL_ROOT_FS.
+    while !KERNEL_READY.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+
+    // Create a per-CPU idle thread and set CURRENT.
+    process::init_ap();
+
+    // Start the LAPIC preemption timer now that CURRENT is valid.
+    start_ap_preemption_timer();
+
+    // Try to pick up runnable work immediately; fall back to idle loop.
+    switch();
+    idle_thread()
 }
 
 pub fn interval_work() {

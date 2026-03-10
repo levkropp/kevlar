@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use super::{apic, bootinfo, cpu_local, gdt, idt, ioapic, pit, serial, smp, syscall, tss, vga};
+use super::{apic, bootinfo, cpu_local, gdt, idt, ioapic, pit, serial, smp, syscall, tss, vga, CPU_ID};
 use crate::address::{PAddr, VAddr};
 use crate::bootinfo::BootInfo;
 use crate::logger;
@@ -49,6 +49,10 @@ unsafe fn ap_common_setup(cpu_local_area: VAddr) {
     syscall::init();
 }
 
+unsafe extern "Rust" {
+    fn ap_kernel_entry() -> !;
+}
+
 /// Entry point for Application Processors.  Called from `setup_ap:` in
 /// boot.S after the trampoline has set up long mode and the AP stack.
 ///
@@ -58,16 +62,19 @@ unsafe extern "C" fn ap_rust_entry(lapic_id: u32) -> ! {
     let cpu_local_vaddr = VAddr::new(smp::AP_CPU_LOCAL.load(
         core::sync::atomic::Ordering::Acquire,
     ));
+    let ap_cpu_id = smp::AP_CPU_ID.load(core::sync::atomic::Ordering::Acquire);
 
     ap_common_setup(cpu_local_vaddr);
 
-    // All setup complete — announce and enter idle loop.
-    info!("CPU (LAPIC {}) online", lapic_id);
+    // Set per-CPU ID now that GSBASE is established.
+    CPU_ID.set(ap_cpu_id);
+
+    // All platform setup complete — announce online.
+    info!("CPU (LAPIC {}, cpu_id={}) online", lapic_id, ap_cpu_id);
     smp::AP_ONLINE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
 
-    loop {
-        super::idle::idle();
-    }
+    // Hand off to the kernel for per-CPU process state initialization.
+    ap_kernel_entry()
 }
 
 /// Enables some CPU features.
@@ -96,6 +103,8 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
     idt::init();
     // Calibrate TSC before PIT channel 0 is configured for timer IRQs.
     super::tsc::calibrate();
+    // Calibrate LAPIC timer using TSC (result used by AP lapic_timer_init).
+    apic::lapic_timer_calibrate();
     super::vdso::init();
     pit::init();
     syscall::init();

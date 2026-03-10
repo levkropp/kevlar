@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::process::PId;
 use alloc::collections::VecDeque;
-use kevlar_platform::spinlock::SpinLock;
+use kevlar_platform::{arch::cpu_id, spinlock::SpinLock};
+
+/// Maximum number of CPUs supported.
+pub const MAX_CPUS: usize = 8;
 
 /// Scheduling policy trait.
 ///
@@ -19,30 +22,61 @@ pub trait SchedulerPolicy: Send + Sync {
     fn remove(&self, pid: PId);
 }
 
-/// Round-robin scheduler.
+/// Per-CPU round-robin scheduler with work stealing.
+///
+/// Each CPU has its own run queue.  `enqueue` pushes to the calling CPU's
+/// queue.  `pick_next` tries the local queue first, then steals from other
+/// CPUs (round-robin victim selection, stealing from the back).
 pub struct Scheduler {
-    run_queue: SpinLock<VecDeque<PId>>,
+    run_queues: [SpinLock<VecDeque<PId>>; MAX_CPUS],
 }
 
 impl Scheduler {
-    /// Creates a scheduler.
     pub fn new() -> Scheduler {
         Scheduler {
-            run_queue: SpinLock::new(VecDeque::new()),
+            run_queues: [
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+                SpinLock::new(VecDeque::new()),
+            ],
         }
     }
 }
 
 impl SchedulerPolicy for Scheduler {
     fn enqueue(&self, pid: PId) {
-        self.run_queue.lock().push_back(pid);
+        let cpu = cpu_id() as usize % MAX_CPUS;
+        self.run_queues[cpu].lock().push_back(pid);
     }
 
     fn pick_next(&self) -> Option<PId> {
-        self.run_queue.lock().pop_front()
+        let cpu = cpu_id() as usize;
+        let local = cpu % MAX_CPUS;
+
+        // Try local queue first.
+        if let Some(pid) = self.run_queues[local].lock().pop_front() {
+            return Some(pid);
+        }
+
+        // Work stealing: try other CPUs in round-robin order, stealing from back.
+        for i in 1..MAX_CPUS {
+            let victim = (cpu + i) % MAX_CPUS;
+            if let Some(pid) = self.run_queues[victim].lock().pop_back() {
+                return Some(pid);
+            }
+        }
+
+        None
     }
 
     fn remove(&self, pid: PId) {
-        self.run_queue.lock().retain(|p| *p != pid);
+        for queue in &self.run_queues {
+            queue.lock().retain(|p| *p != pid);
+        }
     }
 }

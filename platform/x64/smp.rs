@@ -33,6 +33,10 @@ pub static AP_ONLINE_COUNT: AtomicU32 = AtomicU32::new(0);
 /// APs are started one at a time so a single cell suffices.
 pub static AP_CPU_LOCAL: AtomicUsize = AtomicUsize::new(0);
 
+/// The cpu index (0=BSP, 1..N=AP order) for the AP currently being started.
+/// Written by BSP before SIPI; read by AP in ap_rust_entry.
+pub static AP_CPU_ID: AtomicU32 = AtomicU32::new(0);
+
 // ── Trampoline data symbols (in .trampoline section at VMA 0x8000) ───
 
 unsafe extern "C" {
@@ -68,6 +72,7 @@ pub unsafe fn init() {
     let cpu_local_pages = (cpu_local_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     let mut started = 0u32;
+    let mut next_cpu_id: u32 = 1; // BSP is 0; APs get 1, 2, ...
 
     for i in 0..count {
         let apic_id = lapic_ids[i];
@@ -96,7 +101,8 @@ pub unsafe fn init() {
         };
         let cpu_local_vaddr = cpu_local_paddr.as_vaddr();
 
-        // Publish the cpu_local area to the AP (read by ap_rust_entry).
+        // Publish the cpu_local area and cpu index to the AP (read by ap_rust_entry).
+        AP_CPU_ID.store(next_cpu_id, Ordering::Release);
         AP_CPU_LOCAL.store(cpu_local_vaddr.value(), Ordering::Release);
 
         // Write CR3 and stack into the trampoline data page.
@@ -126,6 +132,7 @@ pub unsafe fn init() {
         loop {
             if AP_ONLINE_COUNT.load(Ordering::Acquire) > prev_count {
                 started += 1;
+                next_cpu_id += 1;
                 break;
             }
             if tsc::nanoseconds_since_boot() >= deadline {
