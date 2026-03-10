@@ -3,7 +3,6 @@ import argparse
 import signal
 import shutil
 import socket
-from tempfile import NamedTemporaryFile
 import os
 import subprocess
 import sys
@@ -146,22 +145,29 @@ def main():
     # Kill any stale QEMU sessions that might be holding our ports.
     kill_stale_qemu_on_ports(FORWARDED_PORTS)
 
+    kernel_path_arg = args.kernel_elf
+
+    # For x64: QEMU's multiboot loader requires an EM_386 ELF.  The bzImage flat
+    # binary (kevlar.x64.img) uses the Linux/x86 Boot Protocol which goes through
+    # SeaBIOS's linuxboot.rom option ROM — that path is unreliable in QEMU 10.x
+    # (the ROM loads the kernel but never jumps to code32_start).  Instead we
+    # patch e_machine from EM_X86_64 (0x003E) to EM_386 (0x0003) in a temp copy
+    # of the ELF so QEMU uses its built-in multiboot loader, which works
+    # reliably.  The bzImage is still produced by the build for real hardware
+    # (GRUB2, SYSLINUX, UEFI Linux EFI stub).
+    tmp_elf_path = None
     if args.arch == "x64":
-        #  Because QEMU denies a x86_64 multiboot ELF file (GRUB2 accept it, btw),
-        #  modify `em_machine` to pretend to be an x86 (32-bit) ELF image,
-        #
-        #  https://github.com/qemu/qemu/blob/950c4e6c94b15cd0d8b63891dddd7a8dbf458e6a/hw/i386/multiboot.c#L197
-        # Set EM_386 (0x0003) to em_machine.
-        # On Windows, use delete=False to avoid permission issues
-        elf = NamedTemporaryFile(delete=False)
-        shutil.copyfileobj(open(args.kernel_elf, "rb"), elf.file)
-        elf.seek(18)
-        elf.write(bytes([0x03, 0x00]))
-        elf.flush()
-        elf.close()  # Close before QEMU opens it (important on Windows)
-        kernel_elf = elf.name
-    else:
-        kernel_elf = args.kernel_elf
+        import tempfile
+        with open(kernel_path_arg, 'rb') as f:
+            elf_data = bytearray(f.read())
+        elf_data[18] = 0x03  # e_machine low byte: EM_386
+        elf_data[19] = 0x00  # e_machine high byte
+        tmp_fd, tmp_elf_path = tempfile.mkstemp(suffix=".elf")
+        try:
+            os.write(tmp_fd, elf_data)
+        finally:
+            os.close(tmp_fd)
+        kernel_path_arg = tmp_elf_path
 
     qemu = ARCHS[args.arch]
     if args.qemu:
@@ -190,7 +196,7 @@ def main():
                             break
 
     # On Windows, convert paths to forward slashes for QEMU
-    kernel_path = kernel_elf.replace('\\', '/') if platform.system() == "Windows" else kernel_elf
+    kernel_path = kernel_path_arg.replace('\\', '/') if platform.system() == "Windows" else kernel_path_arg
 
     argv = [qemu_bin] + qemu["args"] + ["-kernel", kernel_path]
     cmdline = []
@@ -240,14 +246,14 @@ def main():
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
 
-    p.wait()
-
-    # Clean up temp file if we created one (multiboot mode on x64)
-    if args.arch == "x64":
-        try:
-            os.unlink(kernel_elf)
-        except OSError:
-            pass
+    try:
+        p.wait()
+    finally:
+        if tmp_elf_path:
+            try:
+                os.unlink(tmp_elf_path)
+            except OSError:
+                pass
 
     if p.returncode != 33:
         sys.exit(

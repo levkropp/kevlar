@@ -69,9 +69,13 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
     let struct_size = be32(header.size_dt_struct) as usize;
 
     let mut ram_areas = ArrayVec::new();
+    let mut cpu_mpdirs: ArrayVec<u64, 8> = ArrayVec::new();
     let mut cmdline_str: Option<&str> = None;
     let mut in_memory = false;
     let mut in_chosen = false;
+    let mut depth: i32 = 0;
+    let mut cpus_depth: i32 = -1;
+    let mut in_cpu_node = false;
 
     let mut offset = 0usize;
     while offset + 4 <= struct_size {
@@ -86,16 +90,29 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
                 let name_len = name.len() + 1; // include null
                 offset += (name_len + 3) & !3; // align to 4
 
-                if name.starts_with("memory") {
+                depth += 1;
+                // Top-level nodes are at depth 2 (root node is depth 1).
+                if depth == 2 && name.starts_with("memory") {
                     in_memory = true;
-                } else if name == "chosen" {
+                } else if depth == 2 && name == "chosen" {
                     in_chosen = true;
+                } else if depth == 2 && name == "cpus" {
+                    cpus_depth = depth;
+                } else if cpus_depth >= 0 && depth == cpus_depth + 1 && name.starts_with("cpu@") {
+                    in_cpu_node = true;
                 }
             }
             2 => {
                 // FDT_END_NODE
-                in_memory = false;
-                in_chosen = false;
+                if in_cpu_node {
+                    in_cpu_node = false;
+                } else if cpus_depth >= 0 && depth == cpus_depth {
+                    cpus_depth = -1;
+                } else {
+                    in_memory = false;
+                    in_chosen = false;
+                }
+                depth -= 1;
             }
             3 => {
                 // FDT_PROP: u32 len, u32 nameoff, then data.
@@ -135,6 +152,12 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
                     }
                 }
 
+                // CPU node: reg = MPIDR (1 cell = 4 bytes on QEMU virt).
+                if in_cpu_node && prop_name == "reg" && prop_len >= 4 && !cpu_mpdirs.is_full() {
+                    let mpidr = u32::from_be(*(prop_data as *const u32)) as u64;
+                    let _ = cpu_mpdirs.try_push(mpidr);
+                }
+
                 offset += (prop_len + 3) & !3; // align to 4
             }
             9 => {
@@ -163,6 +186,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         dhcp_enabled: cmdline.dhcp_enabled,
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
+        cpu_mpdirs,
     }
 }
 
@@ -199,30 +223,29 @@ pub fn default_boot_info() -> BootInfo {
         dhcp_enabled: true,
         ip4: None,
         gateway_ip4: None,
+        cpu_mpdirs: ArrayVec::new(),
     }
 }
 
 /// Scan physical memory for a DTB (looking for the magic 0xd00dfeed).
-/// QEMU may place the DTB anywhere in the first few GB of RAM.
+/// QEMU virt machine may place the DTB anywhere in the first 1GB of RAM.
+/// We scan the entire 1GB region (0x40000000–0x80000000) in 4KB steps.
+/// QEMU 10.x does not place the DTB in guest memory for bare-metal ELF
+/// kernels (the ARM Linux boot protocol only applies to Image-format kernels).
+/// This scan is kept as a fallback for future use but currently always returns
+/// None on QEMU virt.
 unsafe fn scan_for_dtb() -> Option<PAddr> {
-    // Scan first 512KB (before kernel), then after kernel image up to 128MB.
-    let ranges: &[(usize, usize)] = &[
-        (0x40000000, 0x40080000),            // before kernel
-        (0x44000000, 0x48000000),            // well above kernel
-        (0x78000000, 0x80000000),            // top of 1GB RAM
-    ];
-
-    for &(start, end) in ranges {
-        let mut addr = start;
-        while addr < end {
-            let vaddr = addr + super::KERNEL_BASE_ADDR;
-            let val = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
-            if be32(val) == DTB_MAGIC {
-                info!("Found DTB at {:#x}", addr);
-                return Some(PAddr::new(addr));
-            }
-            addr += 0x1000; // DTBs are page-aligned
+    let start = 0x4000_0000usize;
+    let end   = 0x8000_0000usize;
+    let mut addr = start;
+    while addr < end {
+        let vaddr = addr + super::KERNEL_BASE_ADDR;
+        let val = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
+        if be32(val) == DTB_MAGIC {
+            info!("Found DTB at {:#x}", addr);
+            return Some(PAddr::new(addr));
         }
+        addr += 0x1000;
     }
     None
 }

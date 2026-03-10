@@ -261,6 +261,73 @@ impl ArchTask {
         }
     }
 
+    /// Returns the current TLS base (TPIDR_EL0) value.
+    pub fn fsbase(&self) -> u64 {
+        self.tpidr_el0.load()
+    }
+
+    /// Creates a new thread's arch state.
+    /// `child_stack` is the user SP; `tpidr_el0_val` is the TLS base.
+    /// x0 = 0 in the child (clone returns 0).
+    pub fn new_thread(frame: &PtRegs, child_stack: u64, tpidr_el0_val: u64) -> ArchTask {
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+
+        let sp = unsafe {
+            let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
+            let mut sp: *mut u64 = kernel_sp.as_mut_ptr();
+
+            // Push a PtRegs frame, same layout as fork() but with child's stack.
+            sp = sp.sub(34);
+            let child_frame = sp as *mut u64;
+            for i in 0..31 {
+                *child_frame.add(i) = frame.regs[i];
+            }
+            *child_frame.add(0) = 0;           // x0 = 0 (clone returns 0 in child)
+            *child_frame.add(31) = child_stack; // sp_el0 = child stack
+            *child_frame.add(32) = frame.pc;    // elr_el1 = return PC
+            *child_frame.add(33) = frame.pstate; // spsr_el1
+
+            // do_switch_thread context frame.
+            sp = push_stack(sp, frame.regs[20]);
+            sp = push_stack(sp, frame.regs[19]);
+            sp = push_stack(sp, frame.regs[22]);
+            sp = push_stack(sp, frame.regs[21]);
+            sp = push_stack(sp, frame.regs[24]);
+            sp = push_stack(sp, frame.regs[23]);
+            sp = push_stack(sp, frame.regs[26]);
+            sp = push_stack(sp, frame.regs[25]);
+            sp = push_stack(sp, frame.regs[28]);
+            sp = push_stack(sp, frame.regs[27]);
+            sp = push_stack(sp, forked_child_entry as *const u8 as u64); // x30 (LR)
+            sp = push_stack(sp, frame.regs[29]); // x29 (FP)
+            sp = push_stack(sp, 0); // NZCV
+            sp
+        };
+
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+
+        ArchTask {
+            sp: UnsafeCell::new(sp as u64),
+            tpidr_el0: AtomicCell::new(tpidr_el0_val),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        }
+    }
+
     pub fn setup_execve_stack(
         &self,
         frame: &mut PtRegs,

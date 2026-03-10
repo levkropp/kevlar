@@ -339,6 +339,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         dhcp_enabled: cmdline.dhcp_enabled,
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
+        cpu_mpdirs: ArrayVec::new(),
     }
 }
 
@@ -384,6 +385,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         dhcp_enabled: cmdline.dhcp_enabled,
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
+        cpu_mpdirs: ArrayVec::new(),
     }
 }
 
@@ -403,12 +405,16 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         );
     }
 
-    let cmdline = Cmdline::parse(core::slice::from_raw_parts(
-        setup_header.cmd_line_ptr as *const u8,
-        setup_header
-            .cmdline_size
-            .saturating_sub(1 /* trailing NUL */) as usize,
-    ));
+    let cmdline = if setup_header.cmd_line_ptr == 0 {
+        Cmdline::parse(&[])
+    } else {
+        Cmdline::parse(core::slice::from_raw_parts(
+            setup_header.cmd_line_ptr as *const u8,
+            setup_header
+                .cmdline_size
+                .saturating_sub(1 /* trailing NUL */) as usize,
+        ))
+    };
     BootInfo {
         ram_areas,
         pci_enabled: cmdline.pci_enabled,
@@ -419,6 +425,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         dhcp_enabled: cmdline.dhcp_enabled,
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
+        cpu_mpdirs: ArrayVec::new(),
     }
 }
 

@@ -1,12 +1,39 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
-// ARM64 boot code for Kevlar on QEMU virt machine.
-// Entry: EL1, MMU off, x0 = DTB physical address.
+// ARM64 boot code for Kevlar.
+//
+// Boot protocol: ARM64 Linux Image (Documentation/arm64/booting.rst).
+// Bootloaders (QEMU, u-boot, UEFI) recognise the magic at offset 0x38 and:
+//   - Load us at RAM_base + text_offset (0x40000000 + 0x80000 = 0x40080000)
+//   - Set x0 = physical address of the device tree blob (DTB)
+//   - Set x1 = x2 = x3 = 0
+//   - Enter at our load address (this image header, whose first word branches
+//     past the header to the real entry point below)
+//
+// Without the Image header QEMU 10.x loads our ELF but leaves x0 = 0.
 
 .section ".boot", "ax"
+
+// ---------------------------------------------------------------
+// ARM64 Linux Image boot header (64 bytes, must start at offset 0
+// of the loaded image so the magic lands at file/image offset 0x38).
+// ---------------------------------------------------------------
+.global _image_header
+_image_header:
+    b       _start              // offset 0x00 code0: branch to real entry
+    .long   0                   // offset 0x04 code1: reserved
+    .quad   0x80000             // offset 0x08 text_offset: 512 KB from RAM base
+    .quad   0                   // offset 0x10 image_size:  0 = unspecified
+    .quad   0x4                 // offset 0x18 flags: little-endian image
+    .quad   0                   // offset 0x20 reserved
+    .quad   0                   // offset 0x28 reserved
+    .quad   0                   // offset 0x30 reserved
+    .long   0x644d5241          // offset 0x38 magic: "ARM\x64" (LE) ← QEMU checks here
+    .long   0                   // offset 0x3c res2:  PE/COFF offset (none)
+
 .global _start
 _start:
-    // Save DTB address (passed by QEMU in x0).
+    // x0 = DTB physical address (set by bootloader per ARM64 boot protocol).
     mov     x19, x0
 
     // Disable interrupts.
@@ -145,6 +172,72 @@ _start:
     br      x0
 
 // ---------------------------------------------------------------
+// Secondary entry for Application Processors.
+// Called by PSCI CPU_ON (x0 = context_id, unused).
+// APs wake at EL1 with MMU off.
+// ---------------------------------------------------------------
+.section ".boot", "ax"
+.global secondary_entry
+secondary_entry:
+    // Disable all exceptions.
+    msr     daifset, #0xf
+
+    // Disable the physical timer to prevent spurious interrupts before init_ap.
+    mov     x0, xzr
+    msr     cntp_ctl_el0, x0
+
+    // Enable FP/NEON (CPACR_EL1.FPEN = 0b11).
+    mov     x0, #(3 << 20)
+    msr     cpacr_el1, x0
+    isb
+
+    // Reuse the BSP boot stack as a temporary stack.
+    // BSP is past early init by the time APs start; this is safe because
+    // APs are started one at a time.
+    adrp    x0, __boot_stack
+    add     sp, x0, :lo12:__boot_stack
+
+    // MAIR_EL1 (same as BSP).
+    mov     x0, #0xFF00
+    msr     mair_el1, x0
+
+    // TCR_EL1 (same as BSP).
+    ldr     x0, =0x00000025B5103510
+    msr     tcr_el1, x0
+
+    // TTBR0: identity map (reuse BSP's page tables).
+    adrp    x0, __kernel_pgd_ttbr0
+    add     x0, x0, :lo12:__kernel_pgd_ttbr0
+    msr     ttbr0_el1, x0
+
+    // TTBR1: kernel map (reuse BSP's page tables).
+    adrp    x0, __kernel_pgd_ttbr1
+    add     x0, x0, :lo12:__kernel_pgd_ttbr1
+    msr     ttbr1_el1, x0
+
+    // Invalidate TLBs.
+    tlbi    vmalle1
+    dsb     sy
+    isb
+
+    // Enable MMU (same SCTLR bits as BSP).
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 0)      // M    = MMU enable
+    orr     x0, x0, #(1 << 2)      // C    = data cache enable
+    orr     x0, x0, #(1 << 12)     // I    = instruction cache enable
+    orr     x0, x0, #(1 << 16)     // nTWI = don't trap WFI at EL1
+    orr     x0, x0, #(1 << 18)     // nTWE = don't trap WFE at EL1
+    orr     x0, x0, #(1 << 26)     // UCI  = EL0 cache maintenance
+    bic     x0, x0, #(1 << 25)     // EE   = little-endian
+    bic     x0, x0, #(1 << 19)     // WXN  = no write-execute restriction
+    msr     sctlr_el1, x0
+    isb
+
+    // Jump to the kernel virtual address.
+    ldr     x0, =secondary_long_mode
+    br      x0
+
+// ---------------------------------------------------------------
 // Helper: fill PMD entries with 2MB block descriptors.
 //   x0 = PMD table base
 //   x1 = starting physical address
@@ -229,3 +322,37 @@ long_mode:
 halt:
     wfi
     b       halt
+
+// ---------------------------------------------------------------
+// Secondary long mode: AP entry after MMU is enabled.
+// Loads the real kernel stack from AP_ENTRY_STACK_TOP (a no_mangle
+// Rust AtomicU64 static; its layout is a plain u64 at offset 0).
+// ---------------------------------------------------------------
+.global secondary_long_mode
+secondary_long_mode:
+    // Set VBAR_EL1 (exception vector table).
+    ldr     x0, =exception_vectors
+    msr     vbar_el1, x0
+    isb
+
+    // Ensure nTWI/nTWE bits are set (SCTLR may still be transitioning).
+    mrs     x0, sctlr_el1
+    orr     x0, x0, #(1 << 16)     // nTWI
+    orr     x0, x0, #(1 << 18)     // nTWE
+    msr     sctlr_el1, x0
+    isb
+
+    // Load the real AP kernel stack published by the BSP in AP_ENTRY_STACK_TOP.
+    ldr     x0, =AP_ENTRY_STACK_TOP
+    ldr     x1, [x0]        // Load stack top value into x1 (ldr into sp is invalid)
+    mov     sp, x1
+
+    // Clear frame pointer for backtrace.
+    mov     x29, #0
+
+    // Call secondary_rust_entry() — does not return.
+    bl      secondary_rust_entry
+
+    // Unreachable.
+1:  wfi
+    b       1b

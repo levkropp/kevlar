@@ -19,6 +19,7 @@ mod paging;
 mod profile;
 mod semihosting;
 mod serial;
+pub mod smp;
 mod syscall;
 pub mod task;
 mod timer;
@@ -40,18 +41,26 @@ pub mod arm64_specific {
     };
 }
 
-/// ARM64 SMP not yet implemented; always returns 1.
-pub fn num_online_cpus() -> u32 {
-    1
+/// Per-CPU ID (0 = BSP, 1..N = APs in startup order).
+cpu_local! {
+    pub static ref CPU_ID: u32 = 0;
 }
 
-/// ARM64 SMP not yet implemented; BSP is always CPU 0.
+/// Returns the index of the calling CPU (0 = BSP).
 pub fn cpu_id() -> u32 {
-    0
+    *CPU_ID.get()
 }
 
-/// ARM64 AP preemption timer not yet implemented; no-op.
-pub fn start_ap_preemption_timer() {}
+/// Returns the total number of online CPUs.
+pub fn num_online_cpus() -> u32 {
+    smp::num_online_cpus()
+}
+
+/// Start the per-AP preemption timer.
+/// Called from `ap_kernel_entry` after `process::init_ap()` sets up CURRENT.
+pub fn start_ap_preemption_timer() {
+    unsafe { timer::init_ap() }
+}
 
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 50;

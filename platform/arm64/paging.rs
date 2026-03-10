@@ -198,6 +198,28 @@ impl PageTable {
         self.map_page(vaddr, paddr, attrs);
     }
 
+    /// Maps a page only if the entry is not already present.
+    /// Returns `true` if the page was mapped, `false` if already mapped.
+    pub fn try_map_user_page_with_prot(
+        &mut self,
+        vaddr: UserVAddr,
+        paddr: PAddr,
+        prot_flags: i32,
+    ) -> bool {
+        let attrs = prot_to_attrs(prot_flags);
+        let entry_ptr = match traverse(self.pgd, vaddr, true) {
+            Some(ptr) => ptr,
+            None => return false,
+        };
+        unsafe {
+            if *entry_ptr.as_ptr() != 0 {
+                return false; // already mapped
+            }
+            *entry_ptr.as_ptr() = paddr.value() as u64 | attrs;
+            true
+        }
+    }
+
     pub fn update_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
         let entry_ptr = match traverse(self.pgd, vaddr, false) {
             Some(ptr) => ptr,
