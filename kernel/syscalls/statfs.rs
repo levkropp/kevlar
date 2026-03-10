@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
 // Provenance: Own (Linux statfs(2) man page, FreeBSD vfs_syscalls.c BSD-2-Clause).
+use crate::fs::mount::MountTable;
 use crate::fs::opened_file::Fd;
 use crate::fs::path::Path;
 use crate::prelude::*;
@@ -10,6 +11,7 @@ use kevlar_platform::address::UserVAddr;
 
 const TMPFS_MAGIC: i64 = 0x01021994;
 const PROC_SUPER_MAGIC: i64 = 0x9FA0;
+const EXT2_SUPER_MAGIC: i64 = 0xEF53;
 
 /// Linux struct statfs (x86_64 / arm64).
 #[repr(C)]
@@ -63,11 +65,28 @@ impl StatfsBuf {
         }
     }
 
+    fn ext2() -> StatfsBuf {
+        StatfsBuf {
+            f_type: EXT2_SUPER_MAGIC,
+            f_bsize: 1024,
+            f_blocks: 16384,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 4096,
+            f_ffree: 0,
+            f_fsid: [0, 0],
+            f_namelen: 255,
+            f_frsize: 1024,
+            f_flags: 1, // ST_RDONLY
+            f_spare: [0; 4],
+        }
+    }
+
     fn for_path(path: &Path) -> StatfsBuf {
-        if path.as_str().starts_with("/proc") {
-            StatfsBuf::procfs()
-        } else {
-            StatfsBuf::tmpfs()
+        match MountTable::fstype_for_path(path.as_str()).as_deref() {
+            Some("proc") | Some("sysfs") => StatfsBuf::procfs(),
+            Some("ext2") => StatfsBuf::ext2(),
+            _ => StatfsBuf::tmpfs(),
         }
     }
 }

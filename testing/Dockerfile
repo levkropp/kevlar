@@ -116,6 +116,39 @@ COPY testing/mini_systemd.c /mini_systemd.c
 RUN musl-gcc -static -O2 -o /mini-systemd /mini_systemd.c
 
 #
+#  Disk hello binary (tiny static binary for exec-from-disk test)
+#
+FROM ubuntu:20.04 AS disk_hello
+RUN apt-get update && apt-get install -qy musl-tools
+COPY testing/disk_hello.c /disk_hello.c
+RUN musl-gcc -static -O2 -o /disk_hello /disk_hello.c
+
+#
+#  Ext2 disk image for Phase 7 integration tests (16 MiB)
+#
+FROM ubuntu:20.04 AS disk_image
+RUN apt-get update && apt-get install -qy e2fsprogs
+COPY --from=disk_hello /disk_hello /disk_root/hello
+RUN printf 'hello from ext2\n' > /disk_root/greeting.txt && \
+    mkdir -p /disk_root/subdir && \
+    printf 'nested file\n' > /disk_root/subdir/nested.txt && \
+    ln -s greeting.txt /disk_root/link.txt && \
+    chmod +x /disk_root/hello && \
+    dd if=/dev/zero of=/disk.img bs=1M count=16 2>/dev/null && \
+    mke2fs -t ext2 -d /disk_root /disk.img
+
+#
+#  M5 Phase 7 integration test (mini-storage)
+#
+FROM ubuntu:20.04 AS mini_storage
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/mini_storage.c /mini_storage.c
+RUN musl-gcc -static -O2 -o /mini-storage /mini_storage.c
+
+#
 #  Initramfs
 #
 FROM busybox AS empty_dir
@@ -138,6 +171,7 @@ COPY --from=bash       /build/bash /bin/bash
 COPY --from=benchsuite /bench /bin/bench
 COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
+COPY --from=mini_storage /mini-storage /bin/mini-storage
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /mnt /var/www/html

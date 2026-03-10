@@ -60,6 +60,29 @@ impl MountTable {
         MOUNT_ENTRIES.lock().retain(|e| e.mountpoint != mountpoint);
     }
 
+    /// Return the filesystem type for the mount that owns `path`.
+    /// Performs longest-prefix matching so nested mounts resolve correctly.
+    pub fn fstype_for_path(path: &str) -> Option<String> {
+        let entries = MOUNT_ENTRIES.lock();
+        let mut best_len = 0usize;
+        let mut best_fstype: Option<String> = None;
+        for entry in entries.iter() {
+            let mp = entry.mountpoint.as_str();
+            let matches = if mp == "/" {
+                true
+            } else {
+                path.starts_with(mp)
+                    && (path.len() == mp.len()
+                        || path.as_bytes().get(mp.len()) == Some(&b'/'))
+            };
+            if matches && mp.len() >= best_len {
+                best_len = mp.len();
+                best_fstype = Some(entry.fstype.clone());
+            }
+        }
+        best_fstype
+    }
+
     /// Format /proc/mounts content.
     pub fn format_mounts(buf: &mut String) {
         use core::fmt::Write;
