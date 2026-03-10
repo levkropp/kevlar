@@ -163,6 +163,10 @@ mod utimensat;
 // M5 Phase 2: inotify
 mod inotify;
 
+// M5 Phase 3: Zero-copy I/O
+mod sendfile;
+mod splice;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -347,6 +351,11 @@ mod syscall_numbers {
     pub const SYS_INOTIFY_ADD_WATCH: usize = 254;
     pub const SYS_INOTIFY_RM_WATCH: usize = 255;
     pub const SYS_INOTIFY_INIT1: usize = 294;
+    // M5 Phase 3: Zero-copy I/O
+    pub const SYS_SENDFILE: usize = 40;
+    pub const SYS_SPLICE: usize = 275;
+    pub const SYS_TEE: usize = 276;
+    pub const SYS_COPY_FILE_RANGE: usize = 326;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -507,6 +516,11 @@ mod syscall_numbers {
     pub const SYS_INOTIFY_INIT1: usize = 26;
     pub const SYS_INOTIFY_ADD_WATCH: usize = 27;
     pub const SYS_INOTIFY_RM_WATCH: usize = 28;
+    // M5 Phase 3: Zero-copy I/O
+    pub const SYS_SENDFILE: usize = 71;
+    pub const SYS_SPLICE: usize = 76;
+    pub const SYS_TEE: usize = 77;
+    pub const SYS_COPY_FILE_RANGE: usize = 285;
 }
 
 use syscall_numbers::*;
@@ -1078,6 +1092,35 @@ impl<'a> SyscallHandler<'a> {
                 Fd::new(a1 as i32),
                 a2 as c_int,
             ),
+            // M5 Phase 3: Zero-copy I/O
+            SYS_SENDFILE => self.sys_sendfile(
+                Fd::new(a1 as i32),
+                Fd::new(a2 as i32),
+                UserVAddr::new(a3),
+                a4,
+            ),
+            SYS_SPLICE => self.sys_splice(
+                Fd::new(a1 as i32),
+                UserVAddr::new(a2),
+                Fd::new(a3 as i32),
+                UserVAddr::new(a4),
+                a5,
+                a6 as u32,
+            ),
+            SYS_TEE => self.sys_tee(
+                Fd::new(a1 as i32),
+                Fd::new(a2 as i32),
+                a3,
+                a4 as u32,
+            ),
+            SYS_COPY_FILE_RANGE => self.sys_copy_file_range(
+                Fd::new(a1 as i32),
+                UserVAddr::new(a2),
+                Fd::new(a3 as i32),
+                UserVAddr::new(a4),
+                a5,
+                a6 as u32,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1245,6 +1288,10 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_INOTIFY_INIT1 => "inotify_init1",
         SYS_INOTIFY_ADD_WATCH => "inotify_add_watch",
         SYS_INOTIFY_RM_WATCH => "inotify_rm_watch",
+        SYS_SENDFILE => "sendfile",
+        SYS_SPLICE => "splice",
+        SYS_TEE => "tee",
+        SYS_COPY_FILE_RANGE => "copy_file_range",
         _ => "(unknown)",
     }
 }
