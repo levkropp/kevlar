@@ -79,6 +79,10 @@ impl FileMode {
     pub fn is_symbolic_link(self) -> bool {
         (self.0 & S_IFMT) == S_IFLNK
     }
+
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

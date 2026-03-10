@@ -152,6 +152,14 @@ mod setsockopt;
 mod signalfd;
 mod timerfd;
 
+// M5 Phase 1: File metadata & extended operations
+mod fadvise64;
+mod fallocate;
+mod preadv;
+mod statfs;
+mod statx;
+mod utimensat;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -323,6 +331,15 @@ mod syscall_numbers {
     pub const SYS_SIGNALFD4: usize = 289;
     pub const SYS_EVENTFD2: usize = 290;
     pub const SYS_EPOLL_CREATE1: usize = 291;
+    // M5 Phase 1: File metadata & extended operations
+    pub const SYS_STATFS: usize = 137;
+    pub const SYS_FSTATFS: usize = 138;
+    pub const SYS_FADVISE64: usize = 221;
+    pub const SYS_UTIMENSAT: usize = 280;
+    pub const SYS_FALLOCATE: usize = 285;
+    pub const SYS_PREADV: usize = 295;
+    pub const SYS_PWRITEV: usize = 296;
+    pub const SYS_STATX: usize = 332;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -470,6 +487,15 @@ mod syscall_numbers {
     pub const SYS_TIMERFD_SETTIME: usize = 86;
     pub const SYS_SIGNALFD4: usize = 74;
     pub const SYS_EVENTFD2: usize = 19;
+    // M5 Phase 1: File metadata & extended operations
+    pub const SYS_STATFS: usize = 43;
+    pub const SYS_FSTATFS: usize = 44;
+    pub const SYS_FALLOCATE: usize = 47;
+    pub const SYS_PREADV: usize = 69;
+    pub const SYS_PWRITEV: usize = 70;
+    pub const SYS_UTIMENSAT: usize = 88;
+    pub const SYS_FADVISE64: usize = 223;
+    pub const SYS_STATX: usize = 291;
 }
 
 use syscall_numbers::*;
@@ -987,6 +1013,49 @@ impl<'a> SyscallHandler<'a> {
             SYS_PRCTL => self.sys_prctl(a1 as c_int, a2, a3, a4, a5),
             SYS_CAPGET => self.sys_capget(UserVAddr::new_nonnull(a1)?, a2),
             SYS_CAPSET => self.sys_capset(UserVAddr::new_nonnull(a1)?, a2),
+            // M5 Phase 1: File metadata & extended operations
+            SYS_STATFS => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_statfs(p.as_path(), UserVAddr::new_nonnull(a2)?)
+            }
+            SYS_FSTATFS => self.sys_fstatfs(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?),
+            SYS_UTIMENSAT => self.sys_utimensat(
+                CwdOrFd::parse(a1 as c_int),
+                a2,
+                UserVAddr::new(a3),
+                a4 as i32,
+            ),
+            SYS_STATX => self.sys_statx(
+                CwdOrFd::parse(a1 as c_int),
+                a2,
+                a3 as i32,
+                a4 as u32,
+                UserVAddr::new_nonnull(a5)?,
+            ),
+            SYS_FALLOCATE => self.sys_fallocate(
+                Fd::new(a1 as i32),
+                a2 as i32,
+                a3 as i64,
+                a4 as i64,
+            ),
+            SYS_FADVISE64 => self.sys_fadvise64(
+                Fd::new(a1 as i32),
+                a2 as i64,
+                a3 as i64,
+                a4 as i32,
+            ),
+            SYS_PREADV => self.sys_preadv(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3,
+                a4,
+            ),
+            SYS_PWRITEV => self.sys_pwritev(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3,
+                a4,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1143,6 +1212,14 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_PRCTL => "prctl",
         SYS_CAPGET => "capget",
         SYS_CAPSET => "capset",
+        SYS_STATFS => "statfs",
+        SYS_FSTATFS => "fstatfs",
+        SYS_UTIMENSAT => "utimensat",
+        SYS_STATX => "statx",
+        SYS_FALLOCATE => "fallocate",
+        SYS_FADVISE64 => "fadvise64",
+        SYS_PREADV => "preadv",
+        SYS_PWRITEV => "pwritev",
         _ => "(unknown)",
     }
 }
