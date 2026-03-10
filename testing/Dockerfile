@@ -140,7 +140,7 @@ COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 
 RUN ["/bin/busybox", "--install", "-s"]
-RUN mkdir -p /etc /dev /tmp /var/www/html
+RUN mkdir -p /etc /dev /tmp /mnt /var/www/html
 ADD testing/etc/banner /etc
 ADD testing/etc/group /etc
 ADD testing/etc/passwd /etc
