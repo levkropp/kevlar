@@ -1,21 +1,33 @@
 # Logging
 
-By default, the kernel doesn't print `trace!` or `debug!` log messages.
-
-Similar to `$RUST_LOG`, Kevlar supports controlling logging through `LOG=` argument in a `make` command:
-
-```
-make run LOG=trace               # Enable all trace messages.
-make run LOG="kernel::fs=trace"  # Enable traces messages in `kevlar_kernel::fs`.
-                                 # "kevlar_" prefix can be omitted.
-```
-
-## Using the secondary serial port
-
-If the kernel messages are noisy, you can use the secondary serial port to forward them into a separate file:
+Kevlar uses the `log` crate. By default, `trace!` and `debug!` messages are
+suppressed. Control verbosity with `LOG=` on the make command line:
 
 ```
-make run \
-    LOG=trace LOG_SERIAL="chardev:uart1" \
-    QEMU_ARGS="-chardev file,id=uart1,path=/tmp/kevlar-debug.log,logappend=on"
+make run LOG=trace                           # All trace messages
+make run LOG="kevlar_kernel::fs=trace"       # Traces only from the fs module
+make run LOG="kevlar_kernel::net=debug"      # Debug level for networking
 ```
+
+The module path prefix is `kevlar_kernel::` (matching the kernel crate package name).
+
+## Secondary serial port
+
+When kernel output is noisy, redirect it to a file via the secondary serial port:
+
+```
+make run LOG=trace LOG_SERIAL="file:/tmp/kevlar-debug.log"
+```
+
+Or append to an existing file:
+
+```
+make run LOG=trace \
+    QEMU_ARGS="-chardev file,id=uart1,path=/tmp/kevlar.log,logappend=on" \
+    LOG_SERIAL="chardev:uart1"
+```
+
+## Structured debug events
+
+The `debug=` kernel parameter enables structured JSONL debug events (separate from
+the log level). See [Debugging 101](hacking/debugging-101.md) for details.

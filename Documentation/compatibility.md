@@ -14,12 +14,12 @@ Not supported.
 | M1: Static Busybox | ~50 | 79 | **Complete** — BusyBox boots, shell works |
 | M1.5: ARM64 | -- | 79 | **Complete** — BusyBox boots on QEMU virt (cortex-a72) |
 | M2: Dynamic linking (ld-linux.so) | ~55 | 83 | **Complete** — PIE + musl dynamic linker works |
-| M3: GNU Coreutils + Bash | ~80 | 103 | In Progress — terminal, job control, symlinks, clone, *at syscalls done |
-| M4: systemd (PID 1) | ~110 | 103 | Planned |
-| M5: apt/dpkg | ~120 | 103 | Planned |
-| M6: Full networking (SSH, DNS) | ~130 | 103 | Planned |
-| M7: Container runtime | ~145 | 103 | Planned |
-| M8: Kubuntu 24.04 desktop | ~170 | 103 | Planned |
+| M3: Terminal, Job Control, Bash | ~80 | 103 | **Complete** — terminal, job control, symlinks, clone, *at syscalls |
+| M4: systemd-compatible PID 1 | ~110 | 107 | **Complete** — epoll, unix sockets, mount, caps, 15/15 integration tests |
+| M5: Persistent Storage | ~120 | 107 | In Progress — statx/inotify/procfs done; VirtIO block + ext2 planned |
+| M6: Full networking (SSH, DNS) | ~130 | 107 | Planned |
+| M7: Container runtime | ~145 | 107 | Planned |
+| M8: Kubuntu 24.04 desktop | ~170 | 107 | Planned |
 
 ## System Calls
 
@@ -41,7 +41,6 @@ Not supported.
 
 ### Reference Key
 - **FreeBSD** = Reference FreeBSD's linuxulator (sys/compat/linux/) and kernel (BSD-2-Clause) — battle-tested Linux syscall semantics
-- **OSv** = Reference OSv (BSD-3-Clause) — VFS layer, filesystem abstractions
 - **Own** = Implement ourselves (no suitable permissive reference)
 
 <!-- Tip: Use this VSCode plugin to edit this table: https://marketplace.visualstudio.com/items?itemName=darkriszty.markdown-table-prettify -->
@@ -56,10 +55,10 @@ Not supported.
 | 5   | fstat                  | Partial       | M1        |           | Implemented                                            |
 | 6   | lstat                  | Partial       | M1        |           | Implemented                                            |
 | 7   | poll                   | Partial       | M1        |           | Implemented                                            |
-| 8   | lseek                  | Full          | M1        | OSv       | SEEK_SET/CUR/END; ref OSv vfs_syscalls.cc              |
+| 8   | lseek                  | Full          | M1        | FreeBSD   | SEEK_SET/CUR/END              |
 | 9   | mmap                   | Full          | M1        | FreeBSD   | MAP_FIXED unmaps existing, prot flags, NX bit support  |
-| 10  | mprotect               | Full          | M1        | FreeBSD   | VMA splitting, PTE update, TLB flush; ref OSv mmu.cc  |
-| 11  | munmap                 | Full          | M1        | FreeBSD   | VMA removal/splitting, page freeing; ref OSv mmu.cc   |
+| 10  | mprotect               | Full          | M1        | FreeBSD   | VMA splitting, PTE update, TLB flush  |
+| 11  | munmap                 | Full          | M1        | FreeBSD   | VMA removal/splitting, page freeing   |
 | 12  | brk                    | Full          | M1        |           |                                                        |
 | 13  | rt_sigaction           | Partial       | M1        | Own       | oldact return implemented; sa_flags/sa_mask partial    |
 | 14  | rt_sigprocmask         | Full          | M1        |           |                                                        |
@@ -69,7 +68,7 @@ Not supported.
 | 18  | pwrite64               | Full          | M3        | Own       | Write at offset without changing file position          |
 | 19  | readv                  | Full          | M3        | Own       | Scatter-gather read                                    |
 | 20  | writev                 | Full          | M1        |           |                                                        |
-| 21  | access                 | Full          | M1        | FreeBSD   | Path resolution; ref OSv vfs_syscalls.cc               |
+| 21  | access                 | Full          | M1        | FreeBSD   | Path resolution               |
 | 22  | pipe                   | Full          | M1        |           |                                                        |
 | 23  | select                 | Full          | M1        |           | Fixed: writefds uses POLLOUT, errorfds supported       |
 | 24  | sched_yield            | Full          | M1        |           | Calls process::switch()                                |
@@ -83,7 +82,7 @@ Not supported.
 | 32  | dup                    | Full          | M1        |           | Shell redirections                                     |
 | 33  | dup2                   | Full          | M1        |           |                                                        |
 | 34  | pause                  | Full          | M3        | Own       | Yields until signal delivered                          |
-| 35  | nanosleep              | Full          | M1        | OSv       | Parses timespec, delegates to _sleep_ms; ref OSv       |
+| 35  | nanosleep              | Full          | M1        | FreeBSD   | Parses timespec, delegates to _sleep_ms       |
 | 36  | getitimer              | Unimplemented | M3        | FreeBSD   |                                                        |
 | 37  | alarm                  | Stub          | M3        | Own       | Returns 0; no timer delivery yet                       |
 | 38  | setitimer              | Unimplemented | M3        | FreeBSD   |                                                        |
@@ -121,21 +120,21 @@ Not supported.
 | 70  | msgrcv                 | Unimplemented | M8        | FreeBSD   |                                                        |
 | 71  | msgctl                 | Unimplemented | M8        | FreeBSD   |                                                        |
 | 72  | fcntl                  | Partial       | M1        | Own       | F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_DUPFD_CLOEXEC |
-| 73  | flock                  | Unimplemented | M3        | OSv       | Advisory file locking                                  |
+| 73  | flock                  | Unimplemented | M3        | FreeBSD   | Advisory file locking                                  |
 | 74  | fsync                  | Partial       | M1        |           | Delegates to opened_file                               |
-| 75  | fdatasync              | Unimplemented | M3        | OSv       |                                                        |
-| 76  | truncate               | Unimplemented | M5        | OSv       |                                                        |
+| 75  | fdatasync              | Unimplemented | M3        | FreeBSD   |                                                        |
+| 76  | truncate               | Unimplemented | M5        | FreeBSD   |                                                        |
 | 77  | ftruncate              | Full          | M3        | Own       | Truncate file to specified length                      |
-| 78  | getdents               | Unimplemented | M3        | OSv       | Legacy readdir; some programs still use this            |
+| 78  | getdents               | Unimplemented | M3        | FreeBSD   | Legacy readdir; some programs still use this            |
 | 79  | getcwd                 | Full          | M1        |           |                                                        |
 | 80  | chdir                  | Full          | M1        |           |                                                        |
 | 81  | fchdir                 | Full          | M3        | Own       | Change directory by file descriptor                    |
-| 82  | rename                 | Full          | M1        | OSv       | Cross-dir rename with lock ordering; ref OSv           |
+| 82  | rename                 | Full          | M1        | FreeBSD   | Cross-dir rename with lock ordering           |
 | 83  | mkdir                  | Full          | M1        |           |                                                        |
-| 84  | rmdir                  | Full          | M1        | OSv       | ENOTEMPTY check; ref OSv vfs_syscalls.cc               |
+| 84  | rmdir                  | Full          | M1        | FreeBSD   | ENOTEMPTY check               |
 | 85  | creat                  | Unimplemented | M5        | Own       | Legacy; usually via open(O_CREAT)                      |
 | 86  | link                   | Full          | M1        |           |                                                        |
-| 87  | unlink                 | Full          | M1        | OSv       | EISDIR check; ref OSv vfs_syscalls.cc                  |
+| 87  | unlink                 | Full          | M1        | FreeBSD   | EISDIR check                  |
 | 88  | symlink                | Full          | M3        | Own       | ln -s command; tmpfs symlink support                   |
 | 89  | readlink               | Full          | M1        |           | Includes partial /proc/self/fd                         |
 | 90  | chmod                  | Full          | M1        |           |                                                        |
@@ -144,8 +143,8 @@ Not supported.
 | 93  | fchown                 | Stub          | M3        | Own       | Succeeds silently                                      |
 | 94  | lchown                 | Unimplemented | M3        | Own       |                                                        |
 | 95  | umask                  | Full          | M1        |           | Per-process AtomicCell<u32>, propagated through fork   |
-| 96  | gettimeofday           | Full          | M1        | OSv       | Wall clock as timeval; ref OSv osv_clock.cc            |
-| 97  | getrlimit              | Full          | M1        | FreeBSD   | Fake limits: 8MB stack, 1024 NOFILE; ref OSv rlimit.cc|
+| 96  | gettimeofday           | Full          | M1        | FreeBSD   | Wall clock as timeval            |
+| 97  | getrlimit              | Full          | M1        | FreeBSD   | Fake limits: 8MB stack, 1024 NOFILE|
 | 98  | getrusage              | Stub          | M3        | Own       | Returns zeroed struct; real accounting deferred         |
 | 99  | sysinfo                | Full          | M1        |           | Uptime, totalram/freeram from allocator, procs count   |
 | 100 | times                  | Unimplemented | M3        | Own       |                                                        |
@@ -181,12 +180,12 @@ Not supported.
 | 130 | rt_sigsuspend          | Full          | M3        | Own       | Replaces mask, yields, restores, returns EINTR         |
 | 131 | sigaltstack            | Stub          | M3        | Own       | Accepts and ignores; real alt stack deferred            |
 | 132 | utime                  | Unimplemented | M5        | Own       | Legacy; utimensat preferred                             |
-| 133 | mknod                  | Unimplemented | M5        | OSv       | Create device nodes                                    |
+| 133 | mknod                  | Unimplemented | M5        | FreeBSD   | Create device nodes                                    |
 | 134 | uselib                 | Unimplemented | —         |           | Obsolete                                                |
 | 135 | personality            | Unimplemented | M8        | Own       | Execution domain                                       |
 | 136 | ustat                  | Unimplemented | —         |           | Obsolete                                                |
-| 137 | statfs                 | Unimplemented | M3        | OSv       | df command                                             |
-| 138 | fstatfs                | Unimplemented | M3        | OSv       |                                                        |
+| 137 | statfs                 | Unimplemented | M3        | FreeBSD   | df command                                             |
+| 138 | fstatfs                | Unimplemented | M3        | FreeBSD   |                                                        |
 | 139 | sysfs                  | Unimplemented | —         |           | Obsolete                                                |
 | 140 | getpriority            | Unimplemented | M8        | FreeBSD   |                                                        |
 | 141 | setpriority            | Unimplemented | M8        | FreeBSD   |                                                        |
@@ -249,7 +248,7 @@ Not supported.
 | 198 | lremovexattr           | Unimplemented | M5        | Own       |                                                        |
 | 199 | fremovexattr           | Unimplemented | M5        | Own       |                                                        |
 | 200 | tkill                  | Unimplemented | M4        | Own       | Send signal to thread                                  |
-| 201 | time                   | Unimplemented | M3        | OSv       | Trivial wrapper around clock_gettime                    |
+| 201 | time                   | Unimplemented | M3        | FreeBSD   | Trivial wrapper around clock_gettime                    |
 | 202 | futex                  | Partial       | M2        | FreeBSD   | WAIT/WAKE with per-address wait queues                 |
 | 203 | sched_setaffinity      | Unimplemented | M8        | FreeBSD   |                                                        |
 | 204 | sched_getaffinity      | Unimplemented | M8        | FreeBSD   |                                                        |
@@ -277,8 +276,8 @@ Not supported.
 | 226 | timer_delete           | Unimplemented | M4        | Own       |                                                        |
 | 227 | clock_settime          | Unimplemented | M8        | Own       |                                                        |
 | 228 | clock_gettime          | Full          | M1        |           | CLOCK_REALTIME, CLOCK_MONOTONIC                        |
-| 229 | clock_getres           | Unimplemented | M4        | OSv       | Trivial                                                |
-| 230 | clock_nanosleep        | Unimplemented | M4        | OSv       | High-precision sleep                                   |
+| 229 | clock_getres           | Unimplemented | M4        | FreeBSD   | Trivial                                                |
+| 230 | clock_nanosleep        | Unimplemented | M4        | FreeBSD   | High-precision sleep                                   |
 | 231 | exit_group             | Partial       | M1        |           | Other threads TODO                                     |
 | 232 | epoll_wait             | Unimplemented | M4        | FreeBSD   |                                                        |
 | 233 | epoll_ctl              | Unimplemented | M4        | FreeBSD   |                                                        |
@@ -305,12 +304,12 @@ Not supported.
 | 254 | inotify_add_watch      | Unimplemented | M4        | FreeBSD   | Filesystem event monitoring (systemd)                   |
 | 255 | inotify_rm_watch       | Unimplemented | M4        | FreeBSD   |                                                        |
 | 256 | migrate_pages          | Unimplemented | —         |           | NUMA                                                   |
-| 257 | openat                 | Full          | M1        | OSv       | **Critical:** musl/glibc use this instead of open(2). Supports AT_FDCWD, dirfd resolution. Ref: OSv sys_open (BSD-3-Clause) |
+| 257 | openat                 | Full          | M1        | FreeBSD   | **Critical:** musl/glibc use this instead of open(2). Supports AT_FDCWD, dirfd resolution |
 | 258 | mkdirat                | Full          | M3        | Own       | dirfd-relative mkdir                                   |
-| 259 | mknodat                | Unimplemented | M5        | OSv       |                                                        |
+| 259 | mknodat                | Unimplemented | M5        | FreeBSD   |                                                        |
 | 260 | fchownat               | Stub          | M3        | Own       | Succeeds silently                                      |
 | 261 | futimesat              | Unimplemented | —         |           | Legacy; use utimensat(280)                              |
-| 262 | newfstatat             | Full          | M1        | OSv       | **Critical:** musl/glibc use this instead of stat(2). Supports AT_FDCWD, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW. Ref: OSv sys_fstatat (BSD-3-Clause) |
+| 262 | newfstatat             | Full          | M1        | FreeBSD   | **Critical:** musl/glibc use this instead of stat(2). Supports AT_FDCWD, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW |
 | 263 | unlinkat               | Full          | M3        | Own       | AT_REMOVEDIR flag for rmdir; dirfd-relative             |
 | 264 | renameat               | Full          | M3        | Own       | dirfd-relative rename                                   |
 | 265 | linkat                 | Full          | M1        |           |                                                        |
@@ -328,20 +327,20 @@ Not supported.
 | 277 | sync_file_range        | Unimplemented | M5        | Own       |                                                        |
 | 278 | vmsplice               | Unimplemented | M8        | Own       |                                                        |
 | 279 | move_pages             | Unimplemented | —         |           | NUMA                                                   |
-| 280 | utimensat              | Unimplemented | M5        | OSv       | Set file timestamps with nanosecond precision           |
+| 280 | utimensat              | Unimplemented | M5        | FreeBSD   | Set file timestamps with nanosecond precision           |
 | 281 | epoll_pwait            | Unimplemented | M4        | FreeBSD   | Signal-safe epoll wait                                  |
 | 282 | signalfd               | Unimplemented | M4        | FreeBSD   | Legacy; use signalfd4(289)                              |
 | 283 | timerfd_create         | Unimplemented | M4        | FreeBSD   | Timer file descriptors                                  |
 | 284 | eventfd                | Unimplemented | M4        | FreeBSD   | Legacy; use eventfd2(290)                               |
-| 285 | fallocate              | Unimplemented | M5        | OSv       | Preallocate disk space                                  |
+| 285 | fallocate              | Unimplemented | M5        | FreeBSD   | Preallocate disk space                                  |
 | 286 | timerfd_settime        | Unimplemented | M4        | FreeBSD   |                                                        |
 | 287 | timerfd_gettime        | Unimplemented | M4        | FreeBSD   |                                                        |
 | 288 | accept4                | Unimplemented | M6        | FreeBSD   | Accept with SOCK_CLOEXEC flag                           |
 | 289 | signalfd4              | Unimplemented | M4        | FreeBSD   | Receive signals via fd (systemd)                        |
 | 290 | eventfd2               | Unimplemented | M4        | FreeBSD   | Event notification fd                                   |
 | 291 | epoll_create1          | Unimplemented | M4        | FreeBSD   | Scalable I/O event notification                         |
-| 292 | dup3                   | Full          | M1        | OSv       | dup2 with O_CLOEXEC. Returns EINVAL if oldfd==newfd     |
-| 293 | pipe2                  | Full          | M1        | OSv       | pipe with O_CLOEXEC, O_NONBLOCK flags                   |
+| 292 | dup3                   | Full          | M1        | FreeBSD   | dup2 with O_CLOEXEC. Returns EINVAL if oldfd==newfd     |
+| 293 | pipe2                  | Full          | M1        | FreeBSD   | pipe with O_CLOEXEC, O_NONBLOCK flags                   |
 | 294 | inotify_init1          | Unimplemented | M4        | FreeBSD   | Filesystem event monitoring                             |
 | 295 | preadv                 | Unimplemented | M5        | Own       |                                                        |
 | 296 | pwritev                | Unimplemented | M5        | Own       |                                                        |

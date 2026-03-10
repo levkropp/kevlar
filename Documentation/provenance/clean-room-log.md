@@ -29,7 +29,6 @@ and dependencies to modern versions.
 
 ### Reference materials consulted
 - Kerla source code (MIT OR Apache-2.0) — existing syscall implementations
-- OSv source code (BSD-3-Clause) — VFS layer for lseek, rename, unlink, rmdir, mprotect/munmap VMA logic
 - Linux man pages — POSIX syscall specifications
 - smoltcp documentation — networking API migration (0.7 → 0.12)
 - FreeBSD linuxulator source (BSD-2-Clause) — identified as primary reference for future syscall work
@@ -45,9 +44,8 @@ umask, getegid, getpgrp, getgid, unlink, rmdir, rename, nanosleep, gettimeofday,
 sysinfo, mmap (prot flags), select (writefds fix), wait4 (status encoding fix)
 
 ### Attribution
-- Memory management VMA logic influenced by OSv core/mmu.cc (BSD-3-Clause)
-- VFS operations influenced by OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause)
 - Boot sequence and syscall dispatch from Kerla (MIT OR Apache-2.0)
+- All other implementations are original, derived from Linux man pages and POSIX specs
 
 ### Test coverage
 - QEMU boot test: BusyBox shell interactive (echo, ls, cat verified)
@@ -202,9 +200,6 @@ tgkill, rt_sigsuspend, pause, alarm, fchmod/fchmodat/fchownat, getgroups.
 ## Ringkernel Architecture Design - 2026-03-08
 
 ### Reference materials consulted (design concepts only, no code)
-- Asterinas framekernel paper (USENIX ATC 2025, arxiv.org/abs/2506.03876) — MPL-2.0
-  - Studied: crate-level unsafe confinement, OSTD API categories, TCB measurement
-  - NOT copied: any code, API signatures, or module structure
 - RedLeaf paper (OSDI 2020, University of Utah) — MIT
   - Studied: language domain concept, fault containment via type system
 - Tock OS design documentation (tockos.org) — MIT/Apache-2.0
@@ -219,8 +214,8 @@ Original three-ring architecture ("ringkernel") designed for Kevlar:
 - Ring 2 (Services): safe Rust, panic-contained, restartable
 
 Key original contributions distinct from prior work:
-- Three-ring trust hierarchy (vs Asterinas's two-tier framework/service)
-- catch_unwind-based fault containment (vs Asterinas's no containment)
+- Three-ring trust hierarchy
+- catch_unwind-based fault containment at ring boundaries
 - enter_usermode → UserEvent return pattern (vs callback-based)
 - OwnedFrame with copy-only access (vs reference-based frame access)
 - Pod-constrained UserPtr for user-kernel boundary

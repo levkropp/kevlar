@@ -4,7 +4,7 @@
 
 ---
 
-Every Rust OS makes the same pitch: "safe by default." Asterinas confines unsafe to 14% of its codebase. RedLeaf isolates faults in language domains. Theseus builds everything in safe Rust. All of them pick a single point on the safety/performance spectrum and freeze it in place.
+Every Rust OS makes the same pitch: "safe by default." Some confine unsafe to a fixed percentage of their codebase. Others isolate faults in language domains or build everything in safe Rust. All of them pick a single point on the safety/performance spectrum and freeze it in place.
 
 Kevlar doesn't pick one point. It gives you the dial.
 
@@ -85,7 +85,7 @@ We're implementing this last, after the simpler profiles work. If it proves too 
 | Kernel | Safety model | Configurable? | TCB |
 |--------|-------------|---------------|-----|
 | Linux | None (C) | No | 100% |
-| Asterinas | Framekernel | No | ~14% |
+| Framekernels | Fixed unsafe boundary | No | ~10-15% |
 | RedLeaf | Language domains | No | varies |
 | **Kevlar** | **Ringkernel** | **Yes — 4 profiles** | **3-100%** |
 

@@ -105,5 +105,4 @@ infrastructure will shine as Kevlar matures.
 
 - Fix the GPF-in-userspace bug that crashes fork and later benchmarks
 - KVM-accelerated benchmark runs for meaningful Kevlar vs Linux numbers
-- Asterinas comparison using the same bench binary
 - Profile-to-profile comparison to quantify the cost of safety features

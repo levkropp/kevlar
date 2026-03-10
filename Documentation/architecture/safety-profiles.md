@@ -55,7 +55,7 @@ Best for: general-purpose use, development, most deployments.
 
 ### Performance (`--features profile-performance`)
 
-Asterinas-equivalent safety at monolithic speed.
+Framekernel-equivalent safety at monolithic speed.
 
 - **2 rings.** Services compile into the kernel as concrete types — no trait
   object vtable dispatch, no `catch_unwind`. The compiler monomorphizes and
@@ -202,8 +202,8 @@ No other Linux-compatible kernel offers configurable safety profiles:
 | Kernel | Safety model | Configurable? |
 |--------|-------------|---------------|
 | Linux | None (all C) | No |
-| Asterinas | Framekernel (~14% TCB) | No |
-| RedLeaf | Language domains | No |
+| Framekernels | Fixed unsafe boundary (~10-15% TCB) | No |
+| Microkernels | HW isolation (separate address spaces) | No |
 | **Kevlar** | **Ringkernel (3-100% TCB)** | **Yes — 4 profiles** |
 
 The key innovation: safety is not a binary choice between "safe kernel that's
