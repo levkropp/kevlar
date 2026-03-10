@@ -142,6 +142,9 @@ mod tgkill;
 
 // M4: systemd support
 mod epoll;
+mod eventfd;
+mod signalfd;
+mod timerfd;
 
 pub enum CwdOrFd {
     /// `AT_FDCWD`
@@ -295,10 +298,14 @@ mod syscall_numbers {
     pub const SYS_PAUSE: usize = 34;
     pub const SYS_ALARM: usize = 37;
     pub const SYS_GETGROUPS: usize = 115;
-    // M4: epoll
+    // M4: epoll + event fds
     pub const SYS_EPOLL_WAIT: usize = 232;
     pub const SYS_EPOLL_CTL: usize = 233;
     pub const SYS_EPOLL_PWAIT: usize = 281;
+    pub const SYS_TIMERFD_CREATE: usize = 283;
+    pub const SYS_TIMERFD_SETTIME: usize = 286;
+    pub const SYS_SIGNALFD4: usize = 289;
+    pub const SYS_EVENTFD2: usize = 290;
     pub const SYS_EPOLL_CREATE1: usize = 291;
 }
 
@@ -428,11 +435,15 @@ mod syscall_numbers {
     pub const SYS_PAUSE: usize = 0xF012;
     pub const SYS_ALARM: usize = 0xF013;
     pub const SYS_GETGROUPS: usize = 158;
-    // M4: epoll (ARM64 uses epoll_pwait, not epoll_wait)
+    // M4: epoll + event fds
     pub const SYS_EPOLL_CREATE1: usize = 20;
     pub const SYS_EPOLL_CTL: usize = 21;
     pub const SYS_EPOLL_PWAIT: usize = 22;
     pub const SYS_EPOLL_WAIT: usize = 0xF014; // ARM64 doesn't have old epoll_wait
+    pub const SYS_TIMERFD_CREATE: usize = 85;
+    pub const SYS_TIMERFD_SETTIME: usize = 86;
+    pub const SYS_SIGNALFD4: usize = 74;
+    pub const SYS_EVENTFD2: usize = 19;
 }
 
 use syscall_numbers::*;
@@ -886,6 +897,19 @@ impl<'a> SyscallHandler<'a> {
                 a3 as c_int,
                 a4 as c_int,
             ),
+            SYS_EVENTFD2 => self.sys_eventfd2(a1 as u32, a2 as c_int),
+            SYS_TIMERFD_CREATE => self.sys_timerfd_create(a1 as c_int, a2 as c_int),
+            SYS_TIMERFD_SETTIME => self.sys_timerfd_settime(
+                Fd::new(a1 as i32),
+                a2 as c_int,
+                UserVAddr::new_nonnull(a3)?,
+            ),
+            SYS_SIGNALFD4 => self.sys_signalfd4(
+                a1 as c_int,
+                UserVAddr::new_nonnull(a2)?,
+                a3,
+                a4 as c_int,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1028,6 +1052,10 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_EPOLL_CTL => "epoll_ctl",
         SYS_EPOLL_WAIT => "epoll_wait",
         SYS_EPOLL_PWAIT => "epoll_pwait",
+        SYS_EVENTFD2 => "eventfd2",
+        SYS_TIMERFD_CREATE => "timerfd_create",
+        SYS_TIMERFD_SETTIME => "timerfd_settime",
+        SYS_SIGNALFD4 => "signalfd4",
         _ => "(unknown)",
     }
 }
