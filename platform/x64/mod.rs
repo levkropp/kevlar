@@ -43,6 +43,22 @@ pub use profile::read_clock_counter;
 pub use semihosting::{semihosting_halt, SemihostingExitStatus};
 pub use syscall::PtRegs;
 
+cpu_local! {
+    pub static ref CPU_ID: u32 = 0;
+}
+
+/// Returns the CPU index for the current CPU (0 = BSP, 1..N = APs).
+pub fn cpu_id() -> u32 {
+    *CPU_ID.get()
+}
+
+/// Start the LAPIC preemption timer on the current AP.
+/// Must be called after the per-CPU process state (idle thread, CURRENT)
+/// has been fully initialized.
+pub fn start_ap_preemption_timer() {
+    unsafe { apic::lapic_timer_init(); }
+}
+
 pub mod x64_specific {
     pub use super::cpu_local::cpu_local_head;
     pub use super::gdt::{USER_CS32, USER_CS64, USER_DS, USER_RPL};

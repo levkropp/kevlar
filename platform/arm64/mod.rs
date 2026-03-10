@@ -45,6 +45,14 @@ pub fn num_online_cpus() -> u32 {
     1
 }
 
+/// ARM64 SMP not yet implemented; BSP is always CPU 0.
+pub fn cpu_id() -> u32 {
+    0
+}
+
+/// ARM64 AP preemption timer not yet implemented; no-op.
+pub fn start_ap_preemption_timer() {}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 50;
 

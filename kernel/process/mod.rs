@@ -47,3 +47,11 @@ pub fn init() {
     IDLE_THREAD.as_mut().set(idle_thread.clone());
     CURRENT.as_mut().set(idle_thread);
 }
+
+/// Per-AP initialization: create the idle thread and set CURRENT.
+/// Called from `ap_kernel_entry` after the BSP has completed `init()`.
+pub fn init_ap() {
+    let idle_thread = Process::new_idle_thread().unwrap();
+    IDLE_THREAD.as_mut().set(idle_thread.clone());
+    CURRENT.as_mut().set(idle_thread);
+}
