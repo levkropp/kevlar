@@ -281,6 +281,78 @@ impl ArchTask {
         }
     }
 
+    /// Returns the current FS base register value (TLS base for x86_64).
+    pub fn fsbase(&self) -> u64 {
+        self.fsbase.load()
+    }
+
+    /// Creates a new thread's arch state. Similar to fork() but:
+    /// - Uses `child_stack` as the user-space RSP.
+    /// - Uses `fs_base` for the FS segment (TLS).
+    /// - RAX = 0 in the child (clone returns 0 in child thread).
+    pub fn new_thread(frame: &PtRegs, child_stack: u64, fs_base: u64) -> ArchTask {
+        let xsave_area =
+            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+        init_xsave_area(&xsave_area);
+        let kernel_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate kernel stack");
+        let interrupt_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate interrupt stack");
+        let syscall_stack = alloc_pages_owned(
+            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
+        )
+        .expect("failed to allocate syscall stack");
+
+        let rsp = unsafe {
+            let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
+            let mut rsp: *mut u64 = kernel_sp.as_mut_ptr();
+
+            // IRET frame for returning to userspace.
+            rsp = push_stack(rsp, (USER_DS | USER_RPL) as u64); // SS
+            rsp = push_stack(rsp, child_stack);                  // user RSP
+            rsp = push_stack(rsp, frame.rflags);                 // RFLAGS
+            rsp = push_stack(rsp, (USER_CS64 | USER_RPL) as u64); // CS
+            rsp = push_stack(rsp, frame.rip);                    // RIP (clone return addr)
+
+            // Registers popped by forked_child_entry before IRET.
+            rsp = push_stack(rsp, frame.rflags); // r11
+            rsp = push_stack(rsp, frame.rip);    // rcx
+            rsp = push_stack(rsp, frame.r10);
+            rsp = push_stack(rsp, frame.r9);
+            rsp = push_stack(rsp, frame.r8);
+            rsp = push_stack(rsp, frame.rsi);
+            rsp = push_stack(rsp, frame.rdi);
+            rsp = push_stack(rsp, frame.rdx);
+
+            // do_switch_thread context frame.
+            rsp = push_stack(rsp, forked_child_entry as *const u8 as u64);
+            rsp = push_stack(rsp, frame.rbp);
+            rsp = push_stack(rsp, frame.rbx);
+            rsp = push_stack(rsp, frame.r12);
+            rsp = push_stack(rsp, frame.r13);
+            rsp = push_stack(rsp, frame.r14);
+            rsp = push_stack(rsp, frame.r15);
+            rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled)
+            rsp
+        };
+
+        ArchTask {
+            rsp: UnsafeCell::new(rsp as u64),
+            fsbase: AtomicCell::new(fs_base),
+            xsave_area: Some(xsave_area),
+            interrupt_stack,
+            syscall_stack,
+            kernel_stack,
+        }
+    }
+
     pub fn setup_execve_stack(
         &self,
         frame: &mut PtRegs,

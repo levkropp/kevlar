@@ -79,3 +79,20 @@ impl<'a> SyscallHandler<'a> {
         }
     }
 }
+
+/// Wake up to `n` waiters sleeping on the given kernel-virtual address.
+/// Called from process exit for CLONE_CHILD_CLEARTID.
+pub fn futex_wake_addr(addr: usize, n: u32) {
+    let guard = FUTEX_QUEUES.lock();
+    if let Some(ref map) = *guard {
+        if let Some(queue) = map.get(&addr).copied() {
+            if n == u32::MAX {
+                queue.wake_all();
+            } else {
+                for _ in 0..n {
+                    queue._wake_one();
+                }
+            }
+        }
+    }
+}
