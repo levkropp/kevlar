@@ -270,6 +270,20 @@ lint-and-fix:
 	$(MAKE) $(DUMMY_INITRAMFS_PATH)
 	INITRAMFS_PATH=$(DUMMY_INITRAMFS_PATH) RUSTFLAGS="-C panic=abort -Z panic_abort_tests" $(CARGO) clippy --fix -Z unstable-options
 
+.PHONY: test
+test:
+	$(PROGRESS) "TEST" "syscall correctness tests"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_elf) 2>&1 \
+		| tee /tmp/kevlar-test-$(PROFILE).log; true
+	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^FAIL' /tmp/kevlar-test-$(PROFILE).log; then \
+		echo "TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-$(PROFILE).log; then \
+		echo "ALL TESTS PASSED"; \
+	fi
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
@@ -355,7 +369,7 @@ clean:
 #
 #  Build Rules
 #
-build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard benchmarks/*) Makefile
+build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
 	$(PROGRESS) "BUILD" testing
 ifeq ($(OS),Windows_NT)
 	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"

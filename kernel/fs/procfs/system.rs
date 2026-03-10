@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! System-wide /proc files: /proc/mounts, /proc/filesystems, /proc/cmdline,
-//! /proc/stat, /proc/meminfo, /proc/version.
+//! /proc/stat, /proc/meminfo, /proc/version, /proc/cpuinfo, /proc/uptime,
+//! /proc/loadavg.
 use core::fmt;
 
 use kevlar_platform::page_allocator::read_allocator_stats;
@@ -227,6 +228,141 @@ impl FileLike for ProcVersionFile {
         }
 
         let s = "Kevlar version 0.1.0 (rustc) #1 SMP\n";
+        let len = core::cmp::min(s.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&s.as_bytes()[..len])?;
+        Ok(len)
+    }
+}
+
+// ── /proc/cpuinfo ──────────────────────────────────────────────────
+
+pub struct ProcCpuinfoFile;
+
+impl fmt::Debug for ProcCpuinfoFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcCpuinfoFile").finish()
+    }
+}
+
+impl FileLike for ProcCpuinfoFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        use core::fmt::Write;
+        let mut s = alloc::string::String::new();
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let freq_hz = kevlar_platform::arch::tsc::frequency_hz();
+            let mhz = freq_hz / 1_000_000;
+            let _ = write!(s, "processor\t: 0\n");
+            let _ = write!(s, "vendor_id\t: GenuineIntel\n");
+            let _ = write!(s, "model name\t: QEMU Virtual CPU\n");
+            let _ = write!(s, "cpu MHz\t\t: {}.000\n", mhz);
+            let _ = write!(s, "cache size\t: 0 KB\n");
+            let _ = write!(s, "physical id\t: 0\n");
+            let _ = write!(s, "siblings\t: 1\n");
+            let _ = write!(s, "core id\t\t: 0\n");
+            let _ = write!(s, "cpu cores\t: 1\n");
+            let _ = write!(s, "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2\n");
+            let _ = write!(s, "bogomips\t: {}.00\n", mhz * 2);
+            let _ = write!(s, "\n");
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = write!(s, "processor\t: 0\n");
+            let _ = write!(s, "BogoMIPS\t: 100.00\n");
+            let _ = write!(s, "Features\t: fp asimd evtstrm\n");
+            let _ = write!(s, "CPU implementer\t: 0x41\n");
+            let _ = write!(s, "CPU architecture: 8\n");
+            let _ = write!(s, "CPU variant\t: 0x0\n");
+            let _ = write!(s, "CPU part\t: 0xd08\n");
+            let _ = write!(s, "CPU revision\t: 3\n");
+            let _ = write!(s, "\n");
+        }
+
+        let bytes = s.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
+    }
+}
+
+// ── /proc/uptime ───────────────────────────────────────────────────
+
+pub struct ProcUptimeFile;
+
+impl fmt::Debug for ProcUptimeFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcUptimeFile").finish()
+    }
+}
+
+impl FileLike for ProcUptimeFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        let mono = read_monotonic_clock();
+        let secs = mono.msecs() / 1000;
+        let frac = (mono.msecs() % 1000) / 10;
+        // Format: uptime_secs idle_secs (idle = uptime, single CPU)
+        let s = alloc::format!("{}.{:02} {}.{:02}\n", secs, frac, secs, frac);
+
+        let len = core::cmp::min(s.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&s.as_bytes()[..len])?;
+        Ok(len)
+    }
+}
+
+// ── /proc/loadavg ──────────────────────────────────────────────────
+
+pub struct ProcLoadavgFile;
+
+impl fmt::Debug for ProcLoadavgFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcLoadavgFile").finish()
+    }
+}
+
+impl FileLike for ProcLoadavgFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        let procs = process_count();
+        // Format: 1min 5min 15min running/total last_pid
+        let s = alloc::format!("0.00 0.00 0.00 1/{} 1\n", procs);
+
         let len = core::cmp::min(s.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
         writer.write_bytes(&s.as_bytes()[..len])?;

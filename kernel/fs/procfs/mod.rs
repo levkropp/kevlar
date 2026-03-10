@@ -52,6 +52,9 @@ impl ProcFs {
         static_root.add_file("stat", Arc::new(ProcStatFile) as Arc<dyn FileLike>);
         static_root.add_file("meminfo", Arc::new(ProcMeminfoFile) as Arc<dyn FileLike>);
         static_root.add_file("version", Arc::new(ProcVersionFile) as Arc<dyn FileLike>);
+        static_root.add_file("cpuinfo", Arc::new(ProcCpuinfoFile) as Arc<dyn FileLike>);
+        static_root.add_file("uptime", Arc::new(ProcUptimeFile) as Arc<dyn FileLike>);
+        static_root.add_file("loadavg", Arc::new(ProcLoadavgFile) as Arc<dyn FileLike>);
 
         let static_dir: Arc<dyn Directory> = tmpfs.root_dir().unwrap();
 
