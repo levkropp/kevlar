@@ -307,6 +307,20 @@ test:
 		echo "ALL TESTS PASSED"; \
 	fi
 
+.PHONY: test-ext2
+test-ext2: disk
+	$(PROGRESS) "TEST" "ext2 filesystem tests"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --disk build/disk.img $(kernel_elf) 2>&1 \
+		| tee /tmp/kevlar-test-ext2-$(PROFILE).log; true
+	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-ext2-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^FAIL' /tmp/kevlar-test-ext2-$(PROFILE).log; then \
+		echo "TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-ext2-$(PROFILE).log; then \
+		echo "ALL TESTS PASSED"; \
+	fi
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"

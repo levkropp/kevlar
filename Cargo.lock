@@ -222,6 +222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kevlar_ext2"
+version = "0.1.0"
+dependencies = [
+ "kevlar_api",
+ "kevlar_utils",
+ "kevlar_vfs",
+ "log",
+]
+
+[[package]]
 name = "kevlar_initramfs"
 version = "0.1.0"
 dependencies = [
@@ -243,6 +253,7 @@ dependencies = [
  "goblin",
  "hashbrown",
  "kevlar_api",
+ "kevlar_ext2",
  "kevlar_initramfs",
  "kevlar_platform",
  "kevlar_tmpfs",

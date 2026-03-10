@@ -68,6 +68,10 @@ static void init_setup(void) {
 
     if (open("/dev/null", O_RDONLY) < 0)
         (void)mknod("/dev/null", S_IFCHR | 0666, 0x0103);
+
+    /* Mount ext2 if a block device is available. /tmp is writable. */
+    mkdir("/tmp/mnt", 0755);
+    mount("none", "/tmp/mnt", "ext2", MS_RDONLY, NULL);
 }
 
 /* ── Poll tests ───────────────────────────────────────────────────── */
@@ -401,6 +405,87 @@ static void test_readv_writev(void) {
     PASS("readv_writev");
 }
 
+/* ── ext2 filesystem tests ────────────────────────────────────────── */
+
+static void test_ext2_mount(void) {
+    struct stat st;
+    int r = stat("/tmp/mnt", &st);
+    ASSERT("ext2_mount", r == 0, "stat(/tmp/mnt) failed errno=%d", errno);
+    ASSERT("ext2_mount", S_ISDIR(st.st_mode), "/tmp/mnt is not a directory");
+    PASS("ext2_mount");
+}
+
+static void test_ext2_read_file(void) {
+    int fd = open("/tmp/mnt/greeting.txt", O_RDONLY);
+    ASSERT("ext2_read_file", fd >= 0, "open greeting.txt failed errno=%d", errno);
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT("ext2_read_file", n > 0, "read returned %zd", n);
+    buf[n] = '\0';
+    ASSERT("ext2_read_file", strstr(buf, "hello") != NULL,
+           "expected 'hello', got: %s", buf);
+    PASS("ext2_read_file");
+}
+
+static void test_ext2_listdir(void) {
+    DIR *d = opendir("/tmp/mnt");
+    ASSERT("ext2_listdir", d != NULL, "opendir /tmp/mnt failed errno=%d", errno);
+    int found_greeting = 0, found_subdir = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, "greeting.txt") == 0) found_greeting = 1;
+        if (strcmp(ent->d_name, "subdir") == 0)       found_subdir = 1;
+    }
+    closedir(d);
+    ASSERT("ext2_listdir", found_greeting, "greeting.txt not in listing");
+    ASSERT("ext2_listdir", found_subdir, "subdir not in listing");
+    PASS("ext2_listdir");
+}
+
+static void test_ext2_subdir(void) {
+    int fd = open("/tmp/mnt/subdir/nested.txt", O_RDONLY);
+    ASSERT("ext2_subdir", fd >= 0, "open nested.txt failed errno=%d", errno);
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT("ext2_subdir", n > 0, "read returned %zd", n);
+    buf[n] = '\0';
+    ASSERT("ext2_subdir", strstr(buf, "nested") != NULL,
+           "expected 'nested', got: %s", buf);
+    PASS("ext2_subdir");
+}
+
+static void test_ext2_symlink(void) {
+    /* /tmp/mnt/link.txt -> greeting.txt, should resolve and read */
+    int fd = open("/tmp/mnt/link.txt", O_RDONLY);
+    ASSERT("ext2_symlink", fd >= 0, "open link.txt failed errno=%d", errno);
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    ASSERT("ext2_symlink", n > 0, "read returned %zd", n);
+    buf[n] = '\0';
+    ASSERT("ext2_symlink", strstr(buf, "hello") != NULL,
+           "expected 'hello' via symlink, got: %s", buf);
+    PASS("ext2_symlink");
+}
+
+static void test_ext2_stat(void) {
+    struct stat st;
+    int r = stat("/tmp/mnt/greeting.txt", &st);
+    ASSERT("ext2_stat", r == 0, "stat failed errno=%d", errno);
+    ASSERT("ext2_stat", S_ISREG(st.st_mode), "not a regular file");
+    ASSERT("ext2_stat", st.st_size > 0, "size is 0");
+    PASS("ext2_stat");
+}
+
+static void test_ext2_readonly(void) {
+    int fd = open("/tmp/mnt/should_not_exist", O_CREAT | O_WRONLY, 0644);
+    ASSERT("ext2_readonly", fd < 0, "expected EROFS, got fd=%d", fd);
+    ASSERT("ext2_readonly", errno == EROFS, "expected EROFS, got errno=%d", errno);
+    PASS("ext2_readonly");
+}
+
 /* ── Test registry ────────────────────────────────────────────────── */
 
 typedef struct {
@@ -425,6 +510,15 @@ static test_entry tests[] = {
     {"proc_loadavg",     test_proc_loadavg},
     {"proc_stat",        test_proc_stat},
     {"proc_meminfo",     test_proc_meminfo},
+
+    /* ext2 filesystem tests (require disk image at /tmp/mnt) */
+    {"ext2_mount",       test_ext2_mount},
+    {"ext2_read_file",   test_ext2_read_file},
+    {"ext2_listdir",     test_ext2_listdir},
+    {"ext2_subdir",      test_ext2_subdir},
+    {"ext2_symlink",     test_ext2_symlink},
+    {"ext2_stat",        test_ext2_stat},
+    {"ext2_readonly",    test_ext2_readonly},
 
     /* Basic syscall tests */
     {"getpid",           test_getpid},

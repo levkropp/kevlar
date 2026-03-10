@@ -6,10 +6,18 @@ use crate::inode::INodeNo;
 #[repr(transparent)]
 pub struct DevId(usize);
 
+impl DevId {
+    pub const fn new(v: usize) -> Self { Self(v) }
+}
+
 /// The number of hard links.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct NLink(usize);
+
+impl NLink {
+    pub const fn new(v: usize) -> Self { Self(v) }
+}
 
 /// The file size in bytes.
 #[derive(Debug, Copy, Clone)]
@@ -21,25 +29,45 @@ pub struct FileSize(pub isize);
 #[repr(transparent)]
 pub struct UId(u32);
 
+impl UId {
+    pub const fn new(v: u32) -> Self { Self(v) }
+}
+
 /// The Group ID.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct GId(u32);
+
+impl GId {
+    pub const fn new(v: u32) -> Self { Self(v) }
+}
 
 /// The size in bytes of a block file file system I/O operations.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct BlockSize(isize);
 
+impl BlockSize {
+    pub const fn new(v: isize) -> Self { Self(v) }
+}
+
 /// The number of blocks.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct BlockCount(isize);
 
+impl BlockCount {
+    pub const fn new(v: isize) -> Self { Self(v) }
+}
+
 /// The file size in bytes.
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct Time(isize);
+
+impl Time {
+    pub const fn new(v: isize) -> Self { Self(v) }
+}
 
 pub const S_IFMT: u32 = 0o170000;
 pub const S_IFCHR: u32 = 0o020000;
