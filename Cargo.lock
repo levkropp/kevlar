@@ -252,6 +252,7 @@ dependencies = [
  "smoltcp",
  "spin 0.10.0",
  "unwinding",
+ "virtio_blk",
  "virtio_net",
  "x86",
 ]
@@ -517,6 +518,15 @@ dependencies = [
  "kevlar_api",
  "kevlar_utils",
  "memoffset",
+]
+
+[[package]]
+name = "virtio_blk"
+version = "0.1.0"
+dependencies = [
+ "kevlar_api",
+ "kevlar_utils",
+ "virtio",
 ]
 
 [[package]]

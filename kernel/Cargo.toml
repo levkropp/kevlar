@@ -42,6 +42,7 @@ kevlar_initramfs = { path = "../services/kevlar_initramfs" }
 unwinding = { version = "0.2", default-features = false, features = ["unwinder", "fde-static", "personality", "panic"], optional = true }
 
 # Kernel Extensions.
+virtio_blk = { path = "../exts/virtio_blk" }
 virtio_net = { path = "../exts/virtio_net" }
 
 # Arch-specific dependencies.

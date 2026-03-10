@@ -207,6 +207,29 @@ run: build
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_elf) -- $(QEMU_ARGS)
 
+.PHONY: disk
+disk: build/disk.img
+
+build/disk.img:
+	$(PROGRESS) "MKDISK" build/disk.img
+	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+	dd if=/dev/zero of=build/disk.img bs=1M count=64 2>/dev/null
+	mkfs.ext2 -q build/disk.img
+
+.PHONY: run-disk
+run-disk: build disk
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH)                                                 \
+		--disk build/disk.img                                          \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(KVM),--kvm,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_elf) -- $(QEMU_ARGS)
+
 .PHONY: bochs
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc
