@@ -2,6 +2,7 @@
 //
 // Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_unlink.
 // Resolves the parent directory, then calls dir.unlink(basename).
+use crate::fs::inotify;
 use crate::fs::path::Path;
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
@@ -15,6 +16,8 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = current_process().root_fs().lock();
         let parent_dir = root_fs.lookup_dir(parent)?;
         parent_dir.unlink(name)?;
+        drop(root_fs);
+        inotify::notify(parent.as_str(), name, inotify::IN_DELETE);
         Ok(0)
     }
 }

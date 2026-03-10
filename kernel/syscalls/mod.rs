@@ -160,6 +160,9 @@ mod statfs;
 mod statx;
 mod utimensat;
 
+// M5 Phase 2: inotify
+mod inotify;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -340,6 +343,10 @@ mod syscall_numbers {
     pub const SYS_PREADV: usize = 295;
     pub const SYS_PWRITEV: usize = 296;
     pub const SYS_STATX: usize = 332;
+    // M5 Phase 2: inotify
+    pub const SYS_INOTIFY_ADD_WATCH: usize = 254;
+    pub const SYS_INOTIFY_RM_WATCH: usize = 255;
+    pub const SYS_INOTIFY_INIT1: usize = 294;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -496,6 +503,10 @@ mod syscall_numbers {
     pub const SYS_UTIMENSAT: usize = 88;
     pub const SYS_FADVISE64: usize = 223;
     pub const SYS_STATX: usize = 291;
+    // M5 Phase 2: inotify
+    pub const SYS_INOTIFY_INIT1: usize = 26;
+    pub const SYS_INOTIFY_ADD_WATCH: usize = 27;
+    pub const SYS_INOTIFY_RM_WATCH: usize = 28;
 }
 
 use syscall_numbers::*;
@@ -1056,6 +1067,17 @@ impl<'a> SyscallHandler<'a> {
                 a3,
                 a4,
             ),
+            // M5 Phase 2: inotify
+            SYS_INOTIFY_INIT1 => self.sys_inotify_init1(a1 as c_int),
+            SYS_INOTIFY_ADD_WATCH => self.sys_inotify_add_watch(
+                Fd::new(a1 as i32),
+                UserVAddr::new_nonnull(a2)?,
+                a3 as u32,
+            ),
+            SYS_INOTIFY_RM_WATCH => self.sys_inotify_rm_watch(
+                Fd::new(a1 as i32),
+                a2 as c_int,
+            ),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1220,6 +1242,9 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FADVISE64 => "fadvise64",
         SYS_PREADV => "preadv",
         SYS_PWRITEV => "pwritev",
+        SYS_INOTIFY_INIT1 => "inotify_init1",
+        SYS_INOTIFY_ADD_WATCH => "inotify_add_watch",
+        SYS_INOTIFY_RM_WATCH => "inotify_rm_watch",
         _ => "(unknown)",
     }
 }
