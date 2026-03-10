@@ -261,35 +261,41 @@ impl FileLike for ProcCpuinfoFile {
         use core::fmt::Write;
         let mut s = alloc::string::String::new();
 
+        let ncpus = kevlar_platform::arch::num_online_cpus();
+
         #[cfg(target_arch = "x86_64")]
         {
             let freq_hz = kevlar_platform::arch::tsc::frequency_hz();
             let mhz = freq_hz / 1_000_000;
-            let _ = write!(s, "processor\t: 0\n");
-            let _ = write!(s, "vendor_id\t: GenuineIntel\n");
-            let _ = write!(s, "model name\t: QEMU Virtual CPU\n");
-            let _ = write!(s, "cpu MHz\t\t: {}.000\n", mhz);
-            let _ = write!(s, "cache size\t: 0 KB\n");
-            let _ = write!(s, "physical id\t: 0\n");
-            let _ = write!(s, "siblings\t: 1\n");
-            let _ = write!(s, "core id\t\t: 0\n");
-            let _ = write!(s, "cpu cores\t: 1\n");
-            let _ = write!(s, "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2\n");
-            let _ = write!(s, "bogomips\t: {}.00\n", mhz * 2);
-            let _ = write!(s, "\n");
+            for i in 0..ncpus {
+                let _ = write!(s, "processor\t: {}\n", i);
+                let _ = write!(s, "vendor_id\t: GenuineIntel\n");
+                let _ = write!(s, "model name\t: QEMU Virtual CPU\n");
+                let _ = write!(s, "cpu MHz\t\t: {}.000\n", mhz);
+                let _ = write!(s, "cache size\t: 0 KB\n");
+                let _ = write!(s, "physical id\t: 0\n");
+                let _ = write!(s, "siblings\t: {}\n", ncpus);
+                let _ = write!(s, "core id\t\t: {}\n", i);
+                let _ = write!(s, "cpu cores\t: {}\n", ncpus);
+                let _ = write!(s, "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2\n");
+                let _ = write!(s, "bogomips\t: {}.00\n", mhz * 2);
+                let _ = write!(s, "\n");
+            }
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            let _ = write!(s, "processor\t: 0\n");
-            let _ = write!(s, "BogoMIPS\t: 100.00\n");
-            let _ = write!(s, "Features\t: fp asimd evtstrm\n");
-            let _ = write!(s, "CPU implementer\t: 0x41\n");
-            let _ = write!(s, "CPU architecture: 8\n");
-            let _ = write!(s, "CPU variant\t: 0x0\n");
-            let _ = write!(s, "CPU part\t: 0xd08\n");
-            let _ = write!(s, "CPU revision\t: 3\n");
-            let _ = write!(s, "\n");
+            for i in 0..ncpus {
+                let _ = write!(s, "processor\t: {}\n", i);
+                let _ = write!(s, "BogoMIPS\t: 100.00\n");
+                let _ = write!(s, "Features\t: fp asimd evtstrm\n");
+                let _ = write!(s, "CPU implementer\t: 0x41\n");
+                let _ = write!(s, "CPU architecture: 8\n");
+                let _ = write!(s, "CPU variant\t: 0x0\n");
+                let _ = write!(s, "CPU part\t: 0xd08\n");
+                let _ = write!(s, "CPU revision\t: 3\n");
+                let _ = write!(s, "\n");
+            }
         }
 
         let bytes = s.as_bytes();

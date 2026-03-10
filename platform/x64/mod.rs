@@ -5,10 +5,13 @@ global_asm!(include_str!("boot.S"));
 global_asm!(include_str!("trap.S"));
 global_asm!(include_str!("usercopy.S"));
 global_asm!(include_str!("usermode.S"));
+// AP trampoline uses AT&T syntax (16/32/64-bit mixed code at VMA 0x8000).
+global_asm!(include_str!("ap_trampoline.S"), options(att_syntax));
 
 #[macro_use]
 mod cpu_local;
 
+mod acpi;
 mod apic;
 mod backtrace;
 mod boot;
@@ -23,6 +26,7 @@ mod pit;
 mod profile;
 mod semihosting;
 mod serial;
+pub mod smp;
 mod syscall;
 pub mod tsc;
 mod tss;
@@ -42,11 +46,17 @@ pub use syscall::PtRegs;
 pub mod x64_specific {
     pub use super::cpu_local::cpu_local_head;
     pub use super::gdt::{USER_CS32, USER_CS64, USER_DS, USER_RPL};
+    pub use super::smp::num_online_cpus;
     pub use super::tss::TSS;
     pub use super::task::{
         ArchTask, switch_task, write_fsbase,
         KERNEL_STACK_SIZE, USER_VALLOC_END, USER_VALLOC_BASE, USER_STACK_TOP,
     };
+}
+
+/// Returns the total number of online CPUs (BSP + online APs).
+pub fn num_online_cpus() -> u32 {
+    smp::num_online_cpus()
 }
 
 pub const PAGE_SIZE: usize = 4096;

@@ -67,6 +67,22 @@ SECTIONS {
         __kernel_image_end = . - VMA_OFFSET; /* physical address */
     }
 
+    /* AP trampoline: executes at physical 0x8000 (SIPI vector 0x08).
+       VMA = 0x8000 so the assembly uses correct absolute addresses;
+       AT(__kernel_image_end) places the bytes after the BSS in the ELF image.
+       BSP copies these bytes to physical 0x8000 before sending SIPIs.
+       This keeps elf_low = 0x100000 so QEMU's multiboot DMA loads and enters
+       the kernel at the expected address. */
+    .trampoline 0x8000 : AT(__kernel_image_end) {
+        __trampoline_start = .;
+        KEEP(*(.trampoline));
+        __trampoline_end = .;
+    }
+
+    /* Physical (load) address of the trampoline image in the ELF, so the
+       BSP can copy the trampoline bytes to physical 0x8000 at runtime. */
+    __ap_trampoline_image = LOADADDR(.trampoline);
+
     /DISCARD/ :{
         *(*.eh_frame);
         *(*.eh_frame_hdr);

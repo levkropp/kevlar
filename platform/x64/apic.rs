@@ -8,6 +8,16 @@ use x86::msr::{self, rdmsr, wrmsr};
 const APIC_BASE_EN: u64 = 1 << 11;
 const SIVR_SOFT_EN: u32 = 1 << 8;
 
+// LAPIC register offsets (from LAPIC base 0xfee00000).
+const LAPIC_ID_OFF:       usize = 0x020;
+const ICR_HIGH_OFF:       usize = 0x310; // destination field
+const ICR_LOW_OFF:        usize = 0x300; // command + delivery status
+const ICR_PENDING:        u32   = 1 << 12; // Delivery Status bit
+
+// ICR command values.
+const ICR_INIT:           u32 = 0x00004500; // INIT IPI: Level=Assert, Mode=INIT
+const ICR_SIPI:           u32 = 0x00000600; // STARTUP IPI: Mode=StartUp (vector in [7:0])
+
 static APIC: SpinLock<LocalApic> = SpinLock::new(LocalApic::new(PAddr::new(0xfee0_0000)));
 
 #[derive(Debug, Copy, Clone)]
@@ -71,4 +81,47 @@ pub unsafe fn init() {
 
     let apic = APIC.lock();
     apic.write_spurious_interrupt(SIVR_SOFT_EN);
+}
+
+// ── Direct LAPIC MMIO helpers (no lock — used during early SMP boot) ──
+
+/// Returns the APIC ID of the current CPU (bits [31:24] of LAPIC ID reg).
+pub unsafe fn lapic_id() -> u8 {
+    let val = lapic_read(LAPIC_ID_OFF);
+    (val >> 24) as u8
+}
+
+/// Send an INIT IPI to the AP with the given APIC ID.
+pub unsafe fn send_init_ipi(apic_id: u8) {
+    lapic_write(ICR_HIGH_OFF, (apic_id as u32) << 24);
+    lapic_write(ICR_LOW_OFF, ICR_INIT);
+    wait_icr_idle();
+}
+
+/// Send a STARTUP IPI to the AP with the given APIC ID.
+/// `vector` is the trampoline page number (physical_addr >> 12), e.g. 8 for 0x8000.
+pub unsafe fn send_sipi(apic_id: u8, vector: u8) {
+    lapic_write(ICR_HIGH_OFF, (apic_id as u32) << 24);
+    lapic_write(ICR_LOW_OFF, ICR_SIPI | vector as u32);
+    wait_icr_idle();
+}
+
+/// Spin until the ICR Delivery Status bit clears (IPI has been accepted).
+unsafe fn wait_icr_idle() {
+    while lapic_read(ICR_LOW_OFF) & ICR_PENDING != 0 {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline(always)]
+unsafe fn lapic_read(offset: usize) -> u32 {
+    read_volatile(PAddr::new(0xfee0_0000 + offset).as_vaddr().as_ptr::<u32>())
+}
+
+#[inline(always)]
+unsafe fn lapic_write(offset: usize, value: u32) {
+    write_volatile(
+        PAddr::new(0xfee0_0000 + offset).as_vaddr().as_mut_ptr::<u32>(),
+        value,
+    );
 }

@@ -5,12 +5,9 @@ use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
 use crate::arch::SavedInterruptStatus;
-use crate::backtrace::backtrace;
 
 #[cfg(debug_assertions)]
 use crate::backtrace::CapturedBacktrace;
-#[cfg(debug_assertions)]
-use crate::global_allocator::is_kernel_heap_enabled;
 #[cfg(debug_assertions)]
 use atomic_refcell::AtomicRefCell;
 
@@ -32,32 +29,6 @@ impl<T> SpinLock<T> {
 
 impl<T: ?Sized> SpinLock<T> {
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        if self.inner.is_locked() {
-            // Since we don't yet support multiprocessors and interrupts are
-            // disabled until all locks are released, `lock()` will never fail
-            // unless a dead lock has occurred.
-            //
-            // TODO: Remove when we got SMP support.
-            cfg_if! {
-                if #[cfg(debug_assertions)] {
-                    let trace = self.locked_by.borrow();
-                    if let Some(trace) = trace.as_ref() {
-                        debug_warn!(
-                            "DEAD LOCK: already locked from the following context\n{:?}",
-                            trace
-                        );
-                    } else {
-                        debug_warn!("DEAD LOCK: already locked");
-                    }
-                } else {
-                    debug_warn!("DEAD LOCK: already locked");
-                }
-            }
-
-            debug_warn!("Tried to lock from:");
-            backtrace();
-        }
-
         let saved_intr_status = SavedInterruptStatus::save();
         unsafe {
             #[cfg(target_arch = "x86_64")]
@@ -67,13 +38,6 @@ impl<T: ?Sized> SpinLock<T> {
         }
 
         let guard = self.inner.lock();
-
-        // NOTE: backtrace capture on every lock() was removed for performance.
-        // It caused ~10µs overhead per lock acquire (heap alloc + stack walk +
-        // symbol resolution).  The deadlock detector above still fires if
-        // is_locked() is true, and the backtrace info from the *previous*
-        // lock site is printed there.  For non-contended paths (the common
-        // case on single-CPU), the backtrace was never consulted.
 
         SpinLockGuard {
             inner: ManuallyDrop::new(guard),
@@ -90,28 +54,6 @@ impl<T: ?Sized> SpinLock<T> {
     /// acquire/release cycle.
     #[inline(always)]
     pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
-        #[cfg(debug_assertions)]
-        if self.inner.is_locked() {
-            cfg_if! {
-                if #[cfg(debug_assertions)] {
-                    let trace = self.locked_by.borrow();
-                    if let Some(trace) = trace.as_ref() {
-                        debug_warn!(
-                            "DEAD LOCK: already locked from the following context\n{:?}",
-                            trace
-                        );
-                    } else {
-                        debug_warn!("DEAD LOCK: already locked");
-                    }
-                } else {
-                    debug_warn!("DEAD LOCK: already locked");
-                }
-            }
-
-            debug_warn!("Tried to lock from:");
-            backtrace();
-        }
-
         let guard = self.inner.lock();
 
         SpinLockGuardNoIrq {

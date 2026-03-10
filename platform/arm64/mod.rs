@@ -40,6 +40,11 @@ pub mod arm64_specific {
     };
 }
 
+/// ARM64 SMP not yet implemented; always returns 1.
+pub fn num_online_cpus() -> u32 {
+    1
+}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 50;
 
