@@ -210,11 +210,13 @@ run: build
 .PHONY: disk
 disk: build/disk.img
 
-build/disk.img:
+build/disk.img: testing/Dockerfile testing/disk_hello.c
 	$(PROGRESS) "MKDISK" build/disk.img
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
-	dd if=/dev/zero of=build/disk.img bs=1M count=64 2>/dev/null
-	mkfs.ext2 -q build/disk.img
+	$(DOCKER) build --target disk_image -t kevlar-disk-image -f testing/Dockerfile .
+	$(DOCKER) create --name kevlar-disk-tmp kevlar-disk-image
+	$(DOCKER) cp kevlar-disk-tmp:/disk.img build/disk.img
+	$(DOCKER) rm kevlar-disk-tmp
 
 .PHONY: run-disk
 run-disk: build disk
@@ -319,6 +321,21 @@ test-ext2: disk
 		echo "TESTS FAILED"; exit 1; \
 	elif grep -q '^TEST_END' /tmp/kevlar-test-ext2-$(PROFILE).log; then \
 		echo "ALL TESTS PASSED"; \
+	fi
+
+.PHONY: test-storage
+test-storage: build/disk.img
+	$(PROGRESS) "TEST" "M5 storage integration tests"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-storage"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --disk build/disk.img $(kernel_elf) 2>&1 \
+		| tee /tmp/kevlar-test-storage-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
+		/tmp/kevlar-test-storage-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-storage-$(PROFILE).log; then \
+		echo "STORAGE TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-storage-$(PROFILE).log; then \
+		echo "ALL STORAGE TESTS PASSED"; \
 	fi
 
 .PHONY: bench

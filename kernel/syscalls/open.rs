@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::CwdOrFd;
 use crate::fs::stat::{O_RDWR, O_WRONLY};
-use crate::fs::{inode::INode, opened_file::OpenFlags, path::Path, stat::FileMode};
+use crate::fs::{inode::INode, inotify, opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
 
@@ -28,7 +28,12 @@ impl<'a> SyscallHandler<'a> {
 
         if flags.contains(OpenFlags::O_CREAT) {
             match create_file(path, flags, mode) {
-                Ok(_) => {}
+                Ok(_) => {
+                    // Notify inotify watchers of the new file.
+                    if let Some((parent, name)) = path.parent_and_basename() {
+                        inotify::notify(parent.as_str(), name, inotify::IN_CREATE);
+                    }
+                }
                 Err(err) if !flags.contains(OpenFlags::O_EXCL) && err.errno() == Errno::EEXIST => {}
                 Err(err) => {
                     return Err(err);
