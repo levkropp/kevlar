@@ -141,9 +141,11 @@ mod rt_sigsuspend;
 mod tgkill;
 
 // M4: systemd support
+mod capability;
 mod epoll;
 mod eventfd;
 mod mount;
+mod prctl;
 mod recvmsg;
 mod sendmsg;
 mod setsockopt;
@@ -305,6 +307,9 @@ mod syscall_numbers {
     pub const SYS_SENDMSG: usize = 46;
     pub const SYS_RECVMSG: usize = 47;
     pub const SYS_SETSOCKOPT: usize = 54;
+    pub const SYS_CAPGET: usize = 125;
+    pub const SYS_CAPSET: usize = 126;
+    pub const SYS_PRCTL: usize = 157;
     pub const SYS_MOUNT: usize = 165;
     pub const SYS_UMOUNT2: usize = 166;
     pub const SYS_ACCEPT4: usize = 288;
@@ -450,6 +455,9 @@ mod syscall_numbers {
     pub const SYS_SETSOCKOPT: usize = 208;
     pub const SYS_MOUNT: usize = 40;
     pub const SYS_UMOUNT2: usize = 39;
+    pub const SYS_CAPGET: usize = 90;
+    pub const SYS_CAPSET: usize = 91;
+    pub const SYS_PRCTL: usize = 167;
     pub const SYS_ACCEPT4: usize = 242;
     // M4: epoll + event fds
     pub const SYS_EPOLL_CREATE1: usize = 20;
@@ -685,10 +693,18 @@ impl<'a> SyscallHandler<'a> {
             SYS_IOCTL => self.sys_ioctl(Fd::new(a1 as i32), a2, a3),
             SYS_GETPID => self.sys_getpid(),
             SYS_GETPGID => self.sys_getpgid(PId::new(a1 as i32)),
-            SYS_GETUID => Ok(0),    // TODO:
-            SYS_GETEUID => Ok(0),   // TODO:
-            SYS_SETUID => Ok(0),    // TODO:
-            SYS_SETGID => Ok(0),    // TODO:
+            SYS_GETUID => Ok(current_process().uid() as isize),
+            SYS_GETEUID => Ok(current_process().euid() as isize),
+            SYS_SETUID => {
+                current_process().set_uid(a1 as u32);
+                current_process().set_euid(a1 as u32);
+                Ok(0)
+            }
+            SYS_SETGID => {
+                current_process().set_gid(a1 as u32);
+                current_process().set_egid(a1 as u32);
+                Ok(0)
+            }
             SYS_SETGROUPS => Ok(0), // TODO:
             SYS_SETPGID => self.sys_setpgid(PId::new(a1 as i32), PgId::new(a2 as i32)),
             SYS_GETPPID => self.sys_getppid(),
@@ -773,8 +789,8 @@ impl<'a> SyscallHandler<'a> {
             SYS_DUP => self.sys_dup(Fd::new(a1 as c_int)),
             SYS_VFORK => self.sys_vfork(),
             SYS_UMASK => self.sys_umask(a1 as u32),
-            SYS_GETGID => Ok(0),  // TODO: proper GID tracking
-            SYS_GETEGID => self.sys_getegid(),
+            SYS_GETGID => Ok(current_process().gid() as isize),
+            SYS_GETEGID => Ok(current_process().egid() as isize),
             SYS_GETPGRP => self.sys_getpgrp(),
             // M1 Phase 2: FD plumbing
             SYS_DUP3 => self.sys_dup3(Fd::new(a1 as c_int), Fd::new(a2 as c_int), a3 as i32),
@@ -962,6 +978,10 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new_nonnull(a1)?,
                 a2 as c_int,
             ),
+            // M4 Phase 5: Process management & capabilities
+            SYS_PRCTL => self.sys_prctl(a1 as c_int, a2, a3, a4, a5),
+            SYS_CAPGET => self.sys_capget(UserVAddr::new_nonnull(a1)?, a2),
+            SYS_CAPSET => self.sys_capset(UserVAddr::new_nonnull(a1)?, a2),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1114,6 +1134,9 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_ACCEPT4 => "accept4",
         SYS_MOUNT => "mount",
         SYS_UMOUNT2 => "umount2",
+        SYS_PRCTL => "prctl",
+        SYS_CAPGET => "capget",
+        SYS_CAPSET => "capset",
         _ => "(unknown)",
     }
 }

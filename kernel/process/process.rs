@@ -30,7 +30,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
@@ -133,6 +133,15 @@ pub struct Process {
     signaled_frame: AtomicCell<Option<PtRegs>>,
     sigset: AtomicU64,
     umask: AtomicCell<u32>,
+    // UID/GID tracking (Phase 5).
+    uid: AtomicU32,
+    euid: AtomicU32,
+    gid: AtomicU32,
+    egid: AtomicU32,
+    /// Whether this process is a child subreaper (PR_SET_CHILD_SUBREAPER).
+    is_child_subreaper: AtomicBool,
+    /// Process name set via PR_SET_NAME (max 16 bytes including NUL).
+    comm: SpinLock<Option<Vec<u8>>>,
 }
 
 impl Process {
@@ -159,6 +168,12 @@ impl Process {
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(None),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -222,6 +237,12 @@ impl Process {
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(None),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -275,6 +296,41 @@ impl Process {
 
     pub fn cmdline(&self) -> AtomicRef<'_, Cmdline> {
         self.cmdline.borrow()
+    }
+
+    // ── UID/GID accessors ────────────────────────────────────────────
+    pub fn uid(&self) -> u32 { self.uid.load(Ordering::Relaxed) }
+    pub fn euid(&self) -> u32 { self.euid.load(Ordering::Relaxed) }
+    pub fn gid(&self) -> u32 { self.gid.load(Ordering::Relaxed) }
+    pub fn egid(&self) -> u32 { self.egid.load(Ordering::Relaxed) }
+    pub fn set_uid(&self, uid: u32) { self.uid.store(uid, Ordering::Relaxed); }
+    pub fn set_euid(&self, euid: u32) { self.euid.store(euid, Ordering::Relaxed); }
+    pub fn set_gid(&self, gid: u32) { self.gid.store(gid, Ordering::Relaxed); }
+    pub fn set_egid(&self, egid: u32) { self.egid.store(egid, Ordering::Relaxed); }
+
+    // ── Subreaper ────────────────────────────────────────────────────
+    pub fn is_child_subreaper(&self) -> bool {
+        self.is_child_subreaper.load(Ordering::Relaxed)
+    }
+    pub fn set_child_subreaper(&self, val: bool) {
+        self.is_child_subreaper.store(val, Ordering::Relaxed);
+    }
+
+    // ── PR_SET_NAME / PR_GET_NAME ────────────────────────────────────
+    pub fn set_comm(&self, name: &[u8]) {
+        let mut comm = self.comm.lock_no_irq();
+        let len = core::cmp::min(name.len(), 15); // 16 bytes max incl. NUL
+        *comm = Some(name[..len].to_vec());
+    }
+
+    pub fn get_comm(&self) -> Vec<u8> {
+        if let Some(ref name) = *self.comm.lock_no_irq() {
+            name.clone()
+        } else {
+            // Fall back to argv0.
+            let cmdline = self.cmdline();
+            cmdline.argv0().as_bytes().to_vec()
+        }
     }
 
     /// Its child processes.
@@ -447,6 +503,20 @@ impl Process {
         });
 
         current.set_state(ProcessState::ExitedWith(status));
+
+        // Reparent children to the nearest subreaper ancestor, or init (PID 1).
+        {
+            let orphans: Vec<Arc<Process>> = current.children.lock().drain(..).collect();
+            if !orphans.is_empty() {
+                let new_parent = find_subreaper_or_init(&current);
+                for child in orphans {
+                    new_parent.children.lock().push(child);
+                }
+                // Wake wait() in case the new parent is waiting.
+                JOIN_WAIT_QUEUE.wake_all();
+            }
+        }
+
         if let Some(parent) = current.parent.upgrade() {
             if parent.signals().lock().nocldwait() {
                 // Parent explicitly set SIGCHLD to SIG_IGN (or SA_NOCLDWAIT):
@@ -731,6 +801,12 @@ impl Process {
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
+            uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
+            euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
+            egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
         });
 
         process_group.lock().add(Arc::downgrade(&child));
@@ -762,6 +838,21 @@ impl Drop for Process {
         // should remove this process from its list.
         self.process_group().lock().remove_dropped_processes();
     }
+}
+
+/// Walk up the parent chain to find the nearest subreaper, or fall back to
+/// init (PID 1). Used when reparenting orphaned children on process exit.
+fn find_subreaper_or_init(exiting: &Process) -> Arc<Process> {
+    let mut ancestor = exiting.parent.upgrade();
+    while let Some(p) = ancestor {
+        if p.is_child_subreaper() {
+            return p;
+        }
+        ancestor = p.parent.upgrade();
+    }
+    // Fall back to init (PID 1).
+    PROCESSES.lock().get(&PId::new(1)).cloned()
+        .expect("init process (PID 1) must exist")
 }
 
 struct UserspaceEntry {
