@@ -309,6 +309,17 @@ impl Process {
         &self.signals
     }
 
+    /// Lock-free read of the pending signal bitmask.
+    pub fn signal_pending_bits(&self) -> u32 {
+        self.signal_pending.load(Ordering::Relaxed)
+    }
+
+    /// Update the pending signal atomic mirror (call after modifying
+    /// SignalDelivery.pending while holding the signals lock).
+    pub fn sync_signal_pending(&self, bits: u32) {
+        self.signal_pending.store(bits, Ordering::Relaxed);
+    }
+
     /// Loads the current signal mask (lock-free).
     #[inline(always)]
     pub fn sigset_load(&self) -> SigSet {
@@ -485,11 +496,16 @@ impl Process {
         self.signals.lock().signal(signal);
         self.signal_pending.fetch_or(1 << signal, Ordering::Release);
         self.resume();
+
+        // Wake poll/epoll waiters so signalfd can detect the new signal.
+        crate::poll::POLL_WAIT_QUEUE.wake_all();
     }
 
-    /// Returns `true` if there's a pending signal.
+    /// Returns `true` if there's a deliverable (pending AND unblocked) signal.
     pub fn has_pending_signals(&self) -> bool {
-        self.signal_pending.load(Ordering::Relaxed) != 0
+        let pending = self.signal_pending.load(Ordering::Relaxed);
+        let blocked = self.sigset_load().bits() as u32;
+        (pending & !blocked) != 0
     }
 
     /// Sets signal mask (lock-free via atomic u64).
@@ -533,18 +549,13 @@ impl Process {
         }
         let popped = {
             let mut sigs = current.signals.lock();
-            let result = sigs.pop_pending();
+            let sigset = current.sigset_load();
+            let result = sigs.pop_pending_unblocked(sigset);
             // Sync the atomic mirror with the actual pending state.
-            if sigs.is_pending() {
-                // Still more signals pending — leave the flag set.
-            } else {
-                current.signal_pending.store(0, Ordering::Relaxed);
-            }
+            current.signal_pending.store(sigs.pending_bits(), Ordering::Relaxed);
             result
         };
         if let Some((signal, sigaction)) = popped {
-            let sigset = current.sigset_load();
-            if !sigset.is_blocked(signal as usize) {
                 let pid = current.pid().as_i32();
                 let sig_name = debug::signal_name(signal);
 
@@ -632,7 +643,6 @@ impl Process {
                         result?;
                     }
                 }
-            }
         }
 
         Ok(())

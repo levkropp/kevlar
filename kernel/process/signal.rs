@@ -173,6 +173,37 @@ impl SignalDelivery {
         Some((signal as Signal, self.actions[signal as usize]))
     }
 
+    /// Pop the lowest-numbered pending signal that is NOT blocked.
+    /// Blocked signals remain in the pending set for later delivery
+    /// (or for signalfd to consume).
+    pub fn pop_pending_unblocked(&mut self, blocked: SigSet) -> Option<(Signal, SigAction)> {
+        let blocked_bits = blocked.bits() as u32;
+        let deliverable = self.pending & !blocked_bits;
+        if deliverable == 0 {
+            return None;
+        }
+        let signal = deliverable.trailing_zeros();
+        self.pending &= !(1 << signal);
+        Some((signal as Signal, self.actions[signal as usize]))
+    }
+
+    /// Pop a pending signal that matches the given bitmask.
+    /// Used by signalfd to consume blocked-but-pending signals.
+    pub fn pop_pending_masked(&mut self, mask: u32) -> Option<Signal> {
+        let matching = self.pending & mask;
+        if matching == 0 {
+            return None;
+        }
+        let signal = matching.trailing_zeros();
+        self.pending &= !(1 << signal);
+        Some(signal as Signal)
+    }
+
+    /// Return the raw pending bitmask (for syncing the atomic mirror).
+    pub fn pending_bits(&self) -> u32 {
+        self.pending
+    }
+
     pub fn signal(&mut self, signal: Signal) {
         self.pending |= 1 << (signal);
     }

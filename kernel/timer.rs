@@ -126,6 +126,10 @@ pub fn handle_timer_irq() {
         })
     }
 
+    // Wake poll/epoll/select waiters so they can re-check timeouts,
+    // timerfd expirations, and signalfd readiness.
+    crate::poll::POLL_WAIT_QUEUE.wake_all();
+
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
     if ticks % PREEMPT_PER_TICKS == 0 {
