@@ -1,5 +1,0 @@
-[dev]
-# seiya-nuc.local
-
-#[prod]
-demo.kevlar.dev ansible_port=61572 ansible_user=root

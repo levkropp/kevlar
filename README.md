@@ -6,8 +6,8 @@ A permissively licensed Rust kernel for running Linux binaries.
 
 Kevlar implements the Linux ABI so that unmodified Linux programs run directly
 on it — not through a compatibility shim, but because Kevlar *is* a Linux-ABI
-kernel. It is a fork of [Kerla](https://github.com/nuta/kerla) (MIT/Apache-2.0),
-modernized, extended, and relicensed as MIT/Apache-2.0/BSD-2-Clause.
+kernel. It was originally forked from [Kerla](https://github.com/nuta/kerla), but all
+kernel code has been rewritten and is now original Kevlar code (MIT/Apache-2.0/BSD-2-Clause).
 
 Kevlar uses the **ringkernel** architecture: a single-address-space kernel with
 three concentric trust zones enforced by Rust's type system. Unsafe code is
@@ -82,11 +82,10 @@ instructions including Docker, prerequisites, and make targets.
 
 | Source | License | Usage |
 |--------|---------|-------|
-| [Kerla](https://github.com/nuta/kerla) | MIT OR Apache-2.0 | Fork base |
+| boot2dump | MIT OR Apache-2.0 | Crash dump utility (used as-is) |
 | [FreeBSD](https://github.com/freebsd/freebsd-src) | BSD-2-Clause | Primary reference for Linux syscall semantics |
 
-See [Documentation/provenance/](Documentation/provenance/) for the full clean-room
-implementation log and attribution details.
+All kernel code is original Kevlar implementation. See [Documentation/provenance/](Documentation/provenance/) for details.
 
 ## Documentation
 

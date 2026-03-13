@@ -1,12 +1,11 @@
 # License
 
-This software is tri-licensed: MIT license, Apache license version 2.0, and/or BSD-2-Clause license.
+This software is tri-licensed: MIT license, Apache license version 2.0, and/or BSD-2-Clause.
 
 
 ## MIT license
 
 ```
-Copyright 2021 Seiya Nuta
 Copyright 2026 Kevlar Contributors
 
 Permission is hereby granted, free of charge, to any
@@ -228,7 +227,6 @@ END OF TERMS AND CONDITIONS
 ## BSD-2-Clause license
 
 ```
-Copyright 2021 Seiya Nuta
 Copyright 2026 Kevlar Contributors
 
 Redistribution and use in source and binary forms, with or without
