@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv core/osv_clock.cc (BSD-3-Clause) — nanosleep logic.
-// Parses struct timespec {tv_sec, tv_nsec}, converts to ms, sleeps.
+// Own implementation based on Linux man pages.
 use crate::ctypes::{c_long, c_time};
 use crate::prelude::*;
 use crate::syscalls::SyscallHandler;

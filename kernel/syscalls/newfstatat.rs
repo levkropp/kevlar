@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_fstatat logic.
-// Adapted for Kevlar's path resolution and stat infrastructure.
+// Own implementation based on Linux man pages.
 use super::CwdOrFd;
 use crate::ctypes::c_int;
 use crate::fs::path::Path;

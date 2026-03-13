@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_rename.
-// Resolves both parent directories, then calls old_parent.rename().
+// Own implementation based on Linux man pages.
 use crate::fs::{inotify, path::Path};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
@@ -20,10 +18,7 @@ impl<'a> SyscallHandler<'a> {
         let new_parent_dir = root_fs.lookup_dir(new_parent)?;
         old_parent_dir.rename(old_name, &new_parent_dir, new_name)?;
         drop(root_fs);
-        inotify::notify_rename(
-            old_parent.as_str(), old_name,
-            new_parent.as_str(), new_name,
-        );
+        inotify::notify_rename(old_parent.as_str(), old_name, new_parent.as_str(), new_name);
         Ok(0)
     }
 }

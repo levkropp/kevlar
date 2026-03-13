@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_unlink.
-// Resolves the parent directory, then calls dir.unlink(basename).
+// Own implementation based on Linux man pages.
 use crate::fs::inotify;
 use crate::fs::path::Path;
 use crate::prelude::*;

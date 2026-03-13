@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv core/mmu.cc (BSD-3-Clause) — mprotect VMA tracking logic.
-// Page table update and TLB flush are arch-specific to Kevlar's x86-64 paging.
+// Own implementation based on Linux man pages.
 use crate::ctypes::MMapProt;
 use crate::prelude::*;
 use crate::process::current_process;
@@ -10,12 +8,7 @@ use kevlar_platform::{address::UserVAddr, arch::PAGE_SIZE};
 use kevlar_utils::alignment::is_aligned;
 
 impl<'a> SyscallHandler<'a> {
-    pub fn sys_mprotect(
-        &mut self,
-        addr: UserVAddr,
-        len: usize,
-        prot: MMapProt,
-    ) -> Result<isize> {
+    pub fn sys_mprotect(&mut self, addr: UserVAddr, len: usize, prot: MMapProt) -> Result<isize> {
         if !is_aligned(addr.value(), PAGE_SIZE) {
             return Err(Errno::EINVAL.into());
         }
