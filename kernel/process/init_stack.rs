@@ -35,6 +35,10 @@ pub enum Auxv {
     Secure(usize),
     /// 16 random bytes. Used for stack canary.
     Random([u8; 16]),
+    /// Hardware capabilities bitmask (AT_HWCAP).
+    Hwcap(usize),
+    /// Clock ticks per second (AT_CLKTCK), used by times()/clock().
+    Clktck(usize),
     /// Address of the vDSO ELF header (AT_SYSINFO_EHDR).
     SysinfoEhdr(UserVAddr),
 }
@@ -88,6 +92,8 @@ fn push_auxv_entry_to_stack(
         Auxv::Egid(value) => (14, *value),
         Auxv::Secure(value) => (23, *value),
         Auxv::Random(_) => (25, data_ptr.unwrap().as_isize() as usize),
+        Auxv::Hwcap(value) => (16, *value),
+        Auxv::Clktck(value) => (17, *value),
         Auxv::SysinfoEhdr(uaddr) => (33, uaddr.value()),
     };
 

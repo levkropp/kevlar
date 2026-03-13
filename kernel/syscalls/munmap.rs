@@ -25,6 +25,12 @@ impl<'a> SyscallHandler<'a> {
         let len = kevlar_utils::alignment::align_up(len, PAGE_SIZE);
 
         let current = current_process();
+        kevlar_platform::flight_recorder::record(
+            kevlar_platform::flight_recorder::kind::MUNMAP,
+            current.pid().as_i32() as u32,
+            addr.value() as u64,
+            len as u64,
+        );
         let vm_ref = current.vm();
         // lock_preempt: keeps IF=1 (remote CPUs can ACK TLB shootdown IPIs)
         // but disables preemption (prevents the timer from calling switch() on

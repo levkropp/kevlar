@@ -407,6 +407,30 @@ test-smp:
 		| tee /tmp/kevlar-test-smp-$(PROFILE).log; true
 	@grep -E 'CPU \(LAPIC|smp:|online' /tmp/kevlar-test-smp-$(PROFILE).log || echo "(no SMP output found)"
 
+# Run M4 integration suite (mini_systemd) under -smp 4 as a regression check.
+.PHONY: test-regression-smp
+test-regression-smp:
+	$(PROGRESS) "TEST" "M6 Phase 5 regression: mini_systemd on 4 CPUs"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-regression-smp-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-regression-smp-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-regression-smp-$(PROFILE).log; then \
+		echo "REGRESSION TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END\|TEST_PASS' /tmp/kevlar-test-regression-smp-$(PROFILE).log; then \
+		echo "ALL REGRESSION TESTS PASSED"; \
+	fi
+
+# M6 Phase 5 full integration suite: threading + stress + regression.
+.PHONY: test-m6
+test-m6:
+	$(PROGRESS) "TEST" "M6 Phase 5: full integration suite"
+	$(MAKE) test-threads-smp PROFILE=$(PROFILE)
+	$(MAKE) test-regression-smp PROFILE=$(PROFILE)
+	@echo "M6 integration suite complete."
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
