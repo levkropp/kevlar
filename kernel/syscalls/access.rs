@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_access.
-// OSv resolves the path and returns 0 if it exists, ENOENT otherwise.
-// We follow the same approach since we don't track real UIDs.
+// Own implementation based on Linux man pages.
 use crate::fs::path::Path;
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};

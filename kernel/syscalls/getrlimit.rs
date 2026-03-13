@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv core/rlimit.cc (BSD-3-Clause) — getrlimit.
-// Returns fake but reasonable limits: RLIM_INFINITY for most resources,
-// 8 MB for stack, 1024 for NOFILE.
+// Own implementation based on Linux man pages.
 use crate::ctypes::c_int;
 use crate::prelude::*;
 use crate::syscalls::SyscallHandler;
@@ -25,7 +22,7 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_getrlimit(&mut self, resource: c_int, buf: UserVAddr) -> Result<isize> {
         let limit = match resource {
             RLIMIT_STACK => Rlimit {
-                rlim_cur: 8 * 1024 * 1024,  // 8 MB
+                rlim_cur: 8 * 1024 * 1024, // 8 MB
                 rlim_max: RLIM_INFINITY,
             },
             RLIMIT_NOFILE => Rlimit {

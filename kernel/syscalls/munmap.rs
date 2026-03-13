@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv core/mmu.cc (BSD-3-Clause) — munmap VMA removal logic.
-// Page table unmapping and TLB flush are arch-specific to Kevlar's x86-64 paging.
+// Own implementation based on Linux man pages.
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::syscalls::SyscallHandler;

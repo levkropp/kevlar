@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//
-// Reference: OSv fs/vfs/vfs_syscalls.cc (BSD-3-Clause) — sys_open logic with
-// dirfd-relative path resolution. Adapted for Kevlar's existing lookup_path_at.
+// Own implementation based on Linux man pages.
 use super::CwdOrFd;
 use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{inode::INode, opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
 
-fn create_file_at(cwd_or_fd: &CwdOrFd, path: &Path, flags: OpenFlags, mode: FileMode) -> Result<INode> {
+fn create_file_at(
+    cwd_or_fd: &CwdOrFd,
+    path: &Path,
+    flags: OpenFlags,
+    mode: FileMode,
+) -> Result<INode> {
     if flags.contains(OpenFlags::O_DIRECTORY) {
         return Err(Errno::EINVAL.into());
     }
