@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use cfg_if::cfg_if;
 use core::arch::asm;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
 use crate::arch::SavedInterruptStatus;
 
-#[cfg(debug_assertions)]
-use crate::backtrace::CapturedBacktrace;
-#[cfg(debug_assertions)]
-use atomic_refcell::AtomicRefCell;
-
 pub struct SpinLock<T: ?Sized> {
-    #[cfg(debug_assertions)]
-    locked_by: AtomicRefCell<Option<CapturedBacktrace>>,
     inner: spin::mutex::SpinMutex<T>,
 }
 
@@ -21,8 +13,6 @@ impl<T> SpinLock<T> {
     pub const fn new(value: T) -> SpinLock<T> {
         SpinLock {
             inner: spin::mutex::SpinMutex::new(value),
-            #[cfg(debug_assertions)]
-            locked_by: AtomicRefCell::new(None),
         }
     }
 }
@@ -42,8 +32,6 @@ impl<T: ?Sized> SpinLock<T> {
         SpinLockGuard {
             inner: ManuallyDrop::new(guard),
             saved_intr_status: ManuallyDrop::new(saved_intr_status),
-            #[cfg(debug_assertions)]
-            locked_by: &self.locked_by,
         }
     }
 
@@ -58,8 +46,27 @@ impl<T: ?Sized> SpinLock<T> {
 
         SpinLockGuardNoIrq {
             inner: ManuallyDrop::new(guard),
-            #[cfg(debug_assertions)]
-            locked_by: &self.locked_by,
+        }
+    }
+
+    /// Acquires the lock with preemption disabled but interrupts still enabled.
+    ///
+    /// Use for locks held across `flush_tlb` / TLB shootdown.  The lock-holder
+    /// keeps IF=1 so that remote CPUs can receive and ACK the TLB shootdown IPI
+    /// that the lock-holder sends.  At the same time, preemption is disabled so
+    /// that the timer interrupt handler cannot call `switch()` on THIS CPU while
+    /// the lock is held — that would deadlock (switch tries to re-acquire the
+    /// same SpinMutex on the same CPU).
+    ///
+    /// On drop the SpinMutex is released first, then preemption is re-enabled,
+    /// ensuring the invariant that preempt_count > 0 ⟺ lock is held.
+    #[inline(always)]
+    pub fn lock_preempt(&self) -> SpinLockGuardPreempt<'_, T> {
+        crate::arch::preempt_disable();
+        let guard = self.inner.lock();
+
+        SpinLockGuardPreempt {
+            inner: ManuallyDrop::new(guard),
         }
     }
 
@@ -73,8 +80,6 @@ unsafe impl<T: ?Sized + Send> Send for SpinLock<T> {}
 
 pub struct SpinLockGuard<'a, T: ?Sized> {
     inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
-    #[cfg(debug_assertions)]
-    locked_by: &'a AtomicRefCell<Option<CapturedBacktrace>>,
     saved_intr_status: ManuallyDrop<SavedInterruptStatus>,
 }
 
@@ -82,15 +87,6 @@ impl<'a, T: ?Sized> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
-        }
-
-        cfg_if! {
-            if #[cfg(debug_assertions)] {
-                *self.locked_by.borrow_mut() = None;
-            }
-        }
-
-        unsafe {
             ManuallyDrop::drop(&mut self.saved_intr_status);
         }
     }
@@ -101,20 +97,12 @@ impl<'a, T: ?Sized> Drop for SpinLockGuard<'a, T> {
 /// Created by [`SpinLock::lock_no_irq`].
 pub struct SpinLockGuardNoIrq<'a, T: ?Sized> {
     inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
-    #[cfg(debug_assertions)]
-    locked_by: &'a AtomicRefCell<Option<CapturedBacktrace>>,
 }
 
 impl<'a, T: ?Sized> Drop for SpinLockGuardNoIrq<'a, T> {
     fn drop(&mut self) {
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
-        }
-
-        cfg_if! {
-            if #[cfg(debug_assertions)] {
-                *self.locked_by.borrow_mut() = None;
-            }
         }
     }
 }
@@ -128,6 +116,37 @@ impl<'a, T: ?Sized> Deref for SpinLockGuardNoIrq<'a, T> {
 }
 
 impl<'a, T: ?Sized> DerefMut for SpinLockGuardNoIrq<'a, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+/// A lock guard that keeps interrupts enabled but disables preemption.
+///
+/// Created by [`SpinLock::lock_preempt`].
+pub struct SpinLockGuardPreempt<'a, T: ?Sized> {
+    inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
+}
+
+impl<'a, T: ?Sized> Drop for SpinLockGuardPreempt<'a, T> {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.inner);
+        }
+        crate::arch::preempt_enable();
+    }
+}
+
+impl<'a, T: ?Sized> Deref for SpinLockGuardPreempt<'a, T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for SpinLockGuardPreempt<'a, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
         &mut self.inner

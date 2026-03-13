@@ -4,6 +4,7 @@
 //! This module was moved from kernel/arch/x64/process.rs to consolidate
 //! all unsafe code in the platform crate.
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::address::{AccessError, UserVAddr, VAddr};
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
@@ -32,6 +33,11 @@ pub struct ArchTask {
     rsp: UnsafeCell<u64>,
     pub fsbase: AtomicCell<u64>,
     pub xsave_area: Option<OwnedPages>,
+    /// Set to `false` just before `do_switch_thread` saves this task's RSP,
+    /// then back to `true` by the assembly after the save.  `resume()` spins
+    /// on this flag before enqueuing the task, preventing another CPU from
+    /// loading a stale RSP while the save is in flight.
+    pub context_saved: AtomicBool,
     // This appears dead, but really we're keeping the pages referenced from the
     // rsp from being dropped until the ArchTask is dropped.
     #[allow(dead_code)]
@@ -66,7 +72,7 @@ unsafe extern "C" {
     fn kthread_entry();
     fn userland_entry();
     fn forked_child_entry();
-    fn do_switch_thread(prev_rsp: *const u64, next_rsp: *const u64);
+    fn do_switch_thread(prev_rsp: *mut u64, next_rsp: *const u64, ctx_saved: *mut u8);
 }
 
 unsafe fn push_stack(mut rsp: *mut u64, value: u64) -> *mut u64 {
@@ -121,6 +127,7 @@ impl ArchTask {
             xsave_area: None,
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -175,6 +182,7 @@ impl ArchTask {
             xsave_area: Some(xsave_area),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -202,6 +210,7 @@ impl ArchTask {
             xsave_area: None,
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -277,6 +286,7 @@ impl ArchTask {
             xsave_area: Some(xsave_area),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -349,6 +359,7 @@ impl ArchTask {
             xsave_area: Some(xsave_area),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -368,13 +379,8 @@ impl ArchTask {
         frame: &mut PtRegs,
         signal: i32,
         sa_handler: UserVAddr,
+        restorer: Option<UserVAddr>,
     ) -> Result<(), AccessError> {
-        const TRAMPOLINE: &[u8] = &[
-            0xb8, 0x0f, 0x00, 0x00, 0x00, // mov eax, 15
-            0x0f, 0x05, // syscall
-            0x90, // nop (for alignment)
-        ];
-
         fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let rsp = rsp.sub(8);
             rsp.write::<u64>(&value)?;
@@ -387,11 +393,25 @@ impl ArchTask {
         // Avoid corrupting the red zone.
         user_rsp = user_rsp.sub(128);
 
-        // Copy the trampoline code.
-        user_rsp = user_rsp.sub(TRAMPOLINE.len());
-        let trampoline_rip = user_rsp;
-        user_rsp.write_bytes(TRAMPOLINE)?;
-        user_rsp = push_to_user_stack(user_rsp, trampoline_rip.as_isize() as u64)?;
+        // Determine the return address for the signal handler:
+        // If the caller provided SA_RESTORER (e.g. musl's __restore_rt), use it —
+        // it lives in executable text and calls rt_sigreturn for us.
+        // Otherwise fall back to writing a small trampoline on the stack.
+        let return_rip = if let Some(res) = restorer {
+            res.as_isize() as u64
+        } else {
+            const TRAMPOLINE: &[u8] = &[
+                0xb8, 0x0f, 0x00, 0x00, 0x00, // mov eax, 15  (__NR_rt_sigreturn)
+                0x0f, 0x05,                    // syscall
+                0x90,                          // nop (alignment)
+            ];
+            user_rsp = user_rsp.sub(TRAMPOLINE.len());
+            let trampoline_rip = user_rsp;
+            user_rsp.write_bytes(TRAMPOLINE)?;
+            trampoline_rip.as_isize() as u64
+        };
+
+        user_rsp = push_to_user_stack(user_rsp, return_rip)?;
 
         frame.rip = sa_handler.as_isize() as u64;
         frame.rsp = user_rsp.as_isize() as u64;
@@ -437,7 +457,15 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
 
     unsafe {
         wrfsbase(next.fsbase.load());
-        do_switch_thread(prev.rsp.get(), next.rsp.get());
+        // Signal that prev's RSP is about to be overwritten.  The assembly
+        // sets this back to true after the save, allowing resume() to enqueue
+        // the thread without loading a stale RSP.
+        prev.context_saved.store(false, Ordering::Release);
+        do_switch_thread(
+            prev.rsp.get(),
+            next.rsp.get(),
+            prev.context_saved.as_ptr() as *mut u8,
+        );
     }
 }
 

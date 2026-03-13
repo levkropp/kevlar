@@ -72,6 +72,11 @@ pub struct CpuLocalHead {
     pub sp_el1: u64,
     /// Temporary save space for the user stack pointer.
     pub sp_el0_save: u64,
+    /// Preemption disable count.  Incremented at the start of `switch()` and
+    /// decremented after `do_switch_thread` returns.  The timer preemption
+    /// handler skips `process::switch()` while this is non-zero, preventing
+    /// nested context switches on the same CPU.
+    pub preempt_count: u32,
 }
 
 #[used]

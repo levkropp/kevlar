@@ -59,6 +59,13 @@ pub fn start_ap_preemption_timer() {
     unsafe { apic::lapic_timer_init(); }
 }
 
+/// Broadcast a "halt immediately" IPI to all CPUs except the current one.
+/// Called from the panic handler to freeze other CPUs and prevent interleaved
+/// output or double panics on the serial console.
+pub fn broadcast_halt_ipi() {
+    unsafe { apic::broadcast_halt_ipi(); }
+}
+
 pub mod x64_specific {
     pub use super::cpu_local::cpu_local_head;
     pub use super::gdt::{USER_CS32, USER_CS64, USER_DS, USER_RPL};
@@ -77,6 +84,32 @@ pub fn num_online_cpus() -> u32 {
 
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 100;
+
+/// Returns true if hardware interrupts are currently enabled (RFLAGS.IF = 1).
+#[inline(always)]
+pub fn interrupts_enabled() -> bool {
+    use x86::current::rflags;
+    rflags::read().contains(rflags::RFlags::FLAGS_IF)
+}
+
+/// Increment the per-CPU preemption disable count.
+/// While > 0, the timer preemption handler will not call `process::switch()`.
+#[inline(always)]
+pub fn preempt_disable() {
+    cpu_local::cpu_local_head().preempt_count += 1;
+}
+
+/// Decrement the per-CPU preemption disable count.
+#[inline(always)]
+pub fn preempt_enable() {
+    cpu_local::cpu_local_head().preempt_count -= 1;
+}
+
+/// Returns true if preemption is currently disabled (preempt_count > 0).
+#[inline(always)]
+pub fn in_preempt() -> bool {
+    cpu_local::cpu_local_head().preempt_count > 0
+}
 
 /// The base virtual address of straight mapping.
 pub const KERNEL_BASE_ADDR: usize = 0xffff_8000_0000_0000;

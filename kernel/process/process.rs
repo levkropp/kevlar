@@ -458,10 +458,37 @@ impl Process {
     pub fn resume(&self) {
         let old_state = self.state.swap(ProcessState::Runnable);
 
-        debug_assert!(!matches!(old_state, ProcessState::ExitedWith(_)));
+        // A thread may be set to ExitedWith by exit_group() while it is still
+        // in a wait queue (e.g. futex, poll, JOIN_WAIT_QUEUE).  When wake_all()
+        // calls resume() on such a thread, we must not enqueue it — doing so
+        // would schedule an exiting thread, corrupting kernel state.
+        // Undo the state swap and bail out; the thread is no longer schedulable.
+        if matches!(old_state, ProcessState::ExitedWith(_)) {
+            self.state.store(old_state);
+            return;
+        }
 
         if old_state == ProcessState::Runnable {
             return;
+        }
+
+        // Spinwait until the process's context (kernel stack RSP/SP) has been
+        // fully saved by do_switch_thread.  Without this, another CPU could
+        // restore a stale RSP and run this task concurrently with the CPU that
+        // is still executing do_switch_thread for it — corrupting the stack.
+        //
+        // Safety: We skip the spinwait when interrupts are disabled (IRQ context)
+        // to avoid a rare deadlock: if the timer fires on the same CPU that is
+        // mid-switch for this very thread, and the timer calls resume() on it,
+        // the spinwait would block the IRQ handler forever (the assembly that
+        // sets context_saved=true is waiting for the IRQ to return via IRET).
+        // In that case we accept a theoretical stale-RSP race; it is mitigated
+        // by the preempt_count guard that prevents the timer from calling
+        // process::switch() while a switch is already in progress.
+        if kevlar_platform::arch::interrupts_enabled() {
+            while !self.arch.context_saved.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
         }
 
         SCHEDULER.lock().enqueue(self.pid);
@@ -538,22 +565,42 @@ impl Process {
             }
         }
 
-        if let Some(parent) = current.parent.upgrade() {
-            if parent.signals().lock().nocldwait() {
-                // Parent explicitly set SIGCHLD to SIG_IGN (or SA_NOCLDWAIT):
-                // auto-reap the child without creating a zombie.
-                parent.children().retain(|p| p.pid() != current.pid);
-                EXITED_PROCESSES.lock().push(current.clone());
-            } else {
-                // Normal case: keep zombie for wait(), notify parent.
-                parent.send_signal(SIGCHLD);
-            }
+        // Threads created with CLONE_VM|CLONE_THREAD have tgid != pid.
+        // For thread exits: skip SIGCHLD and skip close_all (siblings share
+        // the same opened_files Arc and must keep their fds open).
+        let is_thread = current.tgid != current.pid;
+
+        if is_thread {
+            // Keep a reference in EXITED_PROCESSES so the Arc (and its kernel
+            // stacks) stays alive through the upcoming switch().  Without this,
+            // PROCESSES.lock().remove() below drops the process table's ref,
+            // leaving count=1 (only CURRENT).  switch() then does:
+            //   arc_leak_one_ref(&prev)  → count=1 (CURRENT)
+            //   CURRENT.set(next)        → drops CURRENT → count=0 → FREED
+            //   switch_thread(prev.arch, ...)  → use-after-free!
+            // gc_exited_processes() frees these only from the idle thread,
+            // well after switch_task has finished using prev.arch().
+            EXITED_PROCESSES.lock().push(current.clone());
         }
 
-        // Close opened files here instead of in Drop::drop because `proc` is
-        // not dropped until it's joined by the parent process. Drop them to
-        // make pipes closed.
-        current.opened_files.lock().close_all();
+        if !is_thread {
+            if let Some(parent) = current.parent.upgrade() {
+                if parent.signals().lock().nocldwait() {
+                    // Parent explicitly set SIGCHLD to SIG_IGN (or SA_NOCLDWAIT):
+                    // auto-reap the child without creating a zombie.
+                    parent.children().retain(|p| p.pid() != current.pid);
+                    EXITED_PROCESSES.lock().push(current.clone());
+                } else {
+                    // Normal case: keep zombie for wait(), notify parent.
+                    parent.send_signal(SIGCHLD);
+                }
+            }
+
+            // Close opened files here instead of in Drop::drop because `proc`
+            // is not dropped until it's joined by the parent process. Drop them
+            // to make pipes closed.
+            current.opened_files.lock().close_all();
+        }
 
         PROCESSES.lock().remove(&current.pid);
 
@@ -586,6 +633,16 @@ impl Process {
         };
         for sibling in siblings {
             sibling.set_state(ProcessState::ExitedWith(status));
+            // Keep a reference in EXITED_PROCESSES so the Arc (and its kernel
+            // stacks) stays alive until gc_exited_processes() runs from the
+            // idle thread — even if the sibling is currently running on
+            // another CPU and switch() does arc_leak_one_ref on it.
+            EXITED_PROCESSES.lock().push(sibling.clone());
+            // Remove from scheduler run queues FIRST so that pick_next() stops
+            // returning this PID.  Only then remove from PROCESSES, so that
+            // any in-flight switch() that already picked this PID can still
+            // find the Arc (it will be skipped via the None-check in switch()).
+            SCHEDULER.lock().remove(sibling.pid);
             PROCESSES.lock().remove(&sibling.pid);
         }
         Process::exit(status)
@@ -732,7 +789,7 @@ impl Process {
                         });
                         trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
-                    SigAction::Handler { handler } => {
+                    SigAction::Handler { handler, restorer } => {
                         #[cfg(target_arch = "x86_64")]
                         let rsp_before = frame.rsp as usize;
                         #[cfg(target_arch = "aarch64")]
@@ -753,7 +810,7 @@ impl Process {
 
                         // Set usercopy context for fault attribution.
                         debug::usercopy::set_context("signal_stack_setup");
-                        let result = current.arch.setup_signal_stack(frame, signal, handler);
+                        let result = current.arch.setup_signal_stack(frame, signal, handler, restorer);
                         debug::usercopy::clear_context();
 
                         // Emit detailed signal stack write trace.
@@ -877,6 +934,7 @@ impl Process {
         process_group.lock().add(Arc::downgrade(&child));
         parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
+        drop(process_table); // Release PROCESSES before acquiring SCHEDULER (lock ordering: SCHEDULER → PROCESSES in switch())
         SCHEDULER.lock().enqueue(pid);
 
         FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -951,6 +1009,7 @@ impl Process {
 
         parent.process_group().lock().add(Arc::downgrade(&child));
         process_table.insert(pid, child.clone());
+        drop(process_table); // Release PROCESSES before acquiring SCHEDULER (lock ordering: SCHEDULER → PROCESSES in switch())
         SCHEDULER.lock().enqueue(pid);
 
         FORK_TOTAL.fetch_add(1, Ordering::Relaxed);

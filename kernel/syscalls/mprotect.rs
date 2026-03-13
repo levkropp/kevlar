@@ -28,7 +28,7 @@ impl<'a> SyscallHandler<'a> {
 
         let current = current_process();
         let vm_ref = current.vm();
-        let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
+        let mut vm = vm_ref.as_ref().unwrap().lock_preempt();
 
         // Update VMA protection flags (splits VMAs at boundaries as needed).
         vm.update_prot_range(addr, len, prot)?;

@@ -17,7 +17,8 @@ inter-processor interrupts.
 | [1](phase1-smp-boot.md) | SMP Boot | AP startup, per-CPU state, per-CPU idle threads | None |
 | [2](phase2-smp-scheduler.md) | SMP Scheduler | Per-CPU run queues, load balancing, IPI | Phase 1 |
 | [3](phase3-threading.md) | Threading Primitives | clone(CLONE_VM), TLS, robust futex | Phase 2 |
-| [4](phase4-thread-safety.md) | Thread Safety | TLB shootdowns, signal-to-thread, audit | Phase 3 |
+| [3.5](phase3.5-debug-tooling.md) | SMP Debug Tooling | Flight recorder, better panic context, page poison, crash dump | Phase 3 |
+| [4](phase4-thread-safety.md) | Thread Safety | TLB shootdowns, signal-to-thread, audit | Phase 3.5 |
 | [5](phase5-integration.md) | Integration Testing | pthreads test, glibc hello world | All above |
 
 Phases are strictly sequential — each builds on the previous.

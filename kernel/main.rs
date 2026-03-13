@@ -92,12 +92,25 @@ impl kevlar_platform::Handler for Handler {
         crate::interrupt::handle_irq(irq);
     }
 
-    fn handle_timer_irq(&self) {
-        crate::timer::handle_timer_irq();
+    fn handle_timer_irq(&self) -> bool {
+        crate::timer::handle_timer_irq()
     }
 
-    fn handle_ap_preempt(&self) {
-        process::switch();
+    fn handle_ap_preempt(&self) -> bool {
+        if !kevlar_platform::arch::in_preempt() {
+            process::switch()
+        } else {
+            false
+        }
+    }
+
+    fn handle_interrupt_return(&self, frame: *mut PtRegs) {
+        #[allow(unsafe_code)]
+        let frame_ref = unsafe { &mut *frame };
+        let result = crate::process::Process::try_delivering_signal(frame_ref);
+        if let Err(e) = result {
+            trace!("handle_interrupt_return: signal delivery failed: {:?}", e);
+        }
     }
 
     fn handle_page_fault(

@@ -80,6 +80,25 @@ interrupt_common:
     mov rsi, rsp
     call x64_handle_interrupt
 
+    // After x64_handle_interrupt (which may have context-switched via
+    // do_switch_thread), RSP points to the CURRENT thread's InterruptFrame.
+    // This is correct even after a switch: do_switch_thread changed RSP to
+    // the next thread's kernel stack, so the frame here belongs to the thread
+    // we are about to IRET into.
+    //
+    // Deliver pending signals to the current thread now, before IRET, if
+    // returning to user space.  CS is at offset 136 in InterruptFrame.
+    //
+    // Alignment note: at this point RSP ≡ 8 (mod 16) for ring-3 interrupts
+    // (kernel stack top is 16-byte aligned; ring-3 entry pushes 21 qwords).
+    // sub rsp,8 makes RSP ≡ 0 (mod 16) satisfying the ABI before CALL.
+    test qword ptr [rsp + 136], 3
+    jz 1f
+    lea rdi, [rsp]
+    sub rsp, 8
+    call x64_check_signal_on_irq_return
+    add rsp, 8
+1:
     pop rax
     pop rbx
     pop rcx

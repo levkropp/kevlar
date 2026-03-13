@@ -119,9 +119,14 @@ kthread_entry:
     brk     #0
 
 /// Context switch between two threads.
-/// fn do_switch_thread(prev_sp: *mut u64, next_sp: *const u64)
-///   x0 = &prev.sp (save current SP here)
-///   x1 = &next.sp (load new SP from here)
+/// fn do_switch_thread(prev_sp: *mut u64, next_sp: *const u64, ctx_saved: *mut u8)
+///   x0 = &prev.sp  (save current SP here)
+///   x1 = &next.sp  (load new SP from here)
+///   x2 = ctx_saved (set *ctx_saved = 1 after saving SP, before loading next SP)
+///
+/// The store-release to *ctx_saved (via stlrb) ensures that any CPU that
+/// observed context_saved=0 and is spinning in resume() will see the fully
+/// saved SP before being allowed to enqueue this thread.
 .global do_switch_thread
 do_switch_thread:
     // Save callee-saved registers and LR.
@@ -136,9 +141,11 @@ do_switch_thread:
     mrs     x9, nzcv
     str     x9, [sp, #-8]!
 
-    // Save current SP to prev->sp.
+    // Save current SP to prev->sp, then mark context as saved.
     mov     x9, sp
     str     x9, [x0]
+    mov     w9, #1
+    stlrb   w9, [x2]        // store-release: context_saved = true
 
     // Load next SP.
     ldr     x9, [x1]

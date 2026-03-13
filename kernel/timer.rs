@@ -27,7 +27,7 @@ pub fn _sleep_ms(ms: usize) {
     });
 
     current_process().set_state(ProcessState::BlockedSignalable);
-    switch();
+    let _ = switch();
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -108,7 +108,11 @@ impl Timeval {
     }
 }
 
-pub fn handle_timer_irq() {
+/// Returns `true` if a context switch actually occurred (i.e. we switched to
+/// a different thread).  The caller can use this to skip signal delivery using
+/// the interrupted thread's frame — the new thread will receive signals on its
+/// next preemption cycle.
+pub fn handle_timer_irq() -> bool {
     {
         let mut timers = TIMERS.lock();
         for timer in timers.iter_mut() {
@@ -132,7 +136,8 @@ pub fn handle_timer_irq() {
 
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
-    if ticks % PREEMPT_PER_TICKS == 0 {
-        process::switch();
+    if ticks % PREEMPT_PER_TICKS == 0 && !kevlar_platform::arch::in_preempt() {
+        return process::switch();
     }
+    false
 }

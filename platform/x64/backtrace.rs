@@ -20,6 +20,14 @@ impl Backtrace {
         }
     }
 
+    /// Construct a backtrace starting from an arbitrary RBP value, such as
+    /// one captured from an interrupt frame.  Safe to call with garbage values
+    /// — `traverse` will stop immediately if the pointer is null or maps outside
+    /// kernel space.
+    pub fn from_rbp(rbp: u64) -> Backtrace {
+        Backtrace { frame: rbp as *const StackFrame }
+    }
+
     pub fn traverse<F>(self, mut callback: F)
     where
         F: FnMut(usize, VAddr),

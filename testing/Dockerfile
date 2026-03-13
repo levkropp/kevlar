@@ -138,6 +138,17 @@ RUN printf 'hello from ext2\n' > /disk_root/greeting.txt && \
     mke2fs -t ext2 -d /disk_root /disk.img
 
 #
+#  M6 Phase 3 threading integration test (static musl + pthreads)
+#
+FROM ubuntu:20.04 AS mini_threads
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/mini_threads.c /mini_threads.c
+RUN musl-gcc -static -O2 -pthread -o /mini-threads /mini_threads.c
+
+#
 #  M5 Phase 7 integration test (mini-storage)
 #
 FROM ubuntu:20.04 AS mini_storage
@@ -172,6 +183,7 @@ COPY --from=benchsuite /bench /bin/bench
 COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
+COPY --from=mini_threads /mini-threads /bin/mini-threads
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /mnt /var/www/html
