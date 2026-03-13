@@ -282,7 +282,11 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         .expect("failed to open /dev/console");
 
     // Open the init's executable.
-    let argv0 = if option_env!("INIT_SCRIPT").is_some() {
+    // Priority: cmdline `init=` > compile-time INIT_SCRIPT > /sbin/init
+    let init_path_cmdline = bootinfo.init_path.as_deref().map(str::as_bytes);
+    let argv0 = if let Some(path) = init_path_cmdline {
+        core::str::from_utf8(path).unwrap_or("/sbin/init")
+    } else if option_env!("INIT_SCRIPT").is_some() {
         "/bin/sh"
     } else {
         "/sbin/init"
@@ -302,7 +306,17 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("process init");
 
     // Create the init process.
-    if let Some(script) = option_env!("INIT_SCRIPT") {
+    if let Some(path) = bootinfo.init_path.as_deref() {
+        // `init=` on kernel cmdline: run binary directly as PID 1 (no sh -c wrapper).
+        info!("running cmdline init: {:?}", path);
+        Process::new_init_process(
+            INITIAL_ROOT_FS.clone(),
+            executable_path,
+            console,
+            &[path.as_bytes()],
+        )
+        .expect("failed to execute cmdline init");
+    } else if let Some(script) = option_env!("INIT_SCRIPT") {
         let argv = &[b"sh", b"-c", script.as_bytes()];
         info!("running init script: {:?}", script);
         Process::new_init_process(INITIAL_ROOT_FS.clone(), executable_path, console, argv)

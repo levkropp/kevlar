@@ -30,4 +30,7 @@ pub struct BootInfo {
     pub gateway_ip4: Option<ArrayString<15>>,
     /// CPU identifiers parsed from firmware (MPIDRs on ARM64, empty on x86).
     pub cpu_mpdirs: ArrayVec<u64, 8>,
+    /// Override init binary from kernel cmdline (`init=/path/to/binary`).
+    /// When set, runs this binary directly as PID 1 instead of INIT_SCRIPT.
+    pub init_path: Option<ArrayString<128>>,
 }

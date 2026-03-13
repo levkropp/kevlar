@@ -160,6 +160,28 @@ COPY testing/mini_storage.c /mini_storage.c
 RUN musl-gcc -static -O2 -o /mini-storage /mini_storage.c
 
 #
+#  M6.5 Contract Tests
+#
+FROM ubuntu:20.04 AS contracts
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+RUN mkdir /contracts
+COPY testing/contracts/vm/fork_cow.c /contracts/
+COPY testing/contracts/vm/mprotect_basic.c /contracts/
+COPY testing/contracts/vm/mmap_anon.c /contracts/
+COPY testing/contracts/vm/mmap_hint_flags.c /contracts/
+COPY testing/contracts/vm/brk_basic.c /contracts/
+COPY testing/contracts/signals/mask_semantics.c /contracts/
+COPY testing/contracts/signals/sa_restart.c /contracts/
+COPY testing/contracts/scheduling/getpriority.c /contracts/
+RUN for src in /contracts/*.c; do \
+        name=$(basename ${src%.c}); \
+        musl-gcc -static -O1 -Wall -Wno-unused-result -o /contracts/contract-${name} $src; \
+    done
+
+#
 #  Initramfs
 #
 FROM busybox AS empty_dir
@@ -184,6 +206,7 @@ COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
+COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /mnt /var/www/html

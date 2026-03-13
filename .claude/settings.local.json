@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(*)"
+      "Bash(*)",
+      "WebSearch",
+      "WebFetch(domain:git.musl-libc.org)",
+      "WebFetch(domain:man7.org)"
     ]
   }
 }
