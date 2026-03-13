@@ -870,6 +870,31 @@ impl Process {
 
         let entry = setup_userspace(executable_path, argv, envp, &current.root_fs)?;
 
+        // de_thread: per POSIX, execve terminates all other threads in the
+        // thread group.  Kill siblings NOW — after setup_userspace succeeds
+        // (point of no return) but BEFORE replacing the address space.
+        //
+        // Each sibling's Arc<SpinLock<VirtualMemory>> keeps the OLD page table
+        // alive until gc_exited_processes() drops the Arc, so there is no
+        // use-after-free even if a sibling is still executing on another CPU
+        // for a few hundred nanoseconds after we mark it ExitedWith.
+        {
+            let tgid = current.tgid;
+            let siblings: Vec<Arc<Process>> = {
+                let table = PROCESSES.lock();
+                table.values()
+                    .filter(|p| p.tgid == tgid && p.pid != current.pid)
+                    .cloned()
+                    .collect()
+            };
+            for sibling in siblings {
+                sibling.set_state(ProcessState::ExitedWith(0));
+                EXITED_PROCESSES.lock().push(sibling.clone());
+                SCHEDULER.lock().remove(sibling.pid);
+                PROCESSES.lock().remove(&sibling.pid);
+            }
+        }
+
         debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExec {
             pid: current.pid().as_i32(),
             argv0: core::str::from_utf8(argv.first().copied().unwrap_or(b"?")).unwrap_or("?"),
@@ -1263,6 +1288,8 @@ fn do_elf_binfmt(
     auxv.push(Auxv::Phnum(elf.program_headers().len()));
     auxv.push(Auxv::Phent(size_of::<ProgramHeader>()));
     auxv.push(Auxv::Pagesz(PAGE_SIZE));
+    auxv.push(Auxv::Hwcap(0)); // no extended HW capabilities (glibc reads this at startup)
+    auxv.push(Auxv::Clktck(100)); // TICK_HZ — used by glibc's times()/clock()
     auxv.push(Auxv::Uid(0));
     auxv.push(Auxv::Euid(0));
     auxv.push(Auxv::Gid(0));

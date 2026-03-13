@@ -34,13 +34,20 @@ impl<'a> SyscallHandler<'a> {
         vm.update_prot_range(addr, len, prot)?;
 
         // Walk the page table and update flags for any already-mapped pages.
+        // Use local invlpg per page + a single remote IPI at the end, mirroring
+        // the munmap pattern: O(1) IPIs instead of O(pages) IPIs.
         let prot_flags = prot.bits();
         let num_pages = len / PAGE_SIZE;
+        let mut any_flushed = false;
         for i in 0..num_pages {
             let page_addr = addr.add(i * PAGE_SIZE);
             if vm.page_table_mut().update_page_flags(page_addr, prot_flags) {
-                vm.page_table().flush_tlb(page_addr);
+                vm.page_table().flush_tlb_local(page_addr);
+                any_flushed = true;
             }
+        }
+        if any_flushed {
+            vm.page_table().flush_tlb_remote();
         }
 
         Ok(0)

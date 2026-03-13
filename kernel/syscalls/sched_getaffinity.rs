@@ -2,8 +2,9 @@
 //
 // sched_getaffinity(pid, cpusetsize, mask)
 //
-// Stub: reports CPU 0 as the only available CPU.  The cpu_set_t is a plain
-// bitmask; setting bit 0 in byte 0 means "CPU 0 is available".
+// Returns a cpu_set_t bitmask with one bit set per online CPU.  musl uses
+// this for sysconf(_SC_NPROCESSORS_ONLN), so returning only CPU 0 would
+// make every process believe it's on a 1-CPU machine even under `-smp 4`.
 use crate::{
     ctypes::c_int,
     result::{Errno, Result},
@@ -21,9 +22,13 @@ impl<'a> SyscallHandler<'a> {
         if cpusetsize == 0 {
             return Err(Errno::EINVAL.into());
         }
+        let num_cpus = kevlar_platform::arch::num_online_cpus() as usize;
+        // cpu_set_t is a byte array; bit i lives in byte[i/8] at position i%8.
         let size = cpusetsize.min(128);
         let mut buf = [0u8; 128];
-        buf[0] = 0x01; // CPU 0 available
+        for cpu in 0..num_cpus.min(size * 8) {
+            buf[cpu / 8] |= 1 << (cpu % 8);
+        }
         mask.write_bytes(&buf[..size])?;
         Ok(0)
     }

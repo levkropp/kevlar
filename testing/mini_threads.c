@@ -210,6 +210,54 @@ static int test_fork_from_thread(void) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+/* ─── 13. Pipe ping-pong across threads ─────────────────────────────────── */
+// Two threads bounce a counter through two pipes 100 times.
+// Tests: blocking read/write, scheduler wakeup from WaitQueue, cross-CPU
+// delivery of futex-wake when a thread unblocks another via pipe write.
+struct t13_ctx { int ping[2]; int pong[2]; };
+static void *t13_fn(void *arg) {
+    struct t13_ctx *p = arg;
+    for (int i = 0; i < 100; i++) {
+        int val;
+        if (read(p->ping[0], &val, sizeof(val)) != sizeof(val)) return (void*)1;
+        val++;
+        if (write(p->pong[1], &val, sizeof(val)) != sizeof(val)) return (void*)1;
+    }
+    return NULL;
+}
+static int test_pipe_pingpong(void) {
+    struct t13_ctx p;
+    if (pipe(p.ping) || pipe(p.pong)) return 0;
+    pthread_t t;
+    if (pthread_create(&t, NULL, t13_fn, &p)) return 0;
+    int val = 0;
+    for (int i = 0; i < 100; i++) {
+        if (write(p.ping[1], &val, sizeof(val)) != sizeof(val)) return 0;
+        if (read(p.pong[0], &val, sizeof(val)) != sizeof(val)) return 0;
+    }
+    void *rv;
+    pthread_join(t, &rv);
+    close(p.ping[0]); close(p.ping[1]);
+    close(p.pong[0]); close(p.pong[1]);
+    return val == 100 && rv == NULL;
+}
+
+/* ─── 14. Thread storm: 16 threads on 4 CPUs ────────────────────────────── */
+// More threads than CPUs; exercises the scheduler's ability to context-switch
+// and distribute work across all vCPUs under load.
+static void *t14_fn(void *arg) {
+    atomic_int *ctr = arg;
+    for (int i = 0; i < 100; i++) atomic_fetch_add(ctr, 1);
+    return NULL;
+}
+static int test_thread_storm(void) {
+    atomic_int ctr = 0;
+    pthread_t ts[16];
+    for (int i = 0; i < 16; i++) pthread_create(&ts[i], NULL, t14_fn, &ctr);
+    for (int i = 0; i < 16; i++) pthread_join(ts[i], NULL);
+    return atomic_load(&ctr) == 1600;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 int main(void) {
     printf("\n=== Kevlar M6 Threading Tests ===\n");
@@ -231,6 +279,8 @@ int main(void) {
     RUN(tgkill);
     RUN(mmap_shared);
     RUN(fork_from_thread);
+    RUN(pipe_pingpong);
+    RUN(thread_storm);
 
     printf("\nTEST_END %d/%d\n", g_total - g_failures, g_total);
     return g_failures ? 1 : 0;

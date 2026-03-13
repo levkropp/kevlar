@@ -38,8 +38,10 @@ bitflags! {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MMapFlags: c_int {
-        const MAP_PRIVATE   = 0x02;
-        const MAP_FIXED     = 0x10;
-        const MAP_ANONYMOUS = 0x20;
+        const MAP_PRIVATE    = 0x00002;
+        const MAP_FIXED      = 0x00010;
+        const MAP_ANONYMOUS  = 0x00020;
+        const MAP_GROWSDOWN  = 0x00100; // hint: stack grows downward — ignored
+        const MAP_STACK      = 0x20000; // hint: used for thread stack — ignored
         }
 }

@@ -704,7 +704,9 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new(a1),
                 a2 as c_size,
                 bitflags_from_user!(MMapProt, a3 as c_int)?,
-                bitflags_from_user!(MMapFlags, a4 as c_int)?,
+                // Unknown mmap hint flags (MAP_HUGETLB, MAP_LOCKED, etc.) are
+                // silently ignored — they are hints, not semantic requirements.
+                MMapFlags::from_bits_truncate(a4 as c_int),
                 Fd::new(a5 as i32),
                 a6 as c_off,
             ),

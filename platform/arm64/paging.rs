@@ -262,12 +262,25 @@ impl PageTable {
             let addr = vaddr.value() >> 12;
             core::arch::asm!(
                 "tlbi vale1, {}",
-                "dsb sy",
+                "dsb ish",
                 "isb",
                 in(reg) addr,
             );
         }
     }
+
+    /// On ARM64, `tlbi vale1` with `dsb ish` already broadcasts to all CPUs
+    /// in the inner shareable domain — there is no separate "local only" step.
+    /// This is an alias of `flush_tlb` for interface parity with x86_64.
+    #[inline(always)]
+    pub fn flush_tlb_local(&self, vaddr: UserVAddr) {
+        self.flush_tlb(vaddr);
+    }
+
+    /// On ARM64, TLB invalidation is broadcast automatically; a separate
+    /// "remote flush" IPI is not needed.  This is a no-op for interface parity.
+    #[inline(always)]
+    pub fn flush_tlb_remote(&self) {}
 
     pub fn flush_tlb_all(&self) {
         unsafe {
