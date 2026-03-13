@@ -478,6 +478,25 @@ test-contracts-linux:
 		--json build/contract-results-linux.json \
 		$(if $(CONTRACTS_FILTER),$(CONTRACTS_FILTER),)
 
+# Trace a single contract test: make trace-contract TEST=brk_basic
+.PHONY: trace-contract
+trace-contract: $(kernel_qemu_arg)
+	$(PROGRESS) "TRACE" "contract: $(TEST)"
+	$(PYTHON3) tools/diff-syscall-traces.py $(TEST) \
+		--arch $(ARCH) \
+		--kernel $(kernel_qemu_arg)
+
+# Run contract tests with auto-trace on failures
+.PHONY: test-contracts-trace
+test-contracts-trace: $(kernel_qemu_arg)
+	$(PROGRESS) "TEST" "M6.5 contract tests (with trace on failure)"
+	$(PYTHON3) tools/compare-contracts.py \
+		--arch $(ARCH) \
+		--kernel $(kernel_qemu_arg) \
+		--json build/contract-results.json \
+		--trace \
+		$(if $(CONTRACTS_FILTER),$(CONTRACTS_FILTER),)
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
@@ -563,7 +582,7 @@ clean:
 #
 #  Build Rules
 #
-build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
+build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard testing/*/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
 	$(PROGRESS) "BUILD" testing
 ifeq ($(OS),Windows_NT)
 	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"

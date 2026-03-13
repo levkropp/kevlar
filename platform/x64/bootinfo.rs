@@ -135,6 +135,7 @@ struct Cmdline {
     pub gateway_ip4: Option<ArrayString<15>>,
     pub pci_allowlist: ArrayVec<AllowedPciDevice, 4>,
     pub init_path: Option<ArrayString<128>>,
+    pub debug_filter: ArrayString<64>,
 }
 
 impl Cmdline {
@@ -151,6 +152,7 @@ impl Cmdline {
         let mut ip4 = None;
         let mut gateway_ip4 = None;
         let mut init_path = None;
+        let mut debug_filter = ArrayString::new();
         if !s.is_empty() {
             for config in s.split(' ') {
                 if config.is_empty() {
@@ -219,6 +221,9 @@ impl Cmdline {
                         }
                         gateway_ip4 = Some(s);
                     }
+                    (Some("debug"), Some(value)) => {
+                        let _ = debug_filter.try_push_str(value);
+                    }
                     (Some("init"), Some(value)) => {
                         info!("bootinfo: init path = \"{}\"", value);
                         let mut s = ArrayString::new();
@@ -248,6 +253,7 @@ impl Cmdline {
             ip4,
             gateway_ip4,
             init_path,
+            debug_filter,
         }
     }
 }
@@ -353,6 +359,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
+        debug_filter: cmdline.debug_filter,
     }
 }
 
@@ -400,6 +407,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
+        debug_filter: cmdline.debug_filter,
     }
 }
 
@@ -441,6 +449,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
+        debug_filter: cmdline.debug_filter,
     }
 }
 

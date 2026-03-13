@@ -64,7 +64,9 @@ impl VmArea {
     }
 
     pub fn overlaps(&self, other: UserVAddr, len: usize) -> bool {
-        self.start.value() <= other.value() + len && other.value() < self.start.value() + self.len
+        // Two half-open intervals [a,b) and [c,d) overlap iff a < d && c < b.
+        // Using <= on either side would incorrectly mark adjacent ranges as overlapping.
+        self.start.value() < other.value() + len && other.value() < self.start.value() + self.len
     }
 }
 

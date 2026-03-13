@@ -188,6 +188,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs,
         init_path: cmdline.init_path,
+        debug_filter: cmdline.debug_filter,
     }
 }
 
@@ -226,6 +227,7 @@ pub fn default_boot_info() -> BootInfo {
         gateway_ip4: None,
         cpu_mpdirs: ArrayVec::new(),
         init_path: None,
+        debug_filter: ArrayString::new(),
     }
 }
 
@@ -272,6 +274,7 @@ struct ParsedCmdline {
     ip4: Option<ArrayString<18>>,
     gateway_ip4: Option<ArrayString<15>>,
     init_path: Option<ArrayString<128>>,
+    debug_filter: ArrayString<64>,
 }
 
 fn parse_cmdline(s: &str) -> ParsedCmdline {
@@ -286,6 +289,7 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
         ip4: None,
         gateway_ip4: None,
         init_path: None,
+        debug_filter: ArrayString::new(),
     };
 
     for config in s.split(' ') {
@@ -318,6 +322,9 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
                 if s.try_push_str(value).is_ok() {
                     result.init_path = Some(s);
                 }
+            }
+            (Some("debug"), Some(value)) => {
+                let _ = result.debug_filter.try_push_str(value);
             }
             _ => {}
         }

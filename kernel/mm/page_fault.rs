@@ -192,8 +192,27 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     }
 
-    // Map the page in the page table, respecting VMA protection flags.
+    // If the VMA has PROT_NONE, any access is illegal — deliver SIGSEGV.
+    // This covers both demand-paged PROT_NONE VMAs and pages that were
+    // mprotect'd to PROT_NONE (PTE has paddr but no PRESENT bit).
+    // We send the signal (not exit_by_signal) so that a user-installed
+    // SIGSEGV handler can catch the fault.  The interrupt return path
+    // (x64_check_signal_on_irq_return) will deliver the signal and
+    // redirect RIP to the handler trampoline before IRET.
     let prot_flags = vma.prot().bits();
+    if prot_flags == 0 {
+        kevlar_platform::page_allocator::free_pages(paddr, 1);
+        drop(vm);
+        drop(vm_ref);
+        debug_warn!(
+            "pid={}: PROT_NONE access at {} (ip={:#x}), delivering SIGSEGV",
+            current.pid().as_i32(), unaligned_vaddr, ip
+        );
+        current.send_signal(SIGSEGV);
+        return;
+    }
+
+    // Map the page in the page table, respecting VMA protection flags.
     let vma_end_value = vma.end().value();
     let is_anonymous = matches!(vma.area_type(), VmAreaType::Anonymous);
 
