@@ -82,6 +82,7 @@ mod writev;
 mod dup;
 mod getegid;
 mod getpgrp;
+mod sched_getaffinity;
 mod sched_yield;
 mod umask;
 
@@ -311,6 +312,7 @@ mod syscall_numbers {
     pub const SYS_FCHMODAT: usize = 268;
     pub const SYS_FCHOWNAT: usize = 260;
     pub const SYS_FUTEX: usize = 202;
+    pub const SYS_SCHED_GETAFFINITY: usize = 204;
     pub const SYS_SET_ROBUST_LIST: usize = 273;
     pub const SYS_GETRANDOM: usize = 318;
     pub const SYS_TGKILL: usize = 234;
@@ -407,6 +409,7 @@ mod syscall_numbers {
     pub const SYS_MPROTECT: usize = 226;
     pub const SYS_MUNMAP: usize = 215;
     pub const SYS_BRK: usize = 214;
+    pub const SYS_SCHED_GETAFFINITY: usize = 123;
     pub const SYS_SCHED_YIELD: usize = 124;
     pub const SYS_NANOSLEEP: usize = 101;
     pub const SYS_GETTIMEOFDAY: usize = 169;
@@ -846,6 +849,11 @@ impl<'a> SyscallHandler<'a> {
             }
             // M1 Phase 1: Trivial syscalls
             SYS_SCHED_YIELD => self.sys_sched_yield(),
+            SYS_SCHED_GETAFFINITY => self.sys_sched_getaffinity(
+                a1 as c_int,
+                a2,
+                UserVAddr::new_nonnull(a3)?,
+            ),
             SYS_DUP => self.sys_dup(Fd::new(a1 as c_int)),
             SYS_VFORK => self.sys_vfork(),
             SYS_UMASK => self.sys_umask(a1 as u32),
@@ -1167,6 +1175,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_PIPE => "pipe",
         SYS_SELECT => "select",
         SYS_SCHED_YIELD => "sched_yield",
+        SYS_SCHED_GETAFFINITY => "sched_getaffinity",
         SYS_DUP => "dup",
         SYS_DUP2 => "dup2",
         SYS_NANOSLEEP => "nanosleep",

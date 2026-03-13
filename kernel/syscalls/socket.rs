@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::fs::inode::{FileLike, INode};
 
+use crate::net::service::NetworkStackService;
 use crate::net::socket::*;
 use crate::net::UnixStream;
 use crate::result::{Errno, Result};

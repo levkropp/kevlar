@@ -143,9 +143,13 @@ forked_child_entry:
     swapgs
     iretq
 
-/// fn do_switch_thread(prev_rsp: u64, next_rsp: u64);
+/// fn do_switch_thread(prev_rsp: *mut u64, next_rsp: *const u64, ctx_saved: *mut u8);
 ///
-/// Saves the current context into `prev` and restore the context from `next`.
+/// Saves the current context into `prev` and restores the context from `next`.
+///
+/// After saving prev's RSP, sets *ctx_saved = 1 (release store; on x86 all
+/// stores are TSO-release so a plain byte store suffices).  This lets
+/// resume() on another CPU stop spinning before it enqueues this thread.
 ///
 /// A *context* is a state of registers including:
 ///
@@ -165,8 +169,11 @@ do_switch_thread:
     push r15
     pushfq
 
-    /* Save and restore the stack pointer. */
+    /* Save prev's RSP, then mark its context as saved (rdx = ctx_saved ptr). */
     mov [rdi], rsp
+    mov byte ptr [rdx], 1
+
+    /* Load next's RSP. */
     mov rsp, [rsi]
 
     /* Restore callee-saved registers. */

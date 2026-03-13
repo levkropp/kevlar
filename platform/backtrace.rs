@@ -42,7 +42,12 @@ struct Symbol {
 }
 
 fn resolve_symbol(vaddr: VAddr) -> Option<Symbol> {
-    assert!(unsafe { __symbol_table.magic } == 0xbeefbeef);
+    // Symbol table is only populated by the build system (post-link step).
+    // If magic doesn't match, we're running without symbols — return None
+    // gracefully rather than panicking (which would recurse into this function).
+    if unsafe { __symbol_table.magic } != 0xbeefbeef {
+        return None;
+    }
 
     let num_symbols = unsafe { __symbol_table.num_symbols };
     let symbols = unsafe {
@@ -74,6 +79,41 @@ fn resolve_symbol(vaddr: VAddr) -> Option<Symbol> {
     } else {
         None
     }
+}
+
+/// Print context for an interrupt/exception that occurred at the given RIP.
+/// Shows the interrupted symbol (or a diagnostic if RIP is invalid), then
+/// walks the RBP chain to print a backtrace from the interrupted frame.
+/// Safe to call from panic handlers — never panics itself.
+pub(crate) fn print_interrupted_context(rip: u64, rbp: u64) {
+    const KERNEL_BASE: u64 = 0xffff_8000_0000_0000;
+    let vaddr = VAddr::new(rip as usize);
+    if let Some(sym) = resolve_symbol(vaddr) {
+        let offset = rip as usize - sym.addr.value();
+        warn!(
+            "  interrupted at: {:016x}  {}+{:#x}",
+            rip, sym.name, offset
+        );
+    } else if rip < KERNEL_BASE {
+        warn!(
+            "  interrupted at: {:016x}  (below kernel base — not a kernel address)",
+            rip
+        );
+    } else {
+        warn!(
+            "  interrupted at: {:016x}  (no symbol)",
+            rip
+        );
+    }
+    warn!("  backtrace from interrupted frame (rbp={:#x}):", rbp);
+    Backtrace::from_rbp(rbp).traverse(|i, vaddr| {
+        if let Some(sym) = resolve_symbol(vaddr) {
+            let offset = vaddr.value() - sym.addr.value();
+            warn!("    {}: {:016x}  {}+{:#x}", i, vaddr.value(), sym.name, offset);
+        } else {
+            warn!("    {}: {:016x}  (unknown)", i, vaddr.value());
+        }
+    });
 }
 
 /// Prints a backtrace.

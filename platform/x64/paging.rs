@@ -293,12 +293,36 @@ impl PageTable {
         }
     }
 
-    /// Flushes the TLB for a specific virtual address.
+    /// Flushes the TLB for a specific virtual address on all online CPUs.
+    ///
+    /// On SMP systems this broadcasts a TLB-shootdown IPI so that every CPU
+    /// using this address space invalidates its local TLB entry.  The local
+    /// `invlpg` is issued before the IPI is sent.
     #[inline(always)]
     pub fn flush_tlb(&self, vaddr: UserVAddr) {
+        super::apic::tlb_shootdown(vaddr.value());
+    }
+
+    /// Flushes the TLB for a specific virtual address on the LOCAL CPU only.
+    ///
+    /// Used by bulk operations (e.g. sys_munmap) that flush all pages locally
+    /// with individual invlpg calls and then send a single remote IPI
+    /// via `flush_tlb_remote()` to cover all of them at once.
+    #[inline(always)]
+    pub fn flush_tlb_local(&self, vaddr: UserVAddr) {
         unsafe {
-            core::arch::asm!("invlpg [{}]", in(reg) vaddr.value(), options(nostack, preserves_flags));
+            core::arch::asm!("invlpg [{}]", in(reg) vaddr.value(),
+                options(nostack, preserves_flags));
         }
+    }
+
+    /// Sends ONE IPI to all other CPUs telling them to reload CR3 (full TLB flush).
+    ///
+    /// Call after a batch of `flush_tlb_local` calls to flush remote CPUs
+    /// with a single IPI round-trip instead of one per page.
+    #[inline(always)]
+    pub fn flush_tlb_remote(&self) {
+        super::apic::tlb_remote_full_flush();
     }
 
     /// Flushes the entire TLB by reloading CR3.

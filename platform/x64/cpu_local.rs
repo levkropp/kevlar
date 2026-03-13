@@ -88,6 +88,11 @@ pub struct CpuLocalHead {
     pub rsp0: u64,
     /// The temporary save space for the user stack in the syscall context.
     pub rsp3: u64,
+    /// Preemption disable count.  Incremented at the start of `switch()` and
+    /// decremented after `do_switch_thread` returns.  The timer preemption
+    /// handler skips `process::switch()` while this is non-zero, preventing
+    /// nested context switches on the same CPU.
+    pub preempt_count: u32,
 }
 
 #[used]

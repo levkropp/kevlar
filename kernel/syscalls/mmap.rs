@@ -59,7 +59,7 @@ impl<'a> SyscallHandler<'a> {
         // Determine the virtual address space to map.
         let current = current_process();
         let vm_ref = current.vm();
-        let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
+        let mut vm = vm_ref.as_ref().unwrap().lock_preempt();
         let mapped_uaddr = if flags.contains(MMapFlags::MAP_FIXED) {
             match addr_hint {
                 Some(addr) => {
@@ -74,8 +74,8 @@ impl<'a> SyscallHandler<'a> {
                         for i in 0..num_pages {
                             let page_addr = addr.add(i * PAGE_SIZE);
                             if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
-                                free_pages(paddr, 1);
                                 vm.page_table().flush_tlb(page_addr);
+                                free_pages(paddr, 1);
                             }
                         }
                     }

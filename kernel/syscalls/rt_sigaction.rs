@@ -23,7 +23,7 @@ impl<'a> SyscallHandler<'a> {
             let handler_value: usize = match old_action {
                 SigAction::Ignore => SIG_IGN,
                 SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
-                SigAction::Handler { handler } => handler.value(),
+                SigAction::Handler { handler, .. } => handler.value(),
             };
             debug::usercopy::set_context("sys_rt_sigaction:oldact");
             let r = oldact_ptr.write::<usize>(&handler_value);
@@ -32,7 +32,20 @@ impl<'a> SyscallHandler<'a> {
         }
 
         if let Some(act) = UserVAddr::new(act) {
+            // Linux x86_64 kernel sigaction layout:
+            //   [0]:  sa_handler  (8 bytes)
+            //   [8]:  sa_flags    (8 bytes)
+            //   [16]: sa_restorer (8 bytes)
+            //   [24]: sa_mask     (8 bytes)
+            const SA_RESTORER: usize = 0x04000000;
             let handler = act.read::<usize>()?;
+            let sa_flags = act.add(8).read::<usize>()?;
+            let restorer = if sa_flags & SA_RESTORER != 0 {
+                let restorer_fn = act.add(16).read::<usize>()?;
+                UserVAddr::new(restorer_fn)
+            } else {
+                None
+            };
             let new_action = match handler {
                 SIG_IGN => SigAction::Ignore,
                 SIG_DFL => match DEFAULT_ACTIONS.get(signum as usize) {
@@ -41,6 +54,7 @@ impl<'a> SyscallHandler<'a> {
                 },
                 _ => SigAction::Handler {
                     handler: UserVAddr::new(handler).ok_or_else(|| Error::new(Errno::EFAULT))?,
+                    restorer,
                 },
             };
 

@@ -62,8 +62,43 @@ pub fn start_ap_preemption_timer() {
     unsafe { timer::init_ap() }
 }
 
+/// Broadcast a halt IPI to all other CPUs on panic.
+/// TODO: implement via GIC SGI (Software Generated Interrupt).
+pub fn broadcast_halt_ipi() {
+    // ARM64/GIC implementation pending. Other CPUs will eventually see
+    // PANICKED=true and halt on their next interrupt.
+}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 50;
+
+/// Returns true if hardware interrupts are currently enabled (DAIF.I = 0).
+#[inline(always)]
+pub fn interrupts_enabled() -> bool {
+    let daif: u64;
+    unsafe { core::arch::asm!("mrs {}, daif", out(reg) daif) }
+    // DAIF bit 7 = I (IRQ mask). I=0 means interrupts are enabled.
+    daif & (1 << 7) == 0
+}
+
+/// Increment the per-CPU preemption disable count.
+/// While > 0, the timer preemption handler will not call `process::switch()`.
+#[inline(always)]
+pub fn preempt_disable() {
+    cpu_local::cpu_local_head().preempt_count += 1;
+}
+
+/// Decrement the per-CPU preemption disable count.
+#[inline(always)]
+pub fn preempt_enable() {
+    cpu_local::cpu_local_head().preempt_count -= 1;
+}
+
+/// Returns true if preemption is currently disabled (preempt_count > 0).
+#[inline(always)]
+pub fn in_preempt() -> bool {
+    cpu_local::cpu_local_head().preempt_count > 0
+}
 
 /// The base virtual address of straight mapping (TTBR1 region).
 pub const KERNEL_BASE_ADDR: usize = 0xffff_0000_0000_0000;

@@ -4,6 +4,7 @@
 //! This module was moved from kernel/arch/arm64/process.rs to consolidate
 //! all unsafe code in the platform crate.
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::address::{AccessError, UserVAddr, VAddr};
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
@@ -30,6 +31,11 @@ pub const USER_STACK_TOP: UserVAddr = USER_VALLOC_BASE;
 pub struct ArchTask {
     sp: UnsafeCell<u64>,
     pub tpidr_el0: AtomicCell<u64>, // User TLS base (equivalent of fsbase)
+    /// Set to `false` just before `do_switch_thread` saves this task's SP,
+    /// then back to `true` by the assembly after the save.  `resume()` spins
+    /// on this flag before enqueuing the task, preventing another CPU from
+    /// loading a stale SP while the save is in flight.
+    pub context_saved: AtomicBool,
     kernel_stack: OwnedPages,
     interrupt_stack: OwnedPages,
     syscall_stack: OwnedPages,
@@ -41,7 +47,7 @@ unsafe extern "C" {
     fn kthread_entry();
     fn userland_entry();
     fn forked_child_entry();
-    fn do_switch_thread(prev_sp: *const u64, next_sp: *const u64);
+    fn do_switch_thread(prev_sp: *mut u64, next_sp: *const u64, ctx_saved: *mut u8);
 }
 
 unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
@@ -101,6 +107,7 @@ impl ArchTask {
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -169,6 +176,7 @@ impl ArchTask {
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -195,6 +203,7 @@ impl ArchTask {
             tpidr_el0: AtomicCell::new(0),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -257,6 +266,7 @@ impl ArchTask {
             tpidr_el0: AtomicCell::new(self.tpidr_el0.load()),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -324,6 +334,7 @@ impl ArchTask {
             tpidr_el0: AtomicCell::new(tpidr_el0_val),
             interrupt_stack,
             syscall_stack,
+            context_saved: AtomicBool::new(true),
             kernel_stack,
         }
     }
@@ -343,28 +354,29 @@ impl ArchTask {
         frame: &mut PtRegs,
         signal: i32,
         sa_handler: UserVAddr,
+        restorer: Option<UserVAddr>,
     ) -> Result<(), AccessError> {
-        // ARM64 signal trampoline: SVC #0 with x8 = __NR_rt_sigreturn (139).
-        const TRAMPOLINE: &[u8] = &[
-            0x88, 0x11, 0x80, 0xd2, // mov x8, #139 (__NR_rt_sigreturn)
-            0x01, 0x00, 0x00, 0xd4, // svc #0
-        ];
-
-        fn push_to_user_stack(sp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
-            let sp = sp.sub(8);
-            sp.write::<u64>(&value)?;
-            Ok(sp)
-        }
-
         let mut user_sp = UserVAddr::new_nonnull(frame.sp as usize)?;
 
-        // Copy the trampoline code onto the user stack.
-        user_sp = user_sp.sub(TRAMPOLINE.len());
-        let trampoline_pc = user_sp;
-        user_sp.write_bytes(TRAMPOLINE)?;
+        // Determine the LR (return address) for the signal handler.
+        // Prefer SA_RESTORER (e.g. musl's __restore_rt) to avoid placing
+        // executable code on a non-executable stack.
+        let return_pc = if let Some(res) = restorer {
+            res.as_isize() as u64
+        } else {
+            // ARM64 signal trampoline: SVC #0 with x8 = __NR_rt_sigreturn (139).
+            const TRAMPOLINE: &[u8] = &[
+                0x88, 0x11, 0x80, 0xd2, // mov x8, #139 (__NR_rt_sigreturn)
+                0x01, 0x00, 0x00, 0xd4, // svc #0
+            ];
+            user_sp = user_sp.sub(TRAMPOLINE.len());
+            let trampoline_pc = user_sp;
+            user_sp.write_bytes(TRAMPOLINE)?;
+            trampoline_pc.as_isize() as u64
+        };
 
-        // Set x30 (LR) to the trampoline so the signal handler returns to it.
-        frame.regs[30] = trampoline_pc.as_isize() as u64;
+        // Set x30 (LR) so the signal handler returns to the restorer/trampoline.
+        frame.regs[30] = return_pc;
 
         frame.pc = sa_handler.as_isize() as u64;
         frame.sp = user_sp.as_isize() as u64;
@@ -393,7 +405,15 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     // Restore next thread's TPIDR_EL0 (user TLS base).
     unsafe {
         core::arch::asm!("msr tpidr_el0, {}", in(reg) next.tpidr_el0.load());
-        do_switch_thread(prev.sp.get(), next.sp.get());
+        // Signal that prev's SP is about to be overwritten.  The assembly
+        // sets this back to true after the save, allowing resume() to enqueue
+        // the thread without loading a stale SP.
+        prev.context_saved.store(false, Ordering::Release);
+        do_switch_thread(
+            prev.sp.get(),
+            next.sp.get(),
+            prev.context_saved.as_ptr() as *mut u8,
+        );
     }
 }
 
