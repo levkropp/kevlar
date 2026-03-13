@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use self::{null::NullFile, tty::Tty};
+use self::{null::NullFile, zero::ZeroFile, tty::Tty};
 
 use crate::{
     fs::{
@@ -16,6 +16,7 @@ use super::tmpfs::TmpFs;
 
 mod null;
 mod tty;
+mod zero;
 
 pub static DEV_FS: Once<Arc<DevFs>> = Once::new();
 static NULL_FILE: Once<Arc<dyn FileLike>> = Once::new();
@@ -35,6 +36,7 @@ impl DevFs {
         PTMX.init(|| Arc::new(Ptmx::new(pts_dir)));
 
         root_dir.add_file("null", NULL_FILE.clone());
+        root_dir.add_file("zero", Arc::new(ZeroFile::new()) as Arc<dyn FileLike>);
         root_dir.add_file("tty", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("console", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("ptmx", PTMX.clone() as Arc<dyn FileLike>);
