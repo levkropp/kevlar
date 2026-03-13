@@ -231,6 +231,15 @@ impl PageTable {
             return false;
         }
 
+        if prot_flags == 0 {
+            // PROT_NONE: clear PRESENT but keep paddr so permissions can be
+            // restored later without re-allocating the page.
+            unsafe {
+                *entry_ptr.as_ptr() = paddr_bits;
+            }
+            return true;
+        }
+
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
         if prot_flags & 2 != 0 {
             attrs |= PageAttrs::WRITABLE;

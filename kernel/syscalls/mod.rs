@@ -38,6 +38,7 @@ mod fsync;
 mod getcwd;
 mod getdents64;
 mod getpeername;
+mod getpriority;
 mod getpgid;
 mod getpid;
 mod getppid;
@@ -340,6 +341,8 @@ mod syscall_numbers {
     pub const SYS_SIGNALFD4: usize = 289;
     pub const SYS_EVENTFD2: usize = 290;
     pub const SYS_EPOLL_CREATE1: usize = 291;
+    pub const SYS_GETPRIORITY: usize = 140;
+    pub const SYS_SETPRIORITY: usize = 141;
     // M5 Phase 1: File metadata & extended operations
     pub const SYS_STATFS: usize = 137;
     pub const SYS_FSTATFS: usize = 138;
@@ -467,6 +470,8 @@ mod syscall_numbers {
     pub const SYS_CLOCK_GETTIME: usize = 113;
     pub const SYS_GETRANDOM: usize = 278;
     pub const SYS_REBOOT: usize = 142;
+    pub const SYS_GETPRIORITY: usize = 141;
+    pub const SYS_SETPRIORITY: usize = 140;
     pub const SYS_CLONE: usize = 220;
     pub const SYS_FACCESSAT: usize = 48;
     pub const SYS_PPOLL: usize = 73;
@@ -757,6 +762,8 @@ impl<'a> SyscallHandler<'a> {
             SYS_GETPGID => self.sys_getpgid(PId::new(a1 as i32)),
             SYS_GETUID => Ok(current_process().uid() as isize),
             SYS_GETEUID => Ok(current_process().euid() as isize),
+            SYS_GETPRIORITY => self.sys_getpriority(a1 as i32, a2 as i32),
+            SYS_SETPRIORITY => self.sys_setpriority(a1 as i32, a2 as i32, a3 as i32),
             SYS_SETUID => {
                 current_process().set_uid(a1 as u32);
                 current_process().set_euid(a1 as u32);
@@ -1292,6 +1299,8 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_PRCTL => "prctl",
         SYS_CAPGET => "capget",
         SYS_CAPSET => "capset",
+        SYS_GETPRIORITY => "getpriority",
+        SYS_SETPRIORITY => "setpriority",
         SYS_STATFS => "statfs",
         SYS_FSTATFS => "fstatfs",
         SYS_UTIMENSAT => "utimensat",

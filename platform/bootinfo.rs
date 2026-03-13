@@ -33,4 +33,7 @@ pub struct BootInfo {
     /// Override init binary from kernel cmdline (`init=/path/to/binary`).
     /// When set, runs this binary directly as PID 1 instead of INIT_SCRIPT.
     pub init_path: Option<ArrayString<128>>,
+    /// Debug filter from kernel cmdline (`debug=syscall,fault,...`).
+    /// When set, overrides the compile-time KEVLAR_DEBUG env var.
+    pub debug_filter: ArrayString<64>,
 }

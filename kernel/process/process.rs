@@ -141,6 +141,8 @@ pub struct Process {
     euid: AtomicU32,
     gid: AtomicU32,
     egid: AtomicU32,
+    /// Nice value (-20 to +19). Used by getpriority/setpriority.
+    nice: AtomicI32,
     /// Whether this process is a child subreaper (PR_SET_CHILD_SUBREAPER).
     is_child_subreaper: AtomicBool,
     /// Process name set via PR_SET_NAME (max 16 bytes including NUL).
@@ -179,6 +181,7 @@ impl Process {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            nice: AtomicI32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
@@ -250,6 +253,7 @@ impl Process {
             euid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            nice: AtomicI32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
@@ -328,6 +332,8 @@ impl Process {
     pub fn set_euid(&self, euid: u32) { self.euid.store(euid, Ordering::Relaxed); }
     pub fn set_gid(&self, gid: u32) { self.gid.store(gid, Ordering::Relaxed); }
     pub fn set_egid(&self, egid: u32) { self.egid.store(egid, Ordering::Relaxed); }
+    pub fn nice(&self) -> i32 { self.nice.load(Ordering::Relaxed) }
+    pub fn set_nice(&self, n: i32) { self.nice.store(n, Ordering::Relaxed); }
 
     // ── Subreaper ────────────────────────────────────────────────────
     pub fn is_child_subreaper(&self) -> bool {
@@ -951,6 +957,7 @@ impl Process {
             euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
             gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
@@ -1016,6 +1023,7 @@ impl Process {
             euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
             gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0),

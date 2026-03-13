@@ -199,9 +199,13 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     kevlar_platform::set_handler(&Handler);
 
     // Initialize structured debug event system.
-    // In the future, parse "debug=..." from the bootinfo command line.
-    // For now, use the compile-time default (debug builds: panic+canary+fault).
-    debug::init(option_env!("KEVLAR_DEBUG"));
+    // Cmdline `debug=...` takes precedence over compile-time KEVLAR_DEBUG.
+    let debug_str = if !bootinfo.debug_filter.is_empty() {
+        Some(bootinfo.debug_filter.as_str())
+    } else {
+        option_env!("KEVLAR_DEBUG")
+    };
+    debug::init(debug_str);
 
     // Initialize memory allocators first.
     interrupt::init();

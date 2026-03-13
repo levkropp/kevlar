@@ -249,6 +249,8 @@ def main():
     parser.add_argument("--cflags", default="")
     parser.add_argument("--build-dir", default="build/contracts")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--trace", action="store_true",
+                        help="On FAIL/DIVERGE, auto-run diff-syscall-traces.py to diagnose")
     args = parser.parse_args()
 
     repo_root = Path(__file__).parent.parent
@@ -363,6 +365,30 @@ def main():
                 print("    --- Kevlar output ---")
                 for l in extract_contract_lines(kevlar_out):
                     print(f"    {l}")
+
+        # Auto-trace on failure/divergence
+        if args.trace and status != "PASS" and not args.no_linux and not args.no_kevlar:
+            trace_script = Path(__file__).parent / "diff-syscall-traces.py"
+            if trace_script.exists():
+                stem = src.stem
+                print(f"    --- Syscall trace diff ({stem}) ---")
+                trace_cmd = [
+                    sys.executable, str(trace_script), stem,
+                    "--arch", args.arch,
+                    "--kernel", str(kernel_elf),
+                    "--timeout", str(args.timeout),
+                    "--build-dir", args.build_dir,
+                    "--cc", args.cc,
+                    "--context", "3",
+                ]
+                trace_result = subprocess.run(
+                    trace_cmd, capture_output=True, text=True, timeout=120,
+                )
+                for line in trace_result.stdout.splitlines():
+                    print(f"    {line}")
+                if trace_result.stderr:
+                    for line in trace_result.stderr.splitlines()[:5]:
+                        print(f"    [stderr] {line}")
 
         results.append({
             "test": test_name,
