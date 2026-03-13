@@ -179,6 +179,9 @@ COPY testing/contracts/vm/tlb_shootdown.c /contracts/
 COPY testing/contracts/signals/mask_semantics.c /contracts/
 COPY testing/contracts/signals/sa_restart.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
+COPY testing/contracts/scheduling/nice_values.c /contracts/
+COPY testing/contracts/scheduling/sched_yield.c /contracts/
+COPY testing/contracts/scheduling/sched_fairness.c /contracts/
 RUN for src in /contracts/*.c; do \
         name=$(basename ${src%.c}); \
         musl-gcc -static -O1 -Wall -Wno-unused-result -o /contracts/contract-${name} $src; \

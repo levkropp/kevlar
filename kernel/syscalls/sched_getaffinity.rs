@@ -30,6 +30,8 @@ impl<'a> SyscallHandler<'a> {
             buf[cpu / 8] |= 1 << (cpu % 8);
         }
         mask.write_bytes(&buf[..size])?;
-        Ok(0)
+        // Linux returns the number of bytes written (not 0).
+        // musl uses this to determine how many bits to scan.
+        Ok(size as isize)
     }
 }
