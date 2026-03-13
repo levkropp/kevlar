@@ -30,26 +30,33 @@ impl WaitQueue {
         F: FnMut() -> Result<Option<R>>,
     {
         loop {
-            // Enqueue the current process into the wait queue before checking
-            // if we need to sleep on it.
+            // Atomically set state to BlockedSignalable AND enqueue in the
+            // wait queue while holding the queue's SpinLock (which disables
+            // interrupts via cli).  Without this, the LAPIC preempt timer can
+            // fire in the window between set_state() and push_back():
             //
-            // You might wonder why we don't `sleep_if_none` first. Consider
-            // the following situation:
+            //   set_state(BlockedSignalable)  ← removed from run queue
+            //   [LAPIC preempt fires here]    ← switch() sees Blocked, does
+            //                                    NOT re-enqueue → thread lost!
+            //   push_back(current)            ← never reached
             //
-            //  1. Check the RX packets queue and it's now empty, the current
-            //     thread needs to sleep until we receive a new packet:
-            //     `sleep_if_none` returns None.
-            //
-            //  [an interrupt arrives here]: receive a RX packet from the device.
-            //
-            //  3. Enqueue the current thread into the wait queue.
-            //  4. Enter the sleep state despite a RX packet exists on the queue!
-            current_process().set_state(ProcessState::BlockedSignalable);
-            self.queue.lock().push_back(current_process().clone());
-            self.waiter_count.fetch_add(1, Ordering::Relaxed);
+            // A lost thread (neither in the run queue nor any WaitQueue) will
+            // never be resumed, causing the joining thread to block forever.
+            // Holding the queue lock across both operations keeps interrupts
+            // masked for those ~2 instructions, preventing the race.
+            {
+                let mut q = self.queue.lock();
+                current_process().set_state(ProcessState::BlockedSignalable);
+                q.push_back(current_process().clone());
+                self.waiter_count.fetch_add(1, Ordering::Relaxed);
+            }
 
             if current_process().has_pending_signals() {
-                current_process().resume();
+                // Restore Runnable state without re-enqueuing: we are the
+                // current process so there is no need to add ourselves to the
+                // scheduler run queue — the preempt timer will do that on the
+                // next tick.  resume() would spuriously enqueue us here.
+                current_process().set_state(ProcessState::Runnable);
                 self.queue
                     .lock()
                     .retain(|proc| !Arc::ptr_eq(proc, current_process()));
@@ -65,7 +72,9 @@ impl WaitQueue {
 
             if let Some(ret_value) = ret_value {
                 // The condition is met. The current thread doesn't have to sleep.
-                current_process().resume();
+                // Same reasoning: set_state(Runnable) rather than resume() to
+                // avoid spuriously enqueuing the currently-running process.
+                current_process().set_state(ProcessState::Runnable);
                 self.queue
                     .lock()
                     .retain(|proc| !Arc::ptr_eq(proc, current_process()));

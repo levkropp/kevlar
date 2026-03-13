@@ -31,6 +31,158 @@ const LAPIC_TIMER_PERIODIC:  u32 = 1 << 17;
 /// Interrupt vector for per-CPU LAPIC timer preemption (APs).
 pub const LAPIC_PREEMPT_VECTOR: u8 = 0x40;
 
+/// Interrupt vector broadcast to all CPUs (except self) to halt them on panic.
+pub const PANIC_HALT_VECTOR: u8 = 0x41;
+
+/// Interrupt vector broadcast to all CPUs (except self) for TLB shootdown.
+pub const TLB_SHOOTDOWN_VECTOR: u8 = 0x42;
+
+/// Virtual address to invalidate during the current TLB shootdown.
+pub static TLB_SHOOTDOWN_VADDR: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Bitmask of CPU indices that have not yet acknowledged the current shootdown.
+/// Bit i is set while CPU i has not called invlpg + ack.
+pub static TLB_SHOOTDOWN_PENDING: AtomicU32 = AtomicU32::new(0);
+
+/// Serialises concurrent TLB-shootdown senders.
+///
+/// We use `lock_no_irq` (no cli/sti) deliberately: while CPU A holds this
+/// lock and spin-waits for acks, CPU B must be able to receive and handle
+/// CPU A's IPI even when CPU B is itself trying to acquire this lock.
+/// Interrupt delivery is not suppressed by the spin loop in `lock_no_irq`.
+static TLB_SHOOTDOWN_LOCK: crate::spinlock::SpinLock<()> =
+    crate::spinlock::SpinLock::new(());
+
+/// Broadcast a "halt now" Fixed IPI to all CPUs except the current one.
+///
+/// Called from the panic handler after claiming the panic slot, so only the
+/// first panicking CPU ever calls this.  Other CPUs receive the IPI on
+/// `PANIC_HALT_VECTOR`, disable interrupts, and spin-halt, eliminating
+/// double-panic noise and interleaved output on the serial console.
+///
+/// The "All Excluding Self" shorthand (bits 19:18 = 0b11) avoids the need to
+/// know the destination APIC IDs at panic time, which is important because the
+/// ACPI/MADT data structures might already be in an inconsistent state.
+pub unsafe fn broadcast_halt_ipi() {
+    // ICR shorthand 0b11 = All Excluding Self; delivery = Fixed (mode 0).
+    const ICR_ALL_EXCL_SELF_FIXED: u32 = (3 << 18) | PANIC_HALT_VECTOR as u32;
+    wait_icr_idle();
+    lapic_write(ICR_LOW_OFF, ICR_ALL_EXCL_SELF_FIXED);
+}
+
+/// Flush a single page from all online CPUs' TLBs.
+///
+/// Performs the local `invlpg` immediately, then — if there are other online
+/// CPUs — broadcasts `TLB_SHOOTDOWN_VECTOR` and spin-waits until every other
+/// CPU has acknowledged.
+///
+/// **Must not be called with hardware interrupts disabled** (i.e. must not be
+/// called while holding a regular `SpinLock::lock()` guard).  Callers that
+/// hold `lock_no_irq` or `lock_preempt` guards are fine: those do not suppress
+/// interrupts, so the receiving CPUs can handle the IPI while spinning.
+///
+/// Supports up to 32 online CPUs (u32 bitmask).
+pub fn tlb_shootdown(vaddr: usize) {
+    use core::sync::atomic::Ordering;
+
+    // Local invlpg — always needed and cheap.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) vaddr,
+            options(nostack, preserves_flags));
+    }
+
+    let num_cpus = super::smp::num_online_cpus();
+    if num_cpus <= 1 {
+        return;
+    }
+
+    let my_cpu = super::cpu_id();
+    debug_assert!((my_cpu as u32) < 32, "tlb_shootdown: CPU id >= 32");
+
+    // Bitmask of all CPUs except self.
+    let pending: u32 = ((1u32 << num_cpus) - 1) & !(1u32 << my_cpu);
+
+    // Acquire the global shootdown slot (no interrupt disable).
+    let _lock = TLB_SHOOTDOWN_LOCK.lock_no_irq();
+
+    // Publish the shootdown address and the pending bitmask.
+    // The Release fence ensures both stores are visible to other CPUs
+    // before the IPI fires.
+    TLB_SHOOTDOWN_VADDR.store(vaddr, Ordering::Relaxed);
+    TLB_SHOOTDOWN_PENDING.store(pending, Ordering::Relaxed);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    // Record the TLB shootdown in the flight recorder.
+    crate::flight_recorder::record(
+        crate::flight_recorder::kind::TLB_SEND,
+        pending,
+        vaddr as u64,
+        0,
+    );
+
+    // Broadcast TLB shootdown IPI to all CPUs except self.
+    const ICR_ALL_EXCL_SELF_SHOOTDOWN: u32 = (3 << 18) | TLB_SHOOTDOWN_VECTOR as u32;
+    unsafe {
+        wait_icr_idle();
+        lapic_write(ICR_LOW_OFF, ICR_ALL_EXCL_SELF_SHOOTDOWN);
+    }
+
+    // Spin until every target CPU has cleared its bit.
+    while TLB_SHOOTDOWN_PENDING.load(Ordering::Acquire) != 0 {
+        core::hint::spin_loop();
+    }
+    // _lock dropped here, releasing the global shootdown slot.
+}
+
+/// Send ONE IPI to all other CPUs telling them to reload CR3 (full TLB flush).
+///
+/// More efficient than calling `tlb_shootdown` per page for large unmaps (e.g.
+/// `sys_munmap` over a whole thread stack): reduces N IPI round-trips to 1.
+///
+/// The receiver sees `TLB_SHOOTDOWN_VADDR == 0` as the sentinel for
+/// "reload CR3", vs a non-zero vaddr which means "invlpg that one page".
+///
+/// Same interrupt-enable requirement as `tlb_shootdown`.
+pub fn tlb_remote_full_flush() {
+    use core::sync::atomic::Ordering;
+
+    let num_cpus = super::smp::num_online_cpus();
+    if num_cpus <= 1 {
+        return;
+    }
+
+    let my_cpu = super::cpu_id();
+    debug_assert!((my_cpu as u32) < 32, "tlb_remote_full_flush: CPU id >= 32");
+
+    let pending: u32 = ((1u32 << num_cpus) - 1) & !(1u32 << my_cpu);
+
+    let _lock = TLB_SHOOTDOWN_LOCK.lock_no_irq();
+
+    // vaddr = 0 is the "full flush" sentinel; receiver reloads CR3.
+    TLB_SHOOTDOWN_VADDR.store(0, Ordering::Relaxed);
+    TLB_SHOOTDOWN_PENDING.store(pending, Ordering::Relaxed);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    // Record the full-TLB shootdown (vaddr=0 sentinel) in the flight recorder.
+    crate::flight_recorder::record(
+        crate::flight_recorder::kind::TLB_SEND,
+        pending,
+        0, // vaddr=0 means full CR3 reload
+        0,
+    );
+
+    const ICR_ALL_EXCL_SELF_SHOOTDOWN: u32 = (3 << 18) | TLB_SHOOTDOWN_VECTOR as u32;
+    unsafe {
+        wait_icr_idle();
+        lapic_write(ICR_LOW_OFF, ICR_ALL_EXCL_SELF_SHOOTDOWN);
+    }
+
+    while TLB_SHOOTDOWN_PENDING.load(Ordering::Acquire) != 0 {
+        core::hint::spin_loop();
+    }
+}
+
 /// LAPIC timer ticks in 10ms, measured by the BSP during calibration.
 static LAPIC_TICKS_PER_10MS: AtomicU32 = AtomicU32::new(0);
 

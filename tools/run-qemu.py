@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--append-cmdline", action="append")
     parser.add_argument("--disk", help="VirtIO block device disk image file")
     parser.add_argument("--log-serial")
+    parser.add_argument("--save-dump", metavar="FILE",
+                        help="Intercept serial output and save any crash dump to FILE")
     parser.add_argument("--qemu")
     parser.add_argument("kernel_elf", help="The kernel ELF executable.")
     parser.add_argument("qemu_args", nargs="*")
@@ -226,10 +228,53 @@ def main():
 
     # Windows doesn't support preexec_fn with os.setsid
     is_windows = platform.system() == "Windows"
-    if is_windows:
-        p = subprocess.Popen(argv)
+
+    # When --save-dump is given, intercept stdout to detect and save the
+    # base64-encoded crash dump emitted by the panic handler.
+    if args.save_dump:
+        import base64
+        import threading
+
+        popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+        if not is_windows:
+            popen_kwargs["preexec_fn"] = os.setsid
+        p = subprocess.Popen(argv, **popen_kwargs)
+
+        dump_lines = []
+        capturing = False
+        saved = False
+
+        def _intercept_stdout():
+            nonlocal capturing, saved
+            for raw in p.stdout:
+                sys.stdout.buffer.write(raw)
+                sys.stdout.buffer.flush()
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
+                    capturing = True
+                    dump_lines.clear()
+                elif line == "===KEVLAR_CRASH_DUMP_END===":
+                    capturing = False
+                    try:
+                        data = base64.b64decode("".join(dump_lines))
+                        with open(args.save_dump, "wb") as f:
+                            f.write(data)
+                        print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
+                              f"({len(data)} bytes)", file=sys.stderr)
+                        saved = True
+                    except Exception as e:
+                        print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
+                              file=sys.stderr)
+                elif capturing:
+                    dump_lines.append(line)
+
+        t = threading.Thread(target=_intercept_stdout, daemon=True)
+        t.start()
     else:
-        p = subprocess.Popen(argv, preexec_fn=os.setsid)
+        if is_windows:
+            p = subprocess.Popen(argv)
+        else:
+            p = subprocess.Popen(argv, preexec_fn=os.setsid)
 
     def _forward_signal(signum, _frame):
         """Forward signal to QEMU's process group so it shuts down cleanly."""
@@ -248,6 +293,8 @@ def main():
 
     try:
         p.wait()
+        if args.save_dump:
+            t.join(timeout=5)
     finally:
         if tmp_elf_path:
             try:
