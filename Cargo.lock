@@ -51,12 +51,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boot2dump"
-version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "225c5460e6cda737adafc046c6106ca1769963bce43261b8a38a18dfcc2efa50"
-
-[[package]]
 name = "buddy_system_allocator"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -248,7 +242,6 @@ dependencies = [
  "arrayvec",
  "atomic_refcell",
  "bitflags 2.11.0",
- "boot2dump",
  "crossbeam",
  "goblin",
  "hashbrown",

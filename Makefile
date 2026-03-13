@@ -227,6 +227,7 @@ iso: build
 run: build
 	$(PYTHON3) tools/run-qemu.py                                           \
 		--arch $(ARCH)                                                 \
+		--save-dump kevlar.dump                                        \
 		$(if $(GUI),--gui,)                                            \
 		$(if $(KVM),--kvm,)                                            \
 		$(if $(GDB),--gdb,)                                            \
@@ -365,6 +366,36 @@ test-storage: build/disk.img
 		echo "STORAGE TESTS FAILED"; exit 1; \
 	elif grep -q '^TEST_END' /tmp/kevlar-test-storage-$(PROFILE).log; then \
 		echo "ALL STORAGE TESTS PASSED"; \
+	fi
+
+.PHONY: test-threads
+test-threads:
+	$(PROGRESS) "TEST" "M6 threading (1 CPU)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-threads-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-threads-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-threads-$(PROFILE).log; then \
+		echo "THREADING TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-threads-$(PROFILE).log; then \
+		echo "ALL THREADING TESTS PASSED"; \
+	fi
+
+.PHONY: test-threads-smp
+test-threads-smp:
+	$(PROGRESS) "TEST" "M6 threading (4 CPUs)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-threads-smp-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-threads-smp-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-threads-smp-$(PROFILE).log; then \
+		echo "THREADING SMP TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-threads-smp-$(PROFILE).log; then \
+		echo "ALL THREADING SMP TESTS PASSED"; \
 	fi
 
 .PHONY: test-smp

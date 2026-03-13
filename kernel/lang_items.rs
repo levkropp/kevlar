@@ -35,13 +35,94 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 #[panic_handler]
 #[cfg(not(test))]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    // Disable interrupts immediately.  The panic handler formats PanicInfo
+    // (which holds references into the faulting frame's stack) using code
+    // that may span many instructions.  If a hardware IRQ fires in between
+    // — particularly a second #GP triggered by a bad interrupt stack — the
+    // CPU will re-enter x64_handle_interrupt and panic again, producing a
+    // spurious "double panic" before the first one is even logged.
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+    }
+
     use crate::logger::KERNEL_LOG_BUF;
     use core::sync::atomic::Ordering;
 
-    if PANICKED.load(Ordering::SeqCst) {
-        kevlar_platform::print::get_debug_printer().print_bytes(b"\ndouble panic!\n");
-        kevlar_platform::arch::halt();
+    // Check for recursive/double panic immediately. Use swap so that only the
+    // FIRST CPU to reach this point proceeds with full diagnostics; all others
+    // disable interrupts and halt forever without printing anything, keeping
+    // the serial console clean.
+    if PANICKED.swap(true, Ordering::SeqCst) {
+        // Another CPU already owns the panic output path.  Halt silently.
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+        }
+        loop { kevlar_platform::arch::halt(); }
     }
+
+    // Freeze all other CPUs immediately so they stop printing to the serial
+    // console.  This eliminates interleaved TEST_PASS / double-panic noise.
+    kevlar_platform::arch::broadcast_halt_ipi();
+
+    // Print the raw panic location using a crash-safe path that avoids
+    // PanicInfo::fmt (which crashes when the PanicInfo is corrupt — e.g. when
+    // an SMP race writes to the panicking thread's stack between the panic!()
+    // call and the handler being invoked).  `location()` returns a reference
+    // to a static Location whose `file` field is always a &'static str.
+    {
+        let cpu = kevlar_platform::arch::cpu_id();
+        let printer = kevlar_platform::print::get_debug_printer();
+        printer.print_bytes(b"\n[PANIC] CPU=");
+        // Print CPU id without allocation.
+        let mut cpu_buf = [0u8; 4];
+        let mut pos = 4usize;
+        let mut n = cpu;
+        if n == 0 {
+            pos -= 1;
+            cpu_buf[pos] = b'0';
+        } else {
+            while n > 0 {
+                pos -= 1;
+                cpu_buf[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+        }
+        printer.print_bytes(&cpu_buf[pos..]);
+        printer.print_bytes(b" at ");
+        if let Some(loc) = info.location() {
+            printer.print_bytes(loc.file().as_bytes());
+            printer.print_bytes(b":");
+            // Print line number without allocation.
+            let mut line_buf = [0u8; 12];
+            let mut pos = 12usize;
+            let mut n = loc.line();
+            if n == 0 {
+                pos -= 1;
+                line_buf[pos] = b'0';
+            } else {
+                while n > 0 {
+                    pos -= 1;
+                    line_buf[pos] = b'0' + (n % 10) as u8;
+                    n /= 10;
+                }
+            }
+            printer.print_bytes(&line_buf[pos..]);
+        } else {
+            printer.print_bytes(b"(no location)");
+        }
+        printer.print_bytes(b"\n");
+    }
+
+    // Capture the panic message NOW, before begin_panic might corrupt `info`
+    // by unwinding through the interrupt handler frame that owns the
+    // fmt::Arguments embedded in PanicInfo.
+    use core::fmt::Write;
+    let mut msg_buf = arrayvec::ArrayString::<512>::new();
+    let _ = write!(msg_buf, "{}", info);
 
     // Under Fortress/Balanced: try to unwind to a catch_unwind frame.
     // If a service triggered this panic, execution will resume at the
@@ -51,22 +132,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     #[cfg(any(feature = "profile-fortress", feature = "profile-balanced"))]
     {
         use alloc::boxed::Box;
-        use alloc::string::ToString;
-        let msg = info.to_string();
-        let _ = unwinding::panic::begin_panic(Box::new(msg));
+        let _ = unwinding::panic::begin_panic(Box::new(alloc::string::String::from(msg_buf.as_str())));
         // begin_panic returned — no catch frame found, this is a core panic.
     }
-
-    PANICKED.store(true, Ordering::SeqCst);
 
     // Emit structured panic event for LLM/MCP consumption.
     {
         use crate::debug::{self, DebugEvent, DebugFilter};
-        use core::fmt::Write;
-
-        // Build a compact panic message on the stack.
-        let mut msg_buf = arrayvec::ArrayString::<512>::new();
-        let _ = write!(msg_buf, "{}", info);
 
         // Capture backtrace frames into stack-allocated array.
         let bt_frames = kevlar_platform::backtrace::capture_frames();
@@ -94,8 +166,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         debug::set_filter(old_filter);
     }
 
-    error!("{}", info);
+    error!("{}", msg_buf.as_str());
     kevlar_platform::backtrace::backtrace();
+
+    // Dump the per-CPU flight recorder — shows what all CPUs were doing
+    // in the moments before the crash.  Other CPUs are halted by this point.
+    kevlar_platform::flight_recorder::dump();
 
     unsafe {
         warn!("preparing a crash dump...");
@@ -114,11 +190,72 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         dump_ref.len = off as u32;
 
         warn!("prepared crash dump: log_len={}", off);
-        warn!("booting boot2dump...");
+
+        // Emit the crash dump over serial as base64, framed by sentinel markers.
+        // run-qemu.py / the crash analyzer can detect the sentinels and decode
+        // the dump automatically.  This avoids the boot2dump approach (requires
+        // a virtio-blk disk that is absent from most QEMU test runs).
         let dump_as_bytes = core::slice::from_raw_parts(
             dump_buf as *const u8,
             core::mem::size_of::<KernelDump>(),
         );
-        boot2dump::save_to_file_and_reboot("kevlar.dump", dump_as_bytes);
+
+        {
+            use kevlar_platform::print::get_debug_printer;
+            let printer = get_debug_printer();
+            printer.print_bytes(b"\n===KEVLAR_CRASH_DUMP_BEGIN===\n");
+
+            const B64: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut col = 0usize;
+            let mut i = 0usize;
+
+            while i + 3 <= dump_as_bytes.len() {
+                let b0 = dump_as_bytes[i];
+                let b1 = dump_as_bytes[i + 1];
+                let b2 = dump_as_bytes[i + 2];
+                let out = [
+                    B64[(b0 >> 2) as usize],
+                    B64[(((b0 & 3) << 4) | (b1 >> 4)) as usize],
+                    B64[(((b1 & 0xf) << 2) | (b2 >> 6)) as usize],
+                    B64[(b2 & 0x3f) as usize],
+                ];
+                printer.print_bytes(&out);
+                col += 4;
+                if col >= 76 {
+                    printer.print_bytes(b"\n");
+                    col = 0;
+                }
+                i += 3;
+            }
+
+            // Handle the remaining 1 or 2 bytes with standard base64 padding.
+            match dump_as_bytes.len() - i {
+                1 => {
+                    let b0 = dump_as_bytes[i];
+                    printer.print_bytes(&[
+                        B64[(b0 >> 2) as usize],
+                        B64[((b0 & 3) << 4) as usize],
+                        b'=',
+                        b'=',
+                    ]);
+                }
+                2 => {
+                    let b0 = dump_as_bytes[i];
+                    let b1 = dump_as_bytes[i + 1];
+                    printer.print_bytes(&[
+                        B64[(b0 >> 2) as usize],
+                        B64[(((b0 & 3) << 4) | (b1 >> 4)) as usize],
+                        B64[((b1 & 0xf) << 2) as usize],
+                        b'=',
+                    ]);
+                }
+                _ => {}
+            }
+
+            printer.print_bytes(b"\n===KEVLAR_CRASH_DUMP_END===\n");
+        }
     }
+
+    loop { kevlar_platform::arch::halt(); }
 }

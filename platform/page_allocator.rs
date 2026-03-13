@@ -292,13 +292,11 @@ pub fn alloc_pages_owned(
 /// `OwnedPages` to free the pages in RAII basis.
 #[inline(always)]
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
-    if cfg!(debug_assertions) {
-        // Poison the memory.
-        unsafe {
-            paddr
-                .as_mut_ptr::<u8>()
-                .write_bytes(0xa5, num_pages * PAGE_SIZE);
-        }
+    // Unconditional poison — detect use-after-free in all builds.
+    unsafe {
+        paddr
+            .as_mut_ptr::<u8>()
+            .write_bytes(0xa5, num_pages * PAGE_SIZE);
     }
 
     // Fast path: single page → push to cache.

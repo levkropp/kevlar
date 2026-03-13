@@ -32,6 +32,7 @@ pub mod sync;
 pub mod bootinfo;
 pub mod global_allocator;
 pub mod logger;
+pub mod flight_recorder;
 pub mod page_allocator;
 pub mod profile;
 pub mod spinlock;
@@ -45,7 +46,8 @@ mod arm64;
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
-        cpu_id, enable_irq, halt, idle, num_online_cpus, read_clock_counter, semihosting_halt,
+        broadcast_halt_ipi, cpu_id, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, semihosting_halt,
         start_ap_preemption_timer, x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
@@ -53,7 +55,8 @@ pub mod arch {
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
-        cpu_id, enable_irq, halt, idle, num_online_cpus, read_clock_counter, semihosting_halt,
+        broadcast_halt_ipi, cpu_id, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, semihosting_halt,
         start_ap_preemption_timer, arm64_specific, Backtrace,
         PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
@@ -66,7 +69,10 @@ use kevlar_utils::static_cell::StaticCell;
 pub trait Handler: Sync {
     fn handle_console_rx(&self, char: u8);
     fn handle_irq(&self, irq: u8);
-    fn handle_timer_irq(&self);
+    /// Returns `true` if a context switch occurred during the timer tick.
+    /// The interrupt handler uses this to skip signal delivery via the old
+    /// thread's frame — the new thread gets signals on its next preemption.
+    fn handle_timer_irq(&self) -> bool;
     fn handle_page_fault(
         &self,
         unaligned_vaddr: Option<UserVAddr>,
@@ -92,8 +98,14 @@ pub trait Handler: Sync {
     ) -> isize;
 
     /// Called on every LAPIC timer tick on an AP to trigger preemption.
+    /// Returns `true` if a context switch actually occurred.
     /// Default implementation is a no-op (safe if called before kernel is ready).
-    fn handle_ap_preempt(&self) {}
+    fn handle_ap_preempt(&self) -> bool { false }
+
+    /// Called when an interrupt is about to return to user space.
+    /// The kernel may modify the frame to deliver a pending signal.
+    /// Default implementation is a no-op.
+    fn handle_interrupt_return(&self, _frame: *mut arch::PtRegs) {}
 
     #[cfg(debug_assertions)]
     fn usercopy_hook(&self) {}
@@ -106,7 +118,7 @@ struct NopHandler;
 impl Handler for NopHandler {
     fn handle_console_rx(&self, _char: u8) {}
     fn handle_irq(&self, _irq: u8) {}
-    fn handle_timer_irq(&self) {}
+    fn handle_timer_irq(&self) -> bool { false }
 
     fn handle_page_fault(
         &self,
