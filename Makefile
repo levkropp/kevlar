@@ -435,6 +435,49 @@ test-m6:
 	$(MAKE) test-regression-smp PROFILE=$(PROFILE)
 	@echo "M6 integration suite complete."
 
+# ─── M6.5 Contract Tests ────────────────────────────────────────────────────
+
+.PHONY: build-contracts
+build-contracts:
+	$(PROGRESS) "BUILD" "M6.5 contract test binaries"
+	@find testing/contracts -name '*.c' | while read src; do \
+		rel=$${src#testing/contracts/}; \
+		out=build/contracts/$${rel%.c}; \
+		mkdir -p $$(dirname $$out); \
+		gcc -static -O1 -Wall -Wno-unused-result -o $$out $$src 2>&1 \
+		  && echo "  CC  $$rel" \
+		  || echo "  FAIL $$rel"; \
+	done
+
+# Run contract tests: Linux (host) vs Kevlar (QEMU) comparison
+.PHONY: test-contracts
+test-contracts: $(kernel_qemu_arg)
+	$(PROGRESS) "TEST" "M6.5 contract tests (Linux vs Kevlar)"
+	$(PYTHON3) tools/compare-contracts.py \
+		--arch $(ARCH) \
+		--kernel $(kernel_qemu_arg) \
+		--json build/contract-results.json \
+		$(if $(CONTRACTS_FILTER),$(CONTRACTS_FILTER),)
+
+# Run only the VM contract tests (fastest subset)
+.PHONY: test-contracts-vm
+test-contracts-vm: $(kernel_qemu_arg)
+	$(PROGRESS) "TEST" "M6.5 VM contract tests"
+	$(PYTHON3) tools/compare-contracts.py \
+		--arch $(ARCH) \
+		--kernel $(kernel_qemu_arg) \
+		--json build/contract-results-vm.json \
+		vm
+
+# Linux-only baseline (no Kevlar QEMU required)
+.PHONY: test-contracts-linux
+test-contracts-linux:
+	$(PROGRESS) "TEST" "M6.5 contract tests (Linux baseline only)"
+	$(PYTHON3) tools/compare-contracts.py \
+		--no-kevlar \
+		--json build/contract-results-linux.json \
+		$(if $(CONTRACTS_FILTER),$(CONTRACTS_FILTER),)
+
 .PHONY: bench
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"

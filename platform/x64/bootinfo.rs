@@ -134,6 +134,7 @@ struct Cmdline {
     pub ip4: Option<ArrayString<18>>,
     pub gateway_ip4: Option<ArrayString<15>>,
     pub pci_allowlist: ArrayVec<AllowedPciDevice, 4>,
+    pub init_path: Option<ArrayString<128>>,
 }
 
 impl Cmdline {
@@ -149,6 +150,7 @@ impl Cmdline {
         let mut dhcp_enabled = true;
         let mut ip4 = None;
         let mut gateway_ip4 = None;
+        let mut init_path = None;
         if !s.is_empty() {
             for config in s.split(' ') {
                 if config.is_empty() {
@@ -217,6 +219,15 @@ impl Cmdline {
                         }
                         gateway_ip4 = Some(s);
                     }
+                    (Some("init"), Some(value)) => {
+                        info!("bootinfo: init path = \"{}\"", value);
+                        let mut s = ArrayString::new();
+                        if s.try_push_str(value).is_err() {
+                            warn!("bootinfo: init path is too long (max 128)");
+                        } else {
+                            init_path = Some(s);
+                        }
+                    }
                     (Some(path), None) if path.starts_with('/') => {
                         // QEMU appends a kernel image path. Just ignore it.
                     }
@@ -236,6 +247,7 @@ impl Cmdline {
             dhcp_enabled,
             ip4,
             gateway_ip4,
+            init_path,
         }
     }
 }
@@ -340,6 +352,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
+        init_path: cmdline.init_path,
     }
 }
 
@@ -386,6 +399,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
+        init_path: cmdline.init_path,
     }
 }
 
@@ -426,6 +440,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs: ArrayVec::new(),
+        init_path: cmdline.init_path,
     }
 }
 

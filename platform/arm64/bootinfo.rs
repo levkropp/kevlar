@@ -187,6 +187,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         ip4: cmdline.ip4,
         gateway_ip4: cmdline.gateway_ip4,
         cpu_mpdirs,
+        init_path: cmdline.init_path,
     }
 }
 
@@ -224,6 +225,7 @@ pub fn default_boot_info() -> BootInfo {
         ip4: None,
         gateway_ip4: None,
         cpu_mpdirs: ArrayVec::new(),
+        init_path: None,
     }
 }
 
@@ -269,6 +271,7 @@ struct ParsedCmdline {
     dhcp_enabled: bool,
     ip4: Option<ArrayString<18>>,
     gateway_ip4: Option<ArrayString<15>>,
+    init_path: Option<ArrayString<128>>,
 }
 
 fn parse_cmdline(s: &str) -> ParsedCmdline {
@@ -282,6 +285,7 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
         dhcp_enabled: true,
         ip4: None,
         gateway_ip4: None,
+        init_path: None,
     };
 
     for config in s.split(' ') {
@@ -307,6 +311,13 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
             }
             (Some("dhcp"), Some("off")) => {
                 result.dhcp_enabled = false;
+            }
+            (Some("init"), Some(value)) => {
+                info!("bootinfo: init path = \"{}\"", value);
+                let mut s = ArrayString::new();
+                if s.try_push_str(value).is_ok() {
+                    result.init_path = Some(s);
+                }
             }
             _ => {}
         }
