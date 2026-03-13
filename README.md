@@ -73,6 +73,8 @@ make run               # Build and boot on x86_64
 make ARCH=arm64 RELEASE=1 run  # ARM64 (release for TCG performance)
 ```
 
+**Windows users**: The Makefile automatically uses WSL2. Just run `make run` - it works!
+
 See [Documentation/quickstart.md](Documentation/quickstart.md) for full build
 instructions including Docker, prerequisites, and make targets.
 

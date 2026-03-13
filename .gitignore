@@ -10,6 +10,10 @@
 *.map
 *.pcap
 *.dtb
+*.img
+
+# Rust compiler ICE reports
+rustc-ice-*.txt
 
 # A temporary file created by the linker. Ignore them not to notify cargo-watch.
 *.map*

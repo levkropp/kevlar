@@ -151,6 +151,7 @@ endif
 
 export RUSTFLAGS = -Z emit-stack-sizes
 CARGOFLAGS += -Z build-std=core,alloc
+CARGOFLAGS += -Z json-target-spec
 CARGOFLAGS += --target $(target_json)
 CARGOFLAGS += $(if $(RELEASE),--release,)
 CARGOFLAGS += --no-default-features --features profile-$(PROFILE)
@@ -266,14 +267,14 @@ run-disk: build disk
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc
 
-.PHONY: test
-test:
-	$(MAKE) initramfs
-	$(CARGO) test $(CARGOFLAGS) $(TESTCARGOFLAGS)
+.PHONY: test-unit
+test-unit:
+	$(PROGRESS) "TEST" "unit tests"
+	RUSTFLAGS="" $(CARGO) test -p kevlar_utils -p log_filter
 
 .PHONY: testw
 testw:
-	$(CARGO) watch $(WATCHFLAGS) -s "$(MAKE) test"
+	$(CARGO) watch $(WATCHFLAGS) -s "$(MAKE) test-unit"
 
 .PHONY: check
 check:
@@ -325,8 +326,8 @@ lint-and-fix:
 	$(MAKE) $(DUMMY_INITRAMFS_PATH)
 	INITRAMFS_PATH=$(DUMMY_INITRAMFS_PATH) RUSTFLAGS="-C panic=abort -Z panic_abort_tests" $(CARGO) clippy --fix -Z unstable-options
 
-.PHONY: test
-test: disk
+.PHONY: test-integration
+test-integration: disk
 	$(PROGRESS) "TEST" "syscall correctness tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
@@ -338,6 +339,9 @@ test: disk
 	elif grep -q '^TEST_END' /tmp/kevlar-test-$(PROFILE).log; then \
 		echo "ALL TESTS PASSED"; \
 	fi
+
+.PHONY: test
+test: test-unit test-integration
 
 .PHONY: test-ext2
 test-ext2: disk
