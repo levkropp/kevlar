@@ -178,6 +178,8 @@ COPY testing/contracts/vm/mmap_file.c /contracts/
 COPY testing/contracts/vm/tlb_shootdown.c /contracts/
 COPY testing/contracts/signals/mask_semantics.c /contracts/
 COPY testing/contracts/signals/sa_restart.c /contracts/
+COPY testing/contracts/signals/delivery_order.c /contracts/
+COPY testing/contracts/signals/handler_context.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
 COPY testing/contracts/scheduling/nice_values.c /contracts/
 COPY testing/contracts/scheduling/sched_yield.c /contracts/
