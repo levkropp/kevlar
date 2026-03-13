@@ -173,6 +173,9 @@ COPY testing/contracts/vm/mprotect_basic.c /contracts/
 COPY testing/contracts/vm/mmap_anon.c /contracts/
 COPY testing/contracts/vm/mmap_hint_flags.c /contracts/
 COPY testing/contracts/vm/brk_basic.c /contracts/
+COPY testing/contracts/vm/demand_paging.c /contracts/
+COPY testing/contracts/vm/mmap_file.c /contracts/
+COPY testing/contracts/vm/tlb_shootdown.c /contracts/
 COPY testing/contracts/signals/mask_semantics.c /contracts/
 COPY testing/contracts/signals/sa_restart.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
@@ -210,10 +213,10 @@ COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /mnt /var/www/html
-ADD testing/etc/banner /etc
-ADD testing/etc/group /etc
-ADD testing/etc/passwd /etc
-ADD testing/etc/profile /etc
+COPY testing/etc/banner /etc/banner
+COPY testing/etc/group /etc/group
+COPY testing/etc/passwd /etc/passwd
+COPY testing/etc/profile /etc/profile
 ADD testing/integration_tests /integration_tests
 ADD testing/var/www/html/index.html /var/www/html/index.html
 
