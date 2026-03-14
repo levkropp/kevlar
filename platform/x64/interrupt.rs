@@ -232,69 +232,15 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
         PAGE_FAULT_VECTOR => {
             let reason = PageFaultReason::from_bits_truncate(frame.error as u32);
 
-            // Panic if it's occurred in the kernel space.
-            let occurred_in_user = reason.contains(PageFaultReason::CAUSED_BY_USER)
-                || frame.rip == usercopy1 as *const u8 as u64
-                || frame.rip == usercopy1b as *const u8 as u64
-                || frame.rip == usercopy1c as *const u8 as u64
-                || frame.rip == usercopy1d as *const u8 as u64
-                || frame.rip == usercopy2 as *const u8 as u64
-                || frame.rip == usercopy3 as *const u8 as u64;
-            if !occurred_in_user {
-                // Copy all packed fields to locals before use (packed struct UB).
-                let rip    = frame.rip;
-                let rsp    = frame.rsp;
-                let rbp    = frame.rbp;
-                let rax    = frame.rax;
-                let rbx    = frame.rbx;
-                let rcx    = frame.rcx;
-                let rdx    = frame.rdx;
-                let rsi    = frame.rsi;
-                let rdi    = frame.rdi;
-                let r8     = frame.r8;
-                let r9     = frame.r9;
-                let r10    = frame.r10;
-                let r11    = frame.r11;
-                let r12    = frame.r12;
-                let r13    = frame.r13;
-                let r14    = frame.r14;
-                let r15    = frame.r15;
-                let cs     = frame.cs;
-                let rflags = frame.rflags;
-                let ss     = frame.ss;
-                let error  = frame.error;
-                let vaddr  = cr2();
-                warn!("kernel page fault — register dump:");
-                warn!("  RIP={:016x}  RSP={:016x}  RBP={:016x}", rip, rsp, rbp);
-                warn!("  RAX={:016x}  RBX={:016x}  RCX={:016x}  RDX={:016x}", rax, rbx, rcx, rdx);
-                warn!("  RSI={:016x}  RDI={:016x}  R8 ={:016x}  R9 ={:016x}", rsi, rdi, r8, r9);
-                warn!("  R10={:016x}  R11={:016x}  R12={:016x}  R13={:016x}", r10, r11, r12, r13);
-                warn!("  R14={:016x}  R15={:016x}", r14, r15);
-                warn!("  CS={:#x} ({})  SS={:#x}  RFLAGS={:#010x}  ERR={:#x}",
-                    cs,
-                    if cs & 3 == 0 { "ring 0" } else { "ring 3" },
-                    ss, rflags, error);
-                warn!("  CR2 (fault vaddr) = {:016x}", vaddr);
-                // Dump kernel stack contents at the fault RSP to identify
-                // corrupted return addresses or null function pointers.
-                warn!("  kernel stack at RSP ({:016x}):", rsp);
-                for i in 0..8usize {
-                    let addr = rsp as usize + i * 8;
-                    if VAddr::is_accessible_from_kernel(addr) {
-                        let val = unsafe { *(addr as *const u64) };
-                        warn!("    [rsp+{:#04x}] = {:016x}", i * 8, val);
-                    }
-                }
-                crate::backtrace::print_interrupted_context(rip, rbp);
-                panic!(
-                    "page fault occurred in the kernel: rip={:x}, rsp={:x}, vaddr={:x}",
-                    rip, rsp, vaddr
-                );
+            // Hot path: user-mode page fault → demand paging.
+            // Check the common case (CAUSED_BY_USER) first with a single branch.
+            if reason.contains(PageFaultReason::CAUSED_BY_USER) {
+                let unaligned_vaddr = UserVAddr::new(cr2());
+                handler().handle_page_fault(unaligned_vaddr, frame.rip as usize, reason);
+            } else {
+                // Cold path: kernel fault or usercopy fault.
+                handle_kernel_page_fault(frame, reason);
             }
-
-            // Abort if the virtual address points to out of the user's address space.
-            let unaligned_vaddr = UserVAddr::new(cr2());
-            handler().handle_page_fault(unaligned_vaddr, frame.rip as usize, reason);
         }
         ALIGNMENT_CHECK_VECTOR => {
             // TODO:
@@ -312,6 +258,85 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             panic!("unexpected interrupt: vec={}", vec);
         }
     }
+}
+
+/// Cold path for kernel-mode page faults and usercopy faults.
+/// Extracted from the hot interrupt dispatch to reduce icache pressure
+/// in the user-mode page fault path (the common case for demand paging).
+#[cold]
+#[inline(never)]
+fn handle_kernel_page_fault(frame: &InterruptFrame, reason: PageFaultReason) {
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        fn usercopy1();
+        fn usercopy1b();
+        fn usercopy1c();
+        fn usercopy1d();
+        fn usercopy2();
+        fn usercopy3();
+    }
+
+    let occurred_in_usercopy = frame.rip == usercopy1 as *const u8 as u64
+        || frame.rip == usercopy1b as *const u8 as u64
+        || frame.rip == usercopy1c as *const u8 as u64
+        || frame.rip == usercopy1d as *const u8 as u64
+        || frame.rip == usercopy2 as *const u8 as u64
+        || frame.rip == usercopy3 as *const u8 as u64;
+
+    if occurred_in_usercopy {
+        // Usercopy fault in kernel — handle as user page fault.
+        let unaligned_vaddr = UserVAddr::new(unsafe { cr2() });
+        handler().handle_page_fault(unaligned_vaddr, frame.rip as usize, reason);
+        return;
+    }
+
+    // True kernel page fault — dump registers and panic.
+    let rip    = frame.rip;
+    let rsp    = frame.rsp;
+    let rbp    = frame.rbp;
+    let rax    = frame.rax;
+    let rbx    = frame.rbx;
+    let rcx    = frame.rcx;
+    let rdx    = frame.rdx;
+    let rsi    = frame.rsi;
+    let rdi    = frame.rdi;
+    let r8     = frame.r8;
+    let r9     = frame.r9;
+    let r10    = frame.r10;
+    let r11    = frame.r11;
+    let r12    = frame.r12;
+    let r13    = frame.r13;
+    let r14    = frame.r14;
+    let r15    = frame.r15;
+    let cs     = frame.cs;
+    let rflags = frame.rflags;
+    let ss     = frame.ss;
+    let error  = frame.error;
+    let vaddr  = unsafe { cr2() };
+    warn!("kernel page fault — register dump:");
+    warn!("  RIP={:016x}  RSP={:016x}  RBP={:016x}", rip, rsp, rbp);
+    warn!("  RAX={:016x}  RBX={:016x}  RCX={:016x}  RDX={:016x}", rax, rbx, rcx, rdx);
+    warn!("  RSI={:016x}  RDI={:016x}  R8 ={:016x}  R9 ={:016x}", rsi, rdi, r8, r9);
+    warn!("  R10={:016x}  R11={:016x}  R12={:016x}  R13={:016x}", r10, r11, r12, r13);
+    warn!("  R14={:016x}  R15={:016x}", r14, r15);
+    warn!("  CS={:#x} ({})  SS={:#x}  RFLAGS={:#010x}  ERR={:#x}",
+        cs,
+        if cs & 3 == 0 { "ring 0" } else { "ring 3" },
+        ss, rflags, error);
+    warn!("  CR2 (fault vaddr) = {:016x}", vaddr);
+    warn!("  kernel stack at RSP ({:016x}):", rsp);
+    for i in 0..8usize {
+        let addr = rsp as usize + i * 8;
+        if VAddr::is_accessible_from_kernel(addr) {
+            let val = unsafe { *(addr as *const u64) };
+            warn!("    [rsp+{:#04x}] = {:016x}", i * 8, val);
+        }
+    }
+    crate::backtrace::print_interrupted_context(rip, rbp);
+    panic!(
+        "page fault occurred in the kernel: rip={:x}, rsp={:x}, vaddr={:x}",
+        rip, rsp, vaddr
+    );
 }
 
 /// Called from trap.S after `x64_handle_interrupt` returns, with `frame`
