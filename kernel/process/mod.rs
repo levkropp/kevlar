@@ -17,7 +17,7 @@ pub mod signal;
 mod switch;
 pub mod wait_queue;
 
-pub use process::{gc_exited_processes, process_count, read_process_stats, PId, Process, ProcessState};
+pub use process::{gc_exited_processes, list_pids, process_count, read_process_stats, PId, Process, ProcessState};
 pub use scheduler::SchedulerPolicy;
 pub use switch::switch;
 pub use wait_queue::WaitQueue;

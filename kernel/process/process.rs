@@ -58,6 +58,10 @@ pub fn process_count() -> usize {
     PROCESSES.lock().len()
 }
 
+pub fn list_pids() -> Vec<PId> {
+    PROCESSES.lock().keys().cloned().collect()
+}
+
 pub fn read_process_stats() -> Stats {
     Stats {
         fork_total: FORK_TOTAL.load(Ordering::SeqCst),
