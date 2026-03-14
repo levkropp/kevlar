@@ -160,6 +160,8 @@ pub struct Process {
     utime: AtomicU64,
     /// Accumulated kernel-mode ticks (incremented per syscall).
     stime: AtomicU64,
+    /// cgroup v2 membership (None only for idle threads created before cgroups::init).
+    cgroup: atomic_refcell::AtomicRefCell<Option<Arc<crate::cgroups::CgroupNode>>>,
 }
 
 impl Process {
@@ -198,6 +200,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            cgroup: AtomicRefCell::new(None),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -273,6 +276,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            cgroup: AtomicRefCell::new(None),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -352,6 +356,16 @@ impl Process {
         } else {
             0
         }
+    }
+
+    /// Returns the process's cgroup node (root cgroup if not set).
+    pub fn cgroup(&self) -> Arc<crate::cgroups::CgroupNode> {
+        self.cgroup.borrow().clone().unwrap_or_else(|| crate::cgroups::CGROUP_ROOT.clone())
+    }
+
+    /// Sets the process's cgroup node.
+    pub fn set_cgroup(&self, cg: Arc<crate::cgroups::CgroupNode>) {
+        *self.cgroup.borrow_mut() = Some(cg);
     }
 
     /// Sets the `clear_child_tid` address (CLONE_CHILD_CLEARTID / set_tid_address).
@@ -984,6 +998,9 @@ impl Process {
     /// Creates a new process. The calling process (`self`) will be the parent
     /// process of the created process. Returns the created child process.
     pub fn fork(parent: &Arc<Process>, parent_frame: &PtRegs) -> Result<Arc<Process>> {
+        // Check cgroup pids.max limit before allocating resources.
+        crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
+
         let parent_weak = Arc::downgrade(parent);
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
@@ -1023,7 +1040,13 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            cgroup: AtomicRefCell::new(None),
         });
+
+        // Inherit parent's cgroup and register child.
+        let parent_cg = parent.cgroup();
+        *child.cgroup.borrow_mut() = Some(parent_cg.clone());
+        parent_cg.member_pids.lock().push(pid);
 
         process_group.lock().add(Arc::downgrade(&child));
         parent.children().push(child.clone());
@@ -1092,6 +1115,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            cgroup: AtomicRefCell::new(None),
             arch,
         });
 
