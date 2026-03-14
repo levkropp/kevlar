@@ -176,6 +176,25 @@ COPY testing/mini_threads.c /mini_threads.c
 RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
 
 #
+#  M9 Phase 3.1: systemd v245 binaries (from Ubuntu 20.04 package)
+#
+FROM ubuntu:20.04 AS systemd_pkg
+RUN apt-get update && apt-get install -qy systemd
+# Extract the key binaries and ALL shared library dependencies.
+RUN mkdir -p /systemd-root/usr/lib/systemd /systemd-root/lib64 \
+    && cp /lib/systemd/systemd /systemd-root/usr/lib/systemd/systemd \
+    && cp /lib/systemd/systemd-journald /systemd-root/usr/lib/systemd/systemd-journald \
+    && cp /bin/systemctl /systemd-root/usr/lib/systemd/systemctl
+# Copy all glibc runtime libraries needed by systemd.
+RUN mkdir -p /systemd-root/lib/x86_64-linux-gnu /systemd-root/lib64 \
+    && ldd /lib/systemd/systemd /lib/systemd/systemd-journald /bin/systemctl 2>/dev/null \
+       | grep -o '/lib[^ ]*' | sort -u | while read lib; do \
+         mkdir -p "/systemd-root$(dirname $lib)"; \
+         cp -nL "$lib" "/systemd-root$lib" 2>/dev/null || true; \
+       done \
+    && cp -L /lib64/ld-linux-x86-64.so.2 /systemd-root/lib64/ld-linux-x86-64.so.2 2>/dev/null || true
+
+#
 #  M9 Phase 2 integration test (systemd init-sequence validation)
 #
 FROM ubuntu:20.04 AS mini_systemd_v3
@@ -269,16 +288,30 @@ COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
 COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
 COPY --from=mini_systemd_v3 /mini-systemd-v3 /bin/mini-systemd-v3
+# systemd v245 binaries + glibc runtime
+COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
+COPY --from=systemd_pkg /systemd-root/lib/ /lib/
+COPY --from=systemd_pkg /systemd-root/lib64/ /lib64/
+COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/systemctl /bin/systemctl
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
-RUN mkdir -p /etc /dev /tmp /mnt /var/www/html
+RUN mkdir -p /etc /dev /tmp /mnt /var/www/html /run /var/log/journal
+# systemd configuration
+RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
+    && mkdir -p /usr/lib/systemd/system
 COPY testing/etc/banner /etc/banner
 COPY testing/etc/group /etc/group
 COPY testing/etc/passwd /etc/passwd
 COPY testing/etc/profile /etc/profile
+COPY testing/systemd/units/default.target /etc/systemd/system/default.target
+COPY testing/systemd/units/kevlar-getty.service /etc/systemd/system/kevlar-getty.service
+COPY testing/systemd/os-release /etc/os-release
+COPY testing/systemd/fstab /etc/fstab
+RUN head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > /etc/machine-id
+RUN ln -sf /etc/systemd/system/kevlar-getty.service /etc/systemd/system/multi-user.target.wants/kevlar-getty.service
 ADD testing/integration_tests /integration_tests
 ADD testing/var/www/html/index.html /var/www/html/index.html
 

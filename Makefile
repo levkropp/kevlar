@@ -492,6 +492,16 @@ test-cgroups-ns:
 		echo "ALL CGROUPS+NS TESTS PASSED"; \
 	fi
 
+.PHONY: test-systemd-boot
+test-systemd-boot:
+	$(PROGRESS) "TEST" "M9 systemd boot (real systemd PID 1)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/usr/lib/systemd/systemd"
+	timeout 60 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-systemd-boot.log; true
+	@grep -E 'systemd|Reached|target|Started|Failed' \
+		/tmp/kevlar-test-systemd-boot.log || echo "(no systemd output found)"
+
 .PHONY: test-systemd-v3
 test-systemd-v3:
 	$(PROGRESS) "TEST" "M9 systemd init-sequence (25 tests)"
