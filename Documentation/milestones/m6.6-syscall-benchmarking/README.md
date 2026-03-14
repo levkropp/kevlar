@@ -2,47 +2,50 @@
 
 ## Goal
 
-Establish a performance baseline for all implemented syscalls before M7
-adds /proc (which touches VFS paths on every open/stat/read).  Every
-syscall must be within 10% of Linux on KVM.  Any regression found is
-fixed before proceeding.
-
-## Why now
-
-- M5 benchmarked 8 core syscalls and found 65x speedups, but M6 added
-  SMP, threading, and M6.5 added getpriority/mprotect/brk changes —
-  none benchmarked yet.
-- M7 will add /proc filesystem lookups in the VFS hot path.  We need a
-  clean baseline so we can detect /proc-induced regressions.
-- The benchmark infrastructure (`benchmarks/bench.c`,
-  `tools/run-all-benchmarks.py`, `make bench-kvm`) already exists.
-
-## Scope
-
-- Run all 24 existing benchmarks (8 core + 16 extended) on KVM
-- Add 4 new benchmarks for syscalls added since M5
-- Compare to Linux KVM baseline
-- Fix any syscall >10% slower than Linux
-- Publish results table in blog post
+Every syscall must be within 10% of Linux on KVM.  No exceptions —
+a 14% page fault overhead means 12.5% slower level loads in games,
+which is unacceptable for a drop-in replacement.
 
 ## Phases
 
-| Phase | Scope | Duration |
-|-------|-------|----------|
-| 1 | Expand bench.c + baseline both kernels | 1 day |
-| 2 | Analyze results, fix regressions >10% | 1-2 days |
-| 3 | Final benchmark run + results publication | 0.5 day |
-| **Total** | | **~3 days** |
+| Phase | Scope | Duration | Status |
+|-------|-------|----------|--------|
+| 1 | Expand bench.c + baseline both kernels | 1 day | DONE |
+| 2 | Fix surface-level regressions (uname, sigaction, fcntl, etc.) | 1 day | DONE |
+| 3 | Investigate mmap_fault — try batch PTE, pre-zero, per-CPU cache | 1 day | DONE (gap identified) |
+| 4 | Buddy allocator (replace bitmap allocator) | 2 days | |
+| 5 | Lightweight page fault entry (minimal register save) | 1 day | |
+| 6 | Per-CPU page free lists (lock-free fast path) | 1 day | |
+| 7 | Final benchmark run + results publication | 0.5 day | |
+| **Total** | | **~7.5 days** | |
+
+## Results so far
+
+27/28 benchmarks within 10%.  One remaining:
+
+| Benchmark | Linux KVM | Kevlar KVM | Ratio |
+|-----------|-----------|------------|-------|
+| mmap_fault | 1,650ns | 1,881ns | 1.14x |
+
+## Root cause breakdown (231ns gap per page)
+
+| Source | Contribution | Fix |
+|--------|-------------|-----|
+| Bitmap allocator O(N) scan | ~40% (~90ns) | Phase 4: buddy allocator |
+| Exception handler saves 16 GPRs | ~35% (~80ns) | Phase 5: minimal save |
+| Rust codegen / icache pressure | ~25% (~60ns) | Phase 6: per-CPU lists reduce code paths |
+
+## Approaches tried and ruled out
+
+- Batch PTE writes: L1 cache makes repeated traversals cheap
+- Pre-zeroed page cache: free() returns dirty pages, breaks invariant
+- Zero hoisting: 64KB zeroing thrashes 32KB L1
+- Unconditional PTE writes: cache line dirtying > branch savings
+- Per-CPU page cache (lock elimination): lock is only ~5ns, not bottleneck
 
 ## Success Criteria
 
-- All 28 benchmarks run on both Linux and Kevlar under KVM
-- No syscall >10% slower than Linux on KVM
-- Results published as CSV + blog post
-- M6 test suites still pass (no correctness regressions from perf fixes)
-
-## Non-goals
-
-- TCG performance (too noisy, not representative)
-- ARM64 benchmarks (no KVM available in our CI)
-- Application-level benchmarks (that's M10 scope)
+- All 28 benchmarks within 10% of Linux KVM (CPU-pinned, -mem-prealloc)
+- All 4 profiles benchmark equivalently
+- M6.5 contract tests still pass (18/19)
+- M6 thread tests still pass (14/14)
