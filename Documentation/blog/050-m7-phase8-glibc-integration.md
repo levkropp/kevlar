@@ -11,18 +11,18 @@ glibc's full init sequence: `__libc_start_main`, TLS setup,
 `set_tid_address`, `set_robust_list`, signal mask initialization,
 buffered stdio, and `exit_group`.
 
-## glibc pthreads: 13/14
+## glibc pthreads: 14/14
 
 The existing `mini_threads.c` test suite, compiled with `gcc -static
--pthread` instead of `musl-gcc`, passes 13 of 14 tests on `-smp 4`:
+-pthread` instead of `musl-gcc`, passes all 14 tests on `-smp 4`:
 
-- thread_create_join, gettid_unique, getpid_same, shared_memory,
-  atomic_counter, mutex, tls, condvar, signal_group, mmap_shared,
-  fork_from_thread, pipe_pingpong, thread_storm: **PASS**
-- tgkill: **FAIL** (signal delivery timing with glibc thread stacks)
+thread_create_join, gettid_unique, getpid_same, shared_memory,
+atomic_counter, mutex, tls, condvar, signal_group, tgkill,
+mmap_shared, fork_from_thread, pipe_pingpong, thread_storm.
 
 The condvar test passing confirms FUTEX_CMP_REQUEUE works correctly
-under glibc's NPTL implementation.
+under glibc's NPTL implementation.  The tgkill test confirms targeted
+signal delivery to specific threads works with glibc's thread model.
 
 ## Signal bounds fix
 
@@ -51,6 +51,6 @@ New Makefile targets:
 ## Results
 
 - glibc hello: PASS
-- glibc pthreads: 13/14 on -smp 4
+- glibc pthreads: 14/14 on -smp 4
 - musl pthreads: 14/14 (no regression)
-- Contracts: 26/26 PASS
+- Contracts: 26/26 PASS, 0 DIVERGE
