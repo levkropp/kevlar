@@ -82,6 +82,13 @@ pub fn num_online_cpus() -> u32 {
     smp::num_online_cpus()
 }
 
+/// Returns (cpu_family, model, stepping) from CPUID leaf 1.
+pub fn cpuid_family_model_stepping() -> (u32, u32, u32) {
+    use x86::cpuid::CpuId;
+    let info = CpuId::new().get_feature_info().unwrap();
+    (info.family_id() as u32, info.model_id() as u32, info.stepping_id() as u32)
+}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 100;
 
