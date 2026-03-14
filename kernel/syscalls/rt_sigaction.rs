@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::ctypes::*;
-use crate::debug;
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIGCHLD, SIG_DFL, SIG_IGN};
 use crate::syscalls::SyscallHandler;
 use kevlar_platform::address::UserVAddr;
+
+// Linux x86_64 kernel sigaction layout:
+//   [0]:  sa_handler  (8 bytes)
+//   [8]:  sa_flags    (8 bytes)
+//   [16]: sa_restorer (8 bytes)
+//   [24]: sa_mask     (8 bytes)
+const SA_RESTORER: usize = 0x04000000;
 
 // Provenance: Own (POSIX sigaction(2) man page).
 impl<'a> SyscallHandler<'a> {
@@ -25,27 +31,21 @@ impl<'a> SyscallHandler<'a> {
                 SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
                 SigAction::Handler { handler, .. } => handler.value(),
             };
-            debug::usercopy::set_context("sys_rt_sigaction:oldact");
-            let r = oldact_ptr.write::<usize>(&handler_value);
-            debug::usercopy::clear_context();
-            r?;
+            oldact_ptr.write::<usize>(&handler_value)?;
         }
 
         if let Some(act) = UserVAddr::new(act) {
-            // Linux x86_64 kernel sigaction layout:
-            //   [0]:  sa_handler  (8 bytes)
-            //   [8]:  sa_flags    (8 bytes)
-            //   [16]: sa_restorer (8 bytes)
-            //   [24]: sa_mask     (8 bytes)
-            const SA_RESTORER: usize = 0x04000000;
-            let handler = act.read::<usize>()?;
-            let sa_flags = act.add(8).read::<usize>()?;
+            // Read the entire sigaction struct in one usercopy (32 bytes)
+            // instead of 3 separate reads.
+            let raw: [usize; 4] = act.read::<[usize; 4]>()?;
+            let handler = raw[0];
+            let sa_flags = raw[1];
             let restorer = if sa_flags & SA_RESTORER != 0 {
-                let restorer_fn = act.add(16).read::<usize>()?;
-                UserVAddr::new(restorer_fn)
+                UserVAddr::new(raw[2])
             } else {
                 None
             };
+
             let new_action = match handler {
                 SIG_IGN => SigAction::Ignore,
                 SIG_DFL => match DEFAULT_ACTIONS.get(signum as usize) {
