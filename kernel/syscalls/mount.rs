@@ -29,13 +29,49 @@ impl<'a> SyscallHandler<'a> {
         _data: usize,
     ) -> Result<isize> {
         const PATH_MAX: usize = 256;
-        const MS_PRIVATE: c_int = 1 << 18;  // 262144
-        const MS_REC: c_int = 16384;
+        const MS_NOSUID: c_int = 2;
+        const MS_NODEV: c_int = 4;
+        const MS_NOEXEC: c_int = 8;
+        const MS_REMOUNT: c_int = 0x20;
+        const MS_BIND: c_int = 0x1000;
+        const MS_REC: c_int = 0x4000;
+        const MS_PRIVATE: c_int = 1 << 18;
 
-        // Flag-only mount operations (no filesystem type).
-        if flags & (MS_PRIVATE | MS_REC) != 0 && fstype_ptr.value() == 0 {
-            // MS_PRIVATE: mark mount as private (no propagation).
-            // Accept silently — we don't propagate mounts between namespaces yet.
+        // Flag-only mount operations (no filesystem type needed).
+        let flag_only = flags & (MS_PRIVATE | MS_REC | MS_REMOUNT | MS_BIND);
+        if flag_only != 0 && (fstype_ptr.value() == 0
+            || (flags & MS_REMOUNT != 0)
+            || (flags & MS_BIND != 0))
+        {
+            if flags & MS_BIND != 0 {
+                // Bind mount: make source visible at target.
+                let source_path = resolve_path(_source.value())?;
+                let target_path = resolve_path(target_ptr.value())?;
+                let root_fs = current_process().root_fs();
+                let mut root_fs = root_fs.lock();
+                let source_dir = root_fs.lookup_dir(&source_path)?;
+                // Ensure target exists.
+                let target_dir = match root_fs.lookup_dir(&target_path) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        if let Some((parent, name)) = target_path.parent_and_basename() {
+                            let parent_dir = root_fs.lookup_dir(parent)?;
+                            match parent_dir.create_dir(name, kevlar_vfs::stat::FileMode::new(0o755))? {
+                                kevlar_vfs::inode::INode::Directory(d) => d,
+                                _ => return Err(Errno::ENOTDIR.into()),
+                            }
+                        } else {
+                            return Err(Errno::ENOENT.into());
+                        }
+                    }
+                };
+                // Mount the source directory's content at the target.
+                let bind_fs = alloc::sync::Arc::new(BindFs(source_dir));
+                root_fs.mount(target_dir, bind_fs)?;
+                MountTable::add("none", target_path.as_str());
+                return Ok(0);
+            }
+            // MS_PRIVATE, MS_REC, MS_REMOUNT: accept silently.
             return Ok(0);
         }
 
@@ -109,5 +145,14 @@ impl<'a> SyscallHandler<'a> {
         // We don't actually unmount from the VFS — the mount point stays.
         // This is fine for systemd which rarely unmounts at runtime.
         Ok(0)
+    }
+}
+
+/// Minimal bind-mount filesystem wrapper: wraps a directory as a filesystem root.
+struct BindFs(Arc<dyn kevlar_vfs::inode::Directory>);
+
+impl kevlar_vfs::file_system::FileSystem for BindFs {
+    fn root_dir(&self) -> kevlar_vfs::result::Result<Arc<dyn kevlar_vfs::inode::Directory>> {
+        Ok(self.0.clone())
     }
 }
