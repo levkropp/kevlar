@@ -169,6 +169,12 @@ RUN gcc -static -O2 -o /hello-glibc /hello_glibc.c
 # Dynamic glibc hello for testing the glibc dynamic linker.
 COPY testing/hello_dynamic_glibc.c /hello_dynamic_glibc.c
 RUN gcc -O2 -o /hello-dynamic-glibc /hello_dynamic_glibc.c
+# Multi-library dynamic test (libc + libm + libpthread).
+COPY testing/hello_multilib.c /hello_multilib.c
+RUN gcc -O2 -o /hello-multilib /hello_multilib.c -lm -lpthread
+# Test loading libsystemd-shared specifically (the crash culprit).
+COPY testing/hello_libsystemd.c /hello_libsystemd.c
+RUN gcc -O2 -o /hello-libsystemd /hello_libsystemd.c -ldl
 
 #
 #  glibc pthreads test (static, reuses mini_threads.c)
@@ -325,6 +331,8 @@ COPY --from=systemd_build /systemd-root/lib64/ /lib64/
 COPY --from=systemd_build /systemd-root/lib/systemd/libsystemd-shared-245.so /lib/x86_64-linux-gnu/libsystemd-shared-245.so
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=hello_glibc /hello-dynamic-glibc /bin/hello-dynamic-glibc
+COPY --from=hello_glibc /hello-multilib /bin/hello-multilib
+COPY --from=hello_glibc /hello-libsystemd /bin/hello-libsystemd
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
