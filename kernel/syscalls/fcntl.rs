@@ -17,7 +17,7 @@ const F_DUPFD_CLOEXEC: c_int = F_LINUX_SPECIFIC_BASE + 6;
 impl<'a> SyscallHandler<'a> {
     pub fn sys_fcntl(&mut self, fd: Fd, cmd: c_int, arg: usize) -> Result<isize> {
         let current = current_process();
-        let mut opened_files = current.opened_files().lock();
+        let mut opened_files = current.opened_files_no_irq();
         match cmd {
             F_GETFD => {
                 let file = opened_files.get(fd)?;

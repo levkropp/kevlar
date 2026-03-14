@@ -17,15 +17,14 @@ impl<'a> SyscallHandler<'a> {
             // TODO: Implement procfs
             let fd = path.as_str()["/proc/self/fd/".len()..].parse().unwrap();
             current_process()
-                .opened_files()
-                .lock()
+                .opened_files_no_irq()
                 .get(Fd::new(fd))?
                 .path()
                 .resolve_absolute_path()
         } else {
             current_process()
                 .root_fs()
-                .lock()
+                .lock_no_irq()
                 .lookup_no_symlink_follow(path)?
                 .readlink()?
         };

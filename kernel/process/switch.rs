@@ -44,14 +44,22 @@ pub fn switch() -> bool {
 
         // Pick a thread to run next.
         match scheduler.pick_next() {
-            // Defensive None-check: exit_group() removes a sibling from the
-            // scheduler queues before removing it from PROCESSES, but there is
-            // still a narrow window where pick_next() returns a PID that is
-            // already gone.  Fall back to the idle thread rather than panic.
-            Some(next_pid) => match PROCESSES.lock().get(&next_pid) {
-                Some(p) if p.state() == ProcessState::Runnable => p.clone(),
-                _ => IDLE_THREAD.get().get().clone(),
-            },
+            Some(next_pid) => {
+                // Fast path: if we picked ourselves, reuse the existing Arc
+                // instead of locking PROCESSES for a hash lookup.
+                if next_pid == prev_pid {
+                    prev.clone()
+                } else {
+                    // Defensive None-check: exit_group() removes a sibling from the
+                    // scheduler queues before removing it from PROCESSES, but there is
+                    // still a narrow window where pick_next() returns a PID that is
+                    // already gone.  Fall back to the idle thread rather than panic.
+                    match PROCESSES.lock().get(&next_pid) {
+                        Some(p) if p.state() == ProcessState::Runnable => p.clone(),
+                        _ => IDLE_THREAD.get().get().clone(),
+                    }
+                }
+            }
             None => IDLE_THREAD.get().get().clone(),
         }
     };

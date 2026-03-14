@@ -279,6 +279,27 @@ impl Vm {
     /// Splits VMAs at boundaries if the overlap is partial.
     pub fn update_prot_range(&mut self, start: UserVAddr, len: usize, new_prot: MMapProt) -> Result<()> {
         let end = start.value() + len;
+
+        // Fast path: if the range exactly covers a single VMA, just update
+        // the prot field in-place without splitting or allocating.
+        for vma in self.vm_areas.iter_mut() {
+            if vma.start.value() == start.value() && vma.len == len {
+                vma.prot = new_prot;
+                return Ok(());
+            }
+            // Also handle: range covers entire VMA (common for single-page mmaps)
+            if vma.start.value() >= start.value() && vma.start.value() + vma.len <= end
+               && vma.start.value() + vma.len > start.value() {
+                vma.prot = new_prot;
+                // Check if there are more overlapping VMAs
+                let vma_end_val = vma.start.value() + vma.len;
+                if vma_end_val >= end {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Slow path: range partially overlaps VMAs, need to split.
         let mut new_areas: Vec<VmArea> = Vec::new();
         let mut i = 0;
 
