@@ -154,6 +154,12 @@ pub struct Process {
     /// Address to write 0 to (and then wake the futex) when this thread exits.
     /// Set by `set_tid_address(2)`. Used by pthread_join via futex.
     clear_child_tid: AtomicUsize,
+    /// Monotonic tick count at process creation (for /proc/[pid]/stat field 22).
+    start_ticks: u64,
+    /// Accumulated user-mode ticks (incremented by timer IRQ).
+    utime: AtomicU64,
+    /// Accumulated kernel-mode ticks (incremented per syscall).
+    stime: AtomicU64,
 }
 
 impl Process {
@@ -189,6 +195,9 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -261,6 +270,9 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -297,6 +309,49 @@ impl Process {
     /// `getpid()` returns this; `gettid()` returns `pid`.
     pub fn tgid(&self) -> PId {
         self.tgid
+    }
+
+    /// Monotonic tick count when this process was created.
+    pub fn start_ticks(&self) -> u64 {
+        self.start_ticks
+    }
+
+    /// Accumulated user-mode ticks.
+    pub fn utime(&self) -> u64 {
+        self.utime.load(Ordering::Relaxed)
+    }
+
+    /// Accumulated kernel-mode ticks.
+    pub fn stime(&self) -> u64 {
+        self.stime.load(Ordering::Relaxed)
+    }
+
+    /// Increment user-mode tick counter (called from timer IRQ).
+    pub fn tick_utime(&self) {
+        self.utime.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment kernel-mode tick counter (called on syscall entry).
+    pub fn tick_stime(&self) {
+        self.stime.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count threads in this thread group (processes sharing the same TGID).
+    pub fn count_threads(&self) -> usize {
+        let tgid = self.tgid;
+        PROCESSES.lock().values().filter(|p| p.tgid == tgid).count()
+    }
+
+    /// Total virtual memory size in bytes (sum of all VMA lengths).
+    pub fn vm_size_bytes(&self) -> usize {
+        if let Some(ref vm_arc) = *self.vm() {
+            let vm = vm_arc.lock();
+            vm.vm_areas().iter()
+                .map(|vma| vma.end().value() - vma.start().value())
+                .sum()
+        } else {
+            0
+        }
     }
 
     /// Sets the `clear_child_tid` address (CLONE_CHILD_CLEARTID / set_tid_address).
@@ -965,6 +1020,9 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&child));
@@ -1031,6 +1089,9 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0),
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
             arch,
         });
 

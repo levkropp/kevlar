@@ -636,6 +636,9 @@ impl<'a> SyscallHandler<'a> {
         #[cfg(not(target_arch = "x86_64"))]
         let pre_canary: Option<u64> = None;
 
+        // Approximate kernel time: one tick per syscall.
+        current_process().tick_stime();
+
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 

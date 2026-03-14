@@ -14,7 +14,9 @@ use kevlar_vfs::{
 };
 
 use crate::mm::vm::VmAreaType;
-use crate::process::{current_process, Process, PId};
+use crate::process::{current_process, Process, PId, ProcessState};
+
+use kevlar_platform::arch::PAGE_SIZE;
 
 // ── /proc/self → /proc/<pid> symlink ────────────────────────────────
 
@@ -165,18 +167,35 @@ impl FileLike for ProcPidStat {
         let mut s = alloc::string::String::new();
 
         let pid = self.pid.as_i32();
-        let comm = Process::find_by_pid(self.pid)
+        let proc = Process::find_by_pid(self.pid);
+
+        let comm = proc.as_ref()
             .map(|p| p.cmdline().argv0().to_string())
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
-        let ppid = Process::find_by_pid(self.pid)
+        let ppid = proc.as_ref()
             .map(|p| p.ppid().as_i32())
             .unwrap_or(0);
 
-        // Minimal /proc/[pid]/stat format (fields 1-52, most zeroed).
-        // pid (comm) state ppid pgrp session tty_nr tpgid flags ...
+        let state_char = proc.as_ref()
+            .map(|p| process_state_char(p.state()))
+            .unwrap_or('Z');
+        let utime = proc.as_ref().map(|p| p.utime()).unwrap_or(0);
+        let stime = proc.as_ref().map(|p| p.stime()).unwrap_or(0);
+        let num_threads = proc.as_ref().map(|p| p.count_threads()).unwrap_or(0);
+        let starttime = proc.as_ref().map(|p| p.start_ticks()).unwrap_or(0);
+        let vsize = proc.as_ref().map(|p| p.vm_size_bytes()).unwrap_or(0);
+        let rss = vsize / PAGE_SIZE;
+
+        // /proc/[pid]/stat format (fields 1-52, most zeroed).
+        // Fields: pid comm state ppid pgrp session tty_nr tpgid flags
+        //   minflt cminflt majflt cmajflt utime stime cutime cstime
+        //   priority nice num_threads itrealvalue starttime vsize rss ...
         let _ = write!(
             s,
-            "{pid} ({comm}) S {ppid} {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+            "{pid} ({comm}) {state_char} {ppid} {pid} {pid} 0 -1 0 \
+             0 0 0 0 {utime} {stime} 0 0 \
+             20 0 {num_threads} 0 {starttime} {vsize} {rss} \
+             0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
         );
 
         let bytes = s.as_bytes();
@@ -226,31 +245,35 @@ impl FileLike for ProcPidStatus {
             .unwrap_or(0);
 
         let _ = write!(s, "Name:\t{comm}\n");
-        let _ = write!(s, "State:\tS (sleeping)\n");
+
+        let state_str = proc.as_ref()
+            .map(|p| process_state_str(p.state()))
+            .unwrap_or("Z (zombie)");
+        let _ = write!(s, "State:\t{state_str}\n");
         let _ = write!(s, "Tgid:\t{pid}\n");
         let _ = write!(s, "Pid:\t{pid}\n");
         let _ = write!(s, "PPid:\t{ppid}\n");
-        let _ = write!(s, "Uid:\t0\t0\t0\t0\n");
-        let _ = write!(s, "Gid:\t0\t0\t0\t0\n");
 
         if let Some(ref p) = proc {
+            let uid = p.uid();
+            let euid = p.euid();
+            let gid = p.gid();
+            let egid = p.egid();
+            let _ = write!(s, "Uid:\t{uid}\t{euid}\t{euid}\t{euid}\n");
+            let _ = write!(s, "Gid:\t{gid}\t{egid}\t{egid}\t{egid}\n");
+
             let (fd_size, num_open) = {
                 let ft = p.opened_files().lock();
                 (ft.table_size(), ft.count_open())
             };
             let _ = write!(s, "FDSize:\t{}\n", fd_size);
 
-            // VM stats: sum of VMA lengths.
-            if let Some(ref vm_arc) = *p.vm() {
-                let vm = vm_arc.lock();
-                let vm_size_kb: usize = vm.vm_areas().iter()
-                    .map(|vma| (vma.end().value() - vma.start().value()) / 1024)
-                    .sum();
-                let _ = write!(s, "VmSize:\t{} kB\n", vm_size_kb);
-                let _ = write!(s, "VmRSS:\t{} kB\n", vm_size_kb);
-            }
+            let vsize_bytes = p.vm_size_bytes();
+            let vm_size_kb = vsize_bytes / 1024;
+            let _ = write!(s, "VmSize:\t{} kB\n", vm_size_kb);
+            let _ = write!(s, "VmRSS:\t{} kB\n", vm_size_kb);
 
-            let _ = write!(s, "Threads:\t1\n");
+            let _ = write!(s, "Threads:\t{}\n", p.count_threads());
 
             // Signal masks.
             let sig_pending = p.signal_pending_bits() as u64;
@@ -259,6 +282,9 @@ impl FileLike for ProcPidStatus {
             let _ = write!(s, "SigBlk:\t{:016x}\n", sig_blocked);
 
             let _ = num_open; // used above for FDSize context
+        } else {
+            let _ = write!(s, "Uid:\t0\t0\t0\t0\n");
+            let _ = write!(s, "Gid:\t0\t0\t0\t0\n");
         }
 
         let bytes = s.as_bytes();
@@ -537,5 +563,27 @@ impl FileLike for ProcPidExeStub {
 
     fn readlink(&self) -> Result<PathBuf> {
         Ok(PathBuf::from(self.0.clone()))
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Map ProcessState to single-character code for /proc/[pid]/stat field 3.
+fn process_state_char(state: ProcessState) -> char {
+    match state {
+        ProcessState::Runnable => 'R',
+        ProcessState::BlockedSignalable => 'S',
+        ProcessState::Stopped(_) => 'T',
+        ProcessState::ExitedWith(_) => 'Z',
+    }
+}
+
+/// Map ProcessState to human-readable string for /proc/[pid]/status.
+fn process_state_str(state: ProcessState) -> &'static str {
+    match state {
+        ProcessState::Runnable => "R (running)",
+        ProcessState::BlockedSignalable => "S (sleeping)",
+        ProcessState::Stopped(_) => "T (stopped)",
+        ProcessState::ExitedWith(_) => "Z (zombie)",
     }
 }
