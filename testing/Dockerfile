@@ -183,6 +183,7 @@ COPY testing/contracts/signals/handler_context.c /contracts/
 COPY testing/contracts/subsystems/dev_null_zero.c /contracts/
 COPY testing/contracts/subsystems/proc_self.c /contracts/
 COPY testing/contracts/subsystems/proc_mount.c /contracts/
+COPY testing/contracts/subsystems/proc_global.c /contracts/
 COPY testing/contracts/programs/busybox_basic.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
 COPY testing/contracts/scheduling/nice_values.c /contracts/

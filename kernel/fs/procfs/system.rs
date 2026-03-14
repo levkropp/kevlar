@@ -269,8 +269,12 @@ impl FileLike for ProcCpuinfoFile {
             let mhz = freq_hz / 1_000_000;
             for i in 0..ncpus {
                 let _ = write!(s, "processor\t: {}\n", i);
+                let (family, model, stepping) = kevlar_platform::arch::cpuid_family_model_stepping();
                 let _ = write!(s, "vendor_id\t: GenuineIntel\n");
+                let _ = write!(s, "cpu family\t: {}\n", family);
+                let _ = write!(s, "model\t\t: {}\n", model);
                 let _ = write!(s, "model name\t: QEMU Virtual CPU\n");
+                let _ = write!(s, "stepping\t: {}\n", stepping);
                 let _ = write!(s, "cpu MHz\t\t: {}.000\n", mhz);
                 let _ = write!(s, "cache size\t: 0 KB\n");
                 let _ = write!(s, "physical id\t: 0\n");
