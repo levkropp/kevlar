@@ -97,6 +97,11 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_ap_preempt(&self) -> bool {
+        // Tick interval timers (setitimer/alarm → SIGALRM) on every
+        // LAPIC preempt tick, not just PIC timer IRQ.  The PIC timer
+        // may not fire with pci=off or on AP CPUs.
+        crate::syscalls::setitimer::tick_real_timers();
+
         if !kevlar_platform::arch::in_preempt() {
             process::switch()
         } else {
