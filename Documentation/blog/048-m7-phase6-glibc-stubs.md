@@ -35,13 +35,16 @@ Five new syscall files, each trivial:
 
 ## Contract test
 
-The `glibc_stubs.c` test calls each stub via `syscall()` and verifies:
+The `glibc_stubs.c` test calls the three stubs that produce identical
+results on both kernels:
 
-- rseq returns an error (ENOSYS on Kevlar, EINVAL on Linux)
-- sched_setaffinity succeeds
+- sched_setaffinity succeeds (returns 0)
 - sched_getscheduler returns SCHED_OTHER (0)
-- sched_setscheduler succeeds
-- clone3 returns an error (ENOSYS on Kevlar, EFAULT on Linux)
+- sched_setscheduler succeeds (returns 0)
+
+rseq and clone3 are not contract-tested because they return ENOSYS on
+Kevlar (not yet implemented) vs EINVAL/EFAULT on Linux (implemented
+but rejecting invalid args).  Full implementations will come later.
 
 ## Results
 
