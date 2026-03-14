@@ -1,7 +1,5 @@
-/* Contract: glibc init syscall stubs return expected values.
-   Only tests syscalls where Kevlar and Linux produce identical results.
-   rseq and clone3 are omitted — they return ENOSYS (Kevlar) vs
-   EINVAL/EFAULT (Linux) for invalid args; full implementations come later. */
+/* Contract: glibc init syscall stubs return Linux-identical values.
+   rseq and clone3 with invalid args should return the same errno as Linux. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
@@ -10,9 +8,19 @@
 #include <sched.h>
 
 int main(void) {
+    /* rseq with null args: Linux returns EINVAL */
+    errno = 0;
+    long ret = syscall(SYS_rseq, 0, 0, 0, 0);
+    if (ret != -1 || errno != EINVAL) {
+        printf("CONTRACT_FAIL glibc_stubs_rseq: ret=%ld errno=%d (expected EINVAL=%d)\n",
+               ret, errno, EINVAL);
+        return 1;
+    }
+    printf("glibc_stubs_rseq: ok\n");
+
     /* sched_setaffinity should succeed */
     unsigned long mask = 1;
-    long ret = syscall(SYS_sched_setaffinity, 0, sizeof(mask), &mask);
+    ret = syscall(SYS_sched_setaffinity, 0, sizeof(mask), &mask);
     if (ret != 0) {
         printf("CONTRACT_FAIL glibc_stubs_setaffinity: ret=%ld errno=%d\n", ret, errno);
         return 1;
@@ -35,6 +43,20 @@ int main(void) {
         return 1;
     }
     printf("glibc_stubs_setscheduler: ok\n");
+
+    /* clone3 with null args and size=0: Linux returns EINVAL */
+#ifdef SYS_clone3
+    errno = 0;
+    ret = syscall(SYS_clone3, 0, 0);
+    if (ret != -1 || errno != EINVAL) {
+        printf("CONTRACT_FAIL glibc_stubs_clone3: ret=%ld errno=%d (expected EINVAL=%d)\n",
+               ret, errno, EINVAL);
+        return 1;
+    }
+    printf("glibc_stubs_clone3: ok\n");
+#else
+    printf("glibc_stubs_clone3: ok\n");
+#endif
 
     printf("CONTRACT_PASS\n");
     return 0;
