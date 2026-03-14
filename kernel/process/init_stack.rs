@@ -166,8 +166,23 @@ pub(super) fn init_user_stack(
         argv_ptrs.push(kernel_sp_to_user_sp(sp));
     }
 
-    // The length of the string table wrote above could be unaligned.
+    // Count how many usize values we'll push so we can pre-align the stack.
+    // Layout: argc(1) + argv_ptrs(N) + null(1) + envp_ptrs(N) + null(1) + auxv_pairs(2*N+2)
+    let num_entries = 1  // argc
+        + argv_ptrs.len() + 1  // argv + null
+        + envp_ptrs.len() + 1  // envp + null
+        + (auxv.len() + 1) * 2; // auxv pairs + null pair (each is 2 usizes)
+    let pointer_bytes = num_entries * size_of::<usize>();
+
+    // Align so that after pushing all entries, SP is 16-byte aligned.
+    // First align string table end to 8 bytes.
     sp = sp.align_down(size_of::<usize>());
+    // Then check: (sp - pointer_bytes) must be 16-aligned.
+    let final_sp = sp.value() - pointer_bytes;
+    if final_sp % 16 != 0 {
+        // Insert an extra 8-byte padding.
+        push_usize_to_stack(&mut sp, stack_bottom, 0)?;
+    }
 
     // Push auxiliary vector entries.
     push_auxv_entry_to_stack(&mut sp, stack_bottom, &Auxv::Null, None)?;
