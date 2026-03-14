@@ -1,10 +1,11 @@
 /* Contract: without SA_RESTART, a signal-interrupted read() returns EINTR.
- * We use SIGALRM (self-signal via alarm) to avoid race conditions with fork. */
+ * We use fork + kill to deliver the signal to the parent while it's
+ * blocked on a pipe read. */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
-#include <sys/time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 static volatile int handler_ran = 0;
 
@@ -27,15 +28,30 @@ int main(void) {
         return 1;
     }
 
-    /* Fire SIGALRM in 100ms */
-    struct itimerval itv = {{0, 0}, {0, 100000}};
-    setitimer(ITIMER_REAL, &itv, NULL);
+    pid_t parent_pid = getpid();
+    pid_t child = fork();
+    if (child < 0) {
+        printf("CONTRACT_FAIL fork\n");
+        return 1;
+    }
 
-    /* Blocking read on empty pipe — should be interrupted by SIGALRM */
+    if (child == 0) {
+        /* Child: wait briefly, then send SIGALRM to parent */
+        close(pipefd[0]);
+        close(pipefd[1]);
+        /* Busy-wait ~50ms worth of iterations to give parent time to block */
+        for (volatile int i = 0; i < 500000; i++) {}
+        kill(parent_pid, SIGALRM);
+        _exit(0);
+    }
+
+    /* Parent: blocking read on empty pipe — should be interrupted by SIGALRM */
     char buf[1];
     int ret = (int)read(pipefd[0], buf, 1);
     int saved_errno = errno;
 
+    /* Reap child */
+    waitpid(child, NULL, 0);
     close(pipefd[0]);
     close(pipefd[1]);
 
