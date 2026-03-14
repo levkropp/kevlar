@@ -424,6 +424,7 @@ impl FileLike for ProcPidMaps {
                             (*offset, String::new())
                         }
                         VmAreaType::Anonymous => {
+                            // vm_areas[0] = stack, vm_areas[1] = heap (see Vm::new).
                             let label = if i == 0 {
                                 "[stack]"
                             } else if i == 1 {
@@ -445,6 +446,17 @@ impl FileLike for ProcPidMaps {
                     }
                     let _ = write!(s, "\n");
                 }
+            }
+
+            // Synthetic vDSO entry (mapped directly into page table, not a VMA).
+            #[cfg(target_arch = "x86_64")]
+            {
+                let vdso_addr = kevlar_platform::arch::vdso::VDSO_VADDR;
+                let _ = write!(
+                    s,
+                    "{:08x}-{:08x} r-xp 00000000 00:00 0          [vdso]\n",
+                    vdso_addr, vdso_addr + PAGE_SIZE,
+                );
             }
         }
 
