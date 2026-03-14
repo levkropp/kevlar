@@ -130,6 +130,9 @@ pub fn handle_timer_irq() -> bool {
         })
     }
 
+    // Tick real-time interval timers (setitimer/alarm → SIGALRM delivery).
+    crate::syscalls::setitimer::tick_real_timers();
+
     // Wake poll/epoll/select waiters so they can re-check timeouts,
     // timerfd expirations, and signalfd readiness.
     crate::poll::POLL_WAIT_QUEUE.wake_all();

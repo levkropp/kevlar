@@ -52,10 +52,6 @@ impl WaitQueue {
             }
 
             if current_process().has_pending_signals() {
-                // Restore Runnable state without re-enqueuing: we are the
-                // current process so there is no need to add ourselves to the
-                // scheduler run queue — the preempt timer will do that on the
-                // next tick.  resume() would spuriously enqueue us here.
                 current_process().set_state(ProcessState::Runnable);
                 self.queue
                     .lock()
@@ -84,6 +80,18 @@ impl WaitQueue {
 
             // Run other threads until someone wake us up...
             switch();
+
+            // Check for pending signals immediately after waking.
+            // This catches signals that were delivered via the interrupt
+            // return path (try_delivering_signal) while we were blocked.
+            if current_process().has_pending_signals() {
+                current_process().set_state(ProcessState::Runnable);
+                self.queue
+                    .lock()
+                    .retain(|proc| !Arc::ptr_eq(proc, current_process()));
+                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                return Err(Errno::EINTR.into());
+            }
         }
     }
 

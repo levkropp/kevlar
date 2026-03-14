@@ -135,6 +135,7 @@ mod unlinkat;
 
 // M3 Phase 5: Job control, clone, additional stubs
 mod alarm;
+pub(crate) mod setitimer;
 mod clone;
 mod fchmod;
 mod getgroups;
@@ -322,6 +323,7 @@ mod syscall_numbers {
     pub const SYS_FCHMOD: usize = 91;
     pub const SYS_FCHOWN: usize = 93;
     pub const SYS_PAUSE: usize = 34;
+    pub const SYS_SETITIMER: usize = 38;
     pub const SYS_ALARM: usize = 37;
     pub const SYS_GETGROUPS: usize = 115;
     pub const SYS_SENDMSG: usize = 46;
@@ -493,6 +495,7 @@ mod syscall_numbers {
     pub const SYS_FCHOWN: usize = 0xF011;
     // ARM64 doesn't have pause/alarm natively.
     pub const SYS_PAUSE: usize = 0xF012;
+    pub const SYS_SETITIMER: usize = 103;
     pub const SYS_ALARM: usize = 0xF013;
     pub const SYS_GETGROUPS: usize = 158;
     pub const SYS_SENDMSG: usize = 211;
@@ -993,6 +996,11 @@ impl<'a> SyscallHandler<'a> {
                 a5 as i32,
             ),
             SYS_PAUSE => self.sys_pause(),
+            SYS_SETITIMER => self.sys_setitimer(
+                a1 as i32,
+                UserVAddr::new(a2),
+                UserVAddr::new(a3),
+            ),
             SYS_ALARM => self.sys_alarm(a1 as u32),
             SYS_GETGROUPS => self.sys_getgroups(a1, a2),
             // M4: epoll
@@ -1284,6 +1292,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FCHMODAT => "fchmodat",
         SYS_FCHOWNAT => "fchownat",
         SYS_PAUSE => "pause",
+        SYS_SETITIMER => "setitimer",
         SYS_ALARM => "alarm",
         SYS_GETGROUPS => "getgroups",
         SYS_EPOLL_CREATE1 => "epoll_create1",
