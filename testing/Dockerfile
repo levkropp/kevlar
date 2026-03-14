@@ -176,6 +176,17 @@ COPY testing/mini_threads.c /mini_threads.c
 RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
 
 #
+#  M8 Phase 4 integration test (cgroups + namespaces)
+#
+FROM ubuntu:20.04 AS mini_cgroups_ns
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/mini_cgroups_ns.c /mini_cgroups_ns.c
+RUN musl-gcc -static -O2 -o /mini-cgroups-ns /mini_cgroups_ns.c
+
+#
 #  M6.5 Contract Tests
 #
 FROM ubuntu:20.04 AS contracts
@@ -243,6 +254,7 @@ COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
+COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/

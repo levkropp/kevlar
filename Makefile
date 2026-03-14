@@ -477,6 +477,32 @@ test-m7:
 	$(MAKE) test-contracts
 	@echo "M7 integration suite complete."
 
+.PHONY: test-cgroups-ns
+test-cgroups-ns:
+	$(PROGRESS) "TEST" "M8 cgroups + namespaces (14 tests)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-cgroups-ns"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-cgroups-ns-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-cgroups-ns-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-cgroups-ns-$(PROFILE).log; then \
+		echo "CGROUPS+NS TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-cgroups-ns-$(PROFILE).log; then \
+		echo "ALL CGROUPS+NS TESTS PASSED"; \
+	fi
+
+.PHONY: test-m8
+test-m8:
+	$(PROGRESS) "TEST" "M8: full integration suite"
+	$(MAKE) test-glibc-hello PROFILE=$(PROFILE)
+	$(MAKE) test-glibc-threads PROFILE=$(PROFILE)
+	$(MAKE) test-threads-smp PROFILE=$(PROFILE)
+	$(MAKE) test-regression-smp PROFILE=$(PROFILE)
+	$(MAKE) test-contracts
+	$(MAKE) test-cgroups-ns PROFILE=$(PROFILE)
+	@echo "M8 integration suite complete."
+
 # ─── M6.5 Contract Tests ────────────────────────────────────────────────────
 
 .PHONY: build-contracts
