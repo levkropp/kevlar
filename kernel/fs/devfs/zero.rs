@@ -41,11 +41,11 @@ impl FileLike for ZeroFile {
         buf: UserBufferMut<'_>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        // Fill the buffer with zeros.
-        UserBufWriter::from(buf).write_with(|slice| {
-            slice.fill(0);
-            Ok(slice.len())
-        })
+        // Fill the buffer with zeros directly (single usercopy, not 256-byte chunks).
+        let len = buf.len();
+        let mut writer = UserBufWriter::from(buf);
+        writer.fill(0, len)?;
+        Ok(len)
     }
 
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
