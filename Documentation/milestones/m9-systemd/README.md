@@ -17,8 +17,10 @@ managed by systemd.
 |-------|------|----------|--------------|
 | [1](phase1-syscall-gaps.md) | Syscall Gap Closure | 3-4 days | M8 |
 | [2](phase2-init-sequence.md) | Init Sequence Validation | 4-5 days | Phase 1 |
-| [3](phase3-real-systemd.md) | Real systemd Boot | 5-7 days | Phase 2 |
-| [4](phase4-services.md) | Service Management | 3-5 days | Phase 3 |
+| [3.1](phase3.1-build-systemd.md) | Build systemd Binary | 2-3 days | Phase 2 |
+| [3.2](phase3.2-first-boot.md) | First Boot (sysinit.target) | 3-4 days | Phase 3.1 |
+| [3.3](phase3.3-basic-target.md) | Service Startup (basic.target) | 3-4 days | Phase 3.2 |
+| [4](phase4-services.md) | Service Management | 3-5 days | Phase 3.3 |
 
 ## Scope
 
