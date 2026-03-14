@@ -104,6 +104,10 @@ impl kevlar_platform::Handler for Handler {
         }
     }
 
+    fn current_process_signal_pending(&self) -> u32 {
+        crate::process::current_process().signal_pending_bits()
+    }
+
     fn handle_interrupt_return(&self, frame: *mut PtRegs) {
         #[allow(unsafe_code)]
         let frame_ref = unsafe { &mut *frame };

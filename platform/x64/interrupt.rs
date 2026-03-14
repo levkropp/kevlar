@@ -323,6 +323,14 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
 /// to user space.  The trap.S caller already checked `frame.cs & 3 != 0`.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn x64_check_signal_on_irq_return(frame: *mut InterruptFrame) {
+    // Fast path: skip PtRegs construction if no signals are pending.
+    // This avoids copying 20 register fields on every interrupt return
+    // when no signal delivery is needed (the common case for page faults).
+    let current = handler().current_process_signal_pending();
+    if current == 0 {
+        return;
+    }
+
     use super::syscall::PtRegs;
     let frame = &mut *frame;
     let mut pt = PtRegs {
