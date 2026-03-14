@@ -3,7 +3,8 @@ use kevlar_platform::address::UserVAddr;
 
 use crate::result::{Errno, Result};
 use crate::{
-    ctypes::{c_clockid, c_long, c_time, CLOCK_MONOTONIC, CLOCK_REALTIME},
+    ctypes::{c_clockid, c_long, c_time, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
+             CLOCK_MONOTONIC_RAW, CLOCK_REALTIME, CLOCK_REALTIME_COARSE},
     timer::read_wall_clock,
 };
 use crate::{syscalls::SyscallHandler, timer::read_monotonic_clock};
@@ -20,8 +21,9 @@ struct Timespec {
 impl<'a> SyscallHandler<'a> {
     pub fn sys_clock_gettime(&mut self, clock: c_clockid, buf: UserVAddr) -> Result<isize> {
         let total_ns = match clock {
-            CLOCK_REALTIME => read_wall_clock().nanosecs_from_epoch(),
-            CLOCK_MONOTONIC => read_monotonic_clock().nanosecs(),
+            CLOCK_REALTIME | CLOCK_REALTIME_COARSE => read_wall_clock().nanosecs_from_epoch(),
+            CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME =>
+                read_monotonic_clock().nanosecs(),
             _ => {
                 debug_warn!("clock_gettime: unsupported clock id: {}", clock);
                 return Err(Errno::ENOSYS.into());

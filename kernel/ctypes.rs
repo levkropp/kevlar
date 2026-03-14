@@ -25,6 +25,10 @@ pub type c_off = c_uint64;
 
 pub const CLOCK_REALTIME: c_clockid = 0;
 pub const CLOCK_MONOTONIC: c_clockid = 1;
+pub const CLOCK_BOOTTIME: c_clockid = 7;
+pub const CLOCK_MONOTONIC_RAW: c_clockid = 4;
+pub const CLOCK_REALTIME_COARSE: c_clockid = 5;
+pub const CLOCK_MONOTONIC_COARSE: c_clockid = 6;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

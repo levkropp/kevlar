@@ -176,6 +176,17 @@ COPY testing/mini_threads.c /mini_threads.c
 RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
 
 #
+#  M9 Phase 2 integration test (systemd init-sequence validation)
+#
+FROM ubuntu:20.04 AS mini_systemd_v3
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/mini_systemd_v3.c /mini_systemd_v3.c
+RUN musl-gcc -static -O2 -o /mini-systemd-v3 /mini_systemd_v3.c
+
+#
 #  M8 Phase 4 integration test (cgroups + namespaces)
 #
 FROM ubuntu:20.04 AS mini_cgroups_ns
@@ -257,6 +268,7 @@ COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
 COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
+COPY --from=mini_systemd_v3 /mini-systemd-v3 /bin/mini-systemd-v3
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/

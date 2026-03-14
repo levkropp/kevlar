@@ -98,6 +98,9 @@ impl Directory for ProcPidDir {
             "mountinfo" => Ok(INode::FileLike(
                 Arc::new(ProcPidMountinfo { pid: self.pid }) as Arc<dyn FileLike>
             )),
+            "environ" => Ok(INode::FileLike(
+                Arc::new(ProcPidEnviron { pid: self.pid }) as Arc<dyn FileLike>
+            )),
             "exe" => {
                 // Symlink to executable (stub: returns /bin/unknown).
                 let cmdline = Process::find_by_pid(self.pid)
@@ -129,6 +132,7 @@ impl Directory for ProcPidDir {
             ("maps", FileType::Regular),
             ("cgroup", FileType::Regular),
             ("mountinfo", FileType::Regular),
+            ("environ", FileType::Regular),
             ("fd", FileType::Directory),
         ];
         if index >= entries.len() {
@@ -583,6 +587,32 @@ impl FileLike for ProcPidExeStub {
 
     fn readlink(&self) -> Result<PathBuf> {
         Ok(PathBuf::from(self.0.clone()))
+    }
+}
+
+// ── /proc/<pid>/environ ─────────────────────────────────────────────
+
+struct ProcPidEnviron {
+    pid: PId,
+}
+
+impl fmt::Debug for ProcPidEnviron {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcPidEnviron({})", self.pid.as_i32())
+    }
+}
+
+impl FileLike for ProcPidEnviron {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, _offset: usize, _buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        // Return empty — we don't track per-process environment yet.
+        Ok(0)
     }
 }
 
