@@ -1576,8 +1576,13 @@ fn do_elf_binfmt(
         let new_heap_bottom = align_up(final_top, PAGE_SIZE);
         vm.set_heap_bottom(UserVAddr::new_nonnull(new_heap_bottom)?);
 
-        trace!("dynamic link: ip={:#x}, main_entry={:#x}, interp_base={:#x}, heap={:#x}",
-              ip.value(), main_entry, interp_base_uaddr.value(), new_heap_bottom);
+        let phdr_val = match &auxv[0] {
+            Auxv::Phdr(v) => v.value(),
+            _ => 0,
+        };
+        warn!("dynamic link: ip={:#x} main_entry={:#x} AT_BASE={:#x} AT_PHDR={:#x} heap={:#x} main_base_offset={:#x}",
+              ip.value(), main_entry, interp_base_uaddr.value(),
+              phdr_val, new_heap_bottom, main_base_offset);
     } else {
         // --- Static executable (no interpreter) ---
         let end_of_image = main_hi;
