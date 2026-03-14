@@ -170,6 +170,12 @@ mod inotify;
 mod sendfile;
 mod splice;
 
+// M7 Phase 6: glibc syscall stubs
+mod clone3;
+mod rseq;
+mod sched_scheduler;
+mod sched_setaffinity;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -364,6 +370,12 @@ mod syscall_numbers {
     pub const SYS_SPLICE: usize = 275;
     pub const SYS_TEE: usize = 276;
     pub const SYS_COPY_FILE_RANGE: usize = 326;
+    // M7 Phase 6: glibc syscall stubs
+    pub const SYS_SCHED_SETSCHEDULER: usize = 144;
+    pub const SYS_SCHED_GETSCHEDULER: usize = 145;
+    pub const SYS_SCHED_SETAFFINITY: usize = 203;
+    pub const SYS_RSEQ: usize = 334;
+    pub const SYS_CLONE3: usize = 435;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -534,6 +546,12 @@ mod syscall_numbers {
     pub const SYS_SPLICE: usize = 76;
     pub const SYS_TEE: usize = 77;
     pub const SYS_COPY_FILE_RANGE: usize = 285;
+    // M7 Phase 6: glibc syscall stubs
+    pub const SYS_SCHED_SETSCHEDULER: usize = 119;
+    pub const SYS_SCHED_GETSCHEDULER: usize = 121;
+    pub const SYS_SCHED_SETAFFINITY: usize = 122;
+    pub const SYS_RSEQ: usize = 293;
+    pub const SYS_CLONE3: usize = 435;
 }
 
 use syscall_numbers::*;
@@ -1156,6 +1174,12 @@ impl<'a> SyscallHandler<'a> {
                 a5,
                 a6 as u32,
             ),
+            // M7 Phase 6: glibc syscall stubs
+            SYS_RSEQ => self.sys_rseq(a1, a2 as u32, a3 as i32, a4 as u32),
+            SYS_CLONE3 => self.sys_clone3(a1, a2),
+            SYS_SCHED_SETAFFINITY => self.sys_sched_setaffinity(a1 as i32, a2, a3),
+            SYS_SCHED_GETSCHEDULER => self.sys_sched_getscheduler(a1 as i32),
+            SYS_SCHED_SETSCHEDULER => self.sys_sched_setscheduler(a1 as i32, a2 as i32, a3),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1332,6 +1356,11 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SPLICE => "splice",
         SYS_TEE => "tee",
         SYS_COPY_FILE_RANGE => "copy_file_range",
+        SYS_RSEQ => "rseq",
+        SYS_CLONE3 => "clone3",
+        SYS_SCHED_SETAFFINITY => "sched_setaffinity",
+        SYS_SCHED_GETSCHEDULER => "sched_getscheduler",
+        SYS_SCHED_SETSCHEDULER => "sched_setscheduler",
         _ => "(unknown)",
     }
 }
