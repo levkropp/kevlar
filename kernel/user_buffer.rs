@@ -6,17 +6,12 @@ use crate::prelude::*;
 use kevlar_platform::address::UserVAddr;
 
 /// Parses a bitflags field given from the user. Returns `Result<T>`.
+/// Unknown flags are silently truncated (Linux-compatible behavior: many
+/// flags like O_PATH, MAP_HUGETLB are hints that can be safely ignored).
 macro_rules! bitflags_from_user {
     ($st:tt, $input:expr) => {{
         let bits = $input;
-        $st::from_bits(bits).ok_or_else(|| {
-            warn_once!(
-                concat!("unsupported bitflags for ", stringify!($st), ": {:x}"),
-                bits
-            );
-
-            crate::result::Error::new(crate::result::Errno::ENOSYS)
-        })
+        Ok::<$st, crate::result::Error>($st::from_bits_truncate(bits))
     }};
 }
 
