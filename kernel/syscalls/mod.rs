@@ -180,6 +180,9 @@ mod sched_setaffinity;
 mod sethostname;
 mod unshare;
 
+// M8 Phase 3: Filesystem isolation
+mod pivot_root;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -384,6 +387,8 @@ mod syscall_numbers {
     pub const SYS_SETHOSTNAME: usize = 170;
     pub const SYS_SETDOMAINNAME: usize = 171;
     pub const SYS_UNSHARE: usize = 272;
+    // M8 Phase 3: Filesystem isolation
+    pub const SYS_PIVOT_ROOT: usize = 155;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -564,6 +569,8 @@ mod syscall_numbers {
     pub const SYS_SETHOSTNAME: usize = 161;
     pub const SYS_SETDOMAINNAME: usize = 162;
     pub const SYS_UNSHARE: usize = 97;
+    // M8 Phase 3: Filesystem isolation
+    pub const SYS_PIVOT_ROOT: usize = 41;
 }
 
 use syscall_numbers::*;
@@ -1196,6 +1203,8 @@ impl<'a> SyscallHandler<'a> {
             SYS_SETHOSTNAME => self.sys_sethostname(UserVAddr::new_nonnull(a1)?, a2),
             SYS_SETDOMAINNAME => self.sys_setdomainname(UserVAddr::new_nonnull(a1)?, a2),
             SYS_UNSHARE => self.sys_unshare(a1),
+            // M8 Phase 3: Filesystem isolation
+            SYS_PIVOT_ROOT => self.sys_pivot_root(a1, a2),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1380,6 +1389,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SETHOSTNAME => "sethostname",
         SYS_SETDOMAINNAME => "setdomainname",
         SYS_UNSHARE => "unshare",
+        SYS_PIVOT_ROOT => "pivot_root",
         _ => "(unknown)",
     }
 }

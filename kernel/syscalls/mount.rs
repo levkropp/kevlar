@@ -25,10 +25,20 @@ impl<'a> SyscallHandler<'a> {
         _source: UserVAddr,
         target_ptr: UserVAddr,
         fstype_ptr: UserVAddr,
-        _flags: c_int,
+        flags: c_int,
         _data: usize,
     ) -> Result<isize> {
         const PATH_MAX: usize = 256;
+        const MS_PRIVATE: c_int = 1 << 18;  // 262144
+        const MS_REC: c_int = 16384;
+
+        // Flag-only mount operations (no filesystem type).
+        if flags & (MS_PRIVATE | MS_REC) != 0 && fstype_ptr.value() == 0 {
+            // MS_PRIVATE: mark mount as private (no propagation).
+            // Accept silently — we don't propagate mounts between namespaces yet.
+            return Ok(0);
+        }
+
         let target_path = resolve_path(target_ptr.value())?;
         let fstype_str = UserCStr::new(fstype_ptr, PATH_MAX)?;
         let fstype = fstype_str.as_str();

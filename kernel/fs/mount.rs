@@ -18,11 +18,14 @@ const DEFAULT_SYMLINK_FOLLOW_MAX: usize = 8;
 // ── Mount table (for /proc/mounts) ──────────────────────────────────
 
 struct MountEntry {
+    mount_id: u32,
+    parent_id: u32,
     fstype: String,
     mountpoint: String,
 }
 
 static MOUNT_ENTRIES: SpinLock<VecDeque<MountEntry>> = SpinLock::new(VecDeque::new());
+static NEXT_MOUNT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 /// Global mount table for /proc/mounts reporting.
 pub struct MountTable;
@@ -30,27 +33,37 @@ pub struct MountTable;
 impl MountTable {
     /// Register initial boot-time mounts.
     pub fn init() {
+        use core::sync::atomic::Ordering;
         let mut entries = MOUNT_ENTRIES.lock();
+        let root_id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
         entries.push_back(MountEntry {
+            mount_id: root_id, parent_id: 0,
             fstype: String::from("initramfs"),
             mountpoint: String::from("/"),
         });
-        entries.push_back(MountEntry {
-            fstype: String::from("proc"),
-            mountpoint: String::from("/proc"),
-        });
-        entries.push_back(MountEntry {
-            fstype: String::from("devtmpfs"),
-            mountpoint: String::from("/dev"),
-        });
-        entries.push_back(MountEntry {
-            fstype: String::from("tmpfs"),
-            mountpoint: String::from("/tmp"),
-        });
+        for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp")] {
+            let id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
+            entries.push_back(MountEntry {
+                mount_id: id, parent_id: root_id,
+                fstype: String::from(*fstype),
+                mountpoint: String::from(*mp),
+            });
+        }
     }
 
     pub fn add(fstype: &str, mountpoint: &str) {
+        use core::sync::atomic::Ordering;
+        // Find parent mount ID via longest-prefix match.
+        let entries = MOUNT_ENTRIES.lock();
+        let parent_id = entries.iter()
+            .filter(|e| mountpoint.starts_with(e.mountpoint.as_str()))
+            .max_by_key(|e| e.mountpoint.len())
+            .map(|e| e.mount_id)
+            .unwrap_or(0);
+        drop(entries);
+        let id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
         MOUNT_ENTRIES.lock().push_back(MountEntry {
+            mount_id: id, parent_id,
             fstype: String::from(fstype),
             mountpoint: String::from(mountpoint),
         });
@@ -89,6 +102,20 @@ impl MountTable {
         let entries = MOUNT_ENTRIES.lock();
         for entry in entries.iter() {
             let _ = writeln!(buf, "none {} {} rw 0 0", entry.mountpoint, entry.fstype);
+        }
+    }
+
+    /// Format /proc/[pid]/mountinfo content.
+    pub fn format_mountinfo(buf: &mut String) {
+        use core::fmt::Write;
+        let entries = MOUNT_ENTRIES.lock();
+        for (i, entry) in entries.iter().enumerate() {
+            // Format: mount_id parent_id major:minor root mount_point options optional - fstype source super_options
+            let _ = writeln!(
+                buf,
+                "{} {} 0:{} / {} rw - {} none rw",
+                entry.mount_id, entry.parent_id, i + 1, entry.mountpoint, entry.fstype,
+            );
         }
     }
 }
