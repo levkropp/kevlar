@@ -41,6 +41,7 @@ mod prelude;
 mod process;
 mod random;
 mod cgroups;
+mod namespace;
 mod services;
 mod syscalls;
 mod test_runner;
@@ -240,6 +241,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("sysfs init");
     cgroups::init();
     profiler.lap_time("cgroups init");
+    namespace::init();
+    profiler.lap_time("namespace init");
     tmpfs::init();
     profiler.lap_time("tmpfs init");
     initramfs::init();

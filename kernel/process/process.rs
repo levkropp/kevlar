@@ -162,6 +162,10 @@ pub struct Process {
     stime: AtomicU64,
     /// cgroup v2 membership (None only for idle threads created before cgroups::init).
     cgroup: atomic_refcell::AtomicRefCell<Option<Arc<crate::cgroups::CgroupNode>>>,
+    /// Namespace set (UTS, PID, mount).
+    namespaces: AtomicRefCell<Option<crate::namespace::NamespaceSet>>,
+    /// Namespace-local PID (equals global PID in root PID namespace).
+    ns_pid: AtomicI32,
 }
 
 impl Process {
@@ -201,6 +205,8 @@ impl Process {
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
             cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -277,6 +283,8 @@ impl Process {
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
             cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(pid.as_i32()),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -366,6 +374,27 @@ impl Process {
     /// Sets the process's cgroup node.
     pub fn set_cgroup(&self, cg: Arc<crate::cgroups::CgroupNode>) {
         *self.cgroup.borrow_mut() = Some(cg);
+    }
+
+    /// Returns the process's namespace set.
+    pub fn namespaces(&self) -> crate::namespace::NamespaceSet {
+        self.namespaces.borrow().clone()
+            .unwrap_or_else(|| crate::namespace::root_namespace_set())
+    }
+
+    /// Sets the process's namespace set.
+    pub fn set_namespaces(&self, ns: crate::namespace::NamespaceSet) {
+        *self.namespaces.borrow_mut() = Some(ns);
+    }
+
+    /// Namespace-local PID (for getpid in non-root PID namespaces).
+    pub fn ns_pid(&self) -> PId {
+        PId::new(self.ns_pid.load(Ordering::Relaxed))
+    }
+
+    /// Set namespace-local PID (called after clone with CLONE_NEWPID).
+    pub fn set_ns_pid(&self, pid: PId) {
+        self.ns_pid.store(pid.as_i32(), Ordering::Relaxed);
     }
 
     /// Sets the `clear_child_tid` address (CLONE_CHILD_CLEARTID / set_tid_address).
@@ -1041,6 +1070,8 @@ impl Process {
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
             cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(pid.as_i32()),
         });
 
         // Inherit parent's cgroup and register child.
@@ -1116,6 +1147,8 @@ impl Process {
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
             cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(pid.as_i32()),
             arch,
         });
 

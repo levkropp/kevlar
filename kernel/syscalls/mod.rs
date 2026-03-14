@@ -176,6 +176,10 @@ mod rseq;
 mod sched_scheduler;
 mod sched_setaffinity;
 
+// M8 Phase 2: Namespaces
+mod sethostname;
+mod unshare;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -376,6 +380,10 @@ mod syscall_numbers {
     pub const SYS_SCHED_SETAFFINITY: usize = 203;
     pub const SYS_RSEQ: usize = 334;
     pub const SYS_CLONE3: usize = 435;
+    // M8 Phase 2: Namespaces
+    pub const SYS_SETHOSTNAME: usize = 170;
+    pub const SYS_SETDOMAINNAME: usize = 171;
+    pub const SYS_UNSHARE: usize = 272;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -552,6 +560,10 @@ mod syscall_numbers {
     pub const SYS_SCHED_SETAFFINITY: usize = 122;
     pub const SYS_RSEQ: usize = 293;
     pub const SYS_CLONE3: usize = 435;
+    // M8 Phase 2: Namespaces
+    pub const SYS_SETHOSTNAME: usize = 161;
+    pub const SYS_SETDOMAINNAME: usize = 162;
+    pub const SYS_UNSHARE: usize = 97;
 }
 
 use syscall_numbers::*;
@@ -1180,6 +1192,10 @@ impl<'a> SyscallHandler<'a> {
             SYS_SCHED_SETAFFINITY => self.sys_sched_setaffinity(a1 as i32, a2, a3),
             SYS_SCHED_GETSCHEDULER => self.sys_sched_getscheduler(a1 as i32),
             SYS_SCHED_SETSCHEDULER => self.sys_sched_setscheduler(a1 as i32, a2 as i32, a3),
+            // M8 Phase 2: Namespaces
+            SYS_SETHOSTNAME => self.sys_sethostname(UserVAddr::new_nonnull(a1)?, a2),
+            SYS_SETDOMAINNAME => self.sys_setdomainname(UserVAddr::new_nonnull(a1)?, a2),
+            SYS_UNSHARE => self.sys_unshare(a1),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1361,6 +1377,9 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SCHED_SETAFFINITY => "sched_setaffinity",
         SYS_SCHED_GETSCHEDULER => "sched_getscheduler",
         SYS_SCHED_SETSCHEDULER => "sched_setscheduler",
+        SYS_SETHOSTNAME => "sethostname",
+        SYS_SETDOMAINNAME => "setdomainname",
+        SYS_UNSHARE => "unshare",
         _ => "(unknown)",
     }
 }

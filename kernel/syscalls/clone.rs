@@ -78,7 +78,33 @@ impl<'a> SyscallHandler<'a> {
             if child_stack != 0 {
                 debug_warn!("clone: non-zero child_stack without CLONE_VM, ignoring");
             }
+
+            // Handle namespace flags (CLONE_NEWUTS, CLONE_NEWPID, CLONE_NEWNS).
+            let ns_flags = flags & (crate::namespace::CLONE_NEWUTS
+                | crate::namespace::CLONE_NEWPID
+                | crate::namespace::CLONE_NEWNS
+                | crate::namespace::CLONE_NEWNET);
+
+            if flags & crate::namespace::CLONE_NEWNET != 0 {
+                return Err(Errno::EINVAL.into());
+            }
+
             let child = Process::fork(parent, self.frame)?;
+
+            // Apply namespace changes to the child if any CLONE_NEW* flags are set.
+            if ns_flags != 0 {
+                let parent_ns = parent.namespaces();
+                let child_ns = parent_ns.clone_with_flags(ns_flags)?;
+
+                // For CLONE_NEWPID, allocate a namespace-local PID for the child.
+                if ns_flags & crate::namespace::CLONE_NEWPID != 0 {
+                    let ns_pid = child_ns.pid_ns.alloc_ns_pid(child.pid());
+                    // ns_pid is immutable, so we set it via an interior method.
+                    child.set_ns_pid(ns_pid);
+                }
+
+                child.set_namespaces(child_ns);
+            }
 
             // Handle SETTID/CLEARTID for fork-like clones.
             if flags & CLONE_CHILD_SETTID != 0 && ctid != 0 {

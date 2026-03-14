@@ -1,3 +1,4 @@
 {
-    "_comment": "Tests listed here are known to diverge from Linux. They still run and are reported as XFAIL, but do not fail the suite. Remove entries as implementations are completed."
+    "_comment": "Tests listed here are known to diverge from Linux. They still run and are reported as XFAIL, but do not fail the suite. Remove entries as implementations are completed.",
+    "subsystems.ns_uts": "unshare(CLONE_NEWUTS) requires CAP_SYS_ADMIN on Linux but Kevlar does not enforce capability checks yet. The contract runner is unprivileged."
 }
