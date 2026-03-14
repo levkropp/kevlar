@@ -10,6 +10,17 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_write(&mut self, fd: Fd, uaddr: UserVAddr, len: usize) -> Result<isize> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
+        // Debug: log stderr writes from PID 1 (systemd error messages).
+        if fd.as_int() == 2 && current_process().pid().as_i32() == 1 && len > 0 {
+            let mut buf = [0u8; 256];
+            let copy_len = min(len, buf.len());
+            if uaddr.read_bytes(&mut buf[..copy_len]).is_ok() {
+                if let Ok(s) = core::str::from_utf8(&buf[..copy_len]) {
+                    warn!("systemd stderr: {}", s.trim_end());
+                }
+            }
+        }
+
         let opened_file = current_process().get_opened_file_by_fd(fd)?;
         let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
 
