@@ -492,6 +492,21 @@ test-cgroups-ns:
 		echo "ALL CGROUPS+NS TESTS PASSED"; \
 	fi
 
+.PHONY: test-systemd-v3
+test-systemd-v3:
+	$(PROGRESS) "TEST" "M9 systemd init-sequence (25 tests)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd-v3"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-systemd-v3-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-systemd-v3-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-systemd-v3-$(PROFILE).log; then \
+		echo "SYSTEMD-V3 TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-systemd-v3-$(PROFILE).log; then \
+		echo "ALL SYSTEMD-V3 TESTS PASSED"; \
+	fi
+
 .PHONY: test-m8
 test-m8:
 	$(PROGRESS) "TEST" "M8: full integration suite"

@@ -22,9 +22,9 @@ use kevlar_vfs::file_system::FileSystem;
 impl<'a> SyscallHandler<'a> {
     pub fn sys_mount(
         &mut self,
-        _source: UserVAddr,
+        source_opt: Option<UserVAddr>,
         target_ptr: UserVAddr,
-        fstype_ptr: UserVAddr,
+        fstype_opt: Option<UserVAddr>,
         flags: c_int,
         _data: usize,
     ) -> Result<isize> {
@@ -38,37 +38,30 @@ impl<'a> SyscallHandler<'a> {
         const MS_PRIVATE: c_int = 1 << 18;
 
         // Flag-only mount operations (no filesystem type needed).
-        let flag_only = flags & (MS_PRIVATE | MS_REC | MS_REMOUNT | MS_BIND);
-        if flag_only != 0 && (fstype_ptr.value() == 0
-            || (flags & MS_REMOUNT != 0)
-            || (flags & MS_BIND != 0))
-        {
+        let fstype_is_null = match fstype_opt {
+            Some(ptr) => ptr.value() == 0,
+            None => true,
+        };
+        let has_flag_op = flags & (MS_PRIVATE | MS_REC | MS_REMOUNT | MS_BIND) != 0;
+        if has_flag_op && (fstype_is_null || flags & MS_REMOUNT != 0 || flags & MS_BIND != 0) {
             if flags & MS_BIND != 0 {
                 // Bind mount: make source visible at target.
-                let source_path = resolve_path(_source.value())?;
-                let target_path = resolve_path(target_ptr.value())?;
-                let root_fs = current_process().root_fs();
-                let mut root_fs = root_fs.lock();
-                let source_dir = root_fs.lookup_dir(&source_path)?;
-                // Ensure target exists.
-                let target_dir = match root_fs.lookup_dir(&target_path) {
-                    Ok(d) => d,
-                    Err(_) => {
-                        if let Some((parent, name)) = target_path.parent_and_basename() {
-                            let parent_dir = root_fs.lookup_dir(parent)?;
-                            match parent_dir.create_dir(name, kevlar_vfs::stat::FileMode::new(0o755))? {
-                                kevlar_vfs::inode::INode::Directory(d) => d,
-                                _ => return Err(Errno::ENOTDIR.into()),
+                // For file bind mounts (e.g. /dev/console), accept silently.
+                if let Some(source_ptr) = source_opt {
+                    if source_ptr.value() != 0 {
+                        let source_path = resolve_path(source_ptr.value())?;
+                        let target_path = resolve_path(target_ptr.value())?;
+                        let root_fs = current_process().root_fs();
+                        let mut root_fs = root_fs.lock();
+                        if let Ok(source_dir) = root_fs.lookup_dir(&source_path) {
+                            if let Ok(target_dir) = root_fs.lookup_dir(&target_path) {
+                                let bind_fs = alloc::sync::Arc::new(BindFs(source_dir));
+                                let _ = root_fs.mount(target_dir, bind_fs);
+                                MountTable::add("none", target_path.as_str());
                             }
-                        } else {
-                            return Err(Errno::ENOENT.into());
                         }
                     }
-                };
-                // Mount the source directory's content at the target.
-                let bind_fs = alloc::sync::Arc::new(BindFs(source_dir));
-                root_fs.mount(target_dir, bind_fs)?;
-                MountTable::add("none", target_path.as_str());
+                }
                 return Ok(0);
             }
             // MS_PRIVATE, MS_REC, MS_REMOUNT: accept silently.
@@ -76,6 +69,7 @@ impl<'a> SyscallHandler<'a> {
         }
 
         let target_path = resolve_path(target_ptr.value())?;
+        let fstype_ptr = fstype_opt.ok_or_else(|| crate::result::Error::new(Errno::EINVAL))?;
         let fstype_str = UserCStr::new(fstype_ptr, PATH_MAX)?;
         let fstype = fstype_str.as_str();
 

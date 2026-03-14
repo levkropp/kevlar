@@ -57,6 +57,17 @@ impl ProcFs {
         static_root.add_file("uptime", Arc::new(ProcUptimeFile) as Arc<dyn FileLike>);
         static_root.add_file("loadavg", Arc::new(ProcLoadavgFile) as Arc<dyn FileLike>);
 
+        // /proc/sys/ hierarchy for systemd compatibility.
+        let sys_dir = static_root.add_dir("sys");
+        let sys_kernel_dir = sys_dir.add_dir("kernel");
+        sys_kernel_dir.add_file("hostname", Arc::new(ProcSysHostname) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("osrelease", Arc::new(ProcSysStaticFile("4.0.0\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("ostype", Arc::new(ProcSysStaticFile("Linux\n")) as Arc<dyn FileLike>);
+        let sys_random_dir = sys_kernel_dir.add_dir("random");
+        sys_random_dir.add_file("boot_id", Arc::new(ProcSysBootId) as Arc<dyn FileLike>);
+        let sys_fs_dir = sys_dir.add_dir("fs");
+        sys_fs_dir.add_file("nr_open", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
+
         let static_dir: Arc<dyn Directory> = tmpfs.root_dir().unwrap();
 
         let root = Arc::new(ProcRootDir {
@@ -175,5 +186,102 @@ impl Directory for ProcRootDir {
 
     fn unlink(&self, name: &str) -> Result<()> {
         self.static_dir.unlink(name)
+    }
+}
+
+// ── /proc/sys/ helper file types ────────────────────────────────────
+
+use kevlar_vfs::{
+    inode::OpenOptions,
+    stat::S_IFREG,
+    user_buffer::{UserBufWriter, UserBufferMut},
+};
+
+/// Static /proc/sys/ file returning a fixed string.
+struct ProcSysStaticFile(&'static str);
+
+impl fmt::Debug for ProcSysStaticFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcSysStaticFile")
+    }
+}
+
+impl FileLike for ProcSysStaticFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o444), ..Stat::zeroed() })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 { return Ok(0); }
+        let bytes = self.0.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
+    }
+}
+
+/// /proc/sys/kernel/hostname — returns UTS namespace hostname.
+struct ProcSysHostname;
+
+impl fmt::Debug for ProcSysHostname {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcSysHostname")
+    }
+}
+
+impl FileLike for ProcSysHostname {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o644), ..Stat::zeroed() })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 { return Ok(0); }
+        let ns = crate::process::current_process().namespaces();
+        let hostname = ns.uts.get_hostname();
+        let mut s = alloc::string::String::from_utf8_lossy(&hostname).into_owned();
+        s.push('\n');
+        let bytes = s.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
+    }
+}
+
+/// /proc/sys/kernel/random/boot_id — random UUID, generated once.
+struct ProcSysBootId;
+
+impl fmt::Debug for ProcSysBootId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcSysBootId")
+    }
+}
+
+impl FileLike for ProcSysBootId {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o444), ..Stat::zeroed() })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 { return Ok(0); }
+        // Generate a deterministic-ish UUID from boot tick count.
+        let mut bytes = [0u8; 16];
+        kevlar_platform::random::rdrand_fill(&mut bytes);
+        // Format as UUID: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+        bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+        let s = alloc::format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15],
+        );
+        let sb = s.as_bytes();
+        let len = core::cmp::min(sb.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&sb[..len])?;
+        Ok(len)
     }
 }

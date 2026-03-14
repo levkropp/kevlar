@@ -40,6 +40,9 @@ impl DevFs {
         root_dir.add_file("tty", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("console", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("ptmx", PTMX.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("kmsg", Arc::new(KmsgFile) as Arc<dyn FileLike>);
+        root_dir.add_file("urandom", Arc::new(UrandomFile) as Arc<dyn FileLike>);
+        root_dir.add_file("full", Arc::new(FullFile) as Arc<dyn FileLike>);
 
         DevFs(tmpfs)
     }
@@ -53,4 +56,121 @@ impl FileSystem for DevFs {
 
 pub fn init() {
     DEV_FS.init(|| Arc::new(DevFs::new()));
+}
+
+// ── /dev/kmsg: kernel log (write = serial output, read = empty) ─────
+
+use core::fmt;
+use kevlar_vfs::{
+    inode::OpenOptions,
+    result::{Errno, Error},
+    stat::{FileMode, Stat, S_IFCHR},
+    user_buffer::{UserBufReader, UserBuffer, UserBufferMut},
+};
+
+struct KmsgFile;
+
+impl fmt::Debug for KmsgFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "KmsgFile")
+    }
+}
+
+impl FileLike for KmsgFile {
+    fn stat(&self) -> kevlar_vfs::result::Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFCHR | 0o644),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, _offset: usize, _buf: UserBufferMut<'_>, _options: &OpenOptions) -> kevlar_vfs::result::Result<usize> {
+        Ok(0) // empty
+    }
+
+    fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> kevlar_vfs::result::Result<usize> {
+        // Write to serial (kernel log).
+        let mut data = [0u8; 512];
+        let mut reader = UserBufReader::from(buf);
+        let n = reader.read_bytes(&mut data)?;
+        if n > 0 {
+            if let Ok(s) = core::str::from_utf8(&data[..n]) {
+                info!("kmsg: {}", s.trim_end());
+            }
+        }
+        Ok(n)
+    }
+}
+
+// ── /dev/urandom: random bytes ──────────────────────────────────────
+
+struct UrandomFile;
+
+impl fmt::Debug for UrandomFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UrandomFile")
+    }
+}
+
+impl FileLike for UrandomFile {
+    fn stat(&self) -> kevlar_vfs::result::Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFCHR | 0o666),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, _offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> kevlar_vfs::result::Result<usize> {
+        use kevlar_vfs::user_buffer::UserBufWriter;
+        let len = buf.len();
+        let mut writer = UserBufWriter::from(buf);
+        // Fill with random bytes.
+        let mut tmp = [0u8; 64];
+        let mut written = 0;
+        while written < len {
+            kevlar_platform::random::rdrand_fill(&mut tmp);
+            let chunk = core::cmp::min(tmp.len(), len - written);
+            writer.write_bytes(&tmp[..chunk])?;
+            written += chunk;
+        }
+        Ok(written)
+    }
+}
+
+// ── /dev/full: always ENOSPC on write ───────────────────────────────
+
+struct FullFile;
+
+impl fmt::Debug for FullFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FullFile")
+    }
+}
+
+impl FileLike for FullFile {
+    fn stat(&self) -> kevlar_vfs::result::Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFCHR | 0o666),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, _offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> kevlar_vfs::result::Result<usize> {
+        // Read returns zeros (like /dev/zero).
+        use kevlar_vfs::user_buffer::UserBufWriter;
+        let len = buf.len();
+        let mut writer = UserBufWriter::from(buf);
+        let zeros = [0u8; 64];
+        let mut written = 0;
+        while written < len {
+            let chunk = core::cmp::min(zeros.len(), len - written);
+            writer.write_bytes(&zeros[..chunk])?;
+            written += chunk;
+        }
+        Ok(written)
+    }
+
+    fn write(&self, _offset: usize, _buf: UserBuffer<'_>, _options: &OpenOptions) -> kevlar_vfs::result::Result<usize> {
+        Err(Error::new(Errno::ENOSPC))
+    }
 }

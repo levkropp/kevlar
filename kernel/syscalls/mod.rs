@@ -1115,9 +1115,9 @@ impl<'a> SyscallHandler<'a> {
             ),
             // M4 Phase 4: Filesystem mounting
             SYS_MOUNT => self.sys_mount(
-                UserVAddr::new_nonnull(a1)?,
+                UserVAddr::new(a1),
                 UserVAddr::new_nonnull(a2)?,
-                UserVAddr::new_nonnull(a3)?,
+                UserVAddr::new(a3),
                 a4 as c_int,
                 a5,
             ),
