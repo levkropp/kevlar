@@ -92,6 +92,9 @@ impl Directory for ProcPidDir {
             "fd" => Ok(INode::Directory(
                 Arc::new(ProcPidFdDir { pid: self.pid }) as Arc<dyn Directory>
             )),
+            "cgroup" => Ok(INode::FileLike(
+                Arc::new(ProcPidCgroup { pid: self.pid }) as Arc<dyn FileLike>
+            )),
             "exe" => {
                 // Symlink to executable (stub: returns /bin/unknown).
                 let cmdline = Process::find_by_pid(self.pid)
@@ -121,6 +124,7 @@ impl Directory for ProcPidDir {
             ("comm", FileType::Regular),
             ("exe", FileType::Regular),
             ("maps", FileType::Regular),
+            ("cgroup", FileType::Regular),
             ("fd", FileType::Directory),
         ];
         if index >= entries.len() {
@@ -575,6 +579,44 @@ impl FileLike for ProcPidExeStub {
 
     fn readlink(&self) -> Result<PathBuf> {
         Ok(PathBuf::from(self.0.clone()))
+    }
+}
+
+// ── /proc/<pid>/cgroup ──────────────────────────────────────────────
+
+struct ProcPidCgroup {
+    pid: PId,
+}
+
+impl fmt::Debug for ProcPidCgroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcPidCgroup({})", self.pid.as_i32())
+    }
+}
+
+impl FileLike for ProcPidCgroup {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        let path = Process::find_by_pid(self.pid)
+            .map(|p| p.cgroup().path())
+            .unwrap_or_else(|| alloc::string::String::from("/"));
+
+        let s = alloc::format!("0::{}\n", path);
+        let bytes = s.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
     }
 }
 

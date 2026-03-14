@@ -3,6 +3,7 @@
 //!
 //! Provenance: Own (Linux mount(2), umount2(2) man pages).
 use crate::{
+    cgroups::cgroupfs::CgroupFs,
     ctypes::c_int,
     fs::{
         mount::MountTable,
@@ -46,8 +47,7 @@ impl<'a> SyscallHandler<'a> {
                 return Ok(0);
             }
             "cgroup2" | "cgroup" => {
-                // Stub: create an empty tmpfs for cgroup mount points.
-                Arc::new(TmpFs::new())
+                CgroupFs::new_or_get()
             }
             _ => {
                 debug_warn!("mount: unsupported filesystem type: {}", fstype);
