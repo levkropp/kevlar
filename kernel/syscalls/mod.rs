@@ -316,6 +316,7 @@ mod syscall_numbers {
     pub const SYS_SCHED_GETAFFINITY: usize = 204;
     pub const SYS_SET_ROBUST_LIST: usize = 273;
     pub const SYS_GETRANDOM: usize = 318;
+    pub const SYS_TKILL: usize = 200;
     pub const SYS_TGKILL: usize = 234;
     pub const SYS_RT_SIGSUSPEND: usize = 130;
     pub const SYS_FCHMOD: usize = 91;
@@ -484,6 +485,7 @@ mod syscall_numbers {
     pub const SYS_SET_ROBUST_LIST: usize = 99;
     // ARM64 doesn't have arch_prctl; use a dummy value that won't conflict.
     pub const SYS_ARCH_PRCTL: usize = 0xFFFF;
+    pub const SYS_TKILL: usize = 130; // ARM64 tkill
     pub const SYS_TGKILL: usize = 131;
     pub const SYS_RT_SIGSUSPEND: usize = 133;
     // ARM64 only has fchmodat(53)/fchownat(55), not fchmod/fchown.
@@ -972,6 +974,7 @@ impl<'a> SyscallHandler<'a> {
                 &resolve_path(a4)?,
             ),
             // M3 Phase 5: Job control + additional stubs
+            SYS_TKILL => self.sys_tkill(a1 as c_int, a2 as c_int),
             SYS_TGKILL => self.sys_tgkill(a1 as c_int, a2 as c_int, a3 as c_int),
             SYS_RT_SIGSUSPEND => self.sys_rt_sigsuspend(UserVAddr::new_nonnull(a1)?, a2),
             SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
@@ -1149,7 +1152,7 @@ impl<'a> SyscallHandler<'a> {
                     name: syscall_name_by_number(n),
                     number: n,
                 });
-                info!(
+                warn_once!(
                     "unimplemented system call: {} (n={})",
                     syscall_name_by_number(n),
                     n,
@@ -1273,6 +1276,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SYMLINKAT => "symlinkat",
         SYS_GETSID => "getsid",
         SYS_SIGALTSTACK => "sigaltstack",
+        SYS_TKILL => "tkill",
         SYS_TGKILL => "tgkill",
         SYS_RT_SIGSUSPEND => "rt_sigsuspend",
         SYS_FCHMOD => "fchmod",

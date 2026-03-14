@@ -25,8 +25,10 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/resource.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sched.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/reboot.h>
@@ -415,6 +417,59 @@ static void bench_writev(void) {
     close(fd);
 }
 
+/* ── M6.6 benchmarks (4) ───────────────────────────────────────────── */
+
+static void bench_sched_yield(void) {
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        sched_yield();
+    }
+    report("sched_yield", iters, now_ns() - start);
+}
+
+static void bench_getpriority(void) {
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        getpriority(PRIO_PROCESS, 0);
+    }
+    report("getpriority", iters, now_ns() - start);
+}
+
+static void bench_read_zero(void) {
+    int fd = open("/dev/zero", O_RDONLY);
+    if (fd < 0) { printf("BENCH_SKIP read_zero\n"); return; }
+    char buf[4096];
+    int iters = ITERS(200000, 2000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        read(fd, buf, sizeof(buf));
+    }
+    report("read_zero", iters, now_ns() - start);
+    close(fd);
+}
+
+static volatile int bench_sig_count;
+static void bench_sig_handler(int sig) { (void)sig; bench_sig_count++; }
+
+static void bench_signal_delivery(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = bench_sig_handler;
+    sigaction(SIGUSR1, &sa, NULL);
+    bench_sig_count = 0;
+    int iters = ITERS(200000, 2000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        raise(SIGUSR1);
+    }
+    report("signal_delivery", iters, now_ns() - start);
+    /* Restore default */
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &sa, NULL);
+}
+
 /* ── Benchmark registry ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -452,6 +507,12 @@ static bench_entry benchmarks[] = {
     {"sigprocmask",  bench_sigprocmask,  0},
     {"pread",        bench_pread,        0},
     {"writev",       bench_writev,       0},
+
+    /* M6.6 benchmarks (4) */
+    {"sched_yield",  bench_sched_yield,  0},
+    {"getpriority",  bench_getpriority,  0},
+    {"read_zero",    bench_read_zero,    0},
+    {"signal_delivery", bench_signal_delivery, 0},
 
     {NULL, NULL, 0}
 };

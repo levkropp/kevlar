@@ -10,6 +10,10 @@ use crate::{
 };
 
 impl<'a> SyscallHandler<'a> {
+    pub fn sys_tkill(&mut self, tid: c_int, sig: c_int) -> Result<isize> {
+        self.sys_tgkill(0, tid, sig)
+    }
+
     pub fn sys_tgkill(&mut self, _tgid: c_int, tid: c_int, sig: c_int) -> Result<isize> {
         if sig == 0 {
             // Signal 0 is used to check if the process exists.
