@@ -102,6 +102,11 @@ pub trait Handler: Sync {
     /// Default implementation is a no-op (safe if called before kernel is ready).
     fn handle_ap_preempt(&self) -> bool { false }
 
+    /// Fast check: returns the signal_pending bitmask for the current process.
+    /// Used to skip PtRegs construction on interrupt return when no signals
+    /// are pending (the common case for page faults).
+    fn current_process_signal_pending(&self) -> u32 { 0 }
+
     /// Called when an interrupt is about to return to user space.
     /// The kernel may modify the frame to deliver a pending signal.
     /// Default implementation is a no-op.
