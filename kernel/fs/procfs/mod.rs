@@ -10,12 +10,13 @@ use crate::{
         file_system::FileSystem,
         inode::{Directory, FileLike},
     },
-    process::PId,
+    process::{list_pids, PId},
     result::Result,
 };
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use kevlar_vfs::{
-    inode::{DirEntry, INode, INodeNo},
+    inode::{DirEntry, FileType, INode, INodeNo},
     stat::{FileMode, Stat, S_IFDIR},
 };
 use kevlar_utils::once::Once;
@@ -132,13 +133,39 @@ impl Directory for ProcRootDir {
     }
 
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {
-        // Show static entries first, then "self".
+        // Static entries first (metrics, mounts, etc.).
         if let Some(entry) = self.static_dir.readdir(index)? {
             return Ok(Some(entry));
         }
 
-        // After static entries, show "self" pseudo-entry.
-        // We can't easily enumerate all PIDs, but showing "self" is sufficient.
+        // Count static entries to compute the dynamic offset.
+        let mut static_count = 0;
+        while self.static_dir.readdir(static_count)?.is_some() {
+            static_count += 1;
+        }
+
+        let dynamic_index = index - static_count;
+
+        // First dynamic entry: "self" symlink.
+        if dynamic_index == 0 {
+            return Ok(Some(DirEntry {
+                inode_no: INodeNo::new(0),
+                file_type: FileType::Link,
+                name: "self".into(),
+            }));
+        }
+
+        // Remaining dynamic entries: one per PID.
+        let pids = list_pids();
+        let pid_index = dynamic_index - 1;
+        if pid_index < pids.len() {
+            return Ok(Some(DirEntry {
+                inode_no: INodeNo::new(pids[pid_index].as_i32() as usize),
+                file_type: FileType::Directory,
+                name: pids[pid_index].as_i32().to_string(),
+            }));
+        }
+
         Ok(None)
     }
 
