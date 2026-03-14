@@ -97,6 +97,42 @@ fn traverse(
     }
 }
 
+/// Walk PGD→PUD→PMD to find the leaf PTE table base address.
+/// Unlike `traverse`, does NOT index into the final level-0 table.
+#[inline(always)]
+fn traverse_to_pt(
+    pgd: PAddr,
+    vaddr: UserVAddr,
+    allocate: bool,
+) -> Option<*mut PageTableEntry> {
+    let mut table = pgd.as_mut_ptr::<PageTableEntry>();
+    for level in (1..=3).rev() {
+        let index = nth_level_table_index(vaddr, level);
+        let entry = unsafe { table.offset(index) };
+        let mut table_paddr = entry_paddr(unsafe { *entry });
+        if table_paddr.value() == 0 {
+            if !allocate {
+                return None;
+            }
+            let new_table =
+                alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            unsafe {
+                new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
+                *entry = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
+            }
+            table_paddr = new_table;
+        }
+        table = table_paddr.as_mut_ptr::<PageTableEntry>();
+    }
+    Some(table)
+}
+
+/// Compute the leaf (level-0) page table index for a virtual address.
+#[inline(always)]
+fn leaf_pt_index(vaddr_value: usize) -> usize {
+    (vaddr_value >> 12) & 0x1FF
+}
+
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
@@ -218,6 +254,52 @@ impl PageTable {
             *entry_ptr.as_ptr() = paddr.value() as u64 | attrs;
             true
         }
+    }
+
+    /// Batch-map contiguous user pages, traversing the page table hierarchy only
+    /// once per leaf PT (2MB region) instead of once per page.
+    /// Returns a u32 bitmask: bit i set = page i was mapped.
+    #[inline(always)]
+    pub fn batch_try_map_user_pages_with_prot(
+        &mut self,
+        start_vaddr: UserVAddr,
+        paddrs: &[PAddr],
+        count: usize,
+        prot_flags: i32,
+    ) -> u32 {
+        let attrs = prot_to_attrs(prot_flags);
+        let mut mapped: u32 = 0;
+        let mut i = 0;
+
+        while i < count {
+            let vaddr_value = start_vaddr.value() + i * PAGE_SIZE;
+            let pt_base = match traverse_to_pt(
+                self.pgd,
+                UserVAddr::new_nonnull(vaddr_value).unwrap(),
+                true,
+            ) {
+                Some(ptr) => ptr,
+                None => break,
+            };
+
+            let start_idx = leaf_pt_index(vaddr_value);
+            let remaining_in_pt = ENTRIES_PER_TABLE as usize - start_idx;
+            let batch_end = if i + remaining_in_pt < count { i + remaining_in_pt } else { count };
+
+            let mut idx = start_idx;
+            while i < batch_end {
+                let entry_ptr = unsafe { pt_base.add(idx) };
+                let entry_val = unsafe { *entry_ptr };
+                if entry_val == 0 {
+                    unsafe { *entry_ptr = paddrs[i].value() as u64 | attrs; }
+                    mapped |= 1 << i;
+                }
+                idx += 1;
+                i += 1;
+            }
+        }
+
+        mapped
     }
 
     pub fn update_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
