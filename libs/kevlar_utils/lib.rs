@@ -14,6 +14,7 @@ extern crate log;
 
 pub mod alignment;
 pub mod bitmap_allocator;
+pub mod buddy_alloc;
 pub mod buddy_allocator;
 pub mod bump_allocator;
 pub mod byte_size;

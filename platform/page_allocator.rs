@@ -8,7 +8,7 @@ use bitflags::bitflags;
 use kevlar_utils::alignment::is_aligned;
 use kevlar_utils::byte_size::ByteSize;
 
-use kevlar_utils::bitmap_allocator::BitMapAllocator as Allocator;
+use kevlar_utils::buddy_alloc::BuddyAllocator as Allocator;
 
 static ZONES: SpinLock<ArrayVec<Allocator, 8>> = SpinLock::new(ArrayVec::new_const());
 static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
