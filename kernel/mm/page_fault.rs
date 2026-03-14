@@ -257,8 +257,21 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         });
     }
 
-    vm.page_table_mut()
-        .map_user_page_with_prot(aligned_vaddr, paddr, prot_flags);
+    // CRITICAL: Use try_map to detect if the page is already mapped.
+    // A protection fault occurs when a page was mapped with weaker permissions
+    // than the current VMA allows (e.g., ld.so's initial read-only reservation
+    // gets overlaid by a MAP_FIXED writable data segment, but the physical page
+    // was already faulted in from the reservation with PROT_READ).  Re-loading
+    // the page from the file would destroy data (ld.so's relocation writes).
+    // Instead, keep the existing page and update the PTE flags.
+    if !vm.page_table_mut()
+        .try_map_user_page_with_prot(aligned_vaddr, paddr, prot_flags)
+    {
+        kevlar_platform::page_allocator::free_pages(paddr, 1);
+        vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+        vm.page_table().flush_tlb_local(aligned_vaddr);
+        return;
+    }
 
     // Fault-around: for anonymous mappings, prefault adjacent pages to reduce
     // the number of page faults (and their associated exception + EPT overhead).
