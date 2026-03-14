@@ -1079,6 +1079,14 @@ impl Process {
         *child.cgroup.borrow_mut() = Some(parent_cg.clone());
         parent_cg.member_pids.lock().push(pid);
 
+        // Inherit parent's namespaces and allocate namespace-local PID.
+        let parent_ns = parent.namespaces();
+        if !parent_ns.pid_ns.is_root() {
+            let ns_pid = parent_ns.pid_ns.alloc_ns_pid(pid);
+            child.ns_pid.store(ns_pid.as_i32(), Ordering::Relaxed);
+        }
+        *child.namespaces.borrow_mut() = Some(parent_ns);
+
         process_group.lock().add(Arc::downgrade(&child));
         parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
