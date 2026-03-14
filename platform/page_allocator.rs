@@ -14,8 +14,7 @@ static ZONES: SpinLock<ArrayVec<Allocator, 8>> = SpinLock::new(ArrayVec::new_con
 static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NUM_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 
-/// A simple LIFO cache of pre-zeroed free pages to bypass the bitmap allocator.
-/// Pages in this cache are ALREADY ZEROED — alloc_page never needs to zero them.
+/// A simple LIFO cache of single free pages to bypass the buddy allocator.
 const PAGE_CACHE_SIZE: usize = 64;
 
 struct PageCache {
@@ -80,11 +79,8 @@ pub fn read_allocator_stats() -> Stats {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AllocPageFlags: u32 {
-        /// Allocate pages for the kernel purpose.
         const KERNEL = 1 << 0;
-        /// Allocate pages for the user.
         const USER = 1 << 1;
-        /// If set, the page may contain stale data (caller will zero it).
         const DIRTY_OK = 1 << 2;
     }
 }
@@ -105,7 +101,6 @@ impl OwnedPages {
 
 impl Deref for OwnedPages {
     type Target = PAddr;
-
     fn deref(&self) -> &Self::Target {
         &self.paddr
     }
@@ -117,32 +112,9 @@ impl Drop for OwnedPages {
     }
 }
 
-/// Zero a physical page using the platform-optimal method.
-#[inline(always)]
-fn zero_page_internal(paddr: PAddr) {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let ptr = paddr.as_mut_ptr::<u64>();
-        core::arch::asm!(
-            "rep stosq",
-            inout("rdi") ptr => _,
-            inout("rcx") (PAGE_SIZE / 8) => _,
-            in("rax") 0u64,
-            options(nostack),
-        );
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    unsafe {
-        paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
-    }
-}
-
-/// Refill the page cache from the ZONES bitmap allocator in a single lock hold.
-/// Pages are PRE-ZEROED during refill so alloc_page never zeroes on the hot path.
-/// Returns the number of pages added to the cache.
+/// Refill the page cache from the buddy allocator in a single lock hold.
 #[inline(never)]
 fn refill_page_cache() -> usize {
-    // Allocate into a local buffer to avoid holding two locks simultaneously.
     let mut buf = [0usize; PAGE_CACHE_SIZE];
     let mut count = 0;
     {
@@ -173,34 +145,30 @@ fn refill_page_cache() -> usize {
     count
 }
 
-/// Allocate a single physical page. Fast path that avoids the order calculation.
-///
-/// Pages from the cache are PRE-ZEROED. If DIRTY_OK is set, the caller will
-/// zero the page themselves (e.g., page fault handler calls zero_page after).
-/// If DIRTY_OK is NOT set, the page is already zeroed from the cache.
+/// Allocate a single physical page.
 #[inline(always)]
 pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
-    // Try the free-page cache first (O(1), no bitmap scan).
-    // Fast check: skip lock acquisition if cache is known empty.
+    // Fast path: pop from global page cache (lock_no_irq, ~5ns uncontended).
     if PAGE_CACHE_COUNT.load(Ordering::Relaxed) > 0 {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
-            // Pages in cache are already zeroed. No need to zero again
-            // unless the caller explicitly wants a dirty page (DIRTY_OK)
-            // and plans to zero it themselves — which is fine, pre-zeroed
-            // pages are valid for any use.
+            if !flags.contains(AllocPageFlags::DIRTY_OK) {
+                unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
+            }
             NUM_FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
             return Ok(paddr);
         }
     }
 
-    // Cache empty — batch refill from bitmap allocator, then pop one.
+    // Slow path: refill cache from buddy allocator, then pop.
     if refill_page_cache() > 0 {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
-            // Already zeroed during refill.
+            if !flags.contains(AllocPageFlags::DIRTY_OK) {
+                unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
+            }
             return Ok(paddr);
         }
     }
@@ -209,7 +177,6 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 }
 
 /// Batch-allocate up to `max` dirty pages into `out`. Returns number allocated.
-/// Pages are NOT zeroed (caller must zero if needed).
 #[inline(always)]
 pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
     let max = if max < out.len() { max } else { out.len() };
@@ -229,7 +196,7 @@ pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
         PAGE_CACHE_COUNT.store(cache.count, Ordering::Relaxed);
     }
 
-    // Allocate remaining from zones in a single lock hold.
+    // Allocate remaining from buddy allocator directly.
     if count < max {
         let mut zones = ZONES.lock_no_irq();
         for zone in zones.iter_mut() {
@@ -251,7 +218,6 @@ pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
 }
 
 pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
-    // Single page — use the fast cache path.
     if num_pages == 1 {
         return alloc_page(flags);
     }
@@ -263,9 +229,7 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
             let paddr = PAddr::new(paddr);
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe {
-                    paddr
-                        .as_mut_ptr::<u8>()
-                        .write_bytes(0, num_pages * PAGE_SIZE);
+                    paddr.as_mut_ptr::<u8>().write_bytes(0, num_pages * PAGE_SIZE);
                 }
             }
             NUM_FREE_PAGES.fetch_sub(num_pages, Ordering::Relaxed);
@@ -284,7 +248,7 @@ pub fn alloc_pages_owned(
 }
 
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
-    // Single page — try to push to cache instead of bitmap dealloc.
+    // Single page — try to push to cache.
     if num_pages == 1 {
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
             let mut cache = PAGE_CACHE.lock_no_irq();
