@@ -175,6 +175,16 @@ RUN gcc -O2 -o /hello-multilib /hello_multilib.c -lm -lpthread
 # Test loading libsystemd-shared specifically (the crash culprit).
 COPY testing/hello_libsystemd.c /hello_libsystemd.c
 RUN gcc -O2 -o /hello-libsystemd /hello_libsystemd.c -ldl
+# TLS test: shared library with __thread variable.
+COPY testing/libtlstest.c /libtlstest.c
+COPY testing/hello_tls.c /hello_tls.c
+COPY testing/hello_tls_many.c /hello_tls_many.c
+RUN gcc -shared -fPIC -o /libtlstest.so /libtlstest.c
+RUN gcc -O2 -o /hello-tls /hello_tls.c -L/ -ltlstest -Wl,-rpath,/lib
+RUN gcc -O2 -o /hello-tls-many /hello_tls_many.c -L/ -ltlstest -lm -lpthread -ldl -Wl,-rpath,/lib
+# Many-libs test (libc + libm + libpthread + librt + libuuid).
+COPY testing/hello_manylibs.c /hello_manylibs.c
+RUN gcc -O2 -o /hello-manylibs /hello_manylibs.c -lm -lpthread -ldl -lrt
 
 #
 #  glibc pthreads test (static, reuses mini_threads.c)
@@ -333,6 +343,10 @@ COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=hello_glibc /hello-dynamic-glibc /bin/hello-dynamic-glibc
 COPY --from=hello_glibc /hello-multilib /bin/hello-multilib
 COPY --from=hello_glibc /hello-libsystemd /bin/hello-libsystemd
+COPY --from=hello_glibc /libtlstest.so /lib/libtlstest.so
+COPY --from=hello_glibc /hello-tls /bin/hello-tls
+COPY --from=hello_glibc /hello-tls-many /bin/hello-tls-many
+COPY --from=hello_glibc /hello-manylibs /bin/hello-manylibs
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 

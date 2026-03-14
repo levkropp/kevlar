@@ -23,6 +23,23 @@ pub enum VmAreaType {
     },
 }
 
+impl VmAreaType {
+    /// Create an adjusted clone for a sub-range of a VMA.
+    /// `shift` is the byte offset from the original VMA start to the new VMA start.
+    fn clone_with_shift(&self, shift: usize) -> VmAreaType {
+        match self {
+            VmAreaType::Anonymous => VmAreaType::Anonymous,
+            VmAreaType::File { file, offset, file_size } => {
+                VmAreaType::File {
+                    file: file.clone(),
+                    offset: offset + shift,
+                    file_size: file_size.saturating_sub(shift),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct VmArea {
     start: UserVAddr,
@@ -254,7 +271,7 @@ impl Vm {
             // re-insert trimmed pieces.
             let removed = self.vm_areas.remove(i);
 
-            // Left piece: [vma_start, start)
+            // Left piece: [vma_start, start) — keeps original offset
             if vma_start < start.value() {
                 new_areas.push(VmArea {
                     start: removed.start,
@@ -264,12 +281,13 @@ impl Vm {
                 });
             }
 
-            // Right piece: [end, vma_end)
+            // Right piece: [end, vma_end) — offset shifts by (end - vma_start)
             if vma_end > end {
+                let shift = end - vma_start;
                 new_areas.push(VmArea {
                     start: UserVAddr::new_nonnull(end)?,
                     len: vma_end - end,
-                    area_type: removed.area_type,
+                    area_type: removed.area_type.clone_with_shift(shift),
                     prot: removed.prot,
                 });
             }
@@ -293,19 +311,9 @@ impl Vm {
                 vma.prot = new_prot;
                 return Ok(());
             }
-            // Also handle: range covers entire VMA (common for single-page mmaps)
-            if vma.start.value() >= start.value() && vma.start.value() + vma.len <= end
-               && vma.start.value() + vma.len > start.value() {
-                vma.prot = new_prot;
-                // Check if there are more overlapping VMAs
-                let vma_end_val = vma.start.value() + vma.len;
-                if vma_end_val >= end {
-                    return Ok(());
-                }
-            }
         }
 
-        // Slow path: range partially overlaps VMAs, need to split.
+        // Slow path: range partially overlaps one or more VMAs, need to split.
         let mut new_areas: Vec<VmArea> = Vec::new();
         let mut i = 0;
 
@@ -315,6 +323,13 @@ impl Vm {
             let vma_end = vma_start + vma.len;
 
             if vma_end <= start.value() || vma_start >= end {
+                i += 1;
+                continue;
+            }
+
+            // VMA completely contained in [start, end): update in-place.
+            if vma_start >= start.value() && vma_end <= end {
+                self.vm_areas[i].prot = new_prot;
                 i += 1;
                 continue;
             }
@@ -334,22 +349,26 @@ impl Vm {
             // Middle piece (new prot): [max(vma_start, start), min(vma_end, end))
             let mid_start = core::cmp::max(vma_start, start.value());
             let mid_end = core::cmp::min(vma_end, end);
+            let mid_shift = mid_start - vma_start;
             new_areas.push(VmArea {
                 start: UserVAddr::new_nonnull(mid_start)?,
                 len: mid_end - mid_start,
-                area_type: removed.area_type.clone(),
+                area_type: removed.area_type.clone_with_shift(mid_shift),
                 prot: new_prot,
             });
 
             // Right piece (keeps old prot): [end, vma_end)
             if vma_end > end {
+                let right_shift = end - vma_start;
                 new_areas.push(VmArea {
                     start: UserVAddr::new_nonnull(end)?,
                     len: vma_end - end,
-                    area_type: removed.area_type,
+                    area_type: removed.area_type.clone_with_shift(right_shift),
                     prot: removed.prot,
                 });
             }
+
+            // Don't increment i — the next element shifted into position.
         }
 
         self.vm_areas.extend(new_areas);
