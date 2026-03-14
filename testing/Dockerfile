@@ -185,14 +185,13 @@ RUN mkdir -p /systemd-root/usr/lib/systemd /systemd-root/lib64 \
     && cp /lib/systemd/systemd /systemd-root/usr/lib/systemd/systemd \
     && cp /lib/systemd/systemd-journald /systemd-root/usr/lib/systemd/systemd-journald \
     && cp /bin/systemctl /systemd-root/usr/lib/systemd/systemctl
-# Copy all glibc runtime libraries needed by systemd.
-RUN mkdir -p /systemd-root/lib/x86_64-linux-gnu /systemd-root/lib64 \
-    && ldd /lib/systemd/systemd /lib/systemd/systemd-journald /bin/systemctl 2>/dev/null \
-       | grep -o '/lib[^ ]*' | sort -u | while read lib; do \
-         mkdir -p "/systemd-root$(dirname $lib)"; \
-         cp -nL "$lib" "/systemd-root$lib" 2>/dev/null || true; \
-       done \
-    && cp -L /lib64/ld-linux-x86-64.so.2 /systemd-root/lib64/ld-linux-x86-64.so.2 2>/dev/null || true
+# Copy ALL glibc runtime libraries (recursive transitive deps).
+# Simply copy the entire /lib/x86_64-linux-gnu/ directory — it's the
+# cleanest way to get all transitive dependencies.
+RUN mkdir -p /systemd-root/lib/x86_64-linux-gnu /systemd-root/lib64 /systemd-root/lib/systemd \
+    && cp -L /lib/x86_64-linux-gnu/*.so* /systemd-root/lib/x86_64-linux-gnu/ \
+    && cp -L /lib64/ld-linux-x86-64.so.2 /systemd-root/lib64/ld-linux-x86-64.so.2 \
+    && cp -L /lib/systemd/libsystemd-shared-245.so /systemd-root/lib/systemd/
 
 #
 #  M9 Phase 2 integration test (systemd init-sequence validation)
@@ -293,6 +292,8 @@ COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
 COPY --from=systemd_pkg /systemd-root/lib/ /lib/
 COPY --from=systemd_pkg /systemd-root/lib64/ /lib64/
 COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/systemctl /bin/systemctl
+# libsystemd-shared must be in the ld.so search path.
+COPY --from=systemd_pkg /lib/systemd/libsystemd-shared-245.so /lib/x86_64-linux-gnu/libsystemd-shared-245.so
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/

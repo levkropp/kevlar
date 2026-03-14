@@ -495,11 +495,12 @@ test-cgroups-ns:
 .PHONY: test-systemd-boot
 test-systemd-boot:
 	$(PROGRESS) "TEST" "M9 systemd boot (real systemd PID 1)"
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/usr/lib/systemd/systemd"
+	$(MAKE) build PROFILE=$(PROFILE)
 	timeout 60 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--arch $(ARCH) $(kernel_qemu_arg) \
+		-- -append "pci=off init=/usr/lib/systemd/systemd" 2>&1 \
 		| tee /tmp/kevlar-test-systemd-boot.log; true
-	@grep -E 'systemd|Reached|target|Started|Failed' \
+	@grep -aE 'systemd|Reached|target|Started|Failed|exited' \
 		/tmp/kevlar-test-systemd-boot.log || echo "(no systemd output found)"
 
 .PHONY: test-systemd-v3

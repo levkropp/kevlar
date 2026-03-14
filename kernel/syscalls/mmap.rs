@@ -21,9 +21,8 @@ impl<'a> SyscallHandler<'a> {
         fd: Fd,
         offset: c_off,
     ) -> Result<isize> {
-        if !is_aligned(len as usize, PAGE_SIZE) {
-            return Err(Errno::EINVAL.into());
-        }
+        // Linux silently rounds up length to page boundary.
+        let len = kevlar_utils::alignment::align_up(len as usize, PAGE_SIZE);
 
         if !is_aligned(offset as usize, PAGE_SIZE) {
             return Err(Errno::EINVAL.into());
@@ -45,9 +44,9 @@ impl<'a> SyscallHandler<'a> {
             let file_size = opened_file.inode().stat()
                 .map(|st| {
                     let remaining = (st.size.0 as usize).saturating_sub(offset as usize);
-                    core::cmp::min(len as usize, remaining)
+                    core::cmp::min(len, remaining)
                 })
-                .unwrap_or(len as usize);
+                .unwrap_or(len);
 
             VmAreaType::File {
                 file,
@@ -68,9 +67,9 @@ impl<'a> SyscallHandler<'a> {
                     }
 
                     // MAP_FIXED: unmap any existing mappings in the range first.
-                    if !vm.is_free_vaddr_range(addr, len as usize) {
-                        vm.remove_vma_range(addr, len as usize)?;
-                        let num_pages = len as usize / PAGE_SIZE;
+                    if !vm.is_free_vaddr_range(addr, len) {
+                        vm.remove_vma_range(addr, len)?;
+                        let num_pages = len / PAGE_SIZE;
                         for i in 0..num_pages {
                             let page_addr = addr.add(i * PAGE_SIZE);
                             if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
@@ -86,12 +85,12 @@ impl<'a> SyscallHandler<'a> {
             }
         } else {
             match addr_hint {
-                Some(addr) if vm.is_free_vaddr_range(addr, len as usize) => addr,
-                _ => vm.alloc_vaddr_range(len as usize)?,
+                Some(addr) if vm.is_free_vaddr_range(addr, len) => addr,
+                _ => vm.alloc_vaddr_range(len)?,
             }
         };
 
-        vm.add_vm_area_with_prot(mapped_uaddr, len as usize, area_type, prot)?;
+        vm.add_vm_area_with_prot(mapped_uaddr, len, area_type, prot)?;
         Ok(mapped_uaddr.value() as isize)
     }
 }

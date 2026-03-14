@@ -594,6 +594,44 @@ mod syscall_numbers {
 
 use syscall_numbers::*;
 
+// ── PID 1 syscall trace ring buffer (for debugging systemd boot) ────
+
+use core::sync::atomic::{AtomicUsize, Ordering as AtomOrd};
+
+const TRACE_LEN: usize = 512;
+
+struct TraceEntry {
+    nr: usize,
+    result: isize,
+    args: [usize; 3], // first 3 args only
+}
+
+static TRACE_BUF: SpinLock<[TraceEntry; TRACE_LEN]> = SpinLock::new(
+    [const { TraceEntry { nr: 0, result: 0, args: [0; 3] } }; TRACE_LEN]
+);
+static TRACE_IDX: AtomicUsize = AtomicUsize::new(0);
+
+fn trace_pid1_syscall(nr: usize, a1: usize, a2: usize, a3: usize, result: isize) {
+    let idx = TRACE_IDX.fetch_add(1, AtomOrd::Relaxed) % TRACE_LEN;
+    let mut buf = TRACE_BUF.lock();
+    buf[idx] = TraceEntry { nr, result, args: [a1, a2, a3] };
+}
+
+pub fn dump_pid1_trace() {
+    let buf = TRACE_BUF.lock();
+    let end = TRACE_IDX.load(AtomOrd::Relaxed);
+    let start = if end > TRACE_LEN { end - TRACE_LEN } else { 0 };
+    warn!("=== PID 1 last {} syscalls ===", end.min(TRACE_LEN));
+    for i in start..end {
+        let e = &buf[i % TRACE_LEN];
+        let name = syscall_name_by_number(e.nr);
+        warn!("  [{:3}] {}(n={}) args=({:#x},{:#x},{:#x}) -> {}",
+              i, name, e.nr, e.args[0], e.args[1], e.args[2], e.result);
+    }
+}
+
+use kevlar_platform::spinlock::SpinLock;
+
 /// Stack-allocated path buffer for syscall path arguments.
 ///
 /// Avoids 3 heap allocations per path-taking syscall (512-byte Vec for
@@ -713,6 +751,15 @@ impl<'a> SyscallHandler<'a> {
 
         // Per-syscall cycle profiler: record TSC at exit.
         debug::profiler::syscall_exit(n, prof_start);
+
+        // Record PID 1 syscalls for debugging systemd boot.
+        if current_process().pid().as_i32() == 1 {
+            let result = match &ret {
+                Ok(v) => *v,
+                Err(e) => -(e.errno() as isize),
+            };
+            trace_pid1_syscall(n, a1, a2, a3, result);
+        }
 
         // Stack canary check (post-syscall, x86-64 only).
         #[cfg(target_arch = "x86_64")]
@@ -1242,10 +1289,11 @@ impl<'a> SyscallHandler<'a> {
                     name: syscall_name_by_number(n),
                     number: n,
                 });
-                warn_once!(
-                    "unimplemented system call: {} (n={})",
+                warn!(
+                    "unimplemented system call: {} (n={}) pid={}",
                     syscall_name_by_number(n),
                     n,
+                    current_process().pid().as_i32(),
                 );
                 Err(Error::new(Errno::ENOSYS))
             }

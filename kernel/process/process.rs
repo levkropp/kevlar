@@ -648,6 +648,9 @@ impl Process {
                     crate::syscalls::syscall_name_by_number,
                 );
             }
+            // Dump PID 1 syscall trace for debugging.
+            warn!("PID 1 exiting with status {}", status);
+            crate::syscalls::dump_pid1_trace();
             info!("init exited with status {}, halting system", status);
             kevlar_platform::arch::halt();
         }
