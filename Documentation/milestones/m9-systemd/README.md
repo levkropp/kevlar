@@ -11,14 +11,14 @@ in the distro and can be statically linked or dynamically linked against musl.
 just a kernel. Services like networking, logging, storage, and users can be
 managed by systemd.
 
-## Phases
+## Phases (revised after M8 completion)
 
-| Phase | Name | Key Changes | Prerequisite |
-|-------|------|------------|--------------|
-| 1 | systemd Binary Build | Compile systemd as musl static or glibc dynamic | M8 |
-| 2 | Mount Points | /sys, /proc, /dev, /run, /tmp mounted; /boot, /home available | Phase 1 |
-| 3 | Essential Services | systemd-logind, systemd-udevd, systemd-networkd boot | Phase 2 |
-| 4 | User Session | Multi-user systemd environment with shell | Phase 3 |
+| Phase | Name | Duration | Prerequisite |
+|-------|------|----------|--------------|
+| [1](phase1-syscall-gaps.md) | Syscall Gap Closure | 3-4 days | M8 |
+| [2](phase2-init-sequence.md) | Init Sequence Validation | 4-5 days | Phase 1 |
+| [3](phase3-real-systemd.md) | Real systemd Boot | 5-7 days | Phase 2 |
+| [4](phase4-services.md) | Service Management | 3-5 days | Phase 3 |
 
 ## Scope
 
