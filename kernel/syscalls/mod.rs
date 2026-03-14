@@ -183,6 +183,13 @@ mod unshare;
 // M8 Phase 3: Filesystem isolation
 mod pivot_root;
 
+// M9 Phase 1: Syscall gap closure
+mod close_range;
+mod flock;
+mod memfd_create;
+mod pidfd_open;
+mod waitid;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -389,6 +396,12 @@ mod syscall_numbers {
     pub const SYS_UNSHARE: usize = 272;
     // M8 Phase 3: Filesystem isolation
     pub const SYS_PIVOT_ROOT: usize = 155;
+    // M9 Phase 1: Syscall gap closure
+    pub const SYS_FLOCK: usize = 73;
+    pub const SYS_WAITID: usize = 247;
+    pub const SYS_MEMFD_CREATE: usize = 319;
+    pub const SYS_PIDFD_OPEN: usize = 434;
+    pub const SYS_CLOSE_RANGE: usize = 436;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -571,6 +584,12 @@ mod syscall_numbers {
     pub const SYS_UNSHARE: usize = 97;
     // M8 Phase 3: Filesystem isolation
     pub const SYS_PIVOT_ROOT: usize = 41;
+    // M9 Phase 1: Syscall gap closure
+    pub const SYS_FLOCK: usize = 32;
+    pub const SYS_WAITID: usize = 95;
+    pub const SYS_MEMFD_CREATE: usize = 279;
+    pub const SYS_PIDFD_OPEN: usize = 434;
+    pub const SYS_CLOSE_RANGE: usize = 436;
 }
 
 use syscall_numbers::*;
@@ -1205,6 +1224,17 @@ impl<'a> SyscallHandler<'a> {
             SYS_UNSHARE => self.sys_unshare(a1),
             // M8 Phase 3: Filesystem isolation
             SYS_PIVOT_ROOT => self.sys_pivot_root(a1, a2),
+            // M9 Phase 1: Syscall gap closure
+            SYS_FLOCK => self.sys_flock(a1 as i32, a2 as i32),
+            SYS_WAITID => self.sys_waitid(
+                a1 as c_int,
+                a2 as c_int,
+                UserVAddr::new_nonnull(a3)?,
+                a4 as c_int,
+            ),
+            SYS_MEMFD_CREATE => self.sys_memfd_create(UserVAddr::new_nonnull(a1)?, a2 as u32),
+            SYS_PIDFD_OPEN => self.sys_pidfd_open(a1 as i32, a2 as u32),
+            SYS_CLOSE_RANGE => self.sys_close_range(a1 as u32, a2 as u32, a3 as u32),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1390,6 +1420,11 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SETDOMAINNAME => "setdomainname",
         SYS_UNSHARE => "unshare",
         SYS_PIVOT_ROOT => "pivot_root",
+        SYS_FLOCK => "flock",
+        SYS_WAITID => "waitid",
+        SYS_MEMFD_CREATE => "memfd_create",
+        SYS_PIDFD_OPEN => "pidfd_open",
+        SYS_CLOSE_RANGE => "close_range",
         _ => "(unknown)",
     }
 }
