@@ -108,6 +108,17 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         Some(vma) => vma,
         None => {
             let pid = current.pid().as_i32();
+            if pid == 1 {
+                warn!("PAGE FAULT NO VMA: addr={:#x} ip={:#x}", unaligned_vaddr.value(), ip);
+                // Dump all VMAs for diagnosis.
+                for (i, vma) in vm.vm_areas().iter().enumerate() {
+                    let vt = match vma.area_type() {
+                        VmAreaType::Anonymous => "anon",
+                        VmAreaType::File { .. } => "file",
+                    };
+                    warn!("  VMA[{}]: [{:#x}-{:#x}] {}", i, vma.start().value(), vma.end().value(), vt);
+                }
+            }
             debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
                 pid,
                 vaddr: unaligned_vaddr.value(),
@@ -129,6 +140,16 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             Process::exit_by_signal(SIGSEGV);
         }
     };
+
+    // PID 1 page fault trace for debugging dynamic linker boot.
+    if current.pid().as_i32() == 1 {
+        let vma_type_str = match vma.area_type() {
+            VmAreaType::Anonymous => "anon",
+            VmAreaType::File { .. } => "file",
+        };
+        warn!("page_fault: pid=1 addr={:#x} ip={:#x} vma=[{:#x}-{:#x}] type={}",
+              unaligned_vaddr.value(), ip, vma.start().value(), vma.end().value(), vma_type_str);
+    }
 
     match vma.area_type() {
         VmAreaType::Anonymous => { /* Zero-filled by zero_page above. */ }
