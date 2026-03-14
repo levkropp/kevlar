@@ -188,6 +188,7 @@ COPY testing/contracts/subsystems/proc_pid.c /contracts/
 COPY testing/contracts/subsystems/proc_maps.c /contracts/
 COPY testing/contracts/subsystems/proc_fd.c /contracts/
 COPY testing/contracts/programs/busybox_basic.c /contracts/
+COPY testing/contracts/programs/glibc_stubs.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
 COPY testing/contracts/scheduling/nice_values.c /contracts/
 COPY testing/contracts/scheduling/sched_yield.c /contracts/
