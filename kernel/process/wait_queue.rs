@@ -116,4 +116,45 @@ impl WaitQueue {
             process.resume();
         }
     }
+
+    /// Wake up to `max` waiters. Returns the number actually woken.
+    pub fn wake_n(&self, max: u32) -> u32 {
+        if self.waiter_count.load(Ordering::Relaxed) == 0 || max == 0 {
+            return 0;
+        }
+        let mut queue = self.queue.lock();
+        let mut woken = 0u32;
+        while woken < max {
+            if let Some(process) = queue.pop_front() {
+                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                process.resume();
+                woken += 1;
+            } else {
+                break;
+            }
+        }
+        woken
+    }
+
+    /// Move up to `max` waiters from `self` to `other` without waking them.
+    /// Returns the number of waiters moved.
+    pub fn requeue_to(&self, other: &WaitQueue, max: usize) -> usize {
+        if self.waiter_count.load(Ordering::Relaxed) == 0 || max == 0 {
+            return 0;
+        }
+        let mut src = self.queue.lock();
+        let mut dst = other.queue.lock();
+        let mut moved = 0usize;
+        while moved < max {
+            if let Some(process) = src.pop_front() {
+                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                dst.push_back(process);
+                other.waiter_count.fetch_add(1, Ordering::Relaxed);
+                moved += 1;
+            } else {
+                break;
+            }
+        }
+        moved
+    }
 }

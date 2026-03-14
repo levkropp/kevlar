@@ -193,6 +193,7 @@ COPY testing/contracts/scheduling/getpriority.c /contracts/
 COPY testing/contracts/scheduling/nice_values.c /contracts/
 COPY testing/contracts/scheduling/sched_yield.c /contracts/
 COPY testing/contracts/scheduling/sched_fairness.c /contracts/
+COPY testing/contracts/scheduling/futex_requeue.c /contracts/
 RUN for src in /contracts/*.c; do \
         name=$(basename ${src%.c}); \
         musl-gcc -static -O1 -Wall -Wno-unused-result -o /contracts/contract-${name} $src; \
