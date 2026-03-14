@@ -166,6 +166,9 @@ FROM ubuntu:20.04 AS hello_glibc
 RUN apt-get update && apt-get install -qy build-essential
 COPY testing/hello_glibc.c /hello_glibc.c
 RUN gcc -static -O2 -o /hello-glibc /hello_glibc.c
+# Dynamic glibc hello for testing the glibc dynamic linker.
+COPY testing/hello_dynamic_glibc.c /hello_dynamic_glibc.c
+RUN gcc -O2 -o /hello-dynamic-glibc /hello_dynamic_glibc.c
 
 #
 #  glibc pthreads test (static, reuses mini_threads.c)
@@ -178,20 +181,47 @@ RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
 #
 #  M9 Phase 3.1: systemd v245 binaries (from Ubuntu 20.04 package)
 #
-FROM ubuntu:20.04 AS systemd_pkg
-RUN apt-get update && apt-get install -qy systemd
-# Extract the key binaries and ALL shared library dependencies.
-RUN mkdir -p /systemd-root/usr/lib/systemd /systemd-root/lib64 \
-    && cp /lib/systemd/systemd /systemd-root/usr/lib/systemd/systemd \
-    && cp /lib/systemd/systemd-journald /systemd-root/usr/lib/systemd/systemd-journald \
-    && cp /bin/systemctl /systemd-root/usr/lib/systemd/systemctl
-# Copy ALL glibc runtime libraries (recursive transitive deps).
-# Simply copy the entire /lib/x86_64-linux-gnu/ directory — it's the
-# cleanest way to get all transitive dependencies.
-RUN mkdir -p /systemd-root/lib/x86_64-linux-gnu /systemd-root/lib64 /systemd-root/lib/systemd \
-    && cp -L /lib/x86_64-linux-gnu/*.so* /systemd-root/lib/x86_64-linux-gnu/ \
-    && cp -L /lib64/ld-linux-x86-64.so.2 /systemd-root/lib64/ld-linux-x86-64.so.2 \
-    && cp -L /lib/systemd/libsystemd-shared-245.so /systemd-root/lib/systemd/
+FROM ubuntu:20.04 AS systemd_build
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -qy \
+    build-essential meson ninja-build pkg-config python3 python3-jinja2 \
+    libcap-dev libmount-dev gperf gettext m4 \
+    curl xsltproc docbook-xsl docbook-xml
+RUN mkdir /build && curl -fsSL \
+    https://github.com/systemd/systemd-stable/archive/refs/tags/v245.7.tar.gz \
+    | tar xz --strip-components=1 -C /build
+WORKDIR /build
+# Minimal meson config: disable everything non-essential.
+RUN meson setup builddir \
+    -Dstatic-libsystemd=true \
+    -Dlink-systemctl-shared=false \
+    -Dpam=false -Dselinux=false -Dapparmor=false -Daudit=false \
+    -Dseccomp=false -Dutmp=false -Dgcrypt=false -Dp11kit=false \
+    -Dgnutls=false -Dopenssl=false -Dcurl=false \
+    -Dtpm=false -Dzlib=false -Dbzip2=false -Dzstd=false -Dlz4=false \
+    -Dxz=false -Dpolkit=false -Dblkid=false -Dkmod=false -Didn=false \
+    -Dresolve=false -Dnetworkd=false -Dtimesyncd=false -Dlogind=false \
+    -Dmachined=false -Dimportd=false -Dhomed=false -Dhostnamed=false \
+    -Dlocaled=false -Dtimedated=false -Dcoredump=false -Dfirstboot=false \
+    -Drandomseed=false -Dhwdb=false -Drfkill=false -Dhibernate=false \
+    -Dportabled=false -Duserdb=false \
+    -Defi=false -Dgnu-efi=false \
+    -Dman=false -Dhtml=false \
+    -Dtests=false -Dinstall-tests=false \
+    -Ddefault-hierarchy=unified
+# Build just the core binaries.
+RUN ninja -C builddir systemd
+# Try to get a static binary; if not fully static, copy with its deps.
+RUN mkdir -p /systemd-root/usr/lib/systemd /systemd-root/lib/x86_64-linux-gnu /systemd-root/lib64 /systemd-root/lib/systemd \
+    && cp builddir/systemd /systemd-root/usr/lib/systemd/systemd \
+    && cp builddir/src/shared/libsystemd-shared-245.so /systemd-root/lib/systemd/ \
+    && (ldd /systemd-root/usr/lib/systemd/systemd /systemd-root/lib/systemd/libsystemd-shared-245*.so 2>/dev/null \
+       | grep -o '/lib[^ ]*' | sort -u | while read lib; do \
+         mkdir -p "/systemd-root$(dirname $lib)"; \
+         cp -nL "$lib" "/systemd-root$lib" 2>/dev/null || true; \
+       done || true) \
+    && cp -L /lib64/ld-linux-x86-64.so.2 /systemd-root/lib64/ld-linux-x86-64.so.2 2>/dev/null || true \
+    && (cp builddir/systemd-journald /systemd-root/usr/lib/systemd/systemd-journald 2>/dev/null || true) \
+    && (cp builddir/systemctl /systemd-root/usr/lib/systemd/systemctl 2>/dev/null || true)
 
 #
 #  M9 Phase 2 integration test (systemd init-sequence validation)
@@ -288,13 +318,13 @@ COPY --from=mini_threads /mini-threads /bin/mini-threads
 COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
 COPY --from=mini_systemd_v3 /mini-systemd-v3 /bin/mini-systemd-v3
 # systemd v245 binaries + glibc runtime
-COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
-COPY --from=systemd_pkg /systemd-root/lib/ /lib/
-COPY --from=systemd_pkg /systemd-root/lib64/ /lib64/
-COPY --from=systemd_pkg /systemd-root/usr/lib/systemd/systemctl /bin/systemctl
-# libsystemd-shared must be in the ld.so search path.
-COPY --from=systemd_pkg /lib/systemd/libsystemd-shared-245.so /lib/x86_64-linux-gnu/libsystemd-shared-245.so
+COPY --from=systemd_build /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
+COPY --from=systemd_build /systemd-root/lib/ /lib/
+COPY --from=systemd_build /systemd-root/lib64/ /lib64/
+# Also copy libsystemd-shared into the standard ld.so search path.
+COPY --from=systemd_build /systemd-root/lib/systemd/libsystemd-shared-245.so /lib/x86_64-linux-gnu/libsystemd-shared-245.so
 COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
+COPY --from=hello_glibc /hello-dynamic-glibc /bin/hello-dynamic-glibc
 COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
