@@ -760,13 +760,18 @@ impl Process {
     }
 
     /// Terminates the **current** process by a signal.
-    pub fn exit_by_signal(_signal: Signal) -> ! {
+    pub fn exit_by_signal(signal: Signal) -> ! {
+        let pid = current_process().pid().as_i32();
+        warn!("PID {} killed by signal {}", pid, signal);
+        if pid == 1 {
+            crate::syscalls::dump_pid1_trace();
+        }
         debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExit {
-            pid: current_process().pid().as_i32(),
-            status: 128 + _signal,
+            pid,
+            status: 128 + signal,
             by_signal: true,
         });
-        Process::exit(1 /* FIXME: how should we compute the exit status? */);
+        Process::exit(128 + signal);
     }
 
     /// Sends a signal.
@@ -1498,11 +1503,14 @@ fn do_elf_binfmt(
         let interp_entry_offset = interp_elf.entry_offset() as usize;
         let interp_phdrs: Vec<ProgramHeader> = interp_elf.program_headers().to_vec();
 
-        // Create VM. For PIE, heap bottom is arbitrary (will be after the alloc region).
-        // Use a safe default; the actual images are placed via alloc_vaddr_range.
+        // Create VM. For PIE, we need a temporary heap bottom that gets updated
+        // after images are loaded. For ET_EXEC, we know the final address.
+        // We'll set a conservative initial heap bottom and update it after loading.
         let user_heap_bottom = if is_pie {
-            // PIE: heap starts after a placeholder. Images go in the valloc region.
-            align_up(PAGE_SIZE, PAGE_SIZE)
+            // PIE: use a high placeholder. alloc_vaddr_range will allocate in the
+            // valloc region (high addresses), so heap goes after them.
+            // We'll update this after loading all segments.
+            align_up(0x10000, PAGE_SIZE) // temporary, will be updated
         } else {
             align_up(main_hi, PAGE_SIZE)
         };
@@ -1559,8 +1567,17 @@ fn do_elf_binfmt(
         auxv.push(Auxv::Entry(main_entry));
         auxv.push(Auxv::Base(interp_base_uaddr.value()));
 
-        trace!("dynamic link: ip={:#x}, main_entry={:#x}, interp_base={:#x}",
-              ip.value(), main_entry, interp_base_uaddr.value());
+        // Update heap bottom to be after all loaded images.
+        // For PIE, both the main exe and interpreter are in the valloc region.
+        let final_top = core::cmp::max(
+            main_base_offset + main_hi,
+            interp_base_offset + interp_hi,
+        );
+        let new_heap_bottom = align_up(final_top, PAGE_SIZE);
+        vm.set_heap_bottom(UserVAddr::new_nonnull(new_heap_bottom)?);
+
+        trace!("dynamic link: ip={:#x}, main_entry={:#x}, interp_base={:#x}, heap={:#x}",
+              ip.value(), main_entry, interp_base_uaddr.value(), new_heap_bottom);
     } else {
         // --- Static executable (no interpreter) ---
         let end_of_image = main_hi;
