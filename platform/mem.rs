@@ -114,3 +114,12 @@ pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
 pub unsafe extern "C" fn bcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
     unsafe { memcmp(a, b, n) }
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
+    let mut len = 0;
+    while unsafe { *s.add(len) } != 0 {
+        len += 1;
+    }
+    len
+}
