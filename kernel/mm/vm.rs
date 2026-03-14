@@ -153,6 +153,12 @@ impl Vm {
         &mut self.vm_areas[1]
     }
 
+    /// Update the heap base address (used after loading PIE images).
+    pub fn set_heap_bottom(&mut self, new_bottom: UserVAddr) {
+        let heap = self.heap_vma_mut();
+        heap.start = new_bottom;
+    }
+
     pub fn add_vm_area(
         &mut self,
         start: UserVAddr,
