@@ -204,6 +204,7 @@ COPY testing/contracts/subsystems/proc_pid.c /contracts/
 COPY testing/contracts/subsystems/proc_maps.c /contracts/
 COPY testing/contracts/subsystems/proc_fd.c /contracts/
 COPY testing/contracts/subsystems/cgroup_basic.c /contracts/
+COPY testing/contracts/subsystems/ns_uts.c /contracts/
 COPY testing/contracts/programs/busybox_basic.c /contracts/
 COPY testing/contracts/programs/glibc_stubs.c /contracts/
 COPY testing/contracts/scheduling/getpriority.c /contracts/
