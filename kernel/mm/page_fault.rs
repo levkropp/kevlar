@@ -131,7 +131,8 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     };
 
     match vma.area_type() {
-        VmAreaType::Anonymous => { /* The page is already filled with zeros. Nothing to do. */ }
+        VmAreaType::Anonymous => { /* Zero-filled by zero_page above. */ }
+        #[cold]
         VmAreaType::File {
             file,
             offset,
