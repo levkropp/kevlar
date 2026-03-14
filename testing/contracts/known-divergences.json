@@ -1,0 +1,3 @@
+{
+    "_comment": "Tests listed here are known to diverge from Linux. They still run and are reported as XFAIL, but do not fail the suite. Remove entries as implementations are completed."
+}

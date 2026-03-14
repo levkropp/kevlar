@@ -231,6 +231,15 @@ def find_tests(root: Path, filters: list[str]) -> list[Path]:
     return tests
 
 
+def load_known_divergences(contracts_dir: Path) -> dict[str, str]:
+    """Load known-divergences.json if it exists. Returns {test_name: reason}."""
+    path = contracts_dir / "known-divergences.json"
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
 # -------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------
@@ -275,8 +284,9 @@ def main():
 
     extra_cflags = args.cflags.split() if args.cflags else []
 
+    known_divergences = load_known_divergences(contracts_dir)
     results = []
-    passed = failed = diverged = skipped = 0
+    passed = failed = diverged = skipped = xfailed = 0
 
     print(f"Running {len(tests)} contract test(s) [arch={args.arch}]")
     print()
@@ -336,9 +346,14 @@ def main():
         else:
             status, issues = compare(linux_out, kevlar_out)
 
+        is_xfail = test_name in known_divergences and status in ("DIVERGE", "FAIL")
         if status == "PASS":
             passed += 1
             marker = "  PASS "
+        elif is_xfail:
+            xfailed += 1
+            marker = " XFAIL "
+            status = "XFAIL"
         elif status == "FAIL":
             failed += 1
             marker = "  FAIL "
@@ -352,6 +367,9 @@ def main():
 
         print(f"{marker} {test_name}{timing}")
 
+        if is_xfail:
+            reason = known_divergences[test_name]
+            print(f"         known: {reason}")
         if issues or args.verbose:
             for issue in issues:
                 print(f"         issue: {issue}")
@@ -401,8 +419,12 @@ def main():
         })
 
     print()
-    total = passed + failed + diverged + skipped
-    print(f"Results: {passed}/{total} PASS  |  {diverged} DIVERGE  |  {failed} FAIL  |  {skipped} SKIP")
+    total = passed + failed + diverged + skipped + xfailed
+    parts = [f"{passed}/{total} PASS"]
+    if xfailed:
+        parts.append(f"{xfailed} XFAIL")
+    parts.extend([f"{diverged} DIVERGE", f"{failed} FAIL", f"{skipped} SKIP"])
+    print(f"Results: {'  |  '.join(parts)}")
 
     if args.json:
         out = {
@@ -411,6 +433,7 @@ def main():
             "summary": {
                 "total": total,
                 "passed": passed,
+                "xfailed": xfailed,
                 "diverged": diverged,
                 "failed": failed,
                 "skipped": skipped,

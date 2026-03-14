@@ -35,20 +35,34 @@ Five new syscall files, each trivial:
 
 ## Contract test
 
-The `glibc_stubs.c` test calls the three stubs that produce identical
-results on both kernels:
+The `glibc_stubs.c` test verifies Linux-identical behavior for all
+five stubs:
 
+- rseq with null args returns EINVAL
 - sched_setaffinity succeeds (returns 0)
 - sched_getscheduler returns SCHED_OTHER (0)
 - sched_setscheduler succeeds (returns 0)
+- clone3 with null args returns EFAULT
 
-rseq and clone3 are not contract-tested because they return ENOSYS on
-Kevlar (not yet implemented) vs EINVAL/EFAULT on Linux (implemented
-but rejecting invalid args).  Full implementations will come later.
+The stubs match Linux's argument validation: rseq returns EINVAL for
+null/undersized args (before it would return ENOSYS for a valid
+registration), and clone3 returns EINVAL for size < 64 bytes (before
+it would return ENOSYS for a properly-sized struct).  This means the
+invalid-args contract tests produce identical results on both kernels.
+glibc's fallback path still works because it passes valid args and
+gets ENOSYS.
+
+## Known divergences mechanism
+
+Phase 6 also introduces `known-divergences.json` and XFAIL support in
+the contract test runner.  Tests listed in the file still run and show
+their output, but are reported as XFAIL instead of DIVERGE/FAIL and
+don't cause a non-zero exit code.  This makes gaps visible without
+blocking CI.  Currently no tests need it.
 
 ## Results
 
-25/25 contract tests pass with zero divergences from Linux.
+25/25 contract tests pass, zero divergences.
 
 ## What's next
 
