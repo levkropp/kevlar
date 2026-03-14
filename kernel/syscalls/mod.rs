@@ -187,6 +187,7 @@ mod pivot_root;
 mod close_range;
 mod flock;
 mod memfd_create;
+mod name_to_handle_at;
 mod pidfd_open;
 mod waitid;
 
@@ -400,6 +401,7 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 73;
     pub const SYS_WAITID: usize = 247;
     pub const SYS_MEMFD_CREATE: usize = 319;
+    pub const SYS_NAME_TO_HANDLE_AT: usize = 303;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
 }
@@ -588,6 +590,7 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 32;
     pub const SYS_WAITID: usize = 95;
     pub const SYS_MEMFD_CREATE: usize = 279;
+    pub const SYS_NAME_TO_HANDLE_AT: usize = 264;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
 }
@@ -1304,6 +1307,13 @@ impl<'a> SyscallHandler<'a> {
                 a4 as c_int,
             ),
             SYS_MEMFD_CREATE => self.sys_memfd_create(UserVAddr::new_nonnull(a1)?, a2 as u32),
+            SYS_NAME_TO_HANDLE_AT => self.sys_name_to_handle_at(
+                CwdOrFd::parse(a1 as c_int),
+                a2,
+                UserVAddr::new_nonnull(a3)?,
+                UserVAddr::new_nonnull(a4)?,
+                a5 as i32,
+            ),
             SYS_PIDFD_OPEN => self.sys_pidfd_open(a1 as i32, a2 as u32),
             SYS_CLOSE_RANGE => self.sys_close_range(a1 as u32, a2 as u32, a3 as u32),
             _ => {
@@ -1495,6 +1505,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FLOCK => "flock",
         SYS_WAITID => "waitid",
         SYS_MEMFD_CREATE => "memfd_create",
+        SYS_NAME_TO_HANDLE_AT => "name_to_handle_at",
         SYS_PIDFD_OPEN => "pidfd_open",
         SYS_CLOSE_RANGE => "close_range",
         _ => "(unknown)",

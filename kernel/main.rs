@@ -56,7 +56,7 @@ use crate::{
         mount::{MountTable, RootFs},
         path::Path,
         procfs::{self, PROC_FS},
-        sysfs,
+        sysfs::{self, SYS_FS},
     },
     process::{switch, Process},
     syscalls::SyscallHandler,
@@ -275,13 +275,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     let mut root_fs = RootFs::new(INITRAM_FS.clone()).unwrap();
     let proc_dir = root_fs
         .lookup_dir(Path::new("/proc"))
-        .expect("failed to locate /dev");
+        .expect("failed to locate /proc");
     let dev_dir = root_fs
         .lookup_dir(Path::new("/dev"))
         .expect("failed to locate /dev");
     let tmp_dir = root_fs
         .lookup_dir(Path::new("/tmp"))
         .expect("failed to locate /tmp");
+    let sys_dir = root_fs
+        .lookup_dir(Path::new("/sys"))
+        .expect("failed to locate /sys");
     root_fs
         .mount(proc_dir, PROC_FS.clone())
         .expect("failed to mount procfs");
@@ -291,6 +294,9 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     root_fs
         .mount(tmp_dir, TMP_FS.clone())
         .expect("failed to mount tmpfs");
+    root_fs
+        .mount(sys_dir, SYS_FS.clone())
+        .expect("failed to mount sysfs");
 
     // Initialize mount table for /proc/mounts.
     MountTable::init();

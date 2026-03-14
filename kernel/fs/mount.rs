@@ -41,7 +41,7 @@ impl MountTable {
             fstype: String::from("initramfs"),
             mountpoint: String::from("/"),
         });
-        for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp")] {
+        for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp"), ("sysfs", "/sys")] {
             let id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
             entries.push_back(MountEntry {
                 mount_id: id, parent_id: root_id,
@@ -71,6 +71,29 @@ impl MountTable {
 
     pub fn remove(mountpoint: &str) {
         MOUNT_ENTRIES.lock().retain(|e| e.mountpoint != mountpoint);
+    }
+
+    /// Return the mount ID for the mount that owns `path`.
+    /// Uses longest-prefix matching to resolve nested mounts.
+    pub fn mount_id_for_path(path: &str) -> i32 {
+        let entries = MOUNT_ENTRIES.lock();
+        let mut best_len = 0usize;
+        let mut best_id = 0i32;
+        for entry in entries.iter() {
+            let mp = entry.mountpoint.as_str();
+            let matches = if mp == "/" {
+                true
+            } else {
+                path.starts_with(mp)
+                    && (path.len() == mp.len()
+                        || path.as_bytes().get(mp.len()) == Some(&b'/'))
+            };
+            if matches && mp.len() >= best_len {
+                best_len = mp.len();
+                best_id = entry.mount_id as i32;
+            }
+        }
+        best_id
     }
 
     /// Return the filesystem type for the mount that owns `path`.
