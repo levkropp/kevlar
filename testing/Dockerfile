@@ -160,6 +160,22 @@ COPY testing/mini_storage.c /mini_storage.c
 RUN musl-gcc -static -O2 -o /mini-storage /mini_storage.c
 
 #
+#  glibc hello world (static)
+#
+FROM ubuntu:20.04 AS hello_glibc
+RUN apt-get update && apt-get install -qy build-essential
+COPY testing/hello_glibc.c /hello_glibc.c
+RUN gcc -static -O2 -o /hello-glibc /hello_glibc.c
+
+#
+#  glibc pthreads test (static, reuses mini_threads.c)
+#
+FROM ubuntu:20.04 AS mini_threads_glibc
+RUN apt-get update && apt-get install -qy build-essential linux-libc-dev
+COPY testing/mini_threads.c /mini_threads.c
+RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
+
+#
 #  M6.5 Contract Tests
 #
 FROM ubuntu:20.04 AS contracts
@@ -224,6 +240,8 @@ COPY --from=testsuite  /test /bin/test
 COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
+COPY --from=hello_glibc /hello-glibc /bin/hello-glibc
+COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
