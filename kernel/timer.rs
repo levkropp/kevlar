@@ -94,6 +94,11 @@ pub fn read_monotonic_clock() -> MonotonicClock {
     }
 }
 
+/// Returns the raw monotonic tick count (incremented once per timer IRQ).
+pub fn monotonic_ticks() -> usize {
+    MONOTONIC_TICKS.load(Ordering::Relaxed)
+}
+
 /// `struct timeval`
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
@@ -136,6 +141,15 @@ pub fn handle_timer_irq() -> bool {
     // Wake poll/epoll/select waiters so they can re-check timeouts,
     // timerfd expirations, and signalfd readiness.
     crate::poll::POLL_WAIT_QUEUE.wake_all();
+
+    // Approximate user-mode time: attribute the tick to whichever process
+    // was running when the timer fired.
+    {
+        let proc = current_process();
+        if !proc.is_idle() {
+            proc.tick_utime();
+        }
+    }
 
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
