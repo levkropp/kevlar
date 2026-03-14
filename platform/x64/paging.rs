@@ -96,6 +96,47 @@ fn traverse(
     }
 }
 
+/// Walk PML4→PDPT→PD to find the leaf Page Table base address.
+/// Returns a raw pointer to the start of the 512-entry PT.
+/// Unlike `traverse`, does NOT index into the final PT level.
+#[inline(always)]
+fn traverse_to_pt(
+    pml4: PAddr,
+    vaddr: UserVAddr,
+    allocate: bool,
+    attrs: PageAttrs,
+) -> Option<*mut PageTableEntry> {
+    let mut table = pml4.as_mut_ptr::<PageTableEntry>();
+    for level in (2..=4).rev() {
+        let index = nth_level_table_index(vaddr, level);
+        let entry = unsafe { table.add(index as usize) };
+        let entry_val = unsafe { *entry };
+        let table_paddr = entry_paddr(entry_val);
+        if table_paddr.value() == 0 {
+            if !allocate {
+                return None;
+            }
+            let new_table =
+                alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            unsafe { *entry = new_table.value() as u64 | attrs.bits() };
+            table = new_table.as_mut_ptr::<PageTableEntry>();
+        } else {
+            let expected = table_paddr.value() as u64 | attrs.bits();
+            if entry_val != expected {
+                unsafe { *entry = expected; }
+            }
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+        }
+    }
+    Some(table)
+}
+
+/// Compute the leaf (level-1) page table index for a virtual address.
+#[inline(always)]
+fn leaf_pt_index(vaddr_value: usize) -> usize {
+    (vaddr_value >> 12) & 0x1FF
+}
+
 /// Duplicates entires (and referenced memory pages if `level == 1`) in the
 /// nth-level page table. Returns the newly created copy of the page table.
 ///
@@ -254,6 +295,61 @@ impl PageTable {
             *entry_ptr.as_ptr() = paddr_bits | attrs.bits();
         }
         true
+    }
+
+    /// Batch-map contiguous user pages, traversing the page table hierarchy only
+    /// once per leaf PT (2MB region) instead of once per page.
+    /// Returns a u32 bitmask: bit i set = page i was mapped.
+    /// Pages where the PTE was already occupied are NOT overwritten.
+    #[inline(always)]
+    pub fn batch_try_map_user_pages_with_prot(
+        &mut self,
+        start_vaddr: UserVAddr,
+        paddrs: &[PAddr],
+        count: usize,
+        prot_flags: i32,
+    ) -> u32 {
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
+        if prot_flags & 2 != 0 { attrs |= PageAttrs::WRITABLE; }
+        if prot_flags & 4 == 0 { attrs |= PageAttrs::NO_EXECUTE; }
+        let attrs_bits = attrs.bits();
+
+        let mut mapped: u32 = 0;
+        let mut i = 0;
+
+        while i < count {
+            let vaddr_value = start_vaddr.value() + i * PAGE_SIZE;
+
+            // Traverse PML4→PDPT→PD once to get the leaf PT base.
+            let pt_base = match traverse_to_pt(
+                self.pml4,
+                UserVAddr::new(vaddr_value).unwrap(),
+                true, attrs,
+            ) {
+                Some(ptr) => ptr,
+                None => break,
+            };
+
+            // How many pages fit before crossing a 2MB PT boundary?
+            let start_idx = leaf_pt_index(vaddr_value);
+            let remaining_in_pt = ENTRIES_PER_TABLE as usize - start_idx;
+            let batch_end = if i + remaining_in_pt < count { i + remaining_in_pt } else { count };
+
+            // Write PTEs directly by index — no per-page traverse.
+            let mut idx = start_idx;
+            while i < batch_end {
+                let entry_ptr = unsafe { pt_base.add(idx) };
+                let entry_val = unsafe { *entry_ptr };
+                if entry_val == 0 {
+                    unsafe { *entry_ptr = paddrs[i].value() as u64 | attrs_bits; }
+                    mapped |= 1 << i;
+                }
+                idx += 1;
+                i += 1;
+            }
+        }
+
+        mapped
     }
 
     /// Unmaps a user page, returning the physical address if it was mapped.

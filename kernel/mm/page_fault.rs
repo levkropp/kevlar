@@ -268,7 +268,6 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                 let next_addr = match UserVAddr::new_nonnull(next_value) {
                     Ok(a) => a,
                     Err(_) => {
-                        // Free remaining pages.
                         for j in i..allocated {
                             kevlar_platform::page_allocator::free_pages(pages[j], 1);
                         }
