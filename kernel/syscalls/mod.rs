@@ -759,6 +759,30 @@ impl<'a> SyscallHandler<'a> {
                 Err(e) => -(e.errno() as isize),
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
+
+            // Decode path for openat/stat/access to make trace readable.
+            // EXCLUDE execve — page table was switched, old user pointers are invalid!
+            let path_arg = match n {
+                SYS_OPENAT | SYS_NEWFSTATAT => Some(a2),
+                SYS_STAT | SYS_LSTAT | SYS_ACCESS => Some(a1),
+                SYS_READLINK | SYS_READLINKAT => Some(if n == SYS_READLINKAT { a2 } else { a1 }),
+                _ => None,
+            };
+            if let Some(path_ptr) = path_arg {
+                if path_ptr != 0 {
+                    if let Ok(va) = UserVAddr::new_nonnull(path_ptr) {
+                        let mut pbuf = [0u8; 128];
+                        if va.read_cstr(&mut pbuf).is_ok() {
+                            if let Ok(s) = core::str::from_utf8(&pbuf[..pbuf.iter().position(|&b| b == 0).unwrap_or(0)]) {
+                                if !s.is_empty() {
+                                    let name = syscall_name_by_number(n);
+                                    warn!("  pid1 {}({}) -> {}", name, s, result);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Stack canary check (post-syscall, x86-64 only).

@@ -144,8 +144,8 @@ impl kevlar_platform::Handler for Handler {
                 signal_delivered: crate::process::signal::SIGSEGV,
             },
         );
-        debug_warn!(
-            "{} in userspace (pid={}, ip={:x}), killing the current process...",
+        warn!(
+            "USER FAULT: {} pid={} ip={:#x}",
             exception, pid, ip
         );
         crate::process::Process::exit_by_signal(crate::process::signal::SIGSEGV);
