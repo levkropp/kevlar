@@ -136,6 +136,9 @@ impl SignalDelivery {
     }
 
     pub fn get_action(&self, signal: Signal) -> SigAction {
+        if signal <= 0 || signal as usize >= self.actions.len() {
+            return SigAction::Ignore;
+        }
         self.actions[signal as usize]
     }
 
@@ -146,7 +149,7 @@ impl SignalDelivery {
     }
 
     pub fn set_action(&mut self, signal: Signal, action: SigAction) -> Result<()> {
-        if signal > SIGMAX {
+        if signal <= 0 || signal >= SIGMAX {
             return Err(Errno::EINVAL.into());
         }
 
@@ -171,6 +174,9 @@ impl SignalDelivery {
         let bit = self.pending.trailing_zeros();
         self.pending &= !(1 << bit);
         let signal = (bit + 1) as Signal;
+        if signal as usize >= self.actions.len() {
+            return self.pop_pending(); // skip unsupported RT signals
+        }
         Some((signal, self.actions[signal as usize]))
     }
 
@@ -186,6 +192,9 @@ impl SignalDelivery {
         let bit = deliverable.trailing_zeros();
         self.pending &= !(1 << bit);
         let signal = (bit + 1) as Signal;
+        if signal as usize >= self.actions.len() {
+            return self.pop_pending_unblocked(blocked); // skip unsupported RT signals
+        }
         Some((signal, self.actions[signal as usize]))
     }
 

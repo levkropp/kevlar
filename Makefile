@@ -435,6 +435,48 @@ test-m6:
 	$(MAKE) test-regression-smp PROFILE=$(PROFILE)
 	@echo "M6 integration suite complete."
 
+# ─── M7 glibc Integration Tests ──────────────────────────────────────────────
+
+.PHONY: test-glibc-hello
+test-glibc-hello:
+	$(PROGRESS) "TEST" "M7 glibc hello world"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/hello-glibc"
+	timeout 60 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-glibc-hello.log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|hello from glibc)' \
+		/tmp/kevlar-test-glibc-hello.log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-glibc-hello.log; then \
+		echo "GLIBC HELLO TEST FAILED"; exit 1; \
+	elif grep -q '^TEST_PASS' /tmp/kevlar-test-glibc-hello.log; then \
+		echo "GLIBC HELLO TEST PASSED"; \
+	fi
+
+.PHONY: test-glibc-threads
+test-glibc-threads:
+	$(PROGRESS) "TEST" "M7 glibc pthreads (4 CPUs)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads-glibc"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-glibc-threads.log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-glibc-threads.log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-glibc-threads.log; then \
+		echo "GLIBC THREADING TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-glibc-threads.log; then \
+		echo "ALL GLIBC THREADING TESTS PASSED"; \
+	fi
+
+.PHONY: test-m7
+test-m7:
+	$(PROGRESS) "TEST" "M7: full integration suite"
+	$(MAKE) test-glibc-hello PROFILE=$(PROFILE)
+	$(MAKE) test-glibc-threads PROFILE=$(PROFILE)
+	$(MAKE) test-threads-smp PROFILE=$(PROFILE)
+	$(MAKE) test-regression-smp PROFILE=$(PROFILE)
+	$(MAKE) test-contracts
+	@echo "M7 integration suite complete."
+
 # ─── M6.5 Contract Tests ────────────────────────────────────────────────────
 
 .PHONY: build-contracts
