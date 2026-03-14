@@ -401,6 +401,9 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 73;
     pub const SYS_WAITID: usize = 247;
     pub const SYS_MEMFD_CREATE: usize = 319;
+    pub const SYS_MKNOD: usize = 133;
+    pub const SYS_SETTIMEOFDAY: usize = 164;
+    pub const SYS_CLOCK_SETTIME: usize = 227;
     pub const SYS_NAME_TO_HANDLE_AT: usize = 303;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
@@ -590,6 +593,9 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 32;
     pub const SYS_WAITID: usize = 95;
     pub const SYS_MEMFD_CREATE: usize = 279;
+    pub const SYS_MKNOD: usize = 33;
+    pub const SYS_SETTIMEOFDAY: usize = 170;
+    pub const SYS_CLOCK_SETTIME: usize = 112;
     pub const SYS_NAME_TO_HANDLE_AT: usize = 264;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
@@ -1307,6 +1313,12 @@ impl<'a> SyscallHandler<'a> {
                 a4 as c_int,
             ),
             SYS_MEMFD_CREATE => self.sys_memfd_create(UserVAddr::new_nonnull(a1)?, a2 as u32),
+            // mknod: systemd creates device nodes. Stub — our devfs already has them.
+            SYS_MKNOD => Ok(0),
+            // settimeofday: ignore time adjustments.
+            SYS_SETTIMEOFDAY => Ok(0),
+            // clock_settime: ignore clock adjustments.
+            SYS_CLOCK_SETTIME => Ok(0),
             SYS_NAME_TO_HANDLE_AT => self.sys_name_to_handle_at(
                 CwdOrFd::parse(a1 as c_int),
                 a2,
@@ -1505,6 +1517,9 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FLOCK => "flock",
         SYS_WAITID => "waitid",
         SYS_MEMFD_CREATE => "memfd_create",
+        SYS_MKNOD => "mknod",
+        SYS_SETTIMEOFDAY => "settimeofday",
+        SYS_CLOCK_SETTIME => "clock_settime",
         SYS_NAME_TO_HANDLE_AT => "name_to_handle_at",
         SYS_PIDFD_OPEN => "pidfd_open",
         SYS_CLOSE_RANGE => "close_range",
