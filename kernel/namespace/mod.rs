@@ -65,10 +65,15 @@ impl NamespaceSet {
 
 static ROOT_NS: kevlar_utils::once::Once<NamespaceSet> = kevlar_utils::once::Once::new();
 
+/// Direct access to root UTS namespace (avoids Arc clone in hot paths like uname).
+pub static ROOT_UTS: kevlar_utils::once::Once<Arc<UtsNamespace>> = kevlar_utils::once::Once::new();
+
 pub fn root_namespace_set() -> NamespaceSet {
     ROOT_NS.clone()
 }
 
 pub fn init() {
-    ROOT_NS.init(|| NamespaceSet::root());
+    let ns = NamespaceSet::root();
+    ROOT_UTS.init(|| ns.uts.clone());
+    ROOT_NS.init(|| ns);
 }

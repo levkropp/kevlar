@@ -382,6 +382,13 @@ impl Process {
             .unwrap_or_else(|| crate::namespace::root_namespace_set())
     }
 
+    /// Returns just the UTS namespace Arc (avoids cloning the full NamespaceSet).
+    pub fn uts_namespace(&self) -> alloc::sync::Arc<crate::namespace::UtsNamespace> {
+        self.namespaces.borrow().as_ref()
+            .map(|ns| ns.uts.clone())
+            .unwrap_or_else(|| crate::namespace::ROOT_UTS.clone())
+    }
+
     /// Sets the process's namespace set.
     pub fn set_namespaces(&self, ns: crate::namespace::NamespaceSet) {
         *self.namespaces.borrow_mut() = Some(ns);
