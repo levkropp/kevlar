@@ -260,9 +260,7 @@ impl PageTable {
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
-        // Flush user TLB entries: reload CR3 WITHOUT bit 63.
-        // With PGE, global (kernel) entries survive the flush.
-        // CR3 reload is faster than INVPCID on many KVM configurations.
+        // Flush user TLB entries for parent's PCID (CoW correctness).
         unsafe {
             let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
             x86::controlregs::cr3_write(cr3_val);
