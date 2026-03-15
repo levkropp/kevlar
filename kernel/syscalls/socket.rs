@@ -44,7 +44,9 @@ impl<'a> SyscallHandler<'a> {
         let net = services::network_stack();
         let socket = services::call_service(|| {
             match (domain, socket_type, protocol) {
-                (AF_UNIX, SOCK_STREAM, 0) => net.create_unix_socket(),
+                (AF_UNIX, SOCK_STREAM, 0) | (AF_UNIX, SOCK_DGRAM, 0) => {
+                    net.create_unix_socket()
+                }
                 (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
                     net.create_udp_socket()
                 }
@@ -82,7 +84,7 @@ impl<'a> SyscallHandler<'a> {
         let flags = bitflags_from_user!(SocketFlags, type_ & !SOCKET_TYPE_MASK)?;
         let options: OpenOptions = flags.into();
 
-        if domain != AF_UNIX || socket_type != SOCK_STREAM || protocol != 0 {
+        if domain != AF_UNIX || (socket_type != SOCK_STREAM && socket_type != SOCK_DGRAM) || protocol != 0 {
             return Err(Errno::ENOSYS.into());
         }
 

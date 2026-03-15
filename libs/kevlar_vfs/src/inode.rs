@@ -116,7 +116,10 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     /// `poll(2)` and `select(2)`.
     /// Default: regular files are always ready for I/O (matches Linux behavior).
     fn poll(&self) -> Result<PollStatus> {
-        Ok(PollStatus::POLLIN | PollStatus::POLLOUT)
+        // Default: no events pending. Specific file types (pipes, sockets,
+        // timerfd, signalfd) override this when they have data available.
+        // This prevents epoll spin loops on procfs/regular files.
+        Ok(PollStatus::empty())
     }
 
     /// `ioctl(2)`.

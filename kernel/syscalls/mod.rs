@@ -745,35 +745,13 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 
-        // Trace PID 1 syscalls: log uncommon ones and periodic heartbeat.
+        // Trace PID 1 fork/clone and directory listing (getdents64) for unit scanning.
         if current_process().pid().as_i32() == 1 {
-            use core::sync::atomic::{AtomicUsize, Ordering as AO};
-            static PID1_COUNT: AtomicUsize = AtomicUsize::new(0);
-            let count = PID1_COUNT.fetch_add(1, AO::Relaxed);
-            let common = matches!(n,
-                SYS_WRITE | SYS_WRITEV | SYS_CLOSE | SYS_FSTAT
-                | SYS_MMAP | SYS_MPROTECT | SYS_MUNMAP | SYS_BRK
-                | SYS_NEWFSTATAT | SYS_LSEEK | SYS_GETDENTS64
-                | SYS_PREAD64 | SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK
-                | SYS_STAT | SYS_LSTAT | SYS_ACCESS | SYS_FCNTL
-            );
-            if !common || count % 200 == 0 {
-                warn!("pid1[{}]: {}(n={}) a=({:#x},{:#x},{:#x},{:#x})",
-                      count, syscall_name_by_number(n), n, a1, a2, a3, a4);
+            if matches!(n, SYS_FORK | SYS_CLONE | SYS_CLONE3) {
+                warn!("pid1: FORK/CLONE(n={})", n);
             }
-            // Log every syscall after #700 with full detail + path for debugging the hang.
-            if count >= 700 && count <= 770 {
-                let path_str = if n == SYS_OPENAT || n == SYS_NEWFSTATAT {
-                    StackPathBuf::from_user(a2).ok().map(|p| alloc::string::String::from(p.as_path().as_str()))
-                } else if n == SYS_READ {
-                    Some(alloc::format!("fd={}", a1))
-                } else {
-                    None
-                };
-                warn!("pid1 LATE[{}]: {}(n={}) path={:?} a=({:#x},{:#x},{:#x})",
-                      count, syscall_name_by_number(n), n,
-                      path_str.as_deref().unwrap_or(""),
-                      a1, a2, a3);
+            if n == SYS_GETDENTS64 {
+                warn!("pid1: getdents64(fd={})", a1);
             }
         }
 
@@ -801,16 +779,29 @@ impl<'a> SyscallHandler<'a> {
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
 
-            // Post-dispatch LATE trace with return values.
-            {
+            // Trace epoll_ctl registrations for the main event loop.
+            if n == SYS_EPOLL_CTL {
+                let op = match a2 { 1 => "ADD", 2 => "DEL", 3 => "MOD", _ => "?" };
+                warn!("pid1: epoll_ctl(epfd={}, {}, fd={})", a1, op, a3);
+            }
+            // Trace the first few epoll_wait results to diagnose spinning.
+            if (n == SYS_EPOLL_WAIT || n == SYS_EPOLL_PWAIT) && result > 0 {
                 use core::sync::atomic::{AtomicUsize, Ordering as AO};
-                static PID1_POST: AtomicUsize = AtomicUsize::new(0);
-                let count = PID1_POST.fetch_add(1, AO::Relaxed);
-                if count >= 700 && count <= 770 {
-                    warn!("pid1 RET[{}]: {}(n={}) -> {}", count,
-                          syscall_name_by_number(n), n, result);
+                static EPOLL_HIT: AtomicUsize = AtomicUsize::new(0);
+                let c = EPOLL_HIT.fetch_add(1, AO::Relaxed);
+                if c < 5 {
+                    // Read the epoll_event struct from userspace to get the fd.
+                    if let Ok(ev_addr) = UserVAddr::new_nonnull(a2) {
+                        let events: u32 = ev_addr.read().unwrap_or(0);
+                        let data: u64 = UserVAddr::new_nonnull(a2 + 4)
+                            .map(|a| a.read::<u64>().unwrap_or(0))
+                            .unwrap_or(0);
+                        warn!("pid1: epoll_wait(epfd={}) -> events={:#x} data={:#x}",
+                              a1, events, data);
+                    }
                 }
             }
+
 
             // Decode path for openat/stat/access to make trace readable.
             // EXCLUDE execve — page table was switched, old user pointers are invalid!
@@ -1105,7 +1096,15 @@ impl<'a> SyscallHandler<'a> {
                 self.sys_access(p.as_path())
             }
             SYS_PPOLL => self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int),
-            SYS_PRLIMIT64 => self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?),
+            SYS_PRLIMIT64 => {
+                // prlimit64(pid, resource, new_rlim, old_rlim)
+                // a3 = new_rlim (set), a4 = old_rlim (get) — either can be NULL.
+                if a4 != 0 {
+                    self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?)?;
+                }
+                // new_rlim (a3): accept and ignore — we don't enforce rlimits yet.
+                Ok(0)
+            }
             // M2: Dynamic linking
             SYS_PREAD64 => self.sys_pread64(
                 Fd::new(a1 as i32),
