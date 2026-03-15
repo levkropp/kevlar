@@ -18,6 +18,7 @@ use alloc::sync::Arc;
 use kevlar_vfs::{
     inode::{DirEntry, FileType, INode, INodeNo},
     stat::{FileMode, Stat, S_IFDIR},
+    user_buffer::UserBuffer,
 };
 use kevlar_utils::once::Once;
 
@@ -218,7 +219,7 @@ impl fmt::Debug for ProcSysStaticFile {
 
 impl FileLike for ProcSysStaticFile {
     fn stat(&self) -> Result<Stat> {
-        Ok(Stat { mode: FileMode::new(S_IFREG | 0o444), ..Stat::zeroed() })
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o644), ..Stat::zeroed() })
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -228,6 +229,11 @@ impl FileLike for ProcSysStaticFile {
         let mut writer = UserBufWriter::from(buf);
         writer.write_bytes(&bytes[..len])?;
         Ok(len)
+    }
+
+    fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &kevlar_vfs::inode::OpenOptions) -> Result<usize> {
+        // Accept writes silently (systemd bumps sysctl values at boot).
+        Ok(buf.len())
     }
 }
 

@@ -154,14 +154,6 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // PID 1 heartbeat: print every ~1 second (100 ticks at 100 Hz).
-    if ticks % 100 == 0 {
-        let proc = current_process();
-        if proc.pid().as_i32() == 1 {
-            warn!("HEARTBEAT: pid=1 tick={}", ticks);
-        }
-    }
-
     if ticks % PREEMPT_PER_TICKS == 0 && !kevlar_platform::arch::in_preempt() {
         return process::switch();
     }
