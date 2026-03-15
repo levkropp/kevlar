@@ -67,6 +67,7 @@ impl ProcFs {
         let sys_random_dir = sys_kernel_dir.add_dir("random");
         sys_random_dir.add_file("boot_id", Arc::new(ProcSysBootId) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("cap_last_cap", Arc::new(ProcSysStaticFile("40\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("pid_max", Arc::new(ProcSysStaticFile("32768\n")) as Arc<dyn FileLike>);
         let sys_fs_dir = sys_dir.add_dir("fs");
         sys_fs_dir.add_file("nr_open", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
         sys_fs_dir.add_file("file-max", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
