@@ -81,4 +81,23 @@ impl UtsNamespace {
         self.domainname_len.store(name.len(), Ordering::Relaxed);
         Ok(())
     }
+
+    /// Write hostname directly into a utsname buffer field (zero-copy, no heap).
+    /// Uses lock_no_irq since UTS is never accessed from interrupt context.
+    #[inline]
+    pub fn write_hostname_into(&self, utsname: &mut [u8; 390], field_idx: usize) {
+        let host = self.hostname.lock_no_irq();
+        let len = self.hostname_len.load(Ordering::Relaxed).min(64);
+        let offset = field_idx * 65;
+        utsname[offset..offset + len].copy_from_slice(&host[..len]);
+    }
+
+    /// Write domainname directly into a utsname buffer field (zero-copy, no heap).
+    #[inline]
+    pub fn write_domainname_into(&self, utsname: &mut [u8; 390], field_idx: usize) {
+        let dom = self.domainname.lock_no_irq();
+        let len = self.domainname_len.load(Ordering::Relaxed).min(64);
+        let offset = field_idx * 65;
+        utsname[offset..offset + len].copy_from_slice(&dom[..len]);
+    }
 }
