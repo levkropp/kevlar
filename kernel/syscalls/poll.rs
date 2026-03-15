@@ -20,10 +20,6 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_poll(&mut self, fds: UserVAddr, nfds: c_nfds, timeout: c_int) -> Result<isize> {
         let started_at = read_monotonic_clock();
         POLL_WAIT_QUEUE.sleep_signalable_until(|| {
-            if timeout >= 0 && started_at.elapsed_msecs() >= (timeout as usize) {
-                return Ok(Some(0));
-            }
-
             // Check the statuses of all specified files one by one.
             let mut ready_fds = 0;
             let fds_len = (nfds as usize) * (size_of::<Fd>() + 2 * size_of::<c_short>());
@@ -53,11 +49,16 @@ impl<'a> SyscallHandler<'a> {
             }
 
             if ready_fds > 0 {
-                Ok(Some(ready_fds))
-            } else {
-                // Sleep until any changes in files or sockets occur...
-                Ok(None)
+                return Ok(Some(ready_fds));
             }
+
+            // No fds ready — check timeout.
+            if timeout >= 0 && started_at.elapsed_msecs() >= (timeout as usize) {
+                return Ok(Some(0));
+            }
+
+            // Sleep until any changes in files or sockets occur...
+            Ok(None)
         })
     }
 }

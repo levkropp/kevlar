@@ -6,7 +6,7 @@ use core::fmt;
 
 use kevlar_platform::page_allocator::read_allocator_stats;
 use kevlar_vfs::{
-    inode::{FileLike, OpenOptions},
+    inode::{FileLike, OpenOptions, PollStatus},
     result::Result,
     stat::{FileMode, Stat, S_IFREG},
     user_buffer::{UserBufWriter, UserBufferMut},
@@ -32,6 +32,10 @@ impl FileLike for ProcMountsFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -68,6 +72,10 @@ impl FileLike for ProcFilesystemsFile {
         })
     }
 
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
         if offset > 0 {
             return Ok(0);
@@ -97,6 +105,10 @@ impl FileLike for ProcCmdlineFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -129,6 +141,10 @@ impl FileLike for ProcStatFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -174,6 +190,10 @@ impl FileLike for ProcMeminfoFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -222,6 +242,10 @@ impl FileLike for ProcVersionFile {
         })
     }
 
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
         if offset > 0 {
             return Ok(0);
@@ -251,6 +275,10 @@ impl FileLike for ProcCpuinfoFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -328,6 +356,10 @@ impl FileLike for ProcUptimeFile {
         })
     }
 
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
         if offset > 0 {
             return Ok(0);
@@ -362,6 +394,10 @@ impl FileLike for ProcLoadavgFile {
             mode: FileMode::new(S_IFREG | 0o444),
             ..Stat::zeroed()
         })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {

@@ -8,7 +8,7 @@ use core::fmt;
 use crate::{
     fs::{
         file_system::FileSystem,
-        inode::{Directory, FileLike},
+        inode::{Directory, FileLike, PollStatus},
     },
     process::{list_pids, PId},
     result::Result,
@@ -237,6 +237,11 @@ impl FileLike for ProcSysStaticFile {
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &kevlar_vfs::inode::OpenOptions) -> Result<usize> {
         // Accept writes silently (systemd bumps sysctl values at boot).
         Ok(buf.len())
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        // Proc files always have data available for reading.
+        Ok(PollStatus::POLLIN)
     }
 }
 
