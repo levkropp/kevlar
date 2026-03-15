@@ -86,6 +86,7 @@ pub fn enable() {
 }
 
 /// Disable the syscall profiler.
+#[allow(dead_code)]
 pub fn disable() {
     ENABLED.store(false, Ordering::Release);
 }

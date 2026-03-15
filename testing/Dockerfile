@@ -1,14 +1,14 @@
 #
 #  Busybox
 #
-FROM ubuntu:20.04 AS busybox
+FROM ubuntu:24.04 AS busybox
 RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools linux-libc-dev
 # Make Linux headers available to musl-gcc
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
-RUN curl -fsSL --output tarball.tar.bz2 "https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
+RUN curl -fsSL --output tarball.tar.bz2 "https://busybox.net/downloads/busybox-1.37.0.tar.bz2"
 RUN mkdir /build && tar xf tarball.tar.bz2 --strip-components=1 -C /build
 WORKDIR /build
 RUN ln -s /usr/bin/ar /usr/bin/musl-ar \
@@ -24,13 +24,14 @@ RUN ln -s /usr/bin/ar /usr/bin/musl-ar \
     && sed -i 's/^CONFIG_UBIRMVOL=y/# CONFIG_UBIRMVOL is not set/' .config \
     && sed -i 's/^CONFIG_UBIRSVOL=y/# CONFIG_UBIRSVOL is not set/' .config \
     && sed -i 's/^CONFIG_UBIUPDATEVOL=y/# CONFIG_UBIUPDATEVOL is not set/' .config \
-    && sed -i 's/^CONFIG_UBIRENAME=y/# CONFIG_UBIRENAME is not set/' .config
+    && sed -i 's/^CONFIG_UBIRENAME=y/# CONFIG_UBIRENAME is not set/' .config \
+    && sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
 RUN make -j$(nproc)
 
 #
 #  Curl
 #
-FROM ubuntu:20.04 AS curl
+FROM ubuntu:24.04 AS curl
 RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools
 RUN curl -fsSL --output tarball.tar.xz "https://curl.se/download/curl-8.10.1.tar.xz"
@@ -42,7 +43,7 @@ RUN make -j$(nproc) curl_LDFLAGS=-all-static
 #
 #  Dropbear SSH server
 #
-FROM ubuntu:20.04 AS dropbear
+FROM ubuntu:24.04 AS dropbear
 RUN apt-get update && apt-get install -qy build-essential curl sed
 RUN apt-get install -qy musl-tools
 RUN curl -fsSL --output tarball.tar.bz2 "https://matt.ucc.asn.au/dropbear/releases/dropbear-2024.85.tar.bz2"
@@ -57,8 +58,8 @@ RUN make -j$(nproc)
 #
 #  Dynamic linking test binary (musl)
 #
-FROM ubuntu:20.04 AS dyntest
-RUN apt-get update && apt-get install -qy musl-tools
+FROM ubuntu:24.04 AS dyntest
+RUN apt-get update && apt-get install -qy musl-tools binutils
 RUN echo '#include <unistd.h>\nint main(){const char m[]="hello from dynamic linking!\\n";write(1,m,sizeof(m)-1);return 0;}' > /hello.c
 RUN musl-gcc -o /hello-dynamic /hello.c
 RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
@@ -66,7 +67,7 @@ RUN cp /usr/lib/x86_64-linux-musl/libc.so /ld-musl-x86_64.so.1
 #
 #  Bash (static musl)
 #
-FROM ubuntu:20.04 AS bash
+FROM ubuntu:24.04 AS bash
 RUN apt-get update && apt-get install -qy build-essential curl musl-tools
 RUN curl -fsSL --output tarball.tar.gz "https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz"
 RUN mkdir /build && tar xf tarball.tar.gz --strip-components=1 -C /build
@@ -85,8 +86,8 @@ RUN make -j$(nproc) LDFLAGS="-static -Wl,--allow-multiple-definition"
 #
 #  Micro-benchmark suite (musl static)
 #
-FROM ubuntu:20.04 AS benchsuite
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS benchsuite
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -98,8 +99,8 @@ RUN musl-gcc -static -O2 -o /fork_micro /fork_micro.c
 #
 #  Syscall correctness test suite (musl static)
 #
-FROM ubuntu:20.04 AS testsuite
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS testsuite
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -109,8 +110,8 @@ RUN musl-gcc -static -O2 -o /test /test.c
 #
 #  M4 integration test (mini-systemd)
 #
-FROM ubuntu:20.04 AS mini_systemd
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS mini_systemd
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -120,15 +121,15 @@ RUN musl-gcc -static -O2 -o /mini-systemd /mini_systemd.c
 #
 #  Disk hello binary (tiny static binary for exec-from-disk test)
 #
-FROM ubuntu:20.04 AS disk_hello
-RUN apt-get update && apt-get install -qy musl-tools
+FROM ubuntu:24.04 AS disk_hello
+RUN apt-get update && apt-get install -qy musl-tools binutils
 COPY testing/disk_hello.c /disk_hello.c
 RUN musl-gcc -static -O2 -o /disk_hello /disk_hello.c
 
 #
 #  Ext2 disk image for Phase 7 integration tests (16 MiB)
 #
-FROM ubuntu:20.04 AS disk_image
+FROM ubuntu:24.04 AS disk_image
 RUN apt-get update && apt-get install -qy e2fsprogs
 COPY --from=disk_hello /disk_hello /disk_root/hello
 RUN printf 'hello from ext2\n' > /disk_root/greeting.txt && \
@@ -142,8 +143,8 @@ RUN printf 'hello from ext2\n' > /disk_root/greeting.txt && \
 #
 #  M6 Phase 3 threading integration test (static musl + pthreads)
 #
-FROM ubuntu:20.04 AS mini_threads
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS mini_threads
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -153,8 +154,8 @@ RUN musl-gcc -static -O2 -pthread -o /mini-threads /mini_threads.c
 #
 #  M5 Phase 7 integration test (mini-storage)
 #
-FROM ubuntu:20.04 AS mini_storage
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS mini_storage
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -164,7 +165,7 @@ RUN musl-gcc -static -O2 -o /mini-storage /mini_storage.c
 #
 #  glibc hello world (static)
 #
-FROM ubuntu:20.04 AS hello_glibc
+FROM ubuntu:24.04 AS hello_glibc
 RUN apt-get update && apt-get install -qy build-essential
 COPY testing/hello_glibc.c /hello_glibc.c
 RUN gcc -static -O2 -o /hello-glibc /hello_glibc.c
@@ -191,13 +192,14 @@ RUN gcc -O2 -o /hello-manylibs /hello_manylibs.c -lm -lpthread -ldl -lrt
 #
 #  glibc pthreads test (static, reuses mini_threads.c)
 #
-FROM ubuntu:20.04 AS mini_threads_glibc
+FROM ubuntu:24.04 AS mini_threads_glibc
 RUN apt-get update && apt-get install -qy build-essential linux-libc-dev
 COPY testing/mini_threads.c /mini_threads.c
 RUN gcc -static -O2 -pthread -o /mini-threads-glibc /mini_threads.c
 
 #
 #  M9 Phase 3.1: systemd v245 binaries (from Ubuntu 20.04 package)
+#  Pinned to 20.04: systemd v245 meson.build is incompatible with meson >= 1.0.
 #
 FROM ubuntu:20.04 AS systemd_build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -qy \
@@ -244,8 +246,8 @@ RUN mkdir -p /systemd-root/usr/lib/systemd /systemd-root/lib/x86_64-linux-gnu /s
 #
 #  M9 Phase 2 integration test (systemd init-sequence validation)
 #
-FROM ubuntu:20.04 AS mini_systemd_v3
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS mini_systemd_v3
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -255,8 +257,8 @@ RUN musl-gcc -static -O2 -o /mini-systemd-v3 /mini_systemd_v3.c
 #
 #  M8 Phase 4 integration test (cgroups + namespaces)
 #
-FROM ubuntu:20.04 AS mini_cgroups_ns
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS mini_cgroups_ns
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -266,8 +268,8 @@ RUN musl-gcc -static -O2 -o /mini-cgroups-ns /mini_cgroups_ns.c
 #
 #  M6.5 Contract Tests
 #
-FROM ubuntu:20.04 AS contracts
-RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev
+FROM ubuntu:24.04 AS contracts
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
 RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
@@ -307,6 +309,16 @@ RUN for src in /contracts/*.c; do \
         name=$(basename ${src%.c}); \
         musl-gcc -static -O1 -Wall -Wno-unused-result -o /contracts/contract-${name} $src; \
     done
+
+#
+#  OpenRC (Alpine's service manager)
+#
+FROM alpine:3.21 AS openrc
+RUN apk add --no-cache openrc busybox-openrc
+RUN rc-update add devfs sysinit \
+    && rc-update add dmesg sysinit \
+    && rc-update add hostname boot \
+    && rc-update add bootmisc boot
 
 #
 #  Initramfs
@@ -356,6 +368,18 @@ COPY --from=contracts /contracts/contract-* /bin/
 RUN ["/bin/busybox", "--install", "-s"]
 RUN mkdir -p /etc /dev /tmp /mnt /var/www/html /run /var/log/journal \
     && ln -sf /run /var/run
+# OpenRC service manager (Alpine): binaries, libs, service scripts, runlevels
+COPY --from=openrc /sbin/openrc /sbin/openrc
+COPY --from=openrc /sbin/openrc-run /sbin/openrc-run
+COPY --from=openrc /sbin/rc-update /sbin/rc-update
+COPY --from=openrc /sbin/rc-service /sbin/rc-service
+COPY --from=openrc /usr/lib/libeinfo.so.1 /lib/libeinfo.so.1
+COPY --from=openrc /usr/lib/librc.so.1 /lib/librc.so.1
+COPY --from=openrc /usr/libexec/rc/ /usr/libexec/rc/
+COPY --from=openrc /etc/init.d/ /etc/init.d/
+COPY --from=openrc /etc/runlevels/ /etc/runlevels/
+COPY --from=openrc /etc/rc.conf /etc/rc.conf
+COPY --from=openrc /etc/conf.d/ /etc/conf.d/
 # systemd configuration
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
     && mkdir -p /usr/lib/systemd/system

@@ -159,6 +159,7 @@ impl vte::Perform for Console {
 static TERMINAL_PARSER: Once<spin::Mutex<vte::Parser>> = Once::new();
 static CONSOLE: spin::Mutex<Console> = spin::Mutex::new(Console::new());
 
+#[allow(dead_code)]
 pub fn printchar(ch: u8) {
     TERMINAL_PARSER.lock().advance(&mut *CONSOLE.lock(), ch);
 }

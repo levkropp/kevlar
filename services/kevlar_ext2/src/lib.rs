@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use core::cmp::min;
 use core::fmt;
 
-use kevlar_api::driver::block::{block_device, BlockDevice, BlockError};
+use kevlar_api::driver::block::{block_device, BlockDevice};
 use kevlar_vfs::{
     file_system::FileSystem,
     inode::{
@@ -44,11 +44,13 @@ const SUPERBLOCK_SIZE: usize = 1024;
 const GROUP_DESC_SIZE: usize = 32;
 
 // ext2 inode mode type bits.
+#[allow(dead_code)]
 const EXT2_S_IFREG: u16 = 0x8000;
 const EXT2_S_IFDIR: u16 = 0x4000;
 const EXT2_S_IFLNK: u16 = 0xA000;
 
 // ext2 directory file types.
+#[allow(dead_code)]
 const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
 const EXT2_FT_SYMLINK: u8 = 7;
@@ -64,6 +66,7 @@ const EXT2_DIND_BLOCK: usize = 13;
 
 /// On-disk ext2 superblock fields we care about.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct Ext2Superblock {
     inodes_count: u32,
     blocks_count: u32,
@@ -160,6 +163,7 @@ impl Ext2Inode {
         (self.mode & 0xF000) == EXT2_S_IFDIR
     }
 
+    #[allow(dead_code)]
     fn is_regular(&self) -> bool {
         (self.mode & 0xF000) == EXT2_S_IFREG
     }

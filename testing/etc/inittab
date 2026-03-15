@@ -1,18 +1,8 @@
-# Kevlar M10: BusyBox init configuration for Alpine boot
+# Kevlar M10: BusyBox init + OpenRC for Alpine boot
 ::sysinit:/bin/mount -t proc proc /proc
 ::sysinit:/bin/mount -t sysfs sysfs /sys
-::sysinit:/bin/mount -t tmpfs tmpfs /run
-::sysinit:/bin/mount -t tmpfs tmpfs /tmp
-::sysinit:/bin/mkdir -p /dev/pts /dev/shm
-::sysinit:/bin/mount -t devpts devpts /dev/pts
-::sysinit:/bin/hostname kevlar
-
-# Serial console — use ash directly for Phase 1 testing.
-# Phase 2 will add getty+login.
-::respawn:/bin/ash
-
-# Ctrl-Alt-Del
-::ctrlaltdel:/sbin/reboot
-
-# Clean shutdown
-::shutdown:/bin/umount -a -r
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+::respawn:/sbin/getty -L 115200 ttyS0 vt100
+::shutdown:/sbin/openrc shutdown

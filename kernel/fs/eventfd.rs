@@ -7,7 +7,7 @@ use core::fmt;
 use crate::fs::inode::{FileLike, PollStatus};
 use crate::poll::POLL_WAIT_QUEUE;
 use crate::prelude::*;
-use crate::user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut};
+use crate::user_buffer::{UserBufWriter, UserBuffer, UserBufferMut};
 use kevlar_platform::spinlock::SpinLock;
 use kevlar_vfs::inode::OpenOptions;
 use kevlar_vfs::stat::Stat;

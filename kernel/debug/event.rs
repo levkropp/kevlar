@@ -93,6 +93,7 @@ pub enum DebugEvent<'a> {
     },
     /// Emitted for each copy_to_user / copy_from_user call.
     /// High volume — only enabled with `USERCOPY` filter.
+    #[allow(dead_code)]
     Usercopy {
         pid: i32,
         direction: &'a str,     // "to_user" | "from_user" | "fill" | "read_cstr"
@@ -102,6 +103,7 @@ pub enum DebugEvent<'a> {
     },
     /// Enhanced page fault with register state — emitted when a fault occurs
     /// during a usercopy operation (IP in usercopy region).
+    #[allow(dead_code)]
     UsercopyFault {
         pid: i32,
         fault_addr: usize,      // CR2 / FAR_EL1

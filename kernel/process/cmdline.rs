@@ -3,7 +3,7 @@ use arrayvec::ArrayString;
 
 #[derive(Clone)]
 pub struct Cmdline {
-    cmdline: ArrayString<128>,
+    cmdline: ArrayString<256>,
     argv0: ArrayString<128>,
 }
 
@@ -32,14 +32,16 @@ impl Cmdline {
     pub fn set_by_argv(&mut self, argv: &[&[u8]]) {
         self.cmdline.clear();
         for (i, arg) in argv.iter().enumerate() {
-            self.cmdline
-                .push_str(core::str::from_utf8(arg).unwrap_or("[invalid utf-8]"));
+            let s = core::str::from_utf8(arg).unwrap_or("[invalid utf-8]");
+            let _ = self.cmdline.try_push_str(s);
             if i != argv.len() - 1 {
-                self.cmdline.push(' ');
+                let _ = self.cmdline.try_push(' ');
             }
         }
 
         self.argv0.clear();
-        self.argv0.push_str(self.cmdline.split(' ').next().unwrap());
+        if let Some(a0) = self.cmdline.split(' ').next() {
+            let _ = self.argv0.try_push_str(a0);
+        }
     }
 }

@@ -2,14 +2,13 @@
 //! cgroups v2 filesystem implementation.
 use super::{CgroupNode, CGROUP_ROOT, CTRL_CPU, CTRL_MEMORY, CTRL_PIDS};
 use crate::process::{PId, Process};
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::sync::Arc;
 use core::fmt;
 use core::sync::atomic::Ordering;
 use kevlar_vfs::{
     file_system::FileSystem,
     inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions},
-    path::PathBuf,
     result::{Errno, Error, Result},
     stat::{FileMode, Stat, S_IFDIR, S_IFREG},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
@@ -141,7 +140,7 @@ impl Directory for CgroupDir {
 
         // Child cgroup directories.
         let children = self.node.children.lock();
-        for name in children.keys() {
+        for _name in children.keys() {
             entries.push(("", FileType::Directory)); // placeholder
             // We'll handle this specially below.
         }

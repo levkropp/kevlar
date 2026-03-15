@@ -633,7 +633,7 @@ impl FileLike for UnixSocket {
             None => {
                 // No listener — for DGRAM sockets this is fine.
                 // Just store the peer address and return success.
-                let mut state = self.state.lock();
+                let state = self.state.lock();
                 match &*state {
                     SocketState::Created | SocketState::Bound(_) => {
                         // Mark as "connected" by storing peer path.

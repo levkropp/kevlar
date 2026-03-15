@@ -573,6 +573,7 @@ impl Symlink for ProcFdLink {
 }
 
 /// Legacy symlink for /proc/[pid]/fd/N → target path (FileLike for readlink).
+#[allow(dead_code)]
 struct ProcFdSymlink(String);
 
 impl fmt::Debug for ProcFdSymlink {

@@ -92,6 +92,7 @@ pub fn init(debug_cmdline: Option<&str>) {
 ///
 /// `ip` is the faulting instruction pointer (one of the usercopy labels).
 /// `fault_addr` is the address that was being accessed (CR2 on x86_64).
+#[allow(dead_code)]
 pub fn emit_usercopy_fault(pid: i32, fault_addr: usize, ip: usize) {
     // Determine which usercopy phase we're in based on the IP.
     // On x86_64, the assembly labels are:
@@ -103,6 +104,7 @@ pub fn emit_usercopy_fault(pid: i32, fault_addr: usize, ip: usize) {
     #[cfg(target_arch = "x86_64")]
     let label = {
         #[allow(unsafe_code)]
+        #[allow(dead_code)]
         unsafe extern "C" {
             fn usercopy1();
             fn usercopy1b();
@@ -112,17 +114,17 @@ pub fn emit_usercopy_fault(pid: i32, fault_addr: usize, ip: usize) {
             fn usercopy3();
         }
         let ip_val = ip as u64;
-        if ip_val == usercopy1 as u64 {
+        if ip_val == usercopy1 as *const () as u64 {
             "leading_bytes"
-        } else if ip_val == usercopy1b as u64 {
+        } else if ip_val == usercopy1b as *const () as u64 {
             "bulk_qwords"
-        } else if ip_val == usercopy1c as u64 {
+        } else if ip_val == usercopy1c as *const () as u64 {
             "trailing_bytes"
-        } else if ip_val == usercopy1d as u64 {
+        } else if ip_val == usercopy1d as *const () as u64 {
             "small_copy"
-        } else if ip_val == usercopy2 as u64 {
+        } else if ip_val == usercopy2 as *const () as u64 {
             "strncpy"
-        } else if ip_val == usercopy3 as u64 {
+        } else if ip_val == usercopy3 as *const () as u64 {
             "memset"
         } else {
             "unknown"

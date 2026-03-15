@@ -13,7 +13,7 @@ use crate::{
 use kevlar_platform::address::UserVAddr;
 use kevlar_vfs::{
     file_system::FileSystem,
-    inode::{INode, OpenOptions},
+    inode::OpenOptions,
     stat::FileMode,
 };
 

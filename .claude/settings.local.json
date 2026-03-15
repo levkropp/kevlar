@@ -4,7 +4,23 @@
       "Bash(*)",
       "WebSearch",
       "WebFetch(domain:git.musl-libc.org)",
-      "WebFetch(domain:man7.org)"
+      "WebFetch(domain:man7.org)",
+      "WebFetch(domain:www.kernel.org)",
+      "WebFetch(domain:syst3mfailure.io)",
+      "WebFetch(domain:wiki.alpinelinux.org)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:git.busybox.net)",
+      "WebFetch(domain:elixir.bootlin.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:hackmd.io)",
+      "WebFetch(domain:musl.libc.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:lwn.net)",
+      "WebFetch(domain:git.kernel.org)",
+      "WebFetch(domain:www.phoronix.com)",
+      "WebFetch(domain:codebrowser.dev)",
+      "WebFetch(domain:lxr.linux.no)"
     ]
   }
 }

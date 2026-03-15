@@ -326,6 +326,7 @@ impl Process {
 
     /// The thread group ID. Threads in the same group share a TGID.
     /// `getpid()` returns this; `gettid()` returns `pid`.
+    #[allow(dead_code)]
     pub fn tgid(&self) -> PId {
         self.tgid
     }

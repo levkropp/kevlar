@@ -236,6 +236,35 @@ run: build
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
+# Interactive milestone runners: `make run-alpine`, `make run-systemd`
+# These use KVM and pass the appropriate init= cmdline.
+
+.PHONY: run-alpine
+run-alpine: build
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH) --kvm                                           \
+		--append-cmdline "init=/sbin/init"                             \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+.PHONY: run-systemd
+run-systemd: build
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH) --kvm                                           \
+		--append-cmdline "init=/usr/lib/systemd/systemd"               \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
 .PHONY: disk
 disk: build/disk.img
 
@@ -640,7 +669,27 @@ bench-kvm:
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-kvm-$(PROFILE).log; true
-	@grep 'BENCH' /tmp/kevlar-bench-kvm-$(PROFILE).log || echo "(no BENCH output found)"
+	@grep '^BENCH ' /tmp/kevlar-bench-kvm-$(PROFILE).log > /tmp/kevlar-bench-$(PROFILE).txt 2>/dev/null; \
+	 lines=$$(wc -l < /tmp/kevlar-bench-$(PROFILE).txt 2>/dev/null || echo 0); \
+	 if [ "$$lines" -gt 0 ]; then echo "Wrote $$lines benchmarks to /tmp/kevlar-bench-$(PROFILE).txt"; \
+	 else echo "(no BENCH output found)"; fi
+
+# Run bench.c under Linux KVM to generate a baseline for bench-report.
+.PHONY: bench-linux
+bench-linux:
+	$(PROGRESS) "BENCH-LINUX" "Linux KVM baseline"
+	@mkdir -p build
+	gcc -static -O2 -o build/bench.linux benchmarks/bench.c
+	$(PYTHON3) tools/bench-linux.py --full | tee /tmp/linux-bench-kvm.log
+	@grep '^BENCH ' /tmp/linux-bench-kvm.log > /tmp/linux-bench-kvm.txt 2>/dev/null; \
+	 lines=$$(wc -l < /tmp/linux-bench-kvm.txt 2>/dev/null || echo 0); \
+	 if [ "$$lines" -gt 0 ]; then echo "Wrote $$lines benchmarks to /tmp/linux-bench-kvm.txt"; \
+	 else echo "(no BENCH output found)"; fi
+
+# Generate a comparison report (run bench-kvm and bench-linux first).
+.PHONY: bench-report
+bench-report:
+	$(PYTHON3) tools/bench-report.py $(BENCH_REPORT_ARGS)
 
 .PHONY: bench-all
 bench-all:

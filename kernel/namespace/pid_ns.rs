@@ -58,6 +58,7 @@ impl PidNamespace {
 
     /// Translate a global PID to a namespace-local PID.
     /// Returns None if the PID is not visible in this namespace.
+    #[allow(dead_code)]
     pub fn global_to_local(&self, global_pid: PId) -> Option<PId> {
         if self.is_root() {
             return Some(global_pid);
@@ -66,6 +67,7 @@ impl PidNamespace {
     }
 
     /// Remove a PID mapping (called when a process exits).
+    #[allow(dead_code)]
     pub fn remove_pid(&self, global_pid: PId) {
         if self.is_root() {
             return;
