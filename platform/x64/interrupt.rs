@@ -103,10 +103,12 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             use core::sync::atomic::Ordering;
             let vaddr = super::apic::TLB_SHOOTDOWN_VADDR.load(Ordering::Acquire);
             if vaddr == 0 {
-                // Full flush: reload CR3 to invalidate all user TLB entries.
+                // Full flush: reload CR3 WITHOUT bit 63 to invalidate all
+                // TLB entries for the current PCID.
                 unsafe {
                     let cr3 = x86::controlregs::cr3();
-                    x86::controlregs::cr3_write(cr3);
+                    // Clear bit 63 (no-invalidate) to force flush, keep PCID.
+                    x86::controlregs::cr3_write(cr3 & !(1u64 << 63));
                 }
             } else {
                 unsafe {
