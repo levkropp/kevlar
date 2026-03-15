@@ -45,10 +45,20 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        let root_fs = current.root_fs().lock_no_irq();
-        let mut opened_files = current.opened_files_no_irq();
+        // Resolve the path. For absolute paths and CWD-relative paths, avoid
+        // holding the opened_files lock during path resolution to prevent
+        // deadlocks (e.g., /proc/self/fd/N needs the fd table during lookup).
+        let path_comp = {
+            let root_fs = current.root_fs().lock_no_irq();
+            if path.is_absolute() || matches!(dirfd, CwdOrFd::AtCwd) {
+                root_fs.lookup_path(path, true)?
+            } else {
+                // fd-relative path: need opened_files for dirfd resolution.
+                let opened_files = current.opened_files_no_irq();
+                root_fs.lookup_path_at(&opened_files, &dirfd, path, true)?
+            }
+        };
 
-        let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, true)?;
         if flags.contains(OpenFlags::O_DIRECTORY) && !path_comp.inode.is_dir() {
             return Err(Error::new(Errno::ENOTDIR));
         }
@@ -58,6 +68,7 @@ impl<'a> SyscallHandler<'a> {
             return Err(Error::new(Errno::EISDIR));
         }
 
+        let mut opened_files = current.opened_files_no_irq();
         let fd = opened_files.open(path_comp, flags.into())?;
 
         // O_TRUNC: truncate the file if opened for writing.
