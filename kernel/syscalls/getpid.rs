@@ -4,14 +4,8 @@ use crate::{process::current_process, syscalls::SyscallHandler};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_getpid(&mut self) -> Result<isize> {
-        // For threads, getpid() returns the thread group ID (TGID).
-        // In a PID namespace, return the namespace-local PID.
-        let proc = current_process();
-        let ns = proc.namespaces();
-        if ns.pid_ns.is_root() {
-            Ok(proc.tgid().as_i32() as isize)
-        } else {
-            Ok(proc.ns_pid().as_i32() as isize)
-        }
+        // ns_pid == tgid in root namespace, namespace-local PID otherwise.
+        // Avoids cloning the full NamespaceSet (3 Arc increments).
+        Ok(current_process().ns_pid().as_i32() as isize)
     }
 }
