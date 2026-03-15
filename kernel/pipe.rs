@@ -3,7 +3,7 @@
 use core::fmt;
 
 use kevlar_platform::spinlock::SpinLock;
-use kevlar_utils::{once::Once, ring_buffer::RingBuffer};
+use kevlar_utils::ring_buffer::RingBuffer;
 
 use crate::{
     fs::{
@@ -17,24 +17,30 @@ use crate::{
 
 const PIPE_SIZE: usize = 4096;
 
-// TODO: Fine-grained wait queue, say, embed a queue in every pipe.
-static PIPE_WAIT_QUEUE: Once<WaitQueue> = Once::new();
-
 struct PipeInner {
     buf: RingBuffer<u8, PIPE_SIZE>,
     closed_by_reader: bool,
     closed_by_writer: bool,
 }
 
-pub struct Pipe(Arc<SpinLock<PipeInner>>);
+/// Shared state for a pipe: data buffer + per-pipe wait queue.
+struct PipeShared {
+    inner: SpinLock<PipeInner>,
+    waitq: WaitQueue,
+}
+
+pub struct Pipe(Arc<PipeShared>);
 
 impl Pipe {
     pub fn new() -> Pipe {
-        Pipe(Arc::new(SpinLock::new(PipeInner {
-            buf: RingBuffer::new(),
-            closed_by_reader: false,
-            closed_by_writer: false,
-        })))
+        Pipe(Arc::new(PipeShared {
+            inner: SpinLock::new(PipeInner {
+                buf: RingBuffer::new(),
+                closed_by_reader: false,
+                closed_by_writer: false,
+            }),
+            waitq: WaitQueue::new(),
+        }))
     }
 
     pub fn write_end(&self) -> Arc<PipeWriter> {
@@ -47,8 +53,6 @@ impl Pipe {
 }
 
 /// Copy from user buffer directly into the pipe's ring buffer.
-/// Avoids the intermediate stack buffer by writing into the ring buffer's
-/// contiguous free space directly.
 fn copy_user_to_pipe(
     ring: &mut RingBuffer<u8, PIPE_SIZE>,
     buf: &UserBuffer<'_>,
@@ -70,14 +74,13 @@ fn copy_user_to_pipe(
     Ok(written_len)
 }
 
-pub struct PipeWriter(Arc<SpinLock<PipeInner>>);
+pub struct PipeWriter(Arc<PipeShared>);
 
 impl FileLike for PipeWriter {
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, options: &OpenOptions) -> Result<usize> {
         // Fast path: try writing without wait queue overhead.
-        // Avoids process enqueue/dequeue + 3 lock cycles when data fits immediately.
         {
-            let mut pipe = self.0.lock_no_irq();
+            let mut pipe = self.0.inner.lock_no_irq();
             if pipe.closed_by_reader {
                 return Err(Errno::EPIPE.into());
             }
@@ -86,7 +89,7 @@ impl FileLike for PipeWriter {
                 let written_len = copy_user_to_pipe(&mut pipe.buf, &buf)?;
                 if written_len > 0 {
                     drop(pipe);
-                    PIPE_WAIT_QUEUE.wake_all();
+                    self.0.waitq.wake_all();
                     return Ok(written_len);
                 }
             }
@@ -97,8 +100,8 @@ impl FileLike for PipeWriter {
         }
 
         // Slow path: buffer full, wait for reader to drain.
-        let ret_value = PIPE_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut pipe = self.0.lock_no_irq();
+        let ret_value = self.0.waitq.sleep_signalable_until(|| {
+            let mut pipe = self.0.inner.lock_no_irq();
             if pipe.closed_by_reader {
                 return Err(Errno::EPIPE.into());
             }
@@ -113,7 +116,7 @@ impl FileLike for PipeWriter {
             }
         });
 
-        PIPE_WAIT_QUEUE.wake_all();
+        self.0.waitq.wake_all();
         ret_value
     }
 
@@ -128,7 +131,7 @@ impl FileLike for PipeWriter {
 
     fn poll(&self) -> Result<PollStatus> {
         let mut status = PollStatus::empty();
-        let inner = self.0.lock_no_irq();
+        let inner = self.0.inner.lock_no_irq();
 
         if inner.buf.is_writable() {
             status |= PollStatus::POLLOUT;
@@ -146,12 +149,12 @@ impl fmt::Debug for PipeWriter {
 
 impl Drop for PipeWriter {
     fn drop(&mut self) {
-        self.0.lock_no_irq().closed_by_writer = true;
-        PIPE_WAIT_QUEUE.wake_all();
+        self.0.inner.lock_no_irq().closed_by_writer = true;
+        self.0.waitq.wake_all();
     }
 }
 
-pub struct PipeReader(Arc<SpinLock<PipeInner>>);
+pub struct PipeReader(Arc<PipeShared>);
 
 impl FileLike for PipeReader {
     fn write(&self, _offset: usize, _buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
@@ -163,14 +166,14 @@ impl FileLike for PipeReader {
 
         // Fast path: try reading without wait queue overhead.
         {
-            let mut pipe = self.0.lock_no_irq();
+            let mut pipe = self.0.inner.lock_no_irq();
             while let Some(src) = pipe.buf.pop_slice(writer.remaining_len()) {
                 writer.write_bytes(src)?;
             }
 
             if writer.written_len() > 0 {
                 drop(pipe);
-                PIPE_WAIT_QUEUE.wake_all();
+                self.0.waitq.wake_all();
                 return Ok(writer.written_len());
             }
 
@@ -180,8 +183,8 @@ impl FileLike for PipeReader {
         }
 
         // Slow path: buffer empty, wait for writer.
-        let ret_value = PIPE_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut pipe = self.0.lock_no_irq();
+        let ret_value = self.0.waitq.sleep_signalable_until(|| {
+            let mut pipe = self.0.inner.lock_no_irq();
 
             while let Some(src) = pipe.buf.pop_slice(writer.remaining_len()) {
                 writer.write_bytes(src)?;
@@ -196,13 +199,13 @@ impl FileLike for PipeReader {
             }
         });
 
-        PIPE_WAIT_QUEUE.wake_all();
+        self.0.waitq.wake_all();
         ret_value
     }
 
     fn poll(&self) -> Result<PollStatus> {
         let mut status = PollStatus::empty();
-        let inner = self.0.lock_no_irq();
+        let inner = self.0.inner.lock_no_irq();
 
         if inner.buf.is_readable() {
             status |= PollStatus::POLLIN;
@@ -220,11 +223,12 @@ impl fmt::Debug for PipeReader {
 
 impl Drop for PipeReader {
     fn drop(&mut self) {
-        self.0.lock_no_irq().closed_by_reader = true;
-        PIPE_WAIT_QUEUE.wake_all();
+        self.0.inner.lock_no_irq().closed_by_reader = true;
+        self.0.waitq.wake_all();
     }
 }
 
 pub fn init() {
-    PIPE_WAIT_QUEUE.init(WaitQueue::new);
+    // Per-pipe wait queues replaced the global PIPE_WAIT_QUEUE.
+    // This function is kept for API compatibility.
 }
