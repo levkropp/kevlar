@@ -18,7 +18,7 @@ use x86::current::segmentation::wrfsbase;
 /// Kernel stack size per thread. Linux uses 8-16KB; we use 32KB (8 pages)
 /// which is generous for Rust's deeper call stacks. Was 1MB (256 pages)
 /// which dominated fork latency with 3 * 1MB allocations per fork.
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8;
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 4;
 
 /// End of the user virtual address allocation region.
 pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
