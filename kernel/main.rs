@@ -298,6 +298,30 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         .mount(sys_dir, SYS_FS.clone())
         .expect("failed to mount sysfs");
 
+    // Mount cgroup2 at /sys/fs/cgroup (systemd needs this to detect unified cgroups).
+    // Create the directory hierarchy /sys/fs/cgroup/ under sysfs.
+    {
+        use crate::fs::file_system::FileSystem;
+        let sys_root = SYS_FS.as_ref().root_dir().expect("sysfs root");
+        let fs_dir = sys_root
+            .create_dir("fs", kevlar_vfs::stat::FileMode::new(0o755))
+            .and_then(|inode| match inode {
+                kevlar_vfs::inode::INode::Directory(d) => Ok(d),
+                _ => Err(kevlar_vfs::result::Error::new(kevlar_vfs::result::Errno::ENOTDIR)),
+            })
+            .expect("failed to create /sys/fs");
+        let cgroup_dir = fs_dir
+            .create_dir("cgroup", kevlar_vfs::stat::FileMode::new(0o755))
+            .and_then(|inode| match inode {
+                kevlar_vfs::inode::INode::Directory(d) => Ok(d),
+                _ => Err(kevlar_vfs::result::Error::new(kevlar_vfs::result::Errno::ENOTDIR)),
+            })
+            .expect("failed to create /sys/fs/cgroup");
+        root_fs
+            .mount(cgroup_dir, cgroups::cgroupfs::CgroupFs::new_or_get())
+            .expect("failed to mount cgroup2");
+    }
+
     // Initialize mount table for /proc/mounts.
     MountTable::init();
 

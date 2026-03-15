@@ -761,8 +761,8 @@ impl<'a> SyscallHandler<'a> {
                 warn!("pid1[{}]: {}(n={}) a=({:#x},{:#x},{:#x},{:#x})",
                       count, syscall_name_by_number(n), n, a1, a2, a3, a4);
             }
-            // Log every syscall after #740 with full detail + path for debugging the hang.
-            if count >= 740 {
+            // Log every syscall after #700 with full detail + path for debugging the hang.
+            if count >= 700 && count <= 770 {
                 let path_str = if n == SYS_OPENAT || n == SYS_NEWFSTATAT {
                     StackPathBuf::from_user(a2).ok().map(|p| alloc::string::String::from(p.as_path().as_str()))
                 } else if n == SYS_READ {

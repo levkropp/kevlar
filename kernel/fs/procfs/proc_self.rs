@@ -709,6 +709,8 @@ impl FileLike for ProcPidCgroup {
             .unwrap_or_else(|| alloc::string::String::from("/"));
 
         let s = alloc::format!("0::{}\n", path);
+        // Trace disabled — uncomment for cgroup debugging:
+        // warn!("/proc/{}/cgroup: {:?}", self.pid.as_i32(), s);
         let bytes = s.as_bytes();
         let len = core::cmp::min(bytes.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
