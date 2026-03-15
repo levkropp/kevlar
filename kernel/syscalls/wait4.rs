@@ -39,7 +39,6 @@ impl<'a> SyscallHandler<'a> {
             let current = current_process();
             let children = current.children();
 
-            // No children at all (or all auto-reaped): ECHILD.
             let has_matching = if pid.as_i32() > 0 {
                 children.iter().any(|c| c.pid() == pid)
             } else {
@@ -54,19 +53,13 @@ impl<'a> SyscallHandler<'a> {
                     continue;
                 }
 
-                // pid == -1: wait for any child.
-                // pid == 0: wait for children in same process group (treat as any for now).
-                // pid > 0: wait for specific child (handled above).
-
                 match child.state() {
                     ProcessState::ExitedWith(exit_code) => {
-                        // Normal exit: (exit_code << 8) | 0x00
                         let ws = (exit_code & 0xff) << 8;
                         return Ok(Some((child.pid(), ws)));
                     }
                     ProcessState::Stopped(stop_sig) => {
                         if options.contains(WaitOptions::WUNTRACED) {
-                            // Stopped: (signo << 8) | 0x7f
                             let ws = ((stop_sig & 0xff) << 8) | 0x7f;
                             return Ok(Some((child.pid(), ws)));
                         }
@@ -82,7 +75,7 @@ impl<'a> SyscallHandler<'a> {
             Ok(None)
         })?;
 
-        // Only evict the child if it actually exited (not just stopped).
+        // Evict the child from our children list if it exited.
         if got_pid.as_i32() > 0 {
             let current = current_process();
             let should_evict = current
@@ -93,6 +86,11 @@ impl<'a> SyscallHandler<'a> {
                 current.children().retain(|p| p.pid() != got_pid);
             }
         }
+
+        // Eagerly free exited process resources (kernel stacks).
+        // Without this, EXITED_PROCESSES accumulates indefinitely on
+        // single-CPU systems where the idle thread never runs.
+        crate::process::EXITED_PROCESSES.lock().clear();
 
         if let Some(status) = status {
             debug::usercopy::set_context("sys_wait4:status");
