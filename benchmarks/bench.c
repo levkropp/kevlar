@@ -470,6 +470,128 @@ static void bench_signal_delivery(void) {
     sigaction(SIGUSR1, &sa, NULL);
 }
 
+/* ── M10 benchmarks (8) ────────────────────────────────────────────── */
+
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <dirent.h>
+#include <poll.h>
+
+static void bench_epoll(void) {
+    int epfd = epoll_create1(0);
+    if (epfd < 0) { printf("BENCH_SKIP epoll\n"); return; }
+    int evfd = eventfd(0, EFD_NONBLOCK);
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = evfd };
+    epoll_ctl(epfd, EPOLL_CTL_ADD, evfd, &ev);
+    struct epoll_event out;
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        epoll_wait(epfd, &out, 1, 0);
+    }
+    report("epoll_wait", iters, now_ns() - start);
+    close(evfd);
+    close(epfd);
+}
+
+static void bench_poll_null(void) {
+    int fd = open("/dev/null", O_RDONLY);
+    if (fd < 0) { printf("BENCH_SKIP poll\n"); return; }
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        poll(&pfd, 1, 0);
+    }
+    report("poll", iters, now_ns() - start);
+    close(fd);
+}
+
+static void bench_eventfd(void) {
+    int fd = eventfd(0, EFD_NONBLOCK);
+    if (fd < 0) { printf("BENCH_SKIP eventfd\n"); return; }
+    uint64_t val = 1;
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        write(fd, &val, 8);
+        read(fd, &val, 8);
+    }
+    report("eventfd", iters, now_ns() - start);
+    close(fd);
+}
+
+static void bench_getdents(void) {
+    int iters = ITERS(100000, 1000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        int fd = open("/tmp", O_RDONLY | O_DIRECTORY);
+        if (fd < 0) break;
+        char buf[1024];
+        syscall(SYS_getdents64, fd, buf, sizeof(buf));
+        close(fd);
+    }
+    report("getdents64", iters, now_ns() - start);
+}
+
+static void bench_socketpair(void) {
+    int iters = ITERS(200000, 2000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        int sv[2];
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+        close(sv[0]);
+        close(sv[1]);
+    }
+    report("socketpair", iters, now_ns() - start);
+}
+
+static void bench_pipe_pingpong(void) {
+    int p1[2], p2[2];
+    pipe(p1); pipe(p2);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char c;
+        int iters = ITERS(50000, 500);
+        for (int i = 0; i < iters; i++) {
+            read(p1[0], &c, 1);
+            write(p2[1], &c, 1);
+        }
+        _exit(0);
+    }
+    char c = 'x';
+    int iters = ITERS(50000, 500);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        write(p1[1], &c, 1);
+        read(p2[0], &c, 1);
+    }
+    report("pipe_pingpong", iters, now_ns() - start);
+    close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]);
+    waitpid(pid, NULL, 0);
+}
+
+static void bench_waitid_nochild(void) {
+    int iters = ITERS(500000, 5000);
+    siginfo_t si;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        waitid(P_ALL, 0, &si, WNOHANG | WEXITED);
+    }
+    report("waitid", iters, now_ns() - start);
+}
+
+static void bench_getuid(void) {
+    int iters = ITERS(1000000, 10000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        getuid();
+    }
+    report("getuid", iters, now_ns() - start);
+}
+
 /* ── Benchmark registry ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -513,6 +635,16 @@ static bench_entry benchmarks[] = {
     {"getpriority",  bench_getpriority,  0},
     {"read_zero",    bench_read_zero,    0},
     {"signal_delivery", bench_signal_delivery, 0},
+
+    /* M10 benchmarks (8) */
+    {"epoll_wait",   bench_epoll,          0},
+    {"poll",         bench_poll_null,      0},
+    {"eventfd",      bench_eventfd,        0},
+    {"getdents64",   bench_getdents,       0},
+    {"socketpair",   bench_socketpair,     0},
+    {"pipe_pingpong",bench_pipe_pingpong,  0},
+    {"waitid",       bench_waitid_nochild, 0},
+    {"getuid",       bench_getuid,         0},
 
     {NULL, NULL, 0}
 };
