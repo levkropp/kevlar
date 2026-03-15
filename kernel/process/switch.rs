@@ -105,21 +105,12 @@ pub fn switch() -> bool {
     }
 
     if let Some(vm) = next.vm().clone() {
-        // Use lock_no_irq: we only read page_table().pml4 (immutable after init).
-        // lock() would call cli and spin — if this CPU is inside sys_munmap holding
-        // the VM lock via lock_no_irq (IF=1), a timer would fire, switch() would
-        // pick the same thread's sibling, then cli+spin here while holding IF=0
-        // → TLB shootdown IPI never delivered → deadlock.
         let lock = vm.lock_no_irq();
         lock.page_table().switch();
     }
 
-    // Cancel the +1 from `next.clone()` below without calling Drop.  We will
-    // mem::forget(next) so the local variable's Drop never runs; the CURRENT
-    // slot takes over ownership of that extra count.
     kevlar_platform::sync::arc_leak_one_ref(&next);
 
-    // Record context switch in the per-CPU flight recorder before the switch.
     kevlar_platform::flight_recorder::record(
         kevlar_platform::flight_recorder::kind::CTX_SWITCH,
         prev_pid.as_i32() as u32,
@@ -127,14 +118,6 @@ pub fn switch() -> bool {
         0,
     );
 
-    // Switch into the next thread.  We deliberately do NOT arc_leak prev here:
-    // the `prev` local clone keeps its strong reference alive across the entire
-    // arch::switch_thread call.  Without this, another CPU running
-    // gc_exited_processes() could free the exiting thread's kernel stack while
-    // do_switch_thread is still saving/loading the RSP from it, resulting in a
-    // use-after-free (observed as rip=0 / null function-pointer crash).
-    // After arch::switch_thread returns we are on next's kernel stack and it
-    // is safe to drop `prev`.
     CURRENT.as_mut().set(next.clone());
     arch::switch_thread(prev.arch(), next.arch());
 

@@ -1121,6 +1121,9 @@ impl Process {
         parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
         drop(process_table);
+
+        // Enqueue child. sys_fork() will call switch() to let the child
+        // run first (child-first scheduling, like Linux).
         SCHEDULER.lock().enqueue(pid);
 
         FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
