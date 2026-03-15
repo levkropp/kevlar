@@ -15,7 +15,10 @@ use crossbeam::atomic::AtomicCell;
 use x86::current::segmentation::wrfsbase;
 
 /// Kernel stack size: 256 pages = 1 MiB.
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 256;
+/// Kernel stack size per thread. Linux uses 8-16KB; we use 32KB (8 pages)
+/// which is generous for Rust's deeper call stacks. Was 1MB (256 pages)
+/// which dominated fork latency with 3 * 1MB allocations per fork.
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8;
 
 /// End of the user virtual address allocation region.
 pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
@@ -269,6 +272,9 @@ impl ArchTask {
             rsp
         };
 
+        // Interrupt and syscall stacks only need enough space for the initial
+        // register save before switching to the main kernel stack. 2 pages (8KB)
+        // is sufficient (matches Linux's IST stack size).
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,

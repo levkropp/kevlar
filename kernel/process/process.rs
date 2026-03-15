@@ -1120,7 +1120,7 @@ impl Process {
         process_group.lock().add(Arc::downgrade(&child));
         parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
-        drop(process_table); // Release PROCESSES before acquiring SCHEDULER (lock ordering: SCHEDULER → PROCESSES in switch())
+        drop(process_table);
         SCHEDULER.lock().enqueue(pid);
 
         FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
