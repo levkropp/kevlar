@@ -14,8 +14,6 @@ impl<'a> SyscallHandler<'a> {
         let child_pid = child.pid().as_i32() as isize;
 
         // Block parent until child exits or execs.
-        // switch() yields CPU to the child (which was enqueued by vfork).
-        // The child's _exit() calls wake_vfork_parent() which wakes us.
         VFORK_WAIT_QUEUE.sleep_signalable_until(|| {
             match child.state() {
                 ProcessState::ExitedWith(_) => Ok(Some(())),

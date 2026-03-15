@@ -24,6 +24,20 @@ pub fn zero_page(paddr: PAddr) {
     }
 }
 
+/// Zero-fill a 2MB huge page in 4KB chunks.
+///
+/// Under KVM, EPT entries for each 4KB page within a contiguous 2MB
+/// allocation are cold (buddy alloc only touches page 0).  Zeroing in
+/// 4KB chunks keeps each `rep stosq` within L1 cache, and the EPT
+/// violation per page is handled once — the CPU resumes `rep stosq`
+/// after KVM installs the entry.
+#[inline(always)]
+pub fn zero_huge_page(paddr: PAddr) {
+    for i in 0..512 {
+        zero_page(PAddr::new(paddr.value() + i * PAGE_SIZE));
+    }
+}
+
 /// Get a mutable byte slice over a physical page.
 ///
 /// # Safety guarantee

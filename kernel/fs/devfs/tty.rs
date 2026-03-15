@@ -62,8 +62,10 @@ const TCSETSW: usize = 0x5403;
 const TCSETSF: usize = 0x5404;
 const TIOCGPGRP: usize = 0x540f;
 const TIOCSPGRP: usize = 0x5410;
+const TIOCSCTTY: usize = 0x540e;
 const TIOCGWINSZ: usize = 0x5413;
 const TIOCSWINSZ: usize = 0x5414;
+const TIOCNOTTY: usize = 0x5422;
 
 impl fmt::Debug for Tty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -111,6 +113,14 @@ impl FileLike for Tty {
                     .ok_or_else(|| Error::new(Errno::ESRCH))?;
                 self.discipline
                     .set_foreground_process_group(Arc::downgrade(&pg));
+            }
+            TIOCSCTTY => {
+                // Set controlling terminal. For now, accept silently —
+                // we don't track session/controlling-tty associations yet.
+                // getty needs this to succeed.
+            }
+            TIOCNOTTY => {
+                // Detach from controlling terminal. Accept silently.
             }
             TIOCGWINSZ => {
                 let ws = self.discipline.winsize();

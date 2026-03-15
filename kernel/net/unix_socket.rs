@@ -28,7 +28,7 @@ use kevlar_vfs::stat::Stat;
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const UNIX_STREAM_BUF_SIZE: usize = 65536;
+const UNIX_STREAM_BUF_SIZE: usize = 16384;
 const BACKLOG_MAX: usize = 128;
 
 // ── Global listener registry ─────────────────────────────────────────
@@ -68,7 +68,7 @@ pub enum AncillaryData {
 
 struct StreamInner {
     buf: RingBuffer<u8, UNIX_STREAM_BUF_SIZE>,
-    ancillary: VecDeque<AncillaryData>,
+    ancillary: Option<VecDeque<AncillaryData>>,
     shut_wr: bool,
 }
 
@@ -97,12 +97,12 @@ impl UnixStream {
     pub fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
         let buf_a = Arc::new(SpinLock::new(StreamInner {
             buf: RingBuffer::new(),
-            ancillary: VecDeque::new(),
+            ancillary: None,
             shut_wr: false,
         }));
         let buf_b = Arc::new(SpinLock::new(StreamInner {
             buf: RingBuffer::new(),
-            ancillary: VecDeque::new(),
+            ancillary: None,
             shut_wr: false,
         }));
 
@@ -130,12 +130,12 @@ impl UnixStream {
 
     /// Push ancillary data to be received by the peer.
     pub fn send_ancillary(&self, data: AncillaryData) {
-        self.tx.lock().ancillary.push_back(data);
+        self.tx.lock().ancillary.get_or_insert_with(VecDeque::new).push_back(data);
     }
 
     /// Pop ancillary data from our receive side.
     pub fn recv_ancillary(&self) -> Option<AncillaryData> {
-        self.rx.lock().ancillary.pop_front()
+        self.rx.lock().ancillary.as_mut()?.pop_front()
     }
 }
 
@@ -144,7 +144,7 @@ impl Drop for UnixStream {
         // Signal peer that we're closed.
         self.our_peer_flag.store(true, Ordering::Release);
         // Mark our tx as shut down so peer reads get EOF.
-        self.tx.lock().shut_wr = true;
+        self.tx.lock_no_irq().shut_wr = true;
         POLL_WAIT_QUEUE.wake_all();
     }
 }

@@ -89,7 +89,7 @@ impl PathComponent {
     pub fn new_anonymous(inode: INode) -> Arc<PathComponent> {
         Arc::new(PathComponent {
             parent_dir: None,
-            name: "anon".to_owned(),
+            name: String::new(), // Empty string avoids heap allocation.
             inode,
         })
     }

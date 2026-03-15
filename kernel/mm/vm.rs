@@ -218,9 +218,33 @@ impl Vm {
     }
 
     pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<()> {
+        let heap_start = self.heap_vma().start();
         let current_heap_end = self.heap_vma().end();
-        if new_heap_end < current_heap_end {
+
+        if new_heap_end < heap_start {
+            // Cannot shrink below the heap base.
             return Err(Errno::EINVAL.into());
+        }
+
+        if new_heap_end < current_heap_end {
+            // Shrink: unmap pages in the freed region and reduce VMA length.
+            let free_start = new_heap_end.value();
+            let free_end = current_heap_end.value();
+            let start_aligned = kevlar_utils::alignment::align_up(free_start, PAGE_SIZE);
+
+            for addr in (start_aligned..free_end).step_by(PAGE_SIZE) {
+                if let Ok(uaddr) = UserVAddr::new_nonnull(addr) {
+                    if let Some(paddr) = self.page_table.unmap_user_page(uaddr) {
+                        self.page_table.flush_tlb_local(uaddr);
+                        if kevlar_platform::page_refcount::page_ref_dec(paddr) {
+                            kevlar_platform::page_allocator::free_pages(paddr, 1);
+                        }
+                    }
+                }
+            }
+
+            self.heap_vma_mut().len = new_heap_end.value() - heap_start.value();
+            return Ok(());
         }
 
         self.expand_heap_by(new_heap_end.value() - current_heap_end.value())
@@ -387,5 +411,17 @@ impl Vm {
         }
 
         Ok(next)
+    }
+
+    /// Allocate a virtual address range with a specific alignment.
+    /// Used for large anonymous mappings to enable 2MB huge pages.
+    pub fn alloc_vaddr_range_aligned(&mut self, len: usize, align: usize) -> Result<UserVAddr> {
+        let aligned_next = UserVAddr::new(align_up(self.valloc_next.value(), align))
+            .ok_or(Errno::ENOMEM)?;
+        self.valloc_next = aligned_next.add(align_up(len, PAGE_SIZE));
+        if self.valloc_next >= USER_VALLOC_END {
+            return Err(Errno::ENOMEM.into());
+        }
+        Ok(aligned_next)
     }
 }

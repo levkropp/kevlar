@@ -102,18 +102,16 @@ impl EpollInstance {
     /// Poll all interested fds and return ready events.
     /// Returns the number of ready fds (may be 0 if nothing is ready).
     pub fn collect_ready(&self, out: &mut Vec<EpollEvent>, max: usize) -> usize {
-        let interests = self.interests.lock();
+        let interests = self.interests.lock_no_irq();
         let mut count = 0;
         for interest in interests.values() {
             if count >= max {
                 break;
             }
-            // Poll the underlying file for current readiness.
             let status = match interest.file.poll() {
                 Ok(s) => s,
                 Err(_) => PollStatus::POLLERR,
             };
-            // Convert PollStatus to epoll event bits.
             let ready = poll_status_to_epoll(status) & (interest.events | EPOLLERR | EPOLLHUP);
             if ready != 0 {
                 out.push(EpollEvent {
@@ -124,6 +122,37 @@ impl EpollInstance {
             }
         }
         count
+    }
+
+    /// Poll all interested fds and write ready events directly to userspace.
+    /// Avoids heap allocation — used by the non-blocking (timeout=0) fast path.
+    pub fn collect_ready_to_user(
+        &self,
+        events_ptr: kevlar_platform::address::UserVAddr,
+        max: usize,
+    ) -> crate::result::Result<usize> {
+        let interests = self.interests.lock_no_irq();
+        let mut count = 0;
+        for interest in interests.values() {
+            if count >= max {
+                break;
+            }
+            let status = match interest.file.poll() {
+                Ok(s) => s,
+                Err(_) => PollStatus::POLLERR,
+            };
+            let ready = poll_status_to_epoll(status) & (interest.events | EPOLLERR | EPOLLHUP);
+            if ready != 0 {
+                let event = EpollEvent { events: ready, data: interest.data };
+                let dest = events_ptr.add(count * 12); // EPOLL_EVENT_SIZE = 12
+                let mut buf = [0u8; 12];
+                buf[0..4].copy_from_slice(&event.events.to_ne_bytes());
+                buf[4..12].copy_from_slice(&event.data.to_ne_bytes());
+                dest.write_bytes(&buf)?;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 }
 

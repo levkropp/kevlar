@@ -38,7 +38,7 @@ pub use backtrace::Backtrace;
 pub use idle::{halt, idle};
 pub use interrupt::SavedInterruptStatus;
 pub use ioapic::enable_irq;
-pub use paging::{PageFaultReason, PageTable};
+pub use paging::{PageFaultReason, PageTable, HUGE_PAGE_SIZE};
 pub use profile::read_clock_counter;
 pub use semihosting::{semihosting_halt, SemihostingExitStatus};
 pub use syscall::PtRegs;

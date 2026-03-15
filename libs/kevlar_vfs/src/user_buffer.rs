@@ -31,6 +31,22 @@ impl<'a> UserBuffer<'a> {
             Inner::User { len, .. } => *len,
         }
     }
+
+    /// Read a u64 from the start of the buffer (fast path for eventfd).
+    pub fn read_u64(&self) -> Result<u64> {
+        let mut bytes = [0u8; 8];
+        match &self.inner {
+            Inner::Slice(slice) => {
+                if slice.len() < 8 { return Err(Errno::EINVAL.into()); }
+                bytes.copy_from_slice(&slice[..8]);
+            }
+            Inner::User { base, len } => {
+                if *len < 8 { return Err(Errno::EINVAL.into()); }
+                base.read_bytes(&mut bytes)?;
+            }
+        }
+        Ok(u64::from_ne_bytes(bytes))
+    }
 }
 
 impl<'a> From<&'a [u8]> for UserBuffer<'a> {
@@ -62,6 +78,23 @@ impl<'a> UserBufferMut<'a> {
         match &self.inner {
             InnerMut::Slice(slice) => slice.len(),
             InnerMut::User { len, .. } => *len,
+        }
+    }
+
+    /// Write a u64 to the start of the buffer (fast path for eventfd).
+    pub fn write_u64(&mut self, val: u64) -> Result<()> {
+        let bytes = val.to_ne_bytes();
+        match &mut self.inner {
+            InnerMut::Slice(slice) => {
+                if slice.len() < 8 { return Err(Errno::EINVAL.into()); }
+                slice[..8].copy_from_slice(&bytes);
+                Ok(())
+            }
+            InnerMut::User { base, len } => {
+                if *len < 8 { return Err(Errno::EINVAL.into()); }
+                base.write_bytes(&bytes)?;
+                Ok(())
+            }
         }
     }
 }

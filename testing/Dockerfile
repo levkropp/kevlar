@@ -362,7 +362,11 @@ RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
 COPY testing/etc/banner /etc/banner
 COPY testing/etc/group /etc/group
 COPY testing/etc/passwd /etc/passwd
+COPY testing/etc/shadow /etc/shadow
 COPY testing/etc/profile /etc/profile
+COPY testing/etc/inittab /etc/inittab
+COPY testing/etc/hostname /etc/hostname
+COPY testing/etc/issue /etc/issue
 COPY testing/systemd/units/default.target /etc/systemd/system/default.target
 COPY testing/systemd/units/kevlar-getty.service /etc/systemd/system/kevlar-getty.service
 COPY testing/systemd/os-release /etc/os-release
