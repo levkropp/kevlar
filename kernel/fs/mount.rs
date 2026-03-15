@@ -41,7 +41,7 @@ impl MountTable {
             fstype: String::from("initramfs"),
             mountpoint: String::from("/"),
         });
-        for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp"), ("sysfs", "/sys")] {
+        for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp"), ("sysfs", "/sys"), ("cgroup2", "/sys/fs/cgroup")] {
             let id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
             entries.push_back(MountEntry {
                 mount_id: id, parent_id: root_id,

@@ -12,6 +12,8 @@ use kevlar_platform::address::UserVAddr;
 const TMPFS_MAGIC: i64 = 0x01021994;
 const PROC_SUPER_MAGIC: i64 = 0x9FA0;
 const EXT2_SUPER_MAGIC: i64 = 0xEF53;
+const SYSFS_MAGIC: i64 = 0x62656572;
+const CGROUP2_SUPER_MAGIC: i64 = 0x63677270;
 
 /// Linux struct statfs (x86_64 / arm64).
 #[repr(C)]
@@ -82,9 +84,19 @@ impl StatfsBuf {
         }
     }
 
+    fn sysfs() -> StatfsBuf {
+        StatfsBuf { f_type: SYSFS_MAGIC, ..StatfsBuf::procfs() }
+    }
+
+    fn cgroup2() -> StatfsBuf {
+        StatfsBuf { f_type: CGROUP2_SUPER_MAGIC, ..StatfsBuf::tmpfs() }
+    }
+
     fn for_path(path: &Path) -> StatfsBuf {
         match MountTable::fstype_for_path(path.as_str()).as_deref() {
-            Some("proc") | Some("sysfs") => StatfsBuf::procfs(),
+            Some("proc") => StatfsBuf::procfs(),
+            Some("sysfs") => StatfsBuf::sysfs(),
+            Some("cgroup2") | Some("cgroup") => StatfsBuf::cgroup2(),
             Some("ext2") => StatfsBuf::ext2(),
             _ => StatfsBuf::tmpfs(),
         }
