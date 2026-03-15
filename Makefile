@@ -529,6 +529,41 @@ test-m8:
 	$(MAKE) test-cgroups-ns PROFILE=$(PROFILE)
 	@echo "M8 integration suite complete."
 
+.PHONY: test-m9
+test-m9:
+	$(PROGRESS) "TEST" "M9: systemd boot end-to-end"
+	$(MAKE) build PROFILE=$(PROFILE)
+	@echo "Booting systemd v245 under KVM..."
+	@timeout 20 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm $(kernel_qemu_arg) \
+		-- -append "pci=off init=/usr/lib/systemd/systemd" \
+		-display none -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-m9.log; true
+	@echo "=== M9 Test Results ==="
+	@PASS=0; FAIL=0; \
+	if grep -qa 'Started Kevlar Console Shell' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Started Kevlar Console Shell"; PASS=$$((PASS+1)); \
+	else \
+		echo "FAIL: Started Kevlar Console Shell"; FAIL=$$((FAIL+1)); \
+	fi; \
+	if grep -qa 'Reached target Kevlar Default Target' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Reached target Kevlar Default Target"; PASS=$$((PASS+1)); \
+	else \
+		echo "FAIL: Reached target Kevlar Default Target"; FAIL=$$((FAIL+1)); \
+	fi; \
+	if grep -qa 'Startup finished' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Startup finished"; PASS=$$((PASS+1)); \
+	else \
+		echo "FAIL: Startup finished"; FAIL=$$((FAIL+1)); \
+	fi; \
+	if grep -qa 'Welcome to' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Welcome banner"; PASS=$$((PASS+1)); \
+	else \
+		echo "FAIL: Welcome banner"; FAIL=$$((FAIL+1)); \
+	fi; \
+	echo "$$PASS/$$((PASS+FAIL)) passed"; \
+	if [ $$FAIL -gt 0 ]; then exit 1; fi
+
 # ─── M6.5 Contract Tests ────────────────────────────────────────────────────
 
 .PHONY: build-contracts
