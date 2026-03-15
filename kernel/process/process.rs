@@ -642,6 +642,21 @@ impl Process {
     /// Uses `lock_no_irq` — the fd table is never accessed from interrupt
     /// context, so we skip the cli/sti overhead.
     pub fn get_opened_file_by_fd(&self, fd: Fd) -> Result<Arc<OpenedFile>> {
+        // Fast path: if the fd table is unshared (strong_count == 1, meaning
+        // no threads share it), skip the spinlock and access the Vec directly.
+        // This is safe because only the owning process modifies its fd table,
+        // and we ARE the owning process (current_process() == self).
+        //
+        // This avoids the pushf/cli/cmpxchg/popf sequence per syscall that
+        // dominates pipe read/write overhead.
+        #[cfg(not(feature = "profile-fortress"))]
+        if Arc::strong_count(&self.opened_files) == 1 {
+            // SAFETY: strong_count == 1 guarantees no concurrent access.
+            #[allow(unsafe_code)]
+            let table = unsafe { self.opened_files.get_unchecked() };
+            return Ok(table.get(fd)?.clone());
+        }
+
         Ok(self.opened_files.lock_no_irq().get(fd)?.clone())
     }
 
