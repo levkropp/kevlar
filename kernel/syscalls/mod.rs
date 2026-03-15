@@ -745,13 +745,24 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 
-        // Trace PID 1 fork/clone and directory listing (getdents64) for unit scanning.
+        // Trace key PID 1 syscalls for systemd debugging.
         if current_process().pid().as_i32() == 1 {
+            use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AO};
+            static FORKED: AtomicBool = AtomicBool::new(false);
+            static POST_FORK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
             if matches!(n, SYS_FORK | SYS_CLONE | SYS_CLONE3) {
                 warn!("pid1: FORK/CLONE(n={})", n);
+                FORKED.store(true, AO::Relaxed);
             }
-            if n == SYS_GETDENTS64 {
-                warn!("pid1: getdents64(fd={})", a1);
+
+            // After fork: log ALL syscalls to find what blocks.
+            if FORKED.load(AO::Relaxed) {
+                let c = POST_FORK_COUNT.fetch_add(1, AO::Relaxed);
+                if c < 30 {
+                    warn!("pid1 POST[{}]: {}(n={}) a=({:#x},{:#x},{:#x},{:#x})",
+                          c, syscall_name_by_number(n), n, a1, a2, a3, a4);
+                }
             }
         }
 
@@ -778,6 +789,16 @@ impl<'a> SyscallHandler<'a> {
                 Err(e) => -(e.errno() as isize),
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
+
+            // Log first 20 epoll_wait results.
+            if (n == SYS_EPOLL_WAIT || n == SYS_EPOLL_PWAIT) {
+                use core::sync::atomic::{AtomicUsize, Ordering as AO};
+                static ERET: AtomicUsize = AtomicUsize::new(0);
+                let c = ERET.fetch_add(1, AO::Relaxed);
+                if c < 50 {
+                    warn!("pid1: epoll_wait -> {} (timeout was {})", result, a4 as i32);
+                }
+            }
 
             // Trace epoll_ctl registrations for the main event loop.
             if n == SYS_EPOLL_CTL {
