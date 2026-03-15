@@ -141,15 +141,8 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     };
 
-    // PID 1 page fault trace for debugging dynamic linker boot.
-    if current.pid().as_i32() == 1 {
-        let vma_type_str = match vma.area_type() {
-            VmAreaType::Anonymous => "anon",
-            VmAreaType::File { .. } => "file",
-        };
-        warn!("page_fault: pid=1 addr={:#x} ip={:#x} vma=[{:#x}-{:#x}] type={}",
-              unaligned_vaddr.value(), ip, vma.start().value(), vma.end().value(), vma_type_str);
-    }
+    // PID 1 page fault trace: disabled to reduce serial output under KVM.
+    // Enable with: debug=fault on kernel cmdline.
 
     match vma.area_type() {
         VmAreaType::Anonymous => { /* Zero-filled by zero_page above. */ }

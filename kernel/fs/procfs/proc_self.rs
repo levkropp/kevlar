@@ -496,11 +496,16 @@ impl Directory for ProcPidFdDir {
     fn lookup(&self, name: &str) -> Result<INode> {
         let fd_num: usize = name.parse().map_err(|_| Error::new(Errno::ENOENT))?;
         let proc = Process::find_by_pid(self.pid).ok_or_else(|| Error::new(Errno::ENOENT))?;
-        let opened_files = proc.opened_files().lock();
-        let file = opened_files.get(crate::fs::opened_file::Fd::new(fd_num as i32))?;
-        let target = file.path().resolve_absolute_path();
-        Ok(INode::FileLike(
-            Arc::new(ProcFdSymlink(target.as_str().to_string())) as Arc<dyn FileLike>
+        // Return a symlink so the VFS follows it during path resolution.
+        // We resolve the target path here (holding the fd table lock briefly)
+        // and return a Symlink INode that the VFS follows without re-locking.
+        let target = {
+            let opened_files = proc.opened_files().lock();
+            let file = opened_files.get(crate::fs::opened_file::Fd::new(fd_num as i32))?;
+            file.path().resolve_absolute_path().as_str().to_string()
+        };
+        Ok(INode::Symlink(
+            Arc::new(ProcFdLink(target)) as Arc<dyn Symlink>
         ))
     }
 
@@ -545,7 +550,29 @@ impl Directory for ProcPidFdDir {
     }
 }
 
-/// Symlink for /proc/[pid]/fd/N → target path.
+/// Symlink for /proc/[pid]/fd/N → target path (VFS-resolvable).
+struct ProcFdLink(String);
+
+impl fmt::Debug for ProcFdLink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcFdLink({})", self.0)
+    }
+}
+
+impl Symlink for ProcFdLink {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFLNK | 0o777),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn linked_to(&self) -> Result<PathBuf> {
+        Ok(PathBuf::from(self.0.clone()))
+    }
+}
+
+/// Legacy symlink for /proc/[pid]/fd/N → target path (FileLike for readlink).
 struct ProcFdSymlink(String);
 
 impl fmt::Debug for ProcFdSymlink {

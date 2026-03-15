@@ -745,6 +745,38 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 
+        // Trace PID 1 syscalls: log uncommon ones and periodic heartbeat.
+        if current_process().pid().as_i32() == 1 {
+            use core::sync::atomic::{AtomicUsize, Ordering as AO};
+            static PID1_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let count = PID1_COUNT.fetch_add(1, AO::Relaxed);
+            let common = matches!(n,
+                SYS_WRITE | SYS_WRITEV | SYS_CLOSE | SYS_FSTAT
+                | SYS_MMAP | SYS_MPROTECT | SYS_MUNMAP | SYS_BRK
+                | SYS_NEWFSTATAT | SYS_LSEEK | SYS_GETDENTS64
+                | SYS_PREAD64 | SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK
+                | SYS_STAT | SYS_LSTAT | SYS_ACCESS | SYS_FCNTL
+            );
+            if !common || count % 200 == 0 {
+                warn!("pid1[{}]: {}(n={}) a=({:#x},{:#x},{:#x},{:#x})",
+                      count, syscall_name_by_number(n), n, a1, a2, a3, a4);
+            }
+            // Log every syscall after #740 with full detail + path for debugging the hang.
+            if count >= 740 {
+                let path_str = if n == SYS_OPENAT || n == SYS_NEWFSTATAT {
+                    StackPathBuf::from_user(a2).ok().map(|p| alloc::string::String::from(p.as_path().as_str()))
+                } else if n == SYS_READ {
+                    Some(alloc::format!("fd={}", a1))
+                } else {
+                    None
+                };
+                warn!("pid1 LATE[{}]: {}(n={}) path={:?} a=({:#x},{:#x},{:#x})",
+                      count, syscall_name_by_number(n), n,
+                      path_str.as_deref().unwrap_or(""),
+                      a1, a2, a3);
+            }
+        }
+
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if dbg_syscall {
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
