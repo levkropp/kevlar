@@ -235,27 +235,55 @@ fn allocate_pml4() -> Result<PAddr, PageAllocError> {
 
 pub struct PageTable {
     pml4: PAddr,
+    /// Process Context ID (0-4095) for TLB tagging.
+    /// Each address space gets a unique PCID so context switches don't
+    /// flush the entire TLB — only entries for the target PCID are used.
+    pcid: u16,
+}
+
+/// Next PCID to allocate. Wraps at 4095 (12-bit field). 0 = kernel.
+static NEXT_PCID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
+
+fn alloc_pcid() -> u16 {
+    loop {
+        let pcid = NEXT_PCID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let pcid = pcid & 0xFFF; // wrap to 12 bits
+        if pcid != 0 { return pcid; } // 0 reserved for kernel
+    }
 }
 
 impl PageTable {
     pub fn new() -> Result<PageTable, PageAllocError> {
         let pml4 = allocate_pml4()?;
-        Ok(PageTable { pml4 })
+        Ok(PageTable { pml4, pcid: alloc_pcid() })
     }
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table(original.pml4, 4)?;
-        // CoW fork marked parent's writable PTEs as read-only. Flush the
-        // TLB so the parent doesn't bypass CoW via stale writable entries.
-        // A write through a stale entry would modify the shared physical
-        // page, violating fork's independent-copy semantics.
-        unsafe { x86::tlb::flush_all(); }
-        Ok(PageTable { pml4: new_pml4 })
+        // CoW fork marked parent's writable PTEs as read-only.
+        // Flush only the parent's PCID entries (stale writable TLB entries
+        // would bypass CoW). The child gets a fresh PCID with no entries.
+        let parent_pcid = original.pcid;
+        unsafe {
+            // INVPCID type 1: invalidate all entries for a specific PCID.
+            let desc: [u64; 2] = [parent_pcid as u64, 0];
+            core::arch::asm!(
+                "invpcid {0}, [{1}]",
+                in(reg) 1u64,  // type 1 = single-context
+                in(reg) &desc,
+                options(nostack, preserves_flags)
+            );
+        }
+        Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
     }
 
     pub fn switch(&self) {
         unsafe {
-            x86::controlregs::cr3_write(self.pml4.value() as u64);
+            // CR3 format with PCID: bits [11:0] = PCID, bits [51:12] = PML4.
+            // Bit 63 = 1: don't invalidate TLB entries for this PCID.
+            // This preserves TLB entries from previous runs of this process.
+            let cr3_val = self.pml4.value() as u64 | (self.pcid as u64) | (1u64 << 63);
+            x86::controlregs::cr3_write(cr3_val);
         }
     }
 
@@ -475,7 +503,11 @@ impl PageTable {
 
     /// Flushes the entire TLB by reloading CR3.
     pub fn flush_tlb_all(&self) {
-        self.switch();
+        // Reload CR3 WITHOUT bit 63 to flush all entries for our PCID.
+        unsafe {
+            let cr3_val = self.pml4.value() as u64 | (self.pcid as u64);
+            x86::controlregs::cr3_write(cr3_val);
+        }
     }
 
     #[inline(always)]

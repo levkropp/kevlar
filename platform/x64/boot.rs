@@ -30,7 +30,8 @@ unsafe fn ap_common_setup(cpu_local_area: VAddr) {
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
         | Cr4::CR4_ENABLE_OS_XSAVE
         | Cr4::CR4_ENABLE_SSE
-        | Cr4::CR4_UNMASKED_SSE;
+        | Cr4::CR4_UNMASKED_SSE
+        | Cr4::CR4_ENABLE_PCID;      // Process Context IDs for fast TLB
     controlregs::cr4_write(cr4);
 
     let mut xcr0 = controlregs::xcr0();
@@ -88,7 +89,8 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
         | Cr4::CR4_ENABLE_OS_XSAVE
         | Cr4::CR4_ENABLE_SSE
-        | Cr4::CR4_UNMASKED_SSE;
+        | Cr4::CR4_UNMASKED_SSE
+        | Cr4::CR4_ENABLE_PCID;      // Process Context IDs for fast TLB
     controlregs::cr4_write(cr4);
 
     let mut xcr0 = controlregs::xcr0();
