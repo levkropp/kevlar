@@ -52,7 +52,6 @@ fn nth_level_table_index(vaddr: UserVAddr, level: usize) -> isize {
     ((vaddr.value() >> ((((level) - 1) * 9) + 12)) & 0x1ff) as isize
 }
 
-#[inline(always)]
 /// Walk the page table hierarchy to find the PTE for `vaddr`.
 /// If `allocate` is true, allocate missing intermediate tables.
 ///

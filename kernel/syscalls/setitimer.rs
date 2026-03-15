@@ -6,9 +6,7 @@ use crate::{
     prelude::*,
     process::{current_process, signal::SIGALRM, PId},
     syscalls::SyscallHandler,
-    timer,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
 use kevlar_platform::{address::UserVAddr, arch::TICK_HZ, spinlock::SpinLock};
 
 const ITIMER_REAL: i32 = 0;

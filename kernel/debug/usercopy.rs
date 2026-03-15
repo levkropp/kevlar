@@ -30,6 +30,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 static USERCOPY_CONTEXT: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Static empty string for when no context is set.
+#[allow(dead_code)]
 static EMPTY: &[u8] = b"\0";
 
 /// Set the current usercopy context tag.
@@ -48,6 +49,7 @@ pub fn clear_context() {
 }
 
 /// Get the current usercopy context tag, or "" if none set.
+#[allow(dead_code)]
 pub fn get_context() -> &'static str {
     let ptr = USERCOPY_CONTEXT.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -73,6 +75,7 @@ pub fn get_context() -> &'static str {
 /// Emit a usercopy trace event if the USERCOPY filter is enabled.
 ///
 /// Called from `UserVAddr::write_bytes`, `read_bytes`, etc.
+#[allow(dead_code)]
 pub fn trace_usercopy(
     pid: i32,
     direction: &'static str,

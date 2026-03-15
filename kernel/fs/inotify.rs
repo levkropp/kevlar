@@ -30,7 +30,9 @@ pub const IN_MOVED_FROM: u32 = 0x00000040;
 pub const IN_MOVED_TO: u32 = 0x00000080;
 pub const IN_CREATE: u32 = 0x00000100;
 pub const IN_DELETE: u32 = 0x00000200;
+#[allow(dead_code)]
 pub const IN_DELETE_SELF: u32 = 0x00000400;
+#[allow(dead_code)]
 pub const IN_MOVE_SELF: u32 = 0x00000800;
 
 pub const IN_CLOEXEC: i32 = 0o2000000;

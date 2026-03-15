@@ -13,6 +13,13 @@
 /// The kernel stack has a PtRegs frame at the top.
 .global userland_entry
 userland_entry:
+    // Re-enable preemption (switch() called preempt_disable before
+    // do_switch_thread, but this entry bypasses switch()'s return path).
+    mrs     x0, tpidr_el1
+    ldr     w1, [x0, #16]
+    sub     w1, w1, #1
+    str     w1, [x0, #16]
+
     // Sanitize all registers to prevent information leak.
     mov     x0, #0
     mov     x1, #0
@@ -68,6 +75,13 @@ userland_entry:
 /// We need to set return value (x0) to 0 and ERET to user.
 .global forked_child_entry
 forked_child_entry:
+    // Re-enable preemption (switch() called preempt_disable before
+    // do_switch_thread, but this entry bypasses switch()'s return path).
+    mrs     x0, tpidr_el1
+    ldr     w1, [x0, #16]
+    sub     w1, w1, #1
+    str     w1, [x0, #16]
+
     // Restore all registers from the PtRegs on the stack.
     // But set x0 = 0 (fork return value for child).
     ldp     x2,  x3,  [sp, #(2  * 8)]

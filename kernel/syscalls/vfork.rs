@@ -4,7 +4,7 @@
 //! The child runs inline — no context switch. The parent's kernel stack
 //! is frozen at the vfork syscall return point. When the child calls
 //! _exit() or exec(), control returns to the parent.
-use crate::process::{current_process, switch, Process, ProcessState, VFORK_WAIT_QUEUE};
+use crate::process::{current_process, Process, ProcessState, VFORK_WAIT_QUEUE};
 use crate::result::Result;
 use crate::syscalls::SyscallHandler;
 

@@ -1,6 +1,7 @@
 // Offsets in CpuLocalHead.
 .set GS_RSP0, 0
 .set GS_RSP3, 8
+.set GS_PREEMPT_COUNT, 16
 
 .global syscall_entry
 syscall_entry:
@@ -102,6 +103,12 @@ kthread_entry:
 
 .global userland_entry
 userland_entry:
+    // Re-enable preemption (switch() called preempt_disable before
+    // do_switch_thread, but this entry bypasses switch()'s return path).
+    mov eax, dword ptr gs:[GS_PREEMPT_COUNT]
+    dec eax
+    mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+
     // Sanitize registers to prevent information leak.
     xor rax, rax
     xor rbx, rbx
@@ -125,6 +132,13 @@ userland_entry:
 
 .global forked_child_entry
 forked_child_entry:
+    // Re-enable preemption: switch() called preempt_disable() before
+    // do_switch_thread, but forked_child_entry bypasses switch()'s normal
+    // return path (which calls preempt_enable).
+    mov eax, dword ptr gs:[GS_PREEMPT_COUNT]
+    dec eax
+    mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+
     pop rdx
     pop rdi
     pop rsi

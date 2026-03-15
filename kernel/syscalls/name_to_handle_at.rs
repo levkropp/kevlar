@@ -2,7 +2,6 @@
 // Minimal name_to_handle_at implementation for mount point detection.
 // systemd uses this to determine if /sys, /proc, /dev are mount points.
 use crate::fs::mount::MountTable;
-use crate::fs::path::Path;
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::syscalls::{CwdOrFd, SyscallHandler, StackPathBuf};
@@ -48,7 +47,7 @@ impl<'a> SyscallHandler<'a> {
             let opened_files = current.opened_files_no_irq();
             let follow = (flags & 0x100) == 0; // AT_SYMLINK_FOLLOW = default
             match root_fs.lookup_path_at(&opened_files, &dirfd, p.as_path(), follow) {
-                Ok(comp) => {
+                Ok(_comp) => {
                     // Build the full path from the resolved component.
                     // For simplicity, use the input path.
                     alloc::string::String::from(p.as_path().as_str())

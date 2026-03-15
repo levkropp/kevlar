@@ -18,7 +18,6 @@ use smoltcp::wire::{self, EthernetAddress, EthernetFrame, HardwareAddress, IpCid
 
 pub mod service;
 pub mod socket;
-use service::NetworkStackService;
 mod tcp_socket;
 mod udp_socket;
 mod unix_socket;

@@ -162,10 +162,12 @@ impl SignalDelivery {
         self.nocldwait = value;
     }
 
+    #[allow(dead_code)]
     pub fn is_pending(&self) -> bool {
         self.pending != 0
     }
 
+    #[allow(dead_code)]
     pub fn pop_pending(&mut self) -> Option<(Signal, SigAction)> {
         if self.pending == 0 {
             return None;
@@ -239,6 +241,7 @@ impl SignalDelivery {
 pub struct SigSet(u64);
 
 impl SigSet {
+    #[allow(dead_code)]
     pub const ZERO: Self = SigSet(0);
 
     #[inline(always)]
@@ -258,6 +261,7 @@ impl SigSet {
 
     /// Returns true if signal `sig` (1-based signal number) is blocked.
     #[inline(always)]
+    #[allow(dead_code)]
     pub fn is_blocked(self, sig: usize) -> bool {
         if sig == 0 || sig > 64 { return false; }
         (self.0 & (1u64 << (sig - 1))) != 0

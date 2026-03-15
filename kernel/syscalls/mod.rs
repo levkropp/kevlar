@@ -187,6 +187,7 @@ mod pivot_root;
 mod close_range;
 mod flock;
 mod memfd_create;
+mod mknod;
 mod name_to_handle_at;
 mod pidfd_open;
 mod waitid;
@@ -342,6 +343,7 @@ mod syscall_numbers {
     pub const SYS_TGKILL: usize = 234;
     pub const SYS_RT_SIGTIMEDWAIT: usize = 128;
     pub const SYS_RT_SIGSUSPEND: usize = 130;
+    pub const SYS_VHANGUP: usize = 153;
     pub const SYS_FCHMOD: usize = 91;
     pub const SYS_FCHOWN: usize = 93;
     pub const SYS_PAUSE: usize = 34;
@@ -403,6 +405,7 @@ mod syscall_numbers {
     pub const SYS_WAITID: usize = 247;
     pub const SYS_MEMFD_CREATE: usize = 319;
     pub const SYS_MKNOD: usize = 133;
+    pub const SYS_MKNODAT: usize = 259;
     pub const SYS_SETTIMEOFDAY: usize = 164;
     pub const SYS_CLOCK_SETTIME: usize = 227;
     pub const SYS_NAME_TO_HANDLE_AT: usize = 303;
@@ -594,7 +597,8 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 32;
     pub const SYS_WAITID: usize = 95;
     pub const SYS_MEMFD_CREATE: usize = 279;
-    pub const SYS_MKNOD: usize = 33;
+    pub const SYS_MKNOD: usize = 0xF016; // ARM64 has no old mknod, only mknodat
+    pub const SYS_MKNODAT: usize = 33;
     pub const SYS_SETTIMEOFDAY: usize = 170;
     pub const SYS_CLOCK_SETTIME: usize = 112;
     pub const SYS_NAME_TO_HANDLE_AT: usize = 264;
@@ -1129,9 +1133,16 @@ impl<'a> SyscallHandler<'a> {
             SYS_TKILL => self.sys_tkill(a1 as c_int, a2 as c_int),
             SYS_TGKILL => self.sys_tgkill(a1 as c_int, a2 as c_int, a3 as c_int),
             SYS_RT_SIGTIMEDWAIT => {
-                // Stub: BusyBox init uses this to wait for child signals.
-                // Return -EINTR (interrupted) so callers retry or proceed.
-                Err(Errno::EINTR.into())
+                // Stub: yield CPU then return EAGAIN (no signal ready).
+                // BusyBox init calls this in a tight loop; without yielding,
+                // it monopolizes the CPU and child processes (getty) never run.
+                crate::process::switch();
+                Err(Errno::EAGAIN.into())
+            }
+            SYS_VHANGUP => {
+                // Stub: BusyBox init calls vhangup() before spawning getty.
+                // Revokes access to the controlling terminal. Accept silently.
+                Ok(0)
             }
             SYS_RT_SIGSUSPEND => self.sys_rt_sigsuspend(UserVAddr::new_nonnull(a1)?, a2),
             SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
@@ -1328,8 +1339,14 @@ impl<'a> SyscallHandler<'a> {
                 a4 as c_int,
             ),
             SYS_MEMFD_CREATE => self.sys_memfd_create(UserVAddr::new_nonnull(a1)?, a2 as u32),
-            // mknod: systemd creates device nodes. Stub — our devfs already has them.
-            SYS_MKNOD => Ok(0),
+            SYS_MKNOD => {
+                let p = StackPathBuf::from_user(a1)?;
+                self.sys_mknod(p.as_path(), a2 as u32, a3 as u32)
+            }
+            SYS_MKNODAT => {
+                let p = StackPathBuf::from_user(a2)?;
+                self.sys_mknod(p.as_path(), a3 as u32, a4 as u32)
+            }
             // settimeofday: ignore time adjustments.
             SYS_SETTIMEOFDAY => Ok(0),
             // clock_settime: ignore clock adjustments.
@@ -1478,6 +1495,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_TKILL => "tkill",
         SYS_TGKILL => "tgkill",
         SYS_RT_SIGTIMEDWAIT => "rt_sigtimedwait",
+        SYS_VHANGUP => "vhangup",
         SYS_RT_SIGSUSPEND => "rt_sigsuspend",
         SYS_FCHMOD => "fchmod",
         SYS_FCHOWN => "fchown",
@@ -1534,6 +1552,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_WAITID => "waitid",
         SYS_MEMFD_CREATE => "memfd_create",
         SYS_MKNOD => "mknod",
+        SYS_MKNODAT => "mknodat",
         SYS_SETTIMEOFDAY => "settimeofday",
         SYS_CLOCK_SETTIME => "clock_settime",
         SYS_NAME_TO_HANDLE_AT => "name_to_handle_at",

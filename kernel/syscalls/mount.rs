@@ -29,8 +29,11 @@ impl<'a> SyscallHandler<'a> {
         _data: usize,
     ) -> Result<isize> {
         const PATH_MAX: usize = 256;
+        #[allow(dead_code)]
         const MS_NOSUID: c_int = 2;
+        #[allow(dead_code)]
         const MS_NODEV: c_int = 4;
+        #[allow(dead_code)]
         const MS_NOEXEC: c_int = 8;
         const MS_REMOUNT: c_int = 0x20;
         const MS_BIND: c_int = 0x1000;
@@ -82,8 +85,12 @@ impl<'a> SyscallHandler<'a> {
                 // Mount ext2 from the global block device.
                 kevlar_ext2::mount_ext2()?
             }
-            "devtmpfs" | "devpts" => {
-                // Our devfs is always mounted; silently succeed.
+            "devtmpfs" => {
+                // Mount our real DEV_FS so mknod'd nodes appear.
+                crate::fs::devfs::DEV_FS.clone()
+            }
+            "devpts" => {
+                // Our devfs already provides /dev/pts; silently succeed.
                 return Ok(0);
             }
             "cgroup2" | "cgroup" => {

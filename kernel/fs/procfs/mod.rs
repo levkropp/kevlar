@@ -36,6 +36,7 @@ pub static PROC_FS: Once<Arc<ProcFs>> = Once::new();
 
 pub struct ProcFs {
     /// Underlying tmpfs for static entries.
+    #[allow(dead_code)]
     tmpfs: TmpFs,
     /// Dynamic root directory that intercepts PID lookups.
     root: Arc<ProcRootDir>,
@@ -270,6 +271,16 @@ impl FileLike for ProcSysHostname {
         let mut writer = UserBufWriter::from(buf);
         writer.write_bytes(&bytes[..len])?;
         Ok(len)
+    }
+
+    fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
+        use kevlar_vfs::user_buffer::UserBufReader;
+        let mut data = [0u8; 64];
+        let mut reader = UserBufReader::from(buf);
+        let n = reader.read_bytes(&mut data)?;
+        let len = if n > 0 && data[n - 1] == b'\n' { n - 1 } else { n };
+        crate::process::current_process().namespaces().uts.set_hostname(&data[..len])?;
+        Ok(n)
     }
 }
 

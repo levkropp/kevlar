@@ -191,6 +191,7 @@ static APIC: SpinLock<LocalApic> = SpinLock::new(LocalApic::new(PAddr::new(0xfee
 #[derive(Debug, Copy, Clone)]
 #[repr(u32)]
 enum LocalApicReg {
+    #[allow(dead_code)]
     Eoi = 0xb0,
     SpuriousInterrupt = 0xf0,
 }
@@ -204,6 +205,7 @@ impl LocalApic {
         LocalApic { base }
     }
 
+    #[allow(dead_code)]
     pub unsafe fn write_eoi(&self) {
         // The EOI register accepts only 0. CPU raises #GP otherwise.
         self.mmio_write(LocalApicReg::Eoi, 0);

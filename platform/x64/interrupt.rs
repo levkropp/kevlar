@@ -51,6 +51,7 @@ impl fmt::Debug for InterruptFrame {
     }
 }
 
+#[allow(dead_code)]
 unsafe extern "C" {
     fn usercopy1();
     fn usercopy1b();

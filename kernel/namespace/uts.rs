@@ -63,6 +63,7 @@ impl UtsNamespace {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_domainname(&self) -> Vec<u8> {
         let dom = self.domainname.lock();
         let len = self.domainname_len.load(Ordering::Relaxed);

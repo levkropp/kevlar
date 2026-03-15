@@ -18,6 +18,7 @@ const WNOHANG: c_int = 1;
 const WNOWAIT: c_int = 0x01000000;
 
 const CLD_EXITED: c_int = 1;
+#[allow(dead_code)]
 const CLD_KILLED: c_int = 2;
 #[allow(dead_code)]
 const CLD_STOPPED: c_int = 5;

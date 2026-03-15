@@ -18,7 +18,7 @@ impl<'a> SyscallHandler<'a> {
 
         // Verify new_root exists and is a directory.
         let root_fs = current_process().root_fs();
-        let mut root_fs = root_fs.lock();
+        let root_fs = root_fs.lock();
         let _new_root_dir = root_fs.lookup_dir(&new_root_path)
             .map_err(|_| crate::result::Error::new(Errno::EINVAL))?;
 

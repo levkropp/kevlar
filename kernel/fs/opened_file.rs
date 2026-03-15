@@ -288,14 +288,12 @@ struct LocalOpenedFile {
 #[derive(Clone)]
 pub struct OpenedFileTable {
     files: Vec<Option<LocalOpenedFile>>,
-    prev_fd: i32,
 }
 
 impl OpenedFileTable {
     pub fn new() -> OpenedFileTable {
         OpenedFileTable {
             files: Vec::new(),
-            prev_fd: 1,
         }
     }
 
@@ -457,20 +455,13 @@ impl OpenedFileTable {
     /// Allocates an unused fd. Note that this method does not any reservations
     /// for the fd: the caller must register it before unlocking this table.
     fn alloc_fd(&mut self, gte: Option<i32>) -> Result<Fd> {
-        let (mut i, gte) = match gte {
-            Some(gte) => (gte, gte),
-            None => ((self.prev_fd + 1) % FD_MAX, 0),
-        };
-
-        while i != self.prev_fd && i >= gte {
+        // POSIX: open() must return the lowest available fd number.
+        let start = gte.unwrap_or(0);
+        for i in start..FD_MAX {
             if matches!(self.files.get(i as usize), Some(None) | None) {
-                // It looks the fd number is not in use. Open the file at that fd.
                 return Ok(Fd::new(i));
             }
-
-            i = (i + 1) % FD_MAX;
         }
-
         Err(Error::new(Errno::ENFILE))
     }
 }
