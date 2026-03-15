@@ -13,8 +13,8 @@ path = "main.rs"
 default = ["profile-balanced"]
 profile-fortress = ["kevlar_platform/profile-fortress", "unwinding"]
 profile-balanced = ["kevlar_platform/profile-balanced", "unwinding"]
-profile-performance = ["kevlar_platform/profile-performance"]
-profile-ludicrous = ["kevlar_platform/profile-ludicrous"]
+profile-performance = ["kevlar_platform/profile-performance", "unwinding"]
+profile-ludicrous = ["kevlar_platform/profile-ludicrous", "unwinding"]
 
 [dependencies]
 log = "0.4"
