@@ -17,7 +17,7 @@ pub mod signal;
 mod switch;
 pub mod wait_queue;
 
-pub use process::{gc_exited_processes, list_pids, process_count, read_process_stats, PId, Process, ProcessState, EXITED_PROCESSES};
+pub use process::{gc_exited_processes, list_pids, process_count, read_process_stats, PId, Process, ProcessState, EXITED_PROCESSES, VFORK_WAIT_QUEUE};
 pub use scheduler::SchedulerPolicy;
 pub use switch::switch;
 pub use wait_queue::WaitQueue;
@@ -42,6 +42,7 @@ pub fn current_process() -> &'static Arc<Process> {
 
 pub fn init() {
     JOIN_WAIT_QUEUE.init(WaitQueue::new);
+    VFORK_WAIT_QUEUE.init(WaitQueue::new);
     SCHEDULER.init(|| SpinLock::new(Scheduler::new()));
     let idle_thread = Process::new_idle_thread().unwrap();
     IDLE_THREAD.as_mut().set(idle_thread.clone());
