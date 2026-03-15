@@ -763,16 +763,15 @@ impl<'a> SyscallHandler<'a> {
         debug::profiler::syscall_exit(n, prof_start);
 
         // Record PID 1 syscalls for debugging systemd boot.
-        if current_process().pid().as_i32() == 1 {
+        // Only when debug=syscall is enabled (avoids overhead during benchmarks).
+        if dbg_syscall && current_process().pid().as_i32() == 1 {
             let result = match &ret {
                 Ok(v) => *v,
                 Err(e) => -(e.errno() as isize),
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
 
-
             // Decode path for openat/stat/access to make trace readable.
-            // EXCLUDE execve — page table was switched, old user pointers are invalid!
             let path_arg = match n {
                 SYS_OPENAT | SYS_NEWFSTATAT => Some(a2),
                 SYS_STAT | SYS_LSTAT | SYS_ACCESS => Some(a1),
