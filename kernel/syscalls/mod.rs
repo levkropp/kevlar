@@ -745,26 +745,6 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 
-        // Trace key PID 1 syscalls for systemd debugging.
-        if current_process().pid().as_i32() == 1 {
-            use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AO};
-            static FORKED: AtomicBool = AtomicBool::new(false);
-            static POST_FORK_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-            if matches!(n, SYS_FORK | SYS_CLONE | SYS_CLONE3) {
-                warn!("pid1: FORK/CLONE(n={})", n);
-                FORKED.store(true, AO::Relaxed);
-            }
-
-            // After fork: log ALL syscalls to find what blocks.
-            if FORKED.load(AO::Relaxed) {
-                let c = POST_FORK_COUNT.fetch_add(1, AO::Relaxed);
-                if c < 30 {
-                    warn!("pid1 POST[{}]: {}(n={}) a=({:#x},{:#x},{:#x},{:#x})",
-                          c, syscall_name_by_number(n), n, a1, a2, a3, a4);
-                }
-            }
-        }
 
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if dbg_syscall {
@@ -789,39 +769,6 @@ impl<'a> SyscallHandler<'a> {
                 Err(e) => -(e.errno() as isize),
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
-
-            // Log first 20 epoll_wait results.
-            if (n == SYS_EPOLL_WAIT || n == SYS_EPOLL_PWAIT) {
-                use core::sync::atomic::{AtomicUsize, Ordering as AO};
-                static ERET: AtomicUsize = AtomicUsize::new(0);
-                let c = ERET.fetch_add(1, AO::Relaxed);
-                if c < 50 {
-                    warn!("pid1: epoll_wait -> {} (timeout was {})", result, a4 as i32);
-                }
-            }
-
-            // Trace epoll_ctl registrations for the main event loop.
-            if n == SYS_EPOLL_CTL {
-                let op = match a2 { 1 => "ADD", 2 => "DEL", 3 => "MOD", _ => "?" };
-                warn!("pid1: epoll_ctl(epfd={}, {}, fd={})", a1, op, a3);
-            }
-            // Trace the first few epoll_wait results to diagnose spinning.
-            if (n == SYS_EPOLL_WAIT || n == SYS_EPOLL_PWAIT) && result > 0 {
-                use core::sync::atomic::{AtomicUsize, Ordering as AO};
-                static EPOLL_HIT: AtomicUsize = AtomicUsize::new(0);
-                let c = EPOLL_HIT.fetch_add(1, AO::Relaxed);
-                if c < 5 {
-                    // Read the epoll_event struct from userspace to get the fd.
-                    if let Ok(ev_addr) = UserVAddr::new_nonnull(a2) {
-                        let events: u32 = ev_addr.read().unwrap_or(0);
-                        let data: u64 = UserVAddr::new_nonnull(a2 + 4)
-                            .map(|a| a.read::<u64>().unwrap_or(0))
-                            .unwrap_or(0);
-                        warn!("pid1: epoll_wait(epfd={}) -> events={:#x} data={:#x}",
-                              a1, events, data);
-                    }
-                }
-            }
 
 
             // Decode path for openat/stat/access to make trace readable.

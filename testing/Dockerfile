@@ -351,7 +351,8 @@ COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
-RUN mkdir -p /etc /dev /tmp /mnt /var/www/html /run /var/log/journal
+RUN mkdir -p /etc /dev /tmp /mnt /var/www/html /run /var/log/journal \
+    && ln -sf /run /var/run
 # systemd configuration
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
     && mkdir -p /usr/lib/systemd/system
