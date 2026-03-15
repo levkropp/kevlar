@@ -62,8 +62,11 @@ impl<'a> SyscallHandler<'a> {
         }
 
         // Now safe to free all unmapped physical pages.
+        // CoW: only free when refcount drops to 0.
         for paddr in to_free {
-            free_pages(paddr, 1);
+            if kevlar_platform::page_refcount::page_ref_dec(paddr) {
+                free_pages(paddr, 1);
+            }
         }
 
         Ok(0)

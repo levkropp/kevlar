@@ -74,7 +74,9 @@ impl<'a> SyscallHandler<'a> {
                             let page_addr = addr.add(i * PAGE_SIZE);
                             if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
                                 vm.page_table().flush_tlb(page_addr);
-                                free_pages(paddr, 1);
+                                if kevlar_platform::page_refcount::page_ref_dec(paddr) {
+                                    free_pages(paddr, 1);
+                                }
                             }
                         }
                     }

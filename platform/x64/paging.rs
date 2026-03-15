@@ -245,9 +245,10 @@ impl PageTable {
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table(original.pml4, 4)?;
-        // Flush TLB: we marked writable parent pages as read-only for CoW.
-        // Without a flush, the parent CPU may still have stale writable TLB
-        // entries and bypass the CoW page fault.
+        // CoW fork marked parent's writable PTEs as read-only. Flush the
+        // TLB so the parent doesn't bypass CoW via stale writable entries.
+        // A write through a stale entry would modify the shared physical
+        // page, violating fork's independent-copy semantics.
         unsafe { x86::tlb::flush_all(); }
         Ok(PageTable { pml4: new_pml4 })
     }
