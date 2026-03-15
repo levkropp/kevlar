@@ -132,7 +132,7 @@ static void bench_pipe(void) {
 }
 
 static void bench_fork(void) {
-    int iters = ITERS(200, 50);
+    int iters = ITERS(500, 200);
     int completed = 0;
     long long start = now_ns();
     for (int i = 0; i < iters; i++) {

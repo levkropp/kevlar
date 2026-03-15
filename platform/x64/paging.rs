@@ -141,6 +141,10 @@ fn leaf_pt_index(vaddr_value: usize) -> usize {
 /// nth-level page table. Returns the newly created copy of the page table.
 ///
 /// fork(2) uses this funciton to duplicate the memory space.
+fn duplicate_table_cow(pml4: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
+    duplicate_table(pml4, level)
+}
+
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
@@ -177,13 +181,9 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
 
             if is_writable {
                 // CoW: clear WRITABLE in BOTH parent and child PTEs.
-                // When either process writes, the page fault handler will
-                // allocate a new page and copy (see handle_cow_fault).
                 let cow_flags = flags & !PageAttrs::WRITABLE.bits();
                 unsafe {
-                    // Update parent's PTE to read-only.
                     *orig_table.offset(i) = paddr.value() as u64 | cow_flags;
-                    // Child gets same page, same read-only flags.
                     *new_table.offset(i) = paddr.value() as u64 | cow_flags;
                 }
             } else {
@@ -259,20 +259,13 @@ impl PageTable {
     }
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
-        let new_pml4 = duplicate_table(original.pml4, 4)?;
-        // CoW fork marked parent's writable PTEs as read-only.
-        // Flush only the parent's PCID entries (stale writable TLB entries
-        // would bypass CoW). The child gets a fresh PCID with no entries.
-        let parent_pcid = original.pcid;
+        let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
+        // Flush user TLB entries: reload CR3 WITHOUT bit 63.
+        // With PGE, global (kernel) entries survive the flush.
+        // CR3 reload is faster than INVPCID on many KVM configurations.
         unsafe {
-            // INVPCID type 1: invalidate all entries for a specific PCID.
-            let desc: [u64; 2] = [parent_pcid as u64, 0];
-            core::arch::asm!(
-                "invpcid {0}, [{1}]",
-                in(reg) 1u64,  // type 1 = single-context
-                in(reg) &desc,
-                options(nostack, preserves_flags)
-            );
+            let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
+            x86::controlregs::cr3_write(cr3_val);
         }
         Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
     }
