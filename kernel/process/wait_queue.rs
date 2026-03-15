@@ -9,8 +9,6 @@ use kevlar_platform::spinlock::SpinLock;
 
 pub struct WaitQueue {
     queue: SpinLock<VecDeque<Arc<Process>>>,
-    /// Number of processes currently enqueued.  Checked with a relaxed load
-    /// to skip the lock in `wake_all` when nobody is waiting.
     waiter_count: AtomicUsize,
 }
 
@@ -22,28 +20,30 @@ impl WaitQueue {
         }
     }
 
-    /// Sleeps on the wait queue until `sleep_if_none` returns `Some`.
+    /// Sleeps until `condition` returns `Some`, or a signal arrives (EINTR).
     ///
-    /// If a signal is arrived, this method returns `Err(Errno::EINTR)`.
-    pub fn sleep_signalable_until<F, R>(&self, mut sleep_if_none: F) -> Result<R>
+    /// Optimized vs previous version:
+    /// - Checks condition BEFORE enqueueing (fast path if already met)
+    /// - After waking, checks condition BEFORE re-enqueueing
+    /// - wake_all removes from queue; sleeper only self-removes on signal abort
+    pub fn sleep_signalable_until<F, R>(&self, mut condition: F) -> Result<R>
     where
         F: FnMut() -> Result<Option<R>>,
     {
+        // Fast path: condition already met — no queue ops at all.
+        match condition() {
+            Ok(Some(result)) => return Ok(result),
+            Err(e) => return Err(e),
+            Ok(None) => {}
+        }
+
         loop {
-            // Atomically set state to BlockedSignalable AND enqueue in the
-            // wait queue while holding the queue's SpinLock (which disables
-            // interrupts via cli).  Without this, the LAPIC preempt timer can
-            // fire in the window between set_state() and push_back():
-            //
-            //   set_state(BlockedSignalable)  ← removed from run queue
-            //   [LAPIC preempt fires here]    ← switch() sees Blocked, does
-            //                                    NOT re-enqueue → thread lost!
-            //   push_back(current)            ← never reached
-            //
-            // A lost thread (neither in the run queue nor any WaitQueue) will
-            // never be resumed, causing the joining thread to block forever.
-            // Holding the queue lock across both operations keeps interrupts
-            // masked for those ~2 instructions, preventing the race.
+            if current_process().has_pending_signals() {
+                return Err(Errno::EINTR.into());
+            }
+
+            // Enqueue and sleep. Hold queue lock across state change + push
+            // to prevent lost-wakeup race with preemption timer.
             {
                 let mut q = self.queue.lock();
                 current_process().set_state(ProcessState::BlockedSignalable);
@@ -51,47 +51,37 @@ impl WaitQueue {
                 self.waiter_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            if current_process().has_pending_signals() {
-                current_process().set_state(ProcessState::Runnable);
-                self.queue
-                    .lock()
-                    .retain(|proc| !Arc::ptr_eq(proc, current_process()));
-                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-                return Err(Errno::EINTR.into());
-            }
-
-            let ret_value = match sleep_if_none() {
-                Ok(Some(ret_value)) => Some(Ok(ret_value)),
-                Ok(None) => None,
-                Err(err) => Some(Err(err)),
-            };
-
-            if let Some(ret_value) = ret_value {
-                // The condition is met. The current thread doesn't have to sleep.
-                // Same reasoning: set_state(Runnable) rather than resume() to
-                // avoid spuriously enqueuing the currently-running process.
-                current_process().set_state(ProcessState::Runnable);
-                self.queue
-                    .lock()
-                    .retain(|proc| !Arc::ptr_eq(proc, current_process()));
-                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-                return ret_value;
-            }
-
-            // Run other threads until someone wake us up...
+            // Yield CPU. We'll be woken by wake_all/wake_one which removes
+            // us from the queue and sets us Runnable.
             switch();
 
-            // Check for pending signals immediately after waking.
-            // This catches signals that were delivered via the interrupt
-            // return path (try_delivering_signal) while we were blocked.
+            // After waking: wake_all already removed us from the queue and
+            // decremented waiter_count. Just check the condition.
+
             if current_process().has_pending_signals() {
-                current_process().set_state(ProcessState::Runnable);
-                self.queue
-                    .lock()
-                    .retain(|proc| !Arc::ptr_eq(proc, current_process()));
-                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                // Signal woke us (not wake_all). We might still be in the
+                // queue if the signal arrived via the interrupt return path.
+                // Self-remove if still present.
+                self.try_remove_current();
                 return Err(Errno::EINTR.into());
             }
+
+            match condition() {
+                Ok(Some(result)) => return Ok(result),
+                Err(e) => return Err(e),
+                Ok(None) => {} // spurious wake — re-enqueue and sleep again
+            }
+        }
+    }
+
+    /// Remove current process from queue if present (idempotent).
+    fn try_remove_current(&self) {
+        let mut q = self.queue.lock();
+        let before = q.len();
+        q.retain(|p| !Arc::ptr_eq(p, current_process()));
+        let removed = before - q.len();
+        if removed > 0 {
+            self.waiter_count.fetch_sub(removed, Ordering::Relaxed);
         }
     }
 
@@ -117,7 +107,6 @@ impl WaitQueue {
         }
     }
 
-    /// Wake up to `max` waiters. Returns the number actually woken.
     pub fn wake_n(&self, max: u32) -> u32 {
         if self.waiter_count.load(Ordering::Relaxed) == 0 || max == 0 {
             return 0;
@@ -136,8 +125,6 @@ impl WaitQueue {
         woken
     }
 
-    /// Move up to `max` waiters from `self` to `other` without waking them.
-    /// Returns the number of waiters moved.
     pub fn requeue_to(&self, other: &WaitQueue, max: usize) -> usize {
         if self.waiter_count.load(Ordering::Relaxed) == 0 || max == 0 {
             return 0;
