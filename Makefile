@@ -54,14 +54,12 @@ endif
 topdir      := $(PWD)
 build_mode  := $(if $(RELEASE),release,debug)
 
-# Fortress and Balanced use the unwind target spec for catch_unwind support.
-# Performance and Ludicrous use the abort target spec.
-ifeq ($(filter $(PROFILE),fortress balanced),$(PROFILE))
+# All profiles use panic=unwind on x64 — LLVM generates faster code with
+# unwind tables (better register allocation and code layout).  Performance
+# and Ludicrous still skip runtime safety (catch_unwind, capabilities)
+# via feature flags; the panic strategy is purely a codegen choice.
 ifeq ($(ARCH),x64)
 target_json := kernel/arch/$(ARCH)/$(ARCH)-unwind.json
-else
-target_json := kernel/arch/$(ARCH)/$(ARCH).json
-endif
 else
 target_json := kernel/arch/$(ARCH)/$(ARCH).json
 endif
