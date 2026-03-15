@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use kevlar_platform::{
     address::UserVAddr,
-    arch::PAGE_SIZE,
+    arch::{PAGE_SIZE, HUGE_PAGE_SIZE},
     page_allocator::free_pages,
 };
 use kevlar_utils::alignment::is_aligned;
@@ -88,7 +88,14 @@ impl<'a> SyscallHandler<'a> {
         } else {
             match addr_hint {
                 Some(addr) if vm.is_free_vaddr_range(addr, len) => addr,
-                _ => vm.alloc_vaddr_range(len)?,
+                _ => {
+                    // Align large anonymous mappings to 2MB for transparent huge pages.
+                    if matches!(area_type, VmAreaType::Anonymous) && len >= HUGE_PAGE_SIZE {
+                        vm.alloc_vaddr_range_aligned(len, HUGE_PAGE_SIZE)?
+                    } else {
+                        vm.alloc_vaddr_range(len)?
+                    }
+                }
             }
         };
 

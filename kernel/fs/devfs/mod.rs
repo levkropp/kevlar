@@ -39,10 +39,13 @@ impl DevFs {
         root_dir.add_file("zero", Arc::new(ZeroFile::new()) as Arc<dyn FileLike>);
         root_dir.add_file("tty", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("console", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("ttyS0", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("ptmx", PTMX.clone() as Arc<dyn FileLike>);
         root_dir.add_file("kmsg", Arc::new(KmsgFile) as Arc<dyn FileLike>);
         root_dir.add_file("urandom", Arc::new(UrandomFile) as Arc<dyn FileLike>);
         root_dir.add_file("full", Arc::new(FullFile) as Arc<dyn FileLike>);
+        // /dev/shm directory for POSIX shared memory.
+        root_dir.add_dir("shm");
 
         DevFs(tmpfs)
     }

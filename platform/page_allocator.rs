@@ -15,6 +15,8 @@ static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NUM_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 
 /// A simple LIFO cache of single free pages to bypass the buddy allocator.
+/// Sized to absorb large fault-around bursts (64 pages) across multiple
+/// consecutive faults without immediate buddy allocator refills.
 const PAGE_CACHE_SIZE: usize = 64;
 
 struct PageCache {
@@ -240,6 +242,13 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
     Err(PageAllocError)
 }
 
+/// Allocate a 2MB-aligned huge page (512 contiguous 4KB pages).
+/// The buddy allocator order-9 guarantees 2MB alignment.
+/// Returns DIRTY memory — caller must zero if needed.
+pub fn alloc_huge_page() -> Result<PAddr, PageAllocError> {
+    alloc_pages(512, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)
+}
+
 pub fn alloc_pages_owned(
     num_pages: usize,
     flags: AllocPageFlags,
@@ -271,6 +280,39 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     }
 
     panic!("invalid page address: {:?}", paddr);
+}
+
+/// Pre-warm KVM EPT entries by touching physical pages through the straight-map.
+///
+/// Under KVM, the first access to a guest physical page triggers an EPT
+/// violation (~13µs).  Subsequent accesses to the same page only need a
+/// TLB refill (~200ns).  By pre-touching pages at boot, we ensure that
+/// the benchmark's page fault zeroing path hits warm EPT entries.
+///
+/// Allocates and frees `count` order-9 blocks (each 2MB).  With buddy
+/// coalescing, the freed blocks merge back to order-9 and are available
+/// for alloc_huge_page with warm EPT.
+pub fn pre_warm_ept(count: usize) {
+    use crate::address::PAddr;
+
+    for _ in 0..count {
+        let block = match alloc_pages(512, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        // Write to each 4KB page within the 2MB block to create EPT
+        // entries with WRITE permission.  A read would only create a
+        // read-only EPT entry, requiring a second VM exit to upgrade
+        // when the page is later zeroed.
+        for i in 0..512 {
+            let page = PAddr::new(block.value() + i * PAGE_SIZE);
+            unsafe {
+                core::ptr::write_volatile(page.as_mut_ptr::<u8>(), 0);
+            }
+        }
+        // Free back — coalescing merges it to order-9 with warm EPT.
+        free_pages(block, 512);
+    }
 }
 
 pub fn init(areas: &[RamArea]) {

@@ -340,6 +340,7 @@ mod syscall_numbers {
     pub const SYS_GETRANDOM: usize = 318;
     pub const SYS_TKILL: usize = 200;
     pub const SYS_TGKILL: usize = 234;
+    pub const SYS_RT_SIGTIMEDWAIT: usize = 128;
     pub const SYS_RT_SIGSUSPEND: usize = 130;
     pub const SYS_FCHMOD: usize = 91;
     pub const SYS_FCHOWN: usize = 93;
@@ -1127,6 +1128,11 @@ impl<'a> SyscallHandler<'a> {
             // M3 Phase 5: Job control + additional stubs
             SYS_TKILL => self.sys_tkill(a1 as c_int, a2 as c_int),
             SYS_TGKILL => self.sys_tgkill(a1 as c_int, a2 as c_int, a3 as c_int),
+            SYS_RT_SIGTIMEDWAIT => {
+                // Stub: BusyBox init uses this to wait for child signals.
+                // Return -EINTR (interrupted) so callers retry or proceed.
+                Err(Errno::EINTR.into())
+            }
             SYS_RT_SIGSUSPEND => self.sys_rt_sigsuspend(UserVAddr::new_nonnull(a1)?, a2),
             SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
             SYS_FCHOWN => Ok(0), // stub
@@ -1471,6 +1477,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SIGALTSTACK => "sigaltstack",
         SYS_TKILL => "tkill",
         SYS_TGKILL => "tgkill",
+        SYS_RT_SIGTIMEDWAIT => "rt_sigtimedwait",
         SYS_RT_SIGSUSPEND => "rt_sigsuspend",
         SYS_FCHMOD => "fchmod",
         SYS_FCHOWN => "fchown",

@@ -5,7 +5,7 @@ use crate::process::current_process;
 use crate::syscalls::SyscallHandler;
 use kevlar_platform::{
     address::{PAddr, UserVAddr},
-    arch::PAGE_SIZE,
+    arch::{PAGE_SIZE, HUGE_PAGE_SIZE},
     page_allocator::free_pages,
 };
 use kevlar_utils::alignment::is_aligned;
@@ -43,15 +43,36 @@ impl<'a> SyscallHandler<'a> {
         // We do local invlpg per page here, then ONE remote TLB flush IPI
         // for the entire range (instead of one IPI per page), reducing
         // IPI overhead from O(pages) to O(1) per sys_munmap call.
-        let num_pages = len / PAGE_SIZE;
-        let mut to_free: alloc::vec::Vec<PAddr> = alloc::vec::Vec::new();
-        for i in 0..num_pages {
-            let page_addr = addr.add(i * PAGE_SIZE);
-            if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
-                // Local TLB invalidation only — no IPI yet.
-                vm.page_table().flush_tlb_local(page_addr);
-                to_free.push(paddr);
+        let end_value = addr.value() + len;
+        // Track pages to free: (paddr, num_pages) pairs.
+        let mut to_free: alloc::vec::Vec<(PAddr, usize)> = alloc::vec::Vec::new();
+        let mut cursor = addr.value();
+        while cursor < end_value {
+            let page_addr = UserVAddr::new(cursor).unwrap();
+
+            // Check for 2MB huge page at this address.
+            if is_aligned(cursor, HUGE_PAGE_SIZE) && cursor + HUGE_PAGE_SIZE <= end_value {
+                if let Some(hp_paddr) = vm.page_table_mut().unmap_huge_user_page(page_addr) {
+                    vm.page_table().flush_tlb_local(page_addr);
+                    to_free.push((hp_paddr, 512));
+                    cursor += HUGE_PAGE_SIZE;
+                    continue;
+                }
             }
+
+            // If this address is inside a huge page but not 2MB-aligned (or
+            // the unmap range doesn't cover the full 2MB), split first.
+            if vm.page_table().is_huge_mapped(page_addr).is_some() {
+                vm.page_table_mut().split_huge_page(page_addr);
+                vm.page_table().flush_tlb_local(page_addr);
+                // After splitting, fall through to 4KB unmap below.
+            }
+
+            if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
+                vm.page_table().flush_tlb_local(page_addr);
+                to_free.push((paddr, 1));
+            }
+            cursor += PAGE_SIZE;
         }
 
         // One batch remote TLB flush: remote CPUs reload CR3.
@@ -63,9 +84,9 @@ impl<'a> SyscallHandler<'a> {
 
         // Now safe to free all unmapped physical pages.
         // CoW: only free when refcount drops to 0.
-        for paddr in to_free {
+        for (paddr, num) in to_free {
             if kevlar_platform::page_refcount::page_ref_dec(paddr) {
-                free_pages(paddr, 1);
+                free_pages(paddr, num);
             }
         }
 

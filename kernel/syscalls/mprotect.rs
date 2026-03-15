@@ -4,7 +4,7 @@ use crate::ctypes::MMapProt;
 use crate::prelude::*;
 use crate::process::current_process;
 use crate::syscalls::SyscallHandler;
-use kevlar_platform::{address::UserVAddr, arch::PAGE_SIZE};
+use kevlar_platform::{address::UserVAddr, arch::{PAGE_SIZE, HUGE_PAGE_SIZE}};
 use kevlar_utils::alignment::is_aligned;
 
 impl<'a> SyscallHandler<'a> {
@@ -30,14 +30,36 @@ impl<'a> SyscallHandler<'a> {
         // Use local invlpg per page + a single remote IPI at the end, mirroring
         // the munmap pattern: O(1) IPIs instead of O(pages) IPIs.
         let prot_flags = prot.bits();
-        let num_pages = len / PAGE_SIZE;
+        let end_value = addr.value() + len;
         let mut any_flushed = false;
-        for i in 0..num_pages {
-            let page_addr = addr.add(i * PAGE_SIZE);
+        let mut cursor = addr.value();
+        while cursor < end_value {
+            let page_addr = UserVAddr::new(cursor).unwrap();
+
+            // Check for 2MB huge page: if the entire huge page is in range,
+            // update PDE flags directly; otherwise split first.
+            if vm.page_table().is_huge_mapped(page_addr).is_some() {
+                if is_aligned(cursor, HUGE_PAGE_SIZE)
+                    && cursor + HUGE_PAGE_SIZE <= end_value
+                {
+                    // Full huge page in range — update PDE flags directly.
+                    if vm.page_table_mut().update_huge_page_flags(page_addr, prot_flags) {
+                        vm.page_table().flush_tlb_local(page_addr);
+                        any_flushed = true;
+                    }
+                    cursor += HUGE_PAGE_SIZE;
+                    continue;
+                }
+                // Partial huge page — split into 4KB first.
+                vm.page_table_mut().split_huge_page(page_addr);
+                vm.page_table().flush_tlb_local(page_addr);
+            }
+
             if vm.page_table_mut().update_page_flags(page_addr, prot_flags) {
                 vm.page_table().flush_tlb_local(page_addr);
                 any_flushed = true;
             }
+            cursor += PAGE_SIZE;
         }
         if any_flushed {
             vm.page_table().flush_tlb_remote();

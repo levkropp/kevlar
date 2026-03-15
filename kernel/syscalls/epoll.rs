@@ -109,35 +109,39 @@ impl<'a> SyscallHandler<'a> {
         }
         let maxevents = maxevents as usize;
 
-        // Get the epoll instance (clone the Arc to outlive the table lock).
+        // Fast path: timeout=0 means non-blocking — avoid Arc clone overhead.
+        // Safe: poll() on interest files never locks the fd table.
+        if timeout == 0 {
+            let table = current_process().opened_files_no_irq();
+            let epoll_file = table.get(epfd)?.as_file()?;
+            let epoll = (**epoll_file).as_any().downcast_ref::<EpollInstance>()
+                .ok_or(Error::new(Errno::EINVAL))?;
+            let count = epoll.collect_ready_to_user(events_ptr, maxevents)?;
+            return Ok(count as isize);
+        }
+
+        // Blocking path: clone Arc so it outlives the fd table lock.
         let epoll_file: Arc<dyn FileLike> = {
-            let table = current_process().opened_files().lock();
-            table.get(epfd)?.as_file()?.clone()
+            current_process().opened_files_no_irq().get(epfd)?.as_file()?.clone()
         };
         let epoll = (*epoll_file).as_any().downcast_ref::<EpollInstance>()
             .ok_or(Error::new(Errno::EINVAL))?;
 
         let started_at = crate::timer::read_monotonic_clock();
 
-        // Use the existing poll wait queue for sleeping.
+        // Blocking path: sleep until events are ready or timeout expires.
         let ready_events: Vec<EpollEvent> = POLL_WAIT_QUEUE.sleep_signalable_until(|| {
-            // Check timeout.
             if timeout > 0 && started_at.elapsed_msecs() >= timeout as usize {
                 return Ok(Some(Vec::new()));
             }
 
-            // Poll all interested fds.
             let mut events = Vec::new();
             let count = epoll.collect_ready(&mut events, maxevents);
 
             if count > 0 {
                 Ok(Some(events))
-            } else if timeout == 0 {
-                // Non-blocking: return immediately with 0 events.
-                Ok(Some(Vec::new()))
             } else {
-                // Block until something changes.
-                Ok(None)
+                Ok(None) // Block until something changes.
             }
         })?;
 

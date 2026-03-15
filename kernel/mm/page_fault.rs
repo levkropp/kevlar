@@ -14,9 +14,9 @@ use crate::{
 use core::cmp::min;
 use kevlar_platform::{
     address::UserVAddr,
-    arch::{PageFaultReason, PAGE_SIZE},
-    page_allocator::{alloc_page, alloc_page_batch, AllocPageFlags},
-    page_ops::zero_page,
+    arch::{PageFaultReason, PAGE_SIZE, HUGE_PAGE_SIZE},
+    page_allocator::{alloc_page, alloc_page_batch, alloc_huge_page, AllocPageFlags},
+    page_ops::{zero_page, zero_huge_page},
 };
 #[cfg(not(feature = "profile-fortress"))]
 use kevlar_platform::page_ops::page_as_slice_mut;
@@ -228,6 +228,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     }
 
     // Map the page in the page table, respecting VMA protection flags.
+    let vma_start_value = vma.start().value();
     let vma_end_value = vma.end().value();
     let is_anonymous = matches!(vma.area_type(), VmAreaType::Anonymous);
 
@@ -248,6 +249,38 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             vma_end: Some(vma.end().value()),
             vma_type: Some(vma_type_str),
         });
+    }
+
+    // --- Huge page fast path (2MB transparent huge pages) ---
+    if is_anonymous {
+        let huge_base = align_down(aligned_vaddr.value(), HUGE_PAGE_SIZE);
+        let huge_end = huge_base + HUGE_PAGE_SIZE;
+
+        if huge_base >= vma_start_value && huge_end <= vma_end_value {
+            let huge_vaddr = UserVAddr::new_nonnull(huge_base).unwrap();
+            if vm.page_table().is_pde_empty(huge_vaddr) {
+                if let Ok(huge_paddr) = alloc_huge_page() {
+                    zero_huge_page(huge_paddr);
+                    kevlar_platform::page_refcount::page_ref_init(huge_paddr);
+                    vm.page_table_mut().map_huge_user_page(
+                        huge_vaddr,
+                        huge_paddr,
+                        prot_flags,
+                    );
+                    kevlar_platform::page_allocator::free_pages(paddr, 1);
+                    return;
+                }
+            }
+        }
+    }
+
+    // If the faulting address is within a 2MB huge page, split it into
+    // 512 × 4KB PTEs first, then fall through to the normal 4KB path.
+    // This handles both CoW write faults and permission upgrades on huge pages.
+    if let Some(_pde_val) = vm.page_table().is_huge_mapped(aligned_vaddr) {
+        vm.page_table_mut().split_huge_page(aligned_vaddr);
+        vm.page_table().flush_tlb_local(aligned_vaddr);
+        // Fall through — the page is now mapped as a 4KB PTE.
     }
 
     // CRITICAL: Use try_map to detect if the page is already mapped.
@@ -324,11 +357,15 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     // the number of page faults (and their associated exception + EPT overhead).
     // This mirrors Linux's fault_around_bytes behavior.
     // Batch-allocate pages to amortize allocator lock overhead.
+    //
+    // IMPORTANT: Do NOT prefault across a 2MB boundary. Doing so would
+    // pre-populate PTEs in the next PDE, preventing a future huge page
+    // mapping in that region.
     if is_anonymous {
         use kevlar_platform::address::PAddr;
         const FAULT_AROUND_PAGES: usize = 16;
 
-        // Count how many pages we can prefault.
+        // Count how many pages we can prefault (up to VMA end).
         let mut num_prefault = 0;
         for i in 1..FAULT_AROUND_PAGES {
             let next_value = aligned_vaddr.value() + i * PAGE_SIZE;
@@ -345,23 +382,24 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             let mut pages = [PAddr::new(0); FAULT_AROUND_PAGES];
             let allocated = alloc_page_batch(&mut pages, num_prefault);
 
+            // Zero all pages and initialize refcounts.
             for i in 0..allocated {
-                let next_value = aligned_vaddr.value() + (i + 1) * PAGE_SIZE;
-                let next_addr = match UserVAddr::new_nonnull(next_value) {
-                    Ok(a) => a,
-                    Err(_) => {
-                        for j in i..allocated {
-                            kevlar_platform::page_allocator::free_pages(pages[j], 1);
-                        }
-                        break;
-                    }
-                };
-
                 zero_page(pages[i]);
-                if !vm.page_table_mut()
-                    .try_map_user_page_with_prot(next_addr, pages[i], prot_flags)
-                {
-                    kevlar_platform::page_allocator::free_pages(pages[i], 1);
+                kevlar_platform::page_refcount::page_ref_init(pages[i]);
+            }
+
+            // Batch-map: one page table traversal for all pages.
+            let start_addr = UserVAddr::new(aligned_vaddr.value() + PAGE_SIZE).unwrap();
+            let mapped = vm.page_table_mut().batch_try_map_user_pages_with_prot(
+                start_addr, &pages, allocated, prot_flags,
+            );
+
+            // Free any pages that weren't mapped (PTE already occupied).
+            for i in 0..allocated {
+                if mapped & (1 << i) == 0 {
+                    if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
+                        kevlar_platform::page_allocator::free_pages(pages[i], 1);
+                    }
                 }
             }
         }

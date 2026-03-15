@@ -17,6 +17,11 @@ fn check_cpuid_feature(name: &str, supported: bool) {
     }
 }
 
+/// Whether the CPU supports PCID (Process Context Identifiers).
+/// Set once during BSP boot, read by paging code.
+pub static PCID_SUPPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Per-AP CPU setup: a subset of `common_setup` that skips BSP-only
 /// initializations (IOAPIC, PIT, TSC calibration, vDSO, serial).
 unsafe fn ap_common_setup(cpu_local_area: VAddr) {
@@ -30,8 +35,10 @@ unsafe fn ap_common_setup(cpu_local_area: VAddr) {
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
         | Cr4::CR4_ENABLE_OS_XSAVE
         | Cr4::CR4_ENABLE_SSE
-        | Cr4::CR4_UNMASKED_SSE
-        | Cr4::CR4_ENABLE_PCID;      // Process Context IDs for fast TLB
+        | Cr4::CR4_UNMASKED_SSE;
+    if PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
+        cr4 |= Cr4::CR4_ENABLE_PCID;
+    }
     controlregs::cr4_write(cr4);
 
     let mut xcr0 = controlregs::xcr0();
@@ -85,12 +92,18 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
     check_cpuid_feature("XSAVE", feats.has_xsave());
     check_cpuid_feature("FSGSBASE", ex_feats.has_fsgsbase());
 
+    // Detect PCID support and set the global flag before enabling it.
+    let has_pcid = feats.has_pcid();
+    PCID_SUPPORTED.store(has_pcid, core::sync::atomic::Ordering::Release);
+
     let mut cr4 = controlregs::cr4();
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
         | Cr4::CR4_ENABLE_OS_XSAVE
         | Cr4::CR4_ENABLE_SSE
-        | Cr4::CR4_UNMASKED_SSE
-        | Cr4::CR4_ENABLE_PCID;      // Process Context IDs for fast TLB
+        | Cr4::CR4_UNMASKED_SSE;
+    if has_pcid {
+        cr4 |= Cr4::CR4_ENABLE_PCID;
+    }
     controlregs::cr4_write(cr4);
 
     let mut xcr0 = controlregs::xcr0();

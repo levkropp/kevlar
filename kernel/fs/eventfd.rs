@@ -54,7 +54,7 @@ impl FileLike for EventFd {
     fn read(
         &self,
         _offset: usize,
-        buf: UserBufferMut<'_>,
+        mut buf: UserBufferMut<'_>,
         options: &OpenOptions,
     ) -> Result<usize> {
         if buf.len() < 8 {
@@ -63,7 +63,7 @@ impl FileLike for EventFd {
 
         // Fast path: check if counter is non-zero.
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.inner.lock_no_irq();
             if inner.counter > 0 {
                 let val = if inner.semaphore {
                     inner.counter -= 1;
@@ -75,8 +75,7 @@ impl FileLike for EventFd {
                 };
                 drop(inner);
                 POLL_WAIT_QUEUE.wake_all();
-                let mut writer = UserBufWriter::from(buf);
-                writer.write_bytes(&val.to_ne_bytes())?;
+                buf.write_u64(val)?;
                 return Ok(8);
             }
             if options.nonblock {
@@ -86,7 +85,7 @@ impl FileLike for EventFd {
 
         // Slow path: block until counter > 0.
         POLL_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut inner = self.inner.lock();
+            let mut inner = self.inner.lock_no_irq();
             if inner.counter > 0 {
                 let val = if inner.semaphore {
                     inner.counter -= 1;
@@ -122,10 +121,7 @@ impl FileLike for EventFd {
             return Err(Errno::EINVAL.into());
         }
 
-        let mut bytes = [0u8; 8];
-        let mut reader = UserBufReader::from(buf);
-        reader.read_bytes(&mut bytes)?;
-        let val = u64::from_ne_bytes(bytes);
+        let val = buf.read_u64()?;
 
         if val == u64::MAX {
             return Err(Errno::EINVAL.into());
@@ -133,7 +129,7 @@ impl FileLike for EventFd {
 
         // Add value to counter. Block if would overflow.
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.inner.lock_no_irq();
             if inner.counter.checked_add(val).map_or(false, |v| v < u64::MAX) {
                 inner.counter += val;
                 drop(inner);
@@ -147,7 +143,7 @@ impl FileLike for EventFd {
 
         // Slow path: block until there's room.
         let ret = POLL_WAIT_QUEUE.sleep_signalable_until(|| {
-            let mut inner = self.inner.lock();
+            let mut inner = self.inner.lock_no_irq();
             if inner.counter.checked_add(val).map_or(false, |v| v < u64::MAX) {
                 inner.counter += val;
                 Ok(Some(8usize))
@@ -161,7 +157,7 @@ impl FileLike for EventFd {
     }
 
     fn poll(&self) -> Result<PollStatus> {
-        let inner = self.inner.lock();
+        let inner = self.inner.lock_no_irq();
         let mut status = PollStatus::empty();
         if inner.counter > 0 {
             status |= PollStatus::POLLIN;

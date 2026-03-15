@@ -182,7 +182,7 @@ def run_linux_kvm(bench_filter="all", quick=False):
         return {}
 
     # bench binary IS /init — it detects PID 1 and calls init_setup().
-    # PID 1 defaults to quick mode (sufficient for stable KVM results).
+    # Pass --full via rdinit args for consistent comparison with Kevlar.
     log("Creating Linux initramfs...")
     with tempfile.TemporaryDirectory() as tmpdir:
         initdir = os.path.join(tmpdir, "rootfs")
@@ -205,7 +205,7 @@ def run_linux_kvm(bench_filter="all", quick=False):
         QEMU,
         "-kernel", str(LINUX_KERNEL),
         "-initrd", initramfs,
-        "-append", "console=ttyS0 quiet panic=-1 rdinit=/init",
+        "-append", "console=ttyS0 quiet panic=-1 rdinit=/init -- --full",
         "-m", "1024",
         "-nographic",
         "-no-reboot",

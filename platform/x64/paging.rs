@@ -18,9 +18,13 @@ bitflags! {
         const PRESENT = 1 << 0;
         const WRITABLE = 1 << 1;
         const USER = 1 << 2;
+        const HUGE_PAGE = 1 << 7; // PS bit — marks a 2MB page in a PDE
         const NO_EXECUTE = 1 << 63;
     }
 }
+
+/// 2MB huge page size (512 × 4KB pages).
+pub const HUGE_PAGE_SIZE: usize = 512 * PAGE_SIZE;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +84,11 @@ fn traverse(
             };
             table = new_table.as_mut_ptr::<PageTableEntry>();
         } else {
+            // At level 2 (PD), if the PDE has the PS (huge page) bit set,
+            // this is a 2MB leaf — there is no level-1 page table to descend into.
+            if level == 2 && (entry_val & PageAttrs::HUGE_PAGE.bits()) != 0 {
+                return None;
+            }
             // Only write if value changed to avoid unnecessary cache line dirtying.
             let expected = table_paddr.value() as u64 | attrs.bits();
             if entry_val != expected {
@@ -137,6 +146,89 @@ fn leaf_pt_index(vaddr_value: usize) -> usize {
     (vaddr_value >> 12) & 0x1FF
 }
 
+/// Walk PML4→PDPT→PD to find the PDE (Page Directory Entry) for `vaddr`.
+/// Returns a raw pointer to the PDE. Used for 2MB huge page operations.
+#[inline(always)]
+fn traverse_to_pd(
+    pml4: PAddr,
+    vaddr: UserVAddr,
+    allocate: bool,
+    attrs: PageAttrs,
+) -> Option<*mut PageTableEntry> {
+    let mut table = pml4.as_mut_ptr::<PageTableEntry>();
+    // Walk levels 4 (PML4) and 3 (PDPT) to reach level 2 (PD).
+    for level in (3..=4).rev() {
+        let index = nth_level_table_index(vaddr, level);
+        let entry = unsafe { table.add(index as usize) };
+        let entry_val = unsafe { *entry };
+        let table_paddr = entry_paddr(entry_val);
+        if table_paddr.value() == 0 {
+            if !allocate {
+                return None;
+            }
+            let new_table =
+                alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            unsafe { *entry = new_table.value() as u64 | attrs.bits() };
+            table = new_table.as_mut_ptr::<PageTableEntry>();
+        } else {
+            let expected = table_paddr.value() as u64 | attrs.bits();
+            if entry_val != expected {
+                unsafe { *entry = expected; }
+            }
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+        }
+    }
+    // `table` now points to the PD. Return pointer to the specific PDE.
+    let index = nth_level_table_index(vaddr, 2);
+    Some(unsafe { table.add(index as usize) })
+}
+
+/// Check whether a PDE has the PS (huge page) bit set.
+#[inline(always)]
+fn is_huge_page_pde(entry: PageTableEntry) -> bool {
+    (entry & PageAttrs::HUGE_PAGE.bits()) != 0
+        && (entry & PageAttrs::PRESENT.bits()) != 0
+}
+
+/// Split a 2MB huge page PDE into 512 × 4KB PTEs.
+///
+/// Allocates a new page table, populates it with 512 PTEs pointing to the
+/// constituent 4KB frames (preserving flags minus PS), and replaces the PDE.
+/// Returns the physical address of the huge page's base frame.
+fn split_huge_page(pml4: PAddr, vaddr: UserVAddr) -> Option<PAddr> {
+    let pde_ptr = traverse_to_pd(pml4, vaddr, false,
+        PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE)?;
+    let pde_val = unsafe { *pde_ptr };
+    if !is_huge_page_pde(pde_val) {
+        return None;
+    }
+
+    let base_paddr = entry_paddr(pde_val);
+    // Preserve all flags except PS bit.
+    let flags = entry_flags(pde_val) & !PageAttrs::HUGE_PAGE.bits();
+
+    // Allocate a new level-1 page table.
+    let pt_paddr = alloc_pages(1, AllocPageFlags::KERNEL)
+        .expect("failed to allocate PT for huge page split");
+    let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
+
+    // Fill 512 PTEs, each pointing to base + i*4KB.
+    for i in 0..ENTRIES_PER_TABLE as usize {
+        let frame_paddr = base_paddr.value() + i * PAGE_SIZE;
+        unsafe {
+            *pt.add(i) = frame_paddr as u64 | flags;
+        }
+    }
+
+    // Replace PDE: clear PS, point to new PT. Use intermediate-table flags.
+    let pt_flags = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE;
+    unsafe {
+        *pde_ptr = pt_paddr.value() as u64 | pt_flags.bits();
+    }
+
+    Some(base_paddr)
+}
+
 /// Duplicates entires (and referenced memory pages if `level == 1`) in the
 /// nth-level page table. Returns the newly created copy of the page table.
 ///
@@ -190,6 +282,31 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
                 // Already read-only (code, rodata): share directly.
                 unsafe { *new_table.offset(i) = entry; }
             }
+        } else if level == 2 && is_huge_page_pde(entry) {
+            // 2MB huge page PDE: treat as a leaf for CoW purposes.
+            let flags = entry_flags(entry);
+            let is_user = flags & PageAttrs::USER.bits() != 0;
+
+            if !is_user {
+                unsafe { *new_table.offset(i) = entry; }
+                continue;
+            }
+
+            // Share the 2MB page: increment refcount on the base PFN.
+            crate::page_refcount::page_ref_inc(paddr);
+
+            let is_writable = flags & PageAttrs::WRITABLE.bits() != 0;
+            if is_writable {
+                // CoW: clear WRITABLE in both parent and child PDEs.
+                let cow_flags = flags & !PageAttrs::WRITABLE.bits();
+                unsafe {
+                    *orig_table.offset(i) = paddr.value() as u64 | cow_flags;
+                    *new_table.offset(i) = paddr.value() as u64 | cow_flags;
+                }
+            } else {
+                unsafe { *new_table.offset(i) = entry; }
+            }
+            // Do NOT recurse — there is no level-1 PT under a huge page.
         } else {
             // Intermediate page table (PML4, PDPT, PD): recurse.
             let new_paddr = if level == 4 && i >= 0x80 {
@@ -245,6 +362,9 @@ pub struct PageTable {
 static NEXT_PCID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
 
 fn alloc_pcid() -> u16 {
+    if !super::boot::PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
+        return 0; // No PCID support — use 0 (no PCID bits in CR3)
+    }
     loop {
         let pcid = NEXT_PCID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let pcid = pcid & 0xFFF; // wrap to 12 bits
@@ -270,12 +390,89 @@ impl PageTable {
 
     pub fn switch(&self) {
         unsafe {
-            // CR3 format with PCID: bits [11:0] = PCID, bits [51:12] = PML4.
-            // Bit 63 = 1: don't invalidate TLB entries for this PCID.
-            // This preserves TLB entries from previous runs of this process.
-            let cr3_val = self.pml4.value() as u64 | (self.pcid as u64) | (1u64 << 63);
-            x86::controlregs::cr3_write(cr3_val);
+            if self.pcid != 0 {
+                // PCID enabled: bits [11:0] = PCID, bit 63 = no-invalidate.
+                let cr3_val = self.pml4.value() as u64 | (self.pcid as u64) | (1u64 << 63);
+                x86::controlregs::cr3_write(cr3_val);
+            } else {
+                // No PCID: plain CR3 write (flushes entire TLB).
+                x86::controlregs::cr3_write(self.pml4.value() as u64);
+            }
         }
+    }
+
+    /// Map a 2MB huge page at `vaddr` (must be 2MB-aligned).
+    #[inline(always)]
+    pub fn map_huge_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        debug_assert!(is_aligned(vaddr.value(), HUGE_PAGE_SIZE));
+        debug_assert!(is_aligned(paddr.value(), HUGE_PAGE_SIZE));
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::HUGE_PAGE;
+        if prot_flags & 2 != 0 { attrs |= PageAttrs::WRITABLE; }
+        if prot_flags & 4 == 0 { attrs |= PageAttrs::NO_EXECUTE; }
+        let pde_ptr = traverse_to_pd(self.pml4, vaddr, true,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE)
+            .expect("failed to traverse to PD for huge page");
+        unsafe {
+            *pde_ptr = paddr.value() as u64 | attrs.bits();
+        }
+    }
+
+    /// Unmap a 2MB huge page, returning the base physical address if it was mapped.
+    pub fn unmap_huge_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
+        debug_assert!(is_aligned(vaddr.value(), HUGE_PAGE_SIZE));
+        let pde_ptr = traverse_to_pd(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE)?;
+        let pde_val = unsafe { *pde_ptr };
+        if !is_huge_page_pde(pde_val) {
+            return None;
+        }
+        let paddr = entry_paddr(pde_val);
+        unsafe { *pde_ptr = 0; }
+        Some(paddr)
+    }
+
+    /// Check if `vaddr` falls within a 2MB huge page mapping.
+    /// Returns `Some(pde_value)` if a huge PDE covers this address.
+    pub fn is_huge_mapped(&self, vaddr: UserVAddr) -> Option<u64> {
+        let pde_ptr = traverse_to_pd(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE)?;
+        let pde_val = unsafe { *pde_ptr };
+        if is_huge_page_pde(pde_val) { Some(pde_val) } else { None }
+    }
+
+    /// Check if the PDE for `vaddr`'s 2MB region is empty (no PT or huge page).
+    /// Returns true if the PDE is 0 or the PD doesn't exist yet.
+    pub fn is_pde_empty(&self, vaddr: UserVAddr) -> bool {
+        match traverse_to_pd(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            Some(pde_ptr) => unsafe { *pde_ptr == 0u64 },
+            None => true,
+        }
+    }
+
+    /// Split a 2MB huge page into 512 × 4KB PTEs.
+    /// Returns the base physical address on success.
+    pub fn split_huge_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
+        split_huge_page(self.pml4, vaddr)
+    }
+
+    /// Update PDE flags for a 2MB huge page. Returns true if a huge page was found.
+    pub fn update_huge_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
+        let pde_ptr = match traverse_to_pd(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            Some(ptr) => ptr,
+            None => return false,
+        };
+        let pde_val = unsafe { *pde_ptr };
+        if !is_huge_page_pde(pde_val) {
+            return false;
+        }
+        let paddr_bits = pde_val & 0x7ffffffffffff000;
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::HUGE_PAGE;
+        if prot_flags & 2 != 0 { attrs |= PageAttrs::WRITABLE; }
+        if prot_flags & 4 == 0 { attrs |= PageAttrs::NO_EXECUTE; }
+        unsafe { *pde_ptr = paddr_bits | attrs.bits(); }
+        true
     }
 
     #[inline(always)]
@@ -403,15 +600,25 @@ impl PageTable {
     /// Unmaps a user page, returning the physical address if it was mapped.
     #[inline(always)]
     /// Look up the physical address for a mapped user page (read-only).
+    /// For huge pages, returns base_paddr + offset within the 2MB page.
     pub fn lookup_paddr(&self, vaddr: UserVAddr) -> Option<PAddr> {
-        let entry_ptr = match traverse(self.pml4, vaddr, false,
+        // First try normal 4KB lookup.
+        if let Some(entry_ptr) = traverse(self.pml4, vaddr, false,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
-            Some(ptr) => ptr,
-            None => return None,
-        };
-        let entry = unsafe { *entry_ptr.as_ptr() };
-        let paddr = entry_paddr(entry);
-        if paddr.is_null() { None } else { Some(paddr) }
+            let entry = unsafe { *entry_ptr.as_ptr() };
+            let paddr = entry_paddr(entry);
+            if !paddr.is_null() {
+                return Some(paddr);
+            }
+        }
+        // traverse returns None when a huge page PDE is encountered.
+        // Check for a 2MB huge page mapping.
+        if let Some(pde_val) = self.is_huge_mapped(vaddr) {
+            let base = entry_paddr(pde_val);
+            let offset = vaddr.value() & (HUGE_PAGE_SIZE - 1);
+            return Some(PAddr::new(base.value() + offset));
+        }
+        None
     }
 
     pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
@@ -494,7 +701,7 @@ impl PageTable {
 
     /// Flushes the entire TLB by reloading CR3.
     pub fn flush_tlb_all(&self) {
-        // Reload CR3 WITHOUT bit 63 to flush all entries for our PCID.
+        // Reload CR3 WITHOUT bit 63 to flush entries.
         unsafe {
             let cr3_val = self.pml4.value() as u64 | (self.pcid as u64);
             x86::controlregs::cr3_write(cr3_val);

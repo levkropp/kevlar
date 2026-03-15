@@ -35,6 +35,7 @@ pub mod logger;
 pub mod flight_recorder;
 pub mod page_allocator;
 pub mod page_refcount;
+pub mod stack_cache;
 pub mod profile;
 pub mod spinlock;
 pub mod usercopy_trace;
@@ -52,7 +53,7 @@ pub mod arch {
         num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, semihosting_halt,
         start_ap_preemption_timer, x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
-        KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, TICK_HZ,
+        KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
     };
 
     #[cfg(target_arch = "aarch64")]
