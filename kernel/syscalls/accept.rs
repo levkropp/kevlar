@@ -37,6 +37,7 @@ impl<'a> SyscallHandler<'a> {
             nonblock: (flags & SOCK_NONBLOCK) != 0,
             close_on_exec: (flags & SOCK_CLOEXEC) != 0,
             append: false,
+            access_mode: 2,
         };
         let fd = current_process()
             .opened_files()

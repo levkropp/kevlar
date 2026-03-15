@@ -801,6 +801,17 @@ impl<'a> SyscallHandler<'a> {
             };
             trace_pid1_syscall(n, a1, a2, a3, result);
 
+            // Post-dispatch LATE trace with return values.
+            {
+                use core::sync::atomic::{AtomicUsize, Ordering as AO};
+                static PID1_POST: AtomicUsize = AtomicUsize::new(0);
+                let count = PID1_POST.fetch_add(1, AO::Relaxed);
+                if count >= 700 && count <= 770 {
+                    warn!("pid1 RET[{}]: {}(n={}) -> {}", count,
+                          syscall_name_by_number(n), n, result);
+                }
+            }
+
             // Decode path for openat/stat/access to make trace readable.
             // EXCLUDE execve — page table was switched, old user pointers are invalid!
             let path_arg = match n {

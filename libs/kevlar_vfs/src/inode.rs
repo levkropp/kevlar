@@ -32,6 +32,8 @@ pub struct OpenOptions {
     pub nonblock: bool,
     pub close_on_exec: bool,
     pub append: bool,
+    /// Access mode bits: O_RDONLY=0, O_WRONLY=1, O_RDWR=2.
+    pub access_mode: i32,
 }
 
 impl OpenOptions {
@@ -40,6 +42,7 @@ impl OpenOptions {
             nonblock,
             close_on_exec: cloexec,
             append: false,
+            access_mode: 0,
         }
     }
 
@@ -48,6 +51,7 @@ impl OpenOptions {
             nonblock: false,
             close_on_exec: false,
             append: false,
+            access_mode: 0,
         }
     }
 
@@ -56,6 +60,7 @@ impl OpenOptions {
             nonblock: false,
             close_on_exec: false,
             append: false,
+            access_mode: 2, // O_RDWR
         }
     }
 }
