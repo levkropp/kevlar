@@ -42,6 +42,7 @@ impl From<OpenFlags> for OpenOptions {
             nonblock: flags.contains(OpenFlags::O_NONBLOCK),
             close_on_exec: flags.contains(OpenFlags::O_CLOEXEC),
             append: flags.contains(OpenFlags::O_APPEND),
+            access_mode: flags.bits() & 0o3, // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
         }
     }
 }

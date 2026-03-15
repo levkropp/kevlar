@@ -30,9 +30,13 @@ impl<'a> SyscallHandler<'a> {
             }
             F_GETFL => {
                 let file = opened_files.get(fd)?;
-                let mut flags: i32 = 0;
-                if file.options().nonblock {
+                let opts = file.options();
+                let mut flags: i32 = opts.access_mode;
+                if opts.nonblock {
                     flags |= OpenFlags::O_NONBLOCK.bits();
+                }
+                if opts.append {
+                    flags |= OpenFlags::O_APPEND.bits();
                 }
                 Ok(flags as isize)
             }

@@ -73,9 +73,9 @@ impl TimerFd {
         }
 
         let now_ns = timer::read_monotonic_clock().nanosecs() as u64;
-        let delay_ns = (value_sec as u64) * 1_000_000_000 + (value_nsec as u64);
-        inner.next_fire_ns = now_ns + delay_ns;
-        inner.interval_ns = (interval_sec as u64) * 1_000_000_000 + (interval_nsec as u64);
+        let delay_ns = (value_sec as u64).saturating_mul(1_000_000_000).saturating_add(value_nsec as u64);
+        inner.next_fire_ns = now_ns.saturating_add(delay_ns);
+        inner.interval_ns = (interval_sec as u64).saturating_mul(1_000_000_000).saturating_add(interval_nsec as u64);
         inner.expirations = 0;
     }
 

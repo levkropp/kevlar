@@ -29,6 +29,7 @@ impl From<SocketFlags> for OpenOptions {
             nonblock: flags.contains(SocketFlags::SOCK_NONBLOCK),
             close_on_exec: flags.contains(SocketFlags::SOCK_CLOEXEC),
             append: false,
+            access_mode: 2,
         }
     }
 }
