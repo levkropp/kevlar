@@ -19,7 +19,7 @@ use crate::{
         init_stack::{estimate_user_init_stack_size, init_user_stack, Auxv},
         process_group::{PgId, ProcessGroup},
         signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL},
-        switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER, SchedulerPolicy,
+        switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER, SchedulerPolicy, WaitQueue,
     },
     random::read_secure_random,
     result::Errno,
@@ -48,6 +48,8 @@ pub(super) static PROCESSES: SpinLock<ProcessTable> = SpinLock::new(BTreeMap::ne
 pub static EXITED_PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
 
 static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
+/// Wait queue for vfork parents. Woken when the child calls _exit or exec.
+pub static VFORK_WAIT_QUEUE: kevlar_utils::once::Once<WaitQueue> = kevlar_utils::once::Once::new();
 
 #[derive(Debug)]
 pub struct Stats {
@@ -154,6 +156,9 @@ pub struct Process {
     /// Address to write 0 to (and then wake the futex) when this thread exits.
     /// Set by `set_tid_address(2)`. Used by pthread_join via futex.
     clear_child_tid: AtomicUsize,
+    /// If this process was created by vfork, the parent's PID.
+    /// When this process calls _exit or exec, the parent is woken.
+    vfork_parent: Option<PId>,
     /// Monotonic tick count at process creation (for /proc/[pid]/stat field 22).
     start_ticks: u64,
     /// Accumulated user-mode ticks (incremented by timer IRQ).
@@ -201,6 +206,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
+            vfork_parent: None,
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
@@ -279,6 +285,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
             clear_child_tid: AtomicUsize::new(0),
+            vfork_parent: None,
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
@@ -747,6 +754,9 @@ impl Process {
             crate::syscalls::futex::futex_wake_addr(ctid_addr, 1);
         }
 
+        // Wake vfork parent if this process was created by vfork.
+        current.wake_vfork_parent();
+
         JOIN_WAIT_QUEUE.wake_all();
         switch();
         unreachable!();
@@ -1096,6 +1106,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
+            vfork_parent: None,
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
@@ -1134,6 +1145,85 @@ impl Process {
         });
 
         Ok(child)
+    }
+
+    /// Creates a child process that shares the parent's address space.
+    /// The parent is suspended until the child calls _exit() or exec().
+    /// No page table copy, no TLB flush — much faster than fork().
+    pub fn vfork(parent: &Arc<Process>, parent_frame: &PtRegs) -> Result<Arc<Process>> {
+        crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
+
+        let parent_weak = Arc::downgrade(parent);
+        let mut process_table = PROCESSES.lock();
+        let pid = alloc_pid(&mut process_table)?;
+        let arch = parent.arch.fork(parent_frame);
+        // Share the parent's VM — no page table copy!
+        let vm = parent.vm().clone();
+        let opened_files = parent.opened_files().lock().clone();
+        let process_group = parent.process_group();
+        let sig_set = parent.sigset_load();
+
+        let child = Arc::new(Process {
+            is_idle: false,
+            process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
+            pid,
+            tgid: pid,
+            state: AtomicCell::new(ProcessState::Runnable),
+            parent: parent_weak,
+            cmdline: AtomicRefCell::new(parent.cmdline().clone()),
+            children: SpinLock::new(Vec::new()),
+            vm: AtomicRefCell::new(vm),
+            opened_files: Arc::new(SpinLock::new(opened_files)),
+            root_fs: parent.root_fs().clone(),
+            arch,
+            signals: Arc::new(SpinLock::new(SignalDelivery::new())),
+            signal_pending: AtomicU32::new(0),
+            signaled_frame: AtomicCell::new(None),
+            sigset: AtomicU64::new(sig_set.bits()),
+            umask: AtomicCell::new(parent.umask.load()),
+            uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
+            euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
+            egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
+            clear_child_tid: AtomicUsize::new(0),
+            vfork_parent: Some(parent.pid()),
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
+            cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(pid.as_i32()),
+        });
+
+        let parent_cg = parent.cgroup();
+        *child.cgroup.borrow_mut() = Some(parent_cg.clone());
+        parent_cg.member_pids.lock().push(pid);
+
+        let parent_ns = parent.namespaces();
+        if !parent_ns.pid_ns.is_root() {
+            let ns_pid = parent_ns.pid_ns.alloc_ns_pid(pid);
+            child.ns_pid.store(ns_pid.as_i32(), Ordering::Relaxed);
+        }
+        *child.namespaces.borrow_mut() = Some(parent_ns);
+
+        process_group.lock().add(Arc::downgrade(&child));
+        parent.children().push(child.clone());
+        process_table.insert(pid, child.clone());
+        drop(process_table);
+        SCHEDULER.lock().enqueue(pid);
+
+        FORK_TOTAL.fetch_add(1, Ordering::Relaxed);
+        Ok(child)
+    }
+
+    /// Wake the vfork parent (if any). Called from _exit and exec.
+    pub fn wake_vfork_parent(&self) {
+        if let Some(_parent_pid) = self.vfork_parent {
+            VFORK_WAIT_QUEUE.wake_all();
+        }
     }
 
     /// Creates a new thread in the same thread group as `parent`.
@@ -1184,6 +1274,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0),
+            vfork_parent: None,
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),

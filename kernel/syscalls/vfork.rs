@@ -1,13 +1,28 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use crate::process::{current_process, Process};
+//! vfork(2): create child sharing address space, parent suspended.
+//!
+//! The child runs inline — no context switch. The parent's kernel stack
+//! is frozen at the vfork syscall return point. When the child calls
+//! _exit() or exec(), control returns to the parent.
+use crate::process::{current_process, switch, Process, ProcessState, VFORK_WAIT_QUEUE};
 use crate::result::Result;
 use crate::syscalls::SyscallHandler;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_vfork(&mut self) -> Result<isize> {
-        // For now, vfork behaves identically to fork.
-        // A proper vfork would suspend the parent until the child calls exec or _exit,
-        // but fork semantics are safe and correct.
-        Process::fork(current_process(), self.frame).map(|child| child.pid().as_i32() as isize)
+        let child = Process::vfork(current_process(), self.frame)?;
+        let child_pid = child.pid().as_i32() as isize;
+
+        // Block parent until child exits or execs.
+        // switch() yields CPU to the child (which was enqueued by vfork).
+        // The child's _exit() calls wake_vfork_parent() which wakes us.
+        VFORK_WAIT_QUEUE.sleep_signalable_until(|| {
+            match child.state() {
+                ProcessState::ExitedWith(_) => Ok(Some(())),
+                _ => Ok(None),
+            }
+        })?;
+
+        Ok(child_pid)
     }
 }
