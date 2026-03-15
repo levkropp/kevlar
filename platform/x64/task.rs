@@ -445,7 +445,7 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     TSS.as_mut()
         .set_rsp0((next.interrupt_stack.as_vaddr().value() + 2 * PAGE_SIZE) as u64);
 
-    // Save and restore the XSAVE area (i.e. XMM/YMM registers).
+    // Save and restore the XSAVE area (FPU/SSE/AVX registers).
     unsafe {
         use core::arch::x86_64::{_xrstor64, _xsave64};
 
