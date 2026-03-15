@@ -158,12 +158,22 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
 
         // Create a deep copy of the page table entry.
         let new_paddr = if level == 1 {
-            // Copy a physical page referenced from the last-level page table.
-            let new_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
-            unsafe {
-                ptr::copy_nonoverlapping::<u8>(paddr.as_ptr(), new_paddr.as_mut_ptr(), PAGE_SIZE);
+            // Leaf page table: decide whether to copy or share.
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::WRITABLE.bits() == 0 {
+                // Read-only page (code, rodata): share the physical page
+                // directly. Both parent and child reference the same frame.
+                // This is safe because neither can write to it.
+                paddr
+            } else {
+                // Writable page: must copy to avoid data corruption.
+                // TODO: Implement full CoW (mark both read-only, copy on write fault).
+                let new_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+                unsafe {
+                    ptr::copy_nonoverlapping::<u8>(paddr.as_ptr(), new_paddr.as_mut_ptr(), PAGE_SIZE);
+                }
+                new_paddr
             }
-            new_paddr
         } else {
             // Copy the page table (PML4, PDPT, ...).
             if level == 4 && i >= 0x80 {
