@@ -90,12 +90,12 @@ impl ArchTask {
     #[allow(unused)]
     pub fn new_kthread(ip: VAddr, sp: VAddr) -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate syscall stack");
@@ -142,12 +142,12 @@ impl ArchTask {
         )
         .expect("failed to allocate kernel stack");
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate kernel stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate kernel stack");
@@ -192,12 +192,12 @@ impl ArchTask {
 
     pub fn new_idle_thread() -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate kernel stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate kernel stack");
@@ -276,12 +276,12 @@ impl ArchTask {
         // register save before switching to the main kernel stack. 2 pages (8KB)
         // is sufficient (matches Linux's IST stack size).
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed allocate syscall stack");
@@ -316,12 +316,12 @@ impl ArchTask {
         )
         .expect("failed to allocate kernel stack");
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            2,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate syscall stack");
@@ -441,9 +441,9 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     let head = cpu_local_head();
 
     // Switch the kernel stack.
-    head.rsp0 = (next.syscall_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64;
+    head.rsp0 = (next.syscall_stack.as_vaddr().value() + 2 * PAGE_SIZE) as u64;
     TSS.as_mut()
-        .set_rsp0((next.interrupt_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64);
+        .set_rsp0((next.interrupt_stack.as_vaddr().value() + 2 * PAGE_SIZE) as u64);
 
     // Save and restore the XSAVE area (i.e. XMM/YMM registers).
     unsafe {

@@ -115,7 +115,38 @@ int main(void) {
         report("waitpid_only", N, now_ns() - t);
     }
 
-    /* Test 6: fork + ONE pipe round trip + exit (cold child switch cost) */
+    /* Test 6: first vs warm context switch to forked child */
+    {
+        int p1[2], p2[2];
+        pipe(p1); pipe(p2);
+        pid_t p = fork();
+        if (p == 0) {
+            char c;
+            for (int i = 0; i < 11; i++) {
+                read(p1[0], &c, 1);
+                write(p2[1], &c, 1);
+            }
+            _exit(0);
+        }
+        char c = 'x';
+        /* First round trip: cold child */
+        long long t0 = now_ns();
+        write(p1[1], &c, 1);
+        read(p2[0], &c, 1);
+        long long t1 = now_ns();
+        /* 10 more warm round trips */
+        for (int i = 0; i < 10; i++) {
+            write(p1[1], &c, 1);
+            read(p2[0], &c, 1);
+        }
+        long long t2 = now_ns();
+        close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]);
+        waitpid(p, NULL, 0);
+        printf("FIRST_SWITCH first=%lldns warm_avg=%lldns\n",
+               t1 - t0, (t2 - t1) / 10);
+    }
+
+    /* Test 7: fork + ONE pipe round trip + exit (cold child switch cost) */
     {
         int N = 200;
         long long t = now_ns();
