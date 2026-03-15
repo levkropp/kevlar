@@ -142,52 +142,65 @@ fn leaf_pt_index(vaddr_value: usize) -> usize {
 ///
 /// fork(2) uses this funciton to duplicate the memory space.
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
-    let orig_table = original_table_paddr.as_ptr::<PageTableEntry>();
+    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    // Zero the new table — skipped entries must be 0 (not present),
+    // not garbage from a previous page allocation.
+    unsafe { new_table.write_bytes(0, ENTRIES_PER_TABLE as usize); }
 
     debug_assert!(level > 0);
     for i in 0..ENTRIES_PER_TABLE {
         let entry = unsafe { *orig_table.offset(i) };
         let paddr = entry_paddr(entry);
 
-        // Check if we need to copy the entry.
         if paddr.is_null() {
             continue;
         }
 
-        // Create a deep copy of the page table entry.
-        let new_paddr = if level == 1 {
-            // Leaf page table: decide whether to copy or share.
+        if level == 1 {
+            // Leaf page table (PTE level): implement Copy-on-Write.
             let flags = entry_flags(entry);
-            if flags & PageAttrs::WRITABLE.bits() == 0 {
-                // Read-only page (code, rodata): share the physical page
-                // directly. Both parent and child reference the same frame.
-                // This is safe because neither can write to it.
-                paddr
-            } else {
-                // Writable page: must copy to avoid data corruption.
-                // TODO: Implement full CoW (mark both read-only, copy on write fault).
-                let new_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+            let is_user = flags & PageAttrs::USER.bits() != 0;
+            let is_writable = flags & PageAttrs::WRITABLE.bits() != 0;
+
+            if !is_user {
+                // Kernel page: copy PTE as-is (shared kernel mappings).
+                unsafe { *new_table.offset(i) = entry; }
+                continue;
+            }
+
+            // Share the physical page between parent and child.
+            // Increment the page's reference count.
+            crate::page_refcount::page_ref_inc(paddr);
+
+            if is_writable {
+                // CoW: clear WRITABLE in BOTH parent and child PTEs.
+                // When either process writes, the page fault handler will
+                // allocate a new page and copy (see handle_cow_fault).
+                let cow_flags = flags & !PageAttrs::WRITABLE.bits();
                 unsafe {
-                    ptr::copy_nonoverlapping::<u8>(paddr.as_ptr(), new_paddr.as_mut_ptr(), PAGE_SIZE);
+                    // Update parent's PTE to read-only.
+                    *orig_table.offset(i) = paddr.value() as u64 | cow_flags;
+                    // Child gets same page, same read-only flags.
+                    *new_table.offset(i) = paddr.value() as u64 | cow_flags;
                 }
-                new_paddr
+            } else {
+                // Already read-only (code, rodata): share directly.
+                unsafe { *new_table.offset(i) = entry; }
             }
         } else {
-            // Copy the page table (PML4, PDPT, ...).
-            if level == 4 && i >= 0x80 {
-                // Kernel page table entries are immutable. Copy them as they are.
+            // Intermediate page table (PML4, PDPT, PD): recurse.
+            let new_paddr = if level == 4 && i >= 0x80 {
+                // Kernel page table entries are immutable.
                 entry_paddr(entry)
             } else {
-                // Create the deep copy of the referenced page table recursively...
                 duplicate_table(paddr, level - 1)?
+            };
+            unsafe {
+                *new_table.offset(i) = new_paddr.value() as u64 | entry_flags(entry);
             }
-        };
-
-        // Fill the new table's entry.
-        unsafe {
-            *new_table.offset(i) = new_paddr.value() as u64 | entry_flags(entry);
         }
     }
 
@@ -231,10 +244,12 @@ impl PageTable {
     }
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
-        // TODO: Implement copy-on-write.
-        Ok(PageTable {
-            pml4: duplicate_table(original.pml4, 4)?,
-        })
+        let new_pml4 = duplicate_table(original.pml4, 4)?;
+        // Flush TLB: we marked writable parent pages as read-only for CoW.
+        // Without a flush, the parent CPU may still have stale writable TLB
+        // entries and bypass the CoW page fault.
+        unsafe { x86::tlb::flush_all(); }
+        Ok(PageTable { pml4: new_pml4 })
     }
 
     pub fn switch(&self) {
@@ -245,6 +260,8 @@ impl PageTable {
 
     #[inline(always)]
     pub fn map_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr) {
+        // Initialize CoW refcount for every user page mapping.
+        crate::page_refcount::page_ref_init(paddr);
         self.map_page(
             vaddr,
             paddr,
@@ -256,6 +273,7 @@ impl PageTable {
     /// `prot_flags` uses Linux mmap prot bits: PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4.
     #[inline(always)]
     pub fn map_user_page_with_prot(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        crate::page_refcount::page_ref_init(paddr);
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
         if prot_flags & 2 != 0 {
             // PROT_WRITE
@@ -364,6 +382,18 @@ impl PageTable {
 
     /// Unmaps a user page, returning the physical address if it was mapped.
     #[inline(always)]
+    /// Look up the physical address for a mapped user page (read-only).
+    pub fn lookup_paddr(&self, vaddr: UserVAddr) -> Option<PAddr> {
+        let entry_ptr = match traverse(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            Some(ptr) => ptr,
+            None => return None,
+        };
+        let entry = unsafe { *entry_ptr.as_ptr() };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() { None } else { Some(paddr) }
+    }
+
     pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
         let entry_ptr = match traverse(self.pml4, vaddr, false,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {

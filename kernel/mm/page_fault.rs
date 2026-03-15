@@ -251,20 +251,74 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     }
 
     // CRITICAL: Use try_map to detect if the page is already mapped.
-    // A protection fault occurs when a page was mapped with weaker permissions
-    // than the current VMA allows (e.g., ld.so's initial read-only reservation
-    // gets overlaid by a MAP_FIXED writable data segment, but the physical page
-    // was already faulted in from the reservation with PROT_READ).  Re-loading
-    // the page from the file would destroy data (ld.so's relocation writes).
-    // Instead, keep the existing page and update the PTE flags.
+    // Two cases:
+    //   1. Permission upgrade (ld.so reservation → MAP_FIXED overlay): just update flags
+    //   2. CoW write fault (fork shared page): copy the page, map the copy writable
     if !vm.page_table_mut()
         .try_map_user_page_with_prot(aligned_vaddr, paddr, prot_flags)
     {
+        // Page already mapped — we won't use paddr for a new mapping.
+        // Page already mapped. Free the fresh page we allocated.
         kevlar_platform::page_allocator::free_pages(paddr, 1);
+
+        // Check for CoW: if the fault was a write to a present page,
+        // and the VMA allows writing, this is a CoW page that needs copying.
+        let is_cow_write = _reason.contains(PageFaultReason::PRESENT)
+            && _reason.contains(PageFaultReason::CAUSED_BY_WRITE)
+            && (prot_flags & 2 != 0); // VMA has PROT_WRITE
+
+        if is_cow_write {
+            // Get the old physical page from the existing PTE.
+            if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
+                if refcount > 1 {
+                    // Shared page: allocate new page, copy content, map writable.
+                    let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug_warn!("OOM during CoW fault");
+                            Process::exit_by_signal(SIGKILL);
+                        }
+                    };
+                    #[cfg(not(feature = "profile-fortress"))]
+                    {
+                        let src = kevlar_platform::page_ops::page_as_slice(old_paddr);
+                        let dst = kevlar_platform::page_ops::page_as_slice_mut(new_paddr);
+                        dst.copy_from_slice(src);
+                    }
+                    #[cfg(feature = "profile-fortress")]
+                    {
+                        // Fortress: use PageFrame for safe access.
+                        let mut tmp = [0u8; PAGE_SIZE];
+                        let src_frame = kevlar_platform::page_ops::PageFrame::new(old_paddr);
+                        src_frame.read(0, &mut tmp);
+                        let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(new_paddr);
+                        dst_frame.write(0, &tmp);
+                    }
+                    // Initialize refcount for the new page.
+                    kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                    // Decrement old page's refcount.
+                    if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                        kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    }
+                    // Map the new page with write permission.
+                    vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
+                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    return;
+                }
+                // refcount == 1: we're the sole owner, just make it writable.
+            }
+        }
+
+        // Not a CoW fault (or sole owner): just update the PTE flags.
         vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
         vm.page_table().flush_tlb_local(aligned_vaddr);
         return;
     }
+
+    // Initialize the page's reference count to 1 (sole owner).
+    // CoW fork will increment to 2 when sharing the page.
+    kevlar_platform::page_refcount::page_ref_init(paddr);
 
     // Fault-around: for anonymous mappings, prefault adjacent pages to reduce
     // the number of page faults (and their associated exception + EPT overhead).

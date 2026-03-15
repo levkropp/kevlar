@@ -31,6 +31,12 @@ pub fn zero_page(paddr: PAddr) {
 /// kernel's straight-map region (which all allocated pages are).
 ///
 /// Not available under the Fortress profile — use [`PageFrame`] instead.
+/// Read-only view of a physical page as a byte slice.
+#[cfg(not(feature = "profile-fortress"))]
+pub fn page_as_slice(paddr: PAddr) -> &'static [u8] {
+    unsafe { core::slice::from_raw_parts(paddr.as_ptr(), PAGE_SIZE) }
+}
+
 #[cfg(not(feature = "profile-fortress"))]
 pub fn page_as_slice_mut(paddr: PAddr) -> &'static mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(paddr.as_mut_ptr(), PAGE_SIZE) }

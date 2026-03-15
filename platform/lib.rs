@@ -34,6 +34,7 @@ pub mod global_allocator;
 pub mod logger;
 pub mod flight_recorder;
 pub mod page_allocator;
+pub mod page_refcount;
 pub mod profile;
 pub mod spinlock;
 pub mod usercopy_trace;
