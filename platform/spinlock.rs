@@ -15,6 +15,16 @@ impl<T> SpinLock<T> {
             inner: spin::mutex::SpinMutex::new(value),
         }
     }
+
+    /// Access the inner data without locking.
+    ///
+    /// # Safety
+    /// Caller must guarantee no concurrent access (e.g., the containing
+    /// Arc has strong_count == 1, or the lock is otherwise uncontended).
+    #[allow(unsafe_code)]
+    pub unsafe fn get_unchecked(&self) -> &T {
+        &*self.inner.as_mut_ptr()
+    }
 }
 
 impl<T: ?Sized> SpinLock<T> {
