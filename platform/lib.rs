@@ -32,6 +32,7 @@ pub mod sync;
 pub mod bootinfo;
 pub mod global_allocator;
 pub mod logger;
+pub mod crash_regs;
 pub mod flight_recorder;
 pub mod page_allocator;
 pub mod page_refcount;

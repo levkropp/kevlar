@@ -191,11 +191,20 @@ impl FileLike for TcpSocket {
         }
     }
 
-    fn connect(&self, sockaddr: SockAddr, _options: &OpenOptions) -> Result<()> {
+    fn connect(&self, sockaddr: SockAddr, options: &OpenOptions) -> Result<()> {
         let remote_endpoint: IpEndpoint = super::sockaddr_to_endpoint(sockaddr)?;
 
-        // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
-        //       does not check that.
+        // Check if already connecting/connected.
+        {
+            let sockets = SOCKETS.lock();
+            let socket: &tcp::Socket = sockets.get(self.handle);
+            match socket.state() {
+                tcp::State::Established => return Err(Errno::EISCONN.into()),
+                tcp::State::SynSent => return Err(Errno::EALREADY.into()),
+                _ => {}
+            }
+        }
+
         let mut inuse_endpoints = INUSE_ENDPOINTS.lock();
         let local_endpoint = self.local_endpoint.load().unwrap_or(IpEndpoint {
             addr: IpAddress::Ipv4(Ipv4Address::UNSPECIFIED),
@@ -204,14 +213,11 @@ impl FileLike for TcpSocket {
 
         let mut local_port = local_endpoint.port;
         if local_port == 0 {
-            // Assign a unused port.
-            // TODO: Assign a *random* port instead.
             let mut port = 50000;
             while inuse_endpoints.contains(&port) {
                 if port == u16::MAX {
                     return Err(Errno::EAGAIN.into());
                 }
-
                 port += 1;
             }
             local_port = port;
@@ -231,22 +237,25 @@ impl FileLike for TcpSocket {
                 .connect(cx, remote_endpoint, listen_endpoint)
                 .map_err(|_| Errno::ECONNRESET)?;
         }
-        inuse_endpoints.insert(remote_endpoint.port);
+        inuse_endpoints.insert(local_port);
         drop(inuse_endpoints);
 
         // Submit a SYN packet.
         process_packets();
 
+        if options.nonblock {
+            return Err(Errno::EINPROGRESS.into());
+        }
+
         // Wait until the connection has been established.
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
-            if SOCKETS
-                .lock()
-                .get::<tcp::Socket>(self.handle)
-                .may_send()
-            {
-                Ok(Some(()))
-            } else {
-                Ok(None)
+            process_packets();
+            let sockets = SOCKETS.lock();
+            let socket: &tcp::Socket = sockets.get(self.handle);
+            match socket.state() {
+                tcp::State::Established => Ok(Some(())),
+                tcp::State::Closed => Err(Errno::ECONNREFUSED.into()),
+                _ => Ok(None),
             }
         })
     }
@@ -281,6 +290,12 @@ impl FileLike for TcpSocket {
     fn read(&self, _offset: usize, buf: UserBufferMut<'_>, options: &OpenOptions) -> Result<usize> {
         let mut writer = UserBufWriter::from(buf);
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
+            // Pump any pending network packets into socket buffers before
+            // checking if data is available. Without this, a race exists:
+            // packets may have arrived (queued in RX_PACKET_QUEUE) but not
+            // yet processed by smoltcp into the TCP receive buffer.
+            process_packets();
+
             let copied_len = SOCKETS
                 .lock()
                 .get_mut::<tcp::Socket>(self.handle)
@@ -331,6 +346,7 @@ impl FileLike for TcpSocket {
     }
 
     fn poll(&self) -> Result<PollStatus> {
+        process_packets();
         let mut status = PollStatus::empty();
         let mut sockets = SOCKETS.lock();
         if get_ready_backlog_index(&mut sockets, &self.backlogs.lock()).is_some() {
@@ -344,6 +360,11 @@ impl FileLike for TcpSocket {
 
         if socket.can_send() {
             status |= PollStatus::POLLOUT;
+        }
+
+        // Report error for failed nonblocking connect.
+        if socket.state() == tcp::State::Closed {
+            status |= PollStatus::POLLERR;
         }
 
         Ok(status)

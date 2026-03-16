@@ -78,6 +78,23 @@ impl ProcFs {
         let sys_net_unix_dir = sys_net_dir.add_dir("unix");
         sys_net_unix_dir.add_file("max_dgram_qlen", Arc::new(ProcSysStaticFile("512\n")) as Arc<dyn FileLike>);
 
+        // /proc/net/ — network info stubs for tools like ifconfig.
+        let net_dir = static_root.add_dir("net");
+        net_dir.add_file("dev", Arc::new(ProcNetDevFile) as Arc<dyn FileLike>);
+        net_dir.add_file("if_inet6", Arc::new(ProcSysStaticFile("")) as Arc<dyn FileLike>);
+        net_dir.add_file("tcp", Arc::new(ProcSysStaticFile(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        )) as Arc<dyn FileLike>);
+        net_dir.add_file("udp", Arc::new(ProcSysStaticFile(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        )) as Arc<dyn FileLike>);
+        net_dir.add_file("tcp6", Arc::new(ProcSysStaticFile(
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        )) as Arc<dyn FileLike>);
+        net_dir.add_file("udp6", Arc::new(ProcSysStaticFile(
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        )) as Arc<dyn FileLike>);
+
         // /proc/cgroups — list available cgroup controllers.
         static_root.add_file("cgroups", Arc::new(ProcSysStaticFile(
             "#subsys_name\thierarchy\tnum_cgroups\tenabled\n"

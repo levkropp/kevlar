@@ -181,7 +181,11 @@ mod sethostname;
 mod unshare;
 
 // M8 Phase 3: Filesystem isolation
+mod chroot;
 mod pivot_root;
+
+// M10 Phase 4: Userspace networking
+mod net_ioctl;
 
 // M9 Phase 1: Syscall gap closure
 mod close_range;
@@ -317,6 +321,7 @@ mod syscall_numbers {
     pub const SYS_GETSID: usize = 124;
     pub const SYS_SIGALTSTACK: usize = 131;
     pub const SYS_ARCH_PRCTL: usize = 158;
+    pub const SYS_SYNC: usize = 162;
     pub const SYS_REBOOT: usize = 169;
     pub const SYS_GETTID: usize = 186;
     pub const SYS_GETDENTS64: usize = 217;
@@ -400,6 +405,7 @@ mod syscall_numbers {
     pub const SYS_UNSHARE: usize = 272;
     // M8 Phase 3: Filesystem isolation
     pub const SYS_PIVOT_ROOT: usize = 155;
+    pub const SYS_CHROOT: usize = 161;
     // M9 Phase 1: Syscall gap closure
     pub const SYS_FLOCK: usize = 73;
     pub const SYS_WAITID: usize = 247;
@@ -411,6 +417,7 @@ mod syscall_numbers {
     pub const SYS_NAME_TO_HANDLE_AT: usize = 303;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
+    pub const SYS_FACCESSAT2: usize = 439;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -519,6 +526,7 @@ mod syscall_numbers {
     pub const SYS_SET_TID_ADDRESS: usize = 96;
     pub const SYS_CLOCK_GETTIME: usize = 113;
     pub const SYS_GETRANDOM: usize = 278;
+    pub const SYS_SYNC: usize = 81;
     pub const SYS_REBOOT: usize = 142;
     pub const SYS_GETPRIORITY: usize = 141;
     pub const SYS_SETPRIORITY: usize = 140;
@@ -593,6 +601,7 @@ mod syscall_numbers {
     pub const SYS_UNSHARE: usize = 97;
     // M8 Phase 3: Filesystem isolation
     pub const SYS_PIVOT_ROOT: usize = 41;
+    pub const SYS_CHROOT: usize = 51;
     // M9 Phase 1: Syscall gap closure
     pub const SYS_FLOCK: usize = 32;
     pub const SYS_WAITID: usize = 95;
@@ -604,6 +613,7 @@ mod syscall_numbers {
     pub const SYS_NAME_TO_HANDLE_AT: usize = 264;
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
+    pub const SYS_FACCESSAT2: usize = 439;
 }
 
 use syscall_numbers::*;
@@ -766,6 +776,16 @@ impl<'a> SyscallHandler<'a> {
 
         // Per-syscall cycle profiler: record TSC at exit.
         debug::profiler::syscall_exit(n, prof_start);
+
+        // Record to per-process syscall trace ring buffer (unconditional —
+        // just a few atomic writes, always available for crash diagnostics).
+        {
+            let ret_val = match &ret {
+                Ok(v) => *v,
+                Err(e) => -(e.errno() as isize),
+            };
+            current_process().record_syscall(n, a1, a2, ret_val);
+        }
 
         // Record PID 1 syscalls for debugging systemd boot.
         // Only when debug=syscall is enabled (avoids overhead during benchmarks).
@@ -1001,6 +1021,7 @@ impl<'a> SyscallHandler<'a> {
                 bitflags_from_user!(GetRandomFlags, a3 as c_uint)?,
             ),
             SYS_SYSLOG => self.sys_syslog(a1 as c_int, UserVAddr::new(a2), a3 as c_int),
+            SYS_SYNC => Ok(0), // no-op: we write through on every operation
             SYS_REBOOT => self.sys_reboot(a1 as c_int, a2 as c_int, a3),
             SYS_GETTID => self.sys_gettid(),
             SYS_RT_SIGPROCMASK => {
@@ -1063,7 +1084,7 @@ impl<'a> SyscallHandler<'a> {
             SYS_GETRLIMIT => self.sys_getrlimit(a1 as c_int, UserVAddr::new_nonnull(a2)?),
             SYS_SYSINFO => self.sys_sysinfo(UserVAddr::new_nonnull(a1)?),
             // ARM64-specific *at syscalls (also available on x86_64)
-            SYS_FACCESSAT => {
+            SYS_FACCESSAT | SYS_FACCESSAT2 => {
                 let p = StackPathBuf::from_user(a2)?;
                 self.sys_access(p.as_path())
             }
@@ -1329,6 +1350,7 @@ impl<'a> SyscallHandler<'a> {
             SYS_SETDOMAINNAME => self.sys_setdomainname(UserVAddr::new_nonnull(a1)?, a2),
             SYS_UNSHARE => self.sys_unshare(a1),
             // M8 Phase 3: Filesystem isolation
+            SYS_CHROOT => self.sys_chroot(&resolve_path(a1)?),
             SYS_PIVOT_ROOT => self.sys_pivot_root(a1, a2),
             // M9 Phase 1: Syscall gap closure
             SYS_FLOCK => self.sys_flock(a1 as i32, a2 as i32),
@@ -1456,6 +1478,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SETGROUPS => "setgroups",
         SYS_GETPGID => "getpgid",
         SYS_ARCH_PRCTL => "arch_prctl",
+        SYS_SYNC => "sync",
         SYS_REBOOT => "reboot",
         SYS_GETTID => "gettid",
         SYS_GETDENTS64 => "getdents64",
@@ -1471,6 +1494,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_GETRANDOM => "getrandom",
         SYS_CLONE => "clone",
         SYS_FACCESSAT => "faccessat",
+        SYS_FACCESSAT2 => "faccessat2",
         SYS_PPOLL => "ppoll",
         SYS_PRLIMIT64 => "prlimit64",
         SYS_PREAD64 => "pread64",
@@ -1547,6 +1571,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SETHOSTNAME => "sethostname",
         SYS_SETDOMAINNAME => "setdomainname",
         SYS_UNSHARE => "unshare",
+        SYS_CHROOT => "chroot",
         SYS_PIVOT_ROOT => "pivot_root",
         SYS_FLOCK => "flock",
         SYS_WAITID => "waitid",

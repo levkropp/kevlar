@@ -4,5 +4,5 @@
 ::sysinit:/sbin/openrc sysinit
 ::sysinit:/sbin/openrc boot
 ::wait:/sbin/openrc default
-::respawn:/sbin/getty -L 115200 ttyS0 vt100
+::respawn:/sbin/getty -L 115200 ttyS0 linux
 ::shutdown:/sbin/openrc shutdown

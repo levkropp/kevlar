@@ -1,12 +1,26 @@
 # License
 
-This software is tri-licensed: MIT license, Apache license version 2.0, and/or BSD-2-Clause.
+This software is tri-licensed: MIT license, Apache license version 2.0,
+and/or BSD-2-Clause. You may use this software under any one of these three
+licenses.
+
+This software contains portions derived from
+[Kerla](https://github.com/nuta/kerla) by Seiya Nuta and The Kerla Authors.
+Kerla is licensed under the MIT license or Apache license version 2.0.
+Per the sublicensing rights granted under those licenses, Kerla-derived
+portions are redistributed here under the same tri-license as the rest of the
+project. The original Kerla copyright is retained below.
+
+The `boot2dump/` directory contains the boot2dump crash dump utility by Seiya
+Nuta, used as-is without modification. It is licensed under MIT or Apache-2.0.
+See `boot2dump/LICENSE.md` for its standalone license.
 
 
 ## MIT license
 
 ```
-Copyright 2026 Kevlar Contributors
+Copyright 2026 Lev Kropp
+Copyright 2021 Seiya Nuta and The Kerla Authors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -34,7 +48,7 @@ DEALINGS IN THE SOFTWARE.
 ```
 
 
-###### **_and/or_** 
+###### **_and/or_**
 
 
 
@@ -227,7 +241,7 @@ END OF TERMS AND CONDITIONS
 ## BSD-2-Clause license
 
 ```
-Copyright 2026 Kevlar Contributors
+Copyright 2026 Lev Kropp
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -251,4 +265,3 @@ CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
-

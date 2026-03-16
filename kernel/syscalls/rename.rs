@@ -13,7 +13,8 @@ impl<'a> SyscallHandler<'a> {
             .parent_and_basename()
             .ok_or_else::<Error, _>(|| Errno::ENOENT.into())?;
 
-        let root_fs = current_process().root_fs().lock();
+        let root_fs_arc = current_process().root_fs();
+        let root_fs = root_fs_arc.lock();
         let old_parent_dir = root_fs.lookup_dir(old_parent)?;
         let new_parent_dir = root_fs.lookup_dir(new_parent)?;
         old_parent_dir.rename(old_name, &new_parent_dir, new_name)?;

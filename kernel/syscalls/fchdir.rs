@@ -13,7 +13,8 @@ impl<'a> SyscallHandler<'a> {
             let opened_file = opened_files.get(fd)?;
             opened_file.path().resolve_absolute_path()
         };
-        current.root_fs().lock().chdir(&path)?;
+        let root_fs = current.root_fs();
+        root_fs.lock().chdir(&path)?;
         Ok(0)
     }
 }

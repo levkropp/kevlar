@@ -18,10 +18,12 @@ use smoltcp::wire::{self, EthernetAddress, EthernetFrame, HardwareAddress, IpCid
 
 pub mod service;
 pub mod socket;
+mod icmp_socket;
 mod tcp_socket;
 mod udp_socket;
 mod unix_socket;
 
+pub use icmp_socket::*;
 pub use socket::*;
 pub use tcp_socket::*;
 pub use udp_socket::*;
@@ -49,7 +51,7 @@ impl From<MonotonicClock> for Instant {
 }
 
 static SOCKETS: Once<SpinLock<SocketSet<'static>>> = Once::new();
-static INTERFACE: Once<SpinLock<Interface>> = Once::new();
+pub(crate) static INTERFACE: Once<SpinLock<Interface>> = Once::new();
 static DHCP_HANDLE: Once<SocketHandle> = Once::new();
 static DHCP_ENABLED: Once<bool> = Once::new();
 static SOCKET_WAIT_QUEUE: Once<WaitQueue> = Once::new();
@@ -263,6 +265,10 @@ impl service::NetworkStackService for SmoltcpNetworkStack {
 
     fn create_unix_socket(&self) -> crate::result::Result<alloc::sync::Arc<dyn crate::fs::inode::FileLike>> {
         Ok(UnixSocket::new() as alloc::sync::Arc<dyn crate::fs::inode::FileLike>)
+    }
+
+    fn create_icmp_socket(&self) -> crate::result::Result<alloc::sync::Arc<dyn crate::fs::inode::FileLike>> {
+        Ok(IcmpSocket::new() as alloc::sync::Arc<dyn crate::fs::inode::FileLike>)
     }
 
     fn process_packets(&self) {

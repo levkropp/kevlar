@@ -378,6 +378,46 @@ impl FileLike for ProcUptimeFile {
     }
 }
 
+// ── /proc/net/dev ──────────────────────────────────────────────────
+
+pub struct ProcNetDevFile;
+
+impl fmt::Debug for ProcNetDevFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcNetDevFile").finish()
+    }
+}
+
+impl FileLike for ProcNetDevFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        let s = "\
+Inter-|   Receive                                                |  Transmit\n\
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n\
+  eth0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n";
+
+        let len = core::cmp::min(s.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&s.as_bytes()[..len])?;
+        Ok(len)
+    }
+}
+
 // ── /proc/loadavg ──────────────────────────────────────────────────
 
 pub struct ProcLoadavgFile;

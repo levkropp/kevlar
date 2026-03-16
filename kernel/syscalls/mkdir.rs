@@ -9,8 +9,8 @@ impl<'a> SyscallHandler<'a> {
             .parent_and_basename()
             .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
 
-        current_process()
-            .root_fs()
+        let root_fs = current_process().root_fs();
+        root_fs
             .lock()
             .lookup_dir(parent_dir)?
             .create_dir(name, mode)?;

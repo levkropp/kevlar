@@ -23,6 +23,82 @@ use kevlar_platform::page_ops::page_as_slice_mut;
 #[cfg(feature = "profile-fortress")]
 use kevlar_platform::page_ops::PageFrame;
 
+use crate::process::signal::Signal;
+
+/// Emit a CrashReport debug event and then kill the process.
+///
+/// Collects the per-process syscall trace, VMA map, and fsbase before
+/// calling `Process::exit_by_signal`. This gives us rich crash diagnostics
+/// with zero runtime cost when no crash occurs.
+fn emit_crash_and_exit(signal: Signal, fault_addr: usize, ip: usize) -> ! {
+    let current = current_process();
+    let pid = current.pid().as_i32();
+    let cmdline = current.cmdline();
+    let signal_name = debug::signal_name(signal);
+
+    // Per-process syscall trace.
+    let trace = current.dump_trace();
+    let mut sc_tuples: [(u16, i32, u32, u32); 32] = [(0, 0, 0, 0); 32];
+    let sc_count = core::cmp::min(trace.len(), 32);
+    for (i, e) in trace.iter().enumerate().take(sc_count) {
+        sc_tuples[i] = (e.nr, e.result, e.arg0, e.arg1);
+    }
+
+    // VMA map (up to 64 entries). Skip if the VM lock is already held
+    // to avoid deadlock (best-effort in crash path).
+    let mut vma_buf: [(usize, usize, &str); 64] = [(0, 0, ""); 64];
+    let mut vma_count = 0;
+    if let Some(vm_arc) = current.vm().as_ref() {
+        if !vm_arc.is_locked() {
+            let vm_guard = vm_arc.lock_no_irq();
+            for vma in vm_guard.vm_areas().iter() {
+                if vma_count >= 64 {
+                    break;
+                }
+                let vt = match vma.area_type() {
+                    VmAreaType::Anonymous => "anon",
+                    VmAreaType::File { .. } => "file",
+                };
+                vma_buf[vma_count] = (vma.start().value(), vma.end().value(), vt);
+                vma_count += 1;
+            }
+        }
+    }
+
+    let fsbase = current.arch().fsbase.load() as usize;
+
+    // Read stashed registers from the interrupt handler.
+    let cpu = kevlar_platform::arch::cpu_id() as usize;
+    let regs = kevlar_platform::crash_regs::take(cpu);
+    let r = regs.unwrap_or(kevlar_platform::crash_regs::CrashRegs {
+        rax: 0, rbx: 0, rcx: 0, rdx: 0,
+        rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+        r8: 0, r9: 0, r10: 0, r11: 0,
+        r12: 0, r13: 0, r14: 0, r15: 0,
+        rip: 0, rflags: 0, fault_addr: 0,
+    });
+
+    debug::emit(DebugFilter::FAULT, &DebugEvent::CrashReport {
+        pid,
+        signal: signal as i32,
+        signal_name,
+        cmdline: cmdline.as_str(),
+        fault_addr,
+        ip,
+        fsbase,
+        rax: r.rax, rbx: r.rbx, rcx: r.rcx, rdx: r.rdx,
+        rsi: r.rsi, rdi: r.rdi, rbp: r.rbp, rsp: r.rsp,
+        r8: r.r8, r9: r.r9, r10: r.r10, r11: r.r11,
+        r12: r.r12, r13: r.r13, r14: r.r14, r15: r.r15,
+        rflags: r.rflags,
+        syscalls: &sc_tuples[..sc_count],
+        vmas: &vma_buf[..vma_count],
+    });
+
+    drop(cmdline);
+    Process::exit_by_signal(signal);
+}
+
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
     // Usercopy fault debug check — only in debug builds to avoid hot-path overhead.
     #[cfg(debug_assertions)]
@@ -65,11 +141,12 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                 vma_end: None,
                 vma_type: None,
             });
-            debug_warn!(
-                "null pointer access (pid={}, ip={:x}), killing the current process...",
-                pid, ip
+            let fsbase = current_process().arch().fsbase.load();
+            warn!(
+                "SIGSEGV: null pointer access (pid={}, ip={:#x}, fsbase={:#x})",
+                pid, ip, fsbase
             );
-            Process::exit_by_signal(signal::SIGSEGV);
+            emit_crash_and_exit(signal::SIGSEGV, 0, ip);
         }
     };
 
@@ -78,12 +155,11 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     {
         Ok(uaddr) => uaddr,
         _ => {
-            debug_warn!(
-                "invalid memory access at {} (ip={:x}), killing the current process...",
-                unaligned_vaddr,
-                ip
+            warn!(
+                "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
+                unaligned_vaddr.value(), current_process().pid().as_i32(), ip
             );
-            Process::exit_by_signal(SIGSEGV);
+            emit_crash_and_exit(SIGSEGV, unaligned_vaddr.value(), ip);
         }
     };
 
@@ -129,15 +205,15 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                 vma_end: None,
                 vma_type: None,
             });
-            debug_warn!(
-                "pid={}: no VMAs for address {} (ip={:x}, reason={:?}), killing the current process...",
-                pid, unaligned_vaddr, ip, _reason
+            warn!(
+                "SIGSEGV: no VMA for address {:#x} (pid={}, ip={:#x}, reason={:?})",
+                unaligned_vaddr.value(), pid, ip, _reason
             );
             // Free the page we allocated since we're killing the process.
             kevlar_platform::page_allocator::free_pages(paddr, 1);
             drop(vm);
             drop(vm_ref);
-            Process::exit_by_signal(SIGSEGV);
+            emit_crash_and_exit(SIGSEGV, unaligned_vaddr.value(), ip);
         }
     };
 
@@ -218,9 +294,9 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         kevlar_platform::page_allocator::free_pages(paddr, 1);
         drop(vm);
         drop(vm_ref);
-        debug_warn!(
-            "pid={}: PROT_NONE access at {} (ip={:#x}), delivering SIGSEGV",
-            current.pid().as_i32(), unaligned_vaddr, ip
+        warn!(
+            "SIGSEGV: PROT_NONE access at {:#x} (pid={}, ip={:#x})",
+            unaligned_vaddr.value(), current.pid().as_i32(), ip
         );
         current.send_signal(SIGSEGV);
         return;

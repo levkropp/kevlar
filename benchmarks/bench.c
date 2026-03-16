@@ -4,11 +4,12 @@
  * Kevlar kernel micro-benchmark suite.
  * Compiled as a static musl binary and included in the initramfs.
  *
- * Usage: /bin/bench [--quick|-q] [--full|-f] [--extended|-e] [test-name|all|core|extended]
+ * Usage: /bin/bench [--quick|-q] [--full|-f] [test-name|all|core|extended]
  *   all          — run all benchmarks (default)
  *   core         — run core 8 benchmarks only
- *   extended     — run extended 16 benchmarks only
+ *   extended     — run extended 16 + M6.6 4 + M10 8 + workload 7 benchmarks
  *   <name>       — run a single named benchmark
+ *   name1,name2  — run comma-separated list of benchmarks
  *
  * Output format: BENCH <name> <iterations> <total_ns> <per_iter_ns>
  * This format is parsed by the benchmark runner.
@@ -592,6 +593,203 @@ static void bench_getuid(void) {
     report("getuid", iters, now_ns() - start);
 }
 
+/* ── Workload benchmarks (7) ────────────────────────────────────────── */
+/* These measure real BusyBox/shell workload patterns, not raw syscalls. */
+
+static void bench_exec_true(void) {
+    int iters = ITERS(200, 100);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/true", "true", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("exec_true", completed, now_ns() - start);
+}
+
+static void bench_shell_noop(void) {
+    int iters = ITERS(100, 50);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", "true", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("shell_noop", completed, now_ns() - start);
+}
+
+static void bench_pipe_grep(void) {
+    /* Simulate: echo <data> | grep <pattern> — measures pipe+fork+exec */
+    int iters = ITERS(100, 50);
+    int completed = 0;
+    /* Pre-create a file to grep from (avoids echo overhead in loop) */
+    int tmpfd = open("/tmp/bench_grep", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP pipe_grep\n"); return; }
+    const char *data = "line1 apple\nline2 banana\nline3 apple\n";
+    for (int i = 0; i < 100; i++) write(tmpfd, data, strlen(data));
+    close(tmpfd);
+
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", "grep apple /tmp/bench_grep > /dev/null", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("pipe_grep", completed, now_ns() - start);
+    unlink("/tmp/bench_grep");
+}
+
+static void bench_file_tree(void) {
+    /* Create dirs + files, readdir, delete — measures VFS path resolution + inode ops */
+    int iters = ITERS(50, 10);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        mkdir("/tmp/bench_tree", 0755);
+        mkdir("/tmp/bench_tree/sub", 0755);
+        for (int j = 0; j < 10; j++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/tmp/bench_tree/sub/f%d", j);
+            int fd = open(path, O_CREAT | O_WRONLY, 0644);
+            if (fd >= 0) { write(fd, "x", 1); close(fd); }
+        }
+        /* Readdir */
+        DIR *d = opendir("/tmp/bench_tree/sub");
+        if (d) { while (readdir(d)) {} closedir(d); }
+        /* Cleanup */
+        for (int j = 0; j < 10; j++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/tmp/bench_tree/sub/f%d", j);
+            unlink(path);
+        }
+        rmdir("/tmp/bench_tree/sub");
+        rmdir("/tmp/bench_tree");
+    }
+    report("file_tree", iters, now_ns() - start);
+}
+
+static void bench_sed_pipeline(void) {
+    /* Simulate text processing: sed on a file — measures read+regex+write pattern */
+    int tmpfd = open("/tmp/bench_sed", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP sed_pipeline\n"); return; }
+    for (int i = 0; i < 200; i++) {
+        char line[64];
+        int len = snprintf(line, sizeof(line), "prefix_item_%d_suffix\n", i);
+        write(tmpfd, line, len);
+    }
+    close(tmpfd);
+
+    int iters = ITERS(100, 20);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", "sed 's/prefix/PRE/;s/suffix/SUF/' /tmp/bench_sed > /dev/null", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("sed_pipeline", completed, now_ns() - start);
+    unlink("/tmp/bench_sed");
+}
+
+static void bench_sort_uniq(void) {
+    /* Sort + uniq pipeline — measures fork+pipe+sort algorithm */
+    int tmpfd = open("/tmp/bench_sort", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP sort_uniq\n"); return; }
+    const char *words[] = {"apple","banana","cherry","date","elderberry","fig","grape"};
+    for (int i = 0; i < 500; i++) {
+        const char *w = words[i % 7];
+        write(tmpfd, w, strlen(w));
+        write(tmpfd, "\n", 1);
+    }
+    close(tmpfd);
+
+    int iters = ITERS(50, 10);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", "sort /tmp/bench_sort | uniq -c | sort -rn > /dev/null", NULL);
+            _exit(127);
+        } else if (pid > 0) {
+            waitpid(pid, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("sort_uniq", completed, now_ns() - start);
+    unlink("/tmp/bench_sort");
+}
+
+static void bench_tar_extract(void) {
+    /* Create a tar archive and repeatedly extract — measures VFS + decompression */
+    mkdir("/tmp/bench_tar_in", 0755);
+    for (int i = 0; i < 20; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/tmp/bench_tar_in/f%d", i);
+        int fd = open(path, O_CREAT | O_WRONLY, 0644);
+        if (fd >= 0) { write(fd, "benchmark data\n", 15); close(fd); }
+    }
+    /* Create the archive once */
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", "tar cf /tmp/bench.tar -C /tmp bench_tar_in", NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
+
+    int iters = ITERS(50, 10);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t p = fork();
+        if (p == 0) {
+            execl("/bin/sh", "sh", "-c",
+                  "rm -rf /tmp/bench_tar_out; mkdir /tmp/bench_tar_out; "
+                  "tar xf /tmp/bench.tar -C /tmp/bench_tar_out", NULL);
+            _exit(127);
+        } else if (p > 0) {
+            waitpid(p, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("tar_extract", completed, now_ns() - start);
+
+    /* Cleanup */
+    pid = fork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", "rm -rf /tmp/bench_tar_in /tmp/bench_tar_out /tmp/bench.tar", NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
+}
+
 /* ── Benchmark registry ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -645,6 +843,15 @@ static bench_entry benchmarks[] = {
     {"pipe_pingpong",bench_pipe_pingpong,  0},
     {"waitid",       bench_waitid_nochild, 0},
     {"getuid",       bench_getuid,         0},
+
+    /* Workload benchmarks (7) */
+    {"exec_true",    bench_exec_true,      0},
+    {"shell_noop",   bench_shell_noop,     0},
+    {"pipe_grep",    bench_pipe_grep,      0},
+    {"file_tree",    bench_file_tree,      0},
+    {"sed_pipeline", bench_sed_pipeline,   0},
+    {"sort_uniq",    bench_sort_uniq,      0},
+    {"tar_extract",  bench_tar_extract,    0},
 
     {NULL, NULL, 0}
 };

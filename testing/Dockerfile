@@ -138,7 +138,9 @@ RUN printf 'hello from ext2\n' > /disk_root/greeting.txt && \
     ln -s greeting.txt /disk_root/link.txt && \
     chmod +x /disk_root/hello && \
     dd if=/dev/zero of=/disk.img bs=1M count=16 2>/dev/null && \
-    mke2fs -t ext2 -d /disk_root /disk.img
+    mke2fs -t ext2 -d /disk_root /disk.img && \
+    dd if=/dev/zero of=/disk-ext4.img bs=1M count=16 2>/dev/null && \
+    mke2fs -t ext4 -O ^metadata_csum -d /disk_root /disk-ext4.img
 
 #
 #  M6 Phase 3 threading integration test (static musl + pthreads)
@@ -311,6 +313,50 @@ RUN for src in /contracts/*.c; do \
     done
 
 #
+#  apk.static (statically-linked Alpine package manager)
+#
+#
+#  ext2 read-write test binary (musl static)
+#
+FROM ubuntu:24.04 AS test_ext2_rw
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/test_ext2_rw.c /test_ext2_rw.c
+RUN musl-gcc -static -O2 -o /test-ext2-rw /test_ext2_rw.c
+
+#
+#  Comprehensive BusyBox applet test suite (musl static)
+#
+FROM ubuntu:24.04 AS busybox_suite
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/busybox_suite.c /busybox_suite.c
+RUN musl-gcc -static -O2 -o /busybox-suite /busybox_suite.c
+
+FROM alpine:3.21 AS apk_static
+RUN apk add --no-cache apk-tools-static
+
+#
+#  Alpine ext2 disk image (64 MiB) — rootfs for apk testing
+#
+FROM ubuntu:24.04 AS alpine_disk
+RUN apt-get update && apt-get install -qy e2fsprogs curl
+# Download Alpine 3.21 minirootfs and set up for apk usage.
+RUN mkdir -p /alpine-root && \
+    curl -fsSL https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz \
+    | tar xz -C /alpine-root && \
+    echo "http://dl-cdn.alpinelinux.org/alpine/v3.21/main" > /alpine-root/etc/apk/repositories && \
+    echo "nameserver 10.0.2.3" > /alpine-root/etc/resolv.conf && \
+    mkdir -p /alpine-root/var/cache/apk && \
+    mkdir -p /alpine-root/tmp && \
+    dd if=/dev/zero of=/alpine-disk.img bs=1M count=64 2>/dev/null && \
+    mke2fs -t ext2 -d /alpine-root /alpine-disk.img
+
+#
 #  OpenRC (Alpine's service manager)
 #
 FROM alpine:3.21 AS openrc
@@ -337,6 +383,8 @@ COPY --from=empty_dir /empty_dir /usr/sbin
 COPY --from=busybox  /build/busybox_unstripped /bin/busybox
 COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
+COPY --from=apk_static /sbin/apk.static /bin/apk.static
+COPY --from=test_ext2_rw /test-ext2-rw /bin/test-ext2-rw
 COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
 COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 COPY --from=bash       /build/bash /bin/bash
@@ -347,6 +395,7 @@ COPY --from=mini_systemd /mini-systemd /bin/mini-systemd
 COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
 COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
+COPY --from=busybox_suite /busybox-suite /bin/busybox-suite
 COPY --from=mini_systemd_v3 /mini-systemd-v3 /bin/mini-systemd-v3
 # systemd v245 binaries + glibc runtime
 COPY --from=systemd_build /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
@@ -383,6 +432,8 @@ COPY --from=openrc /etc/conf.d/ /etc/conf.d/
 # systemd configuration
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants \
     && mkdir -p /usr/lib/systemd/system
+COPY testing/etc/resolv.conf /etc/resolv.conf
+COPY testing/etc/network/interfaces /etc/network/interfaces
 COPY testing/etc/banner /etc/banner
 COPY testing/etc/group /etc/group
 COPY testing/etc/passwd /etc/passwd
@@ -397,6 +448,8 @@ COPY testing/systemd/os-release /etc/os-release
 COPY testing/systemd/fstab /etc/fstab
 RUN head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > /etc/machine-id
 RUN ln -sf /etc/systemd/system/kevlar-getty.service /etc/systemd/system/multi-user.target.wants/kevlar-getty.service
+ADD testing/debug_init.sh /debug_init.sh
+ADD testing/test_apk_update.sh /test_apk_update.sh
 ADD testing/integration_tests /integration_tests
 ADD testing/var/www/html/index.html /var/www/html/index.html
 

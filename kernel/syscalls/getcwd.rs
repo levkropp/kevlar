@@ -10,8 +10,8 @@ use crate::user_buffer::UserBufWriter;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_getcwd(&mut self, buf: UserVAddr, len: c_size) -> Result<isize> {
-        let cwd = current_process()
-            .root_fs()
+        let root_fs = current_process().root_fs();
+        let cwd = root_fs
             .lock()
             .cwd_path()
             .resolve_absolute_path();

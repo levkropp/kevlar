@@ -81,8 +81,8 @@ impl<'a> SyscallHandler<'a> {
             "proc" => PROC_FS.clone(),
             "sysfs" => SYS_FS.clone(),
             "tmpfs" => Arc::new(TmpFs::new()),
-            "ext2" => {
-                // Mount ext2 from the global block device.
+            "ext2" | "ext3" | "ext4" => {
+                // Mount ext2/ext3/ext4 from the global block device.
                 kevlar_ext2::mount_ext2()?
             }
             "devtmpfs" => {

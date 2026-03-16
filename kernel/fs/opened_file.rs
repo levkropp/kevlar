@@ -203,6 +203,10 @@ impl OpenedFile {
         Ok(())
     }
 
+    pub fn set_nonblock(&self, nonblock: bool) {
+        self.options.borrow_mut().nonblock = nonblock;
+    }
+
     pub fn fsync(&self) -> Result<()> {
         self.path.inode.fsync()
     }

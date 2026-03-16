@@ -43,7 +43,8 @@ impl<'a> SyscallHandler<'a> {
             }
         } else if let Ok(p) = StackPathBuf::from_user(name_ptr) {
             let current = current_process();
-            let root_fs = current.root_fs().lock_no_irq();
+            let root_fs_arc = current.root_fs();
+            let root_fs = root_fs_arc.lock_no_irq();
             let opened_files = current.opened_files_no_irq();
             let follow = (flags & 0x100) == 0; // AT_SYMLINK_FOLLOW = default
             match root_fs.lookup_path_at(&opened_files, &dirfd, p.as_path(), follow) {

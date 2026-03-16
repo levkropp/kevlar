@@ -41,6 +41,77 @@ use kevlar_platform::{
 };
 use kevlar_utils::alignment::align_up;
 
+// ── Per-process syscall trace ring buffer ────────────────────────────────
+//
+// Records the last 32 syscalls per process for crash diagnostics.
+// Lock-free: uses an atomic write index with Relaxed ordering.
+// Each entry is 16 bytes (nr: u16, pad: u16, arg0: u32, arg1: u32, result: i32).
+
+const SYSCALL_TRACE_SIZE: usize = 32;
+
+/// A single entry in the syscall trace ring buffer.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct SyscallTraceEntry {
+    pub nr: u16,
+    pub _pad: u16,
+    pub arg0: u32,
+    pub arg1: u32,
+    pub result: i32,
+}
+
+/// Per-process ring buffer of the last `SYSCALL_TRACE_SIZE` syscalls.
+///
+/// Lock-free using a single atomic write index. Each `record_syscall()` call
+/// is just a few atomic writes — no locks, no allocation.
+pub struct SyscallTrace {
+    entries: [AtomicCell<SyscallTraceEntry>; SYSCALL_TRACE_SIZE],
+    write_idx: AtomicU32,
+}
+
+impl SyscallTrace {
+    pub fn new() -> Self {
+        const EMPTY: SyscallTraceEntry = SyscallTraceEntry {
+            nr: 0,
+            _pad: 0,
+            arg0: 0,
+            arg1: 0,
+            result: 0,
+        };
+        // AtomicCell<SyscallTraceEntry> is not Copy, so we initialize with array::from_fn.
+        SyscallTrace {
+            entries: core::array::from_fn(|_| AtomicCell::new(EMPTY)),
+            write_idx: AtomicU32::new(0),
+        }
+    }
+
+    /// Record a syscall. Called unconditionally from the dispatch path.
+    /// Cost: one atomic fetch_add + one AtomicCell store.
+    pub fn record(&self, nr: usize, a1: usize, a2: usize, result: isize) {
+        let idx = self.write_idx.fetch_add(1, Ordering::Relaxed) as usize % SYSCALL_TRACE_SIZE;
+        self.entries[idx].store(SyscallTraceEntry {
+            nr: nr as u16,
+            _pad: 0,
+            arg0: a1 as u32,
+            arg1: a2 as u32,
+            result: result as i32,
+        });
+    }
+
+    /// Return the last N entries in chronological order.
+    pub fn dump(&self) -> Vec<SyscallTraceEntry> {
+        let w = self.write_idx.load(Ordering::Relaxed) as usize;
+        let count = core::cmp::min(w, SYSCALL_TRACE_SIZE);
+        let mut out = Vec::with_capacity(count);
+        // The oldest entry is at (w - count) % SIZE, the newest is at (w - 1) % SIZE.
+        for i in 0..count {
+            let idx = (w - count + i) % SYSCALL_TRACE_SIZE;
+            out.push(self.entries[idx].load());
+        }
+        out
+    }
+}
+
 type ProcessTable = BTreeMap<PId, Arc<Process>>;
 
 /// The process table. All processes are registered in with its process Id.
@@ -134,7 +205,7 @@ pub struct Process {
     children: SpinLock<Vec<Arc<Process>>>,
     vm: AtomicRefCell<Option<Arc<SpinLock<Vm>>>>,
     opened_files: Arc<SpinLock<OpenedFileTable>>,
-    root_fs: Arc<SpinLock<RootFs>>,
+    root_fs: AtomicRefCell<Arc<SpinLock<RootFs>>>,
     signals: Arc<SpinLock<SignalDelivery>>,
     /// Lock-free mirror of `signals.pending`.  Avoids taking the spinlock on
     /// every syscall exit when no signals are pending (the common case).
@@ -171,6 +242,9 @@ pub struct Process {
     namespaces: AtomicRefCell<Option<crate::namespace::NamespaceSet>>,
     /// Namespace-local PID (equals global PID in root PID namespace).
     ns_pid: AtomicI32,
+    /// Per-process syscall trace ring buffer (last 32 syscalls).
+    /// Used for crash diagnostics — always recorded, no debug flag needed.
+    syscall_trace: SyscallTrace,
 }
 
 impl Process {
@@ -191,7 +265,7 @@ impl Process {
             vm: AtomicRefCell::new(None),
             pid: PId::new(0),
             tgid: PId::new(0),
-            root_fs: INITIAL_ROOT_FS.clone(),
+            root_fs: AtomicRefCell::new(INITIAL_ROOT_FS.clone()),
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
@@ -213,6 +287,7 @@ impl Process {
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(0),
+            syscall_trace: SyscallTrace::new(),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -271,7 +346,7 @@ impl Process {
             arch: arch::Process::new_user_thread(entry.ip, entry.user_sp),
             vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(entry.vm)))),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs,
+            root_fs: AtomicRefCell::new(root_fs),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
@@ -292,6 +367,7 @@ impl Process {
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
+            syscall_trace: SyscallTrace::new(),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -422,6 +498,17 @@ impl Process {
         &self.arch
     }
 
+    /// Record a syscall in the per-process trace ring buffer.
+    /// Called unconditionally from the syscall dispatch path.
+    pub fn record_syscall(&self, nr: usize, a1: usize, a2: usize, result: isize) {
+        self.syscall_trace.record(nr, a1, a2, result);
+    }
+
+    /// Return the last N syscall trace entries in chronological order.
+    pub fn dump_trace(&self) -> Vec<SyscallTraceEntry> {
+        self.syscall_trace.dump()
+    }
+
     /// The process parent.
     fn parent(&self) -> Option<Arc<Process>> {
         self.parent.upgrade().as_ref().cloned()
@@ -483,8 +570,15 @@ impl Process {
     }
 
     /// The process's path resolution info.
-    pub fn root_fs(&self) -> &Arc<SpinLock<RootFs>> {
-        &self.root_fs
+    pub fn root_fs(&self) -> Arc<SpinLock<RootFs>> {
+        self.root_fs.borrow().clone()
+    }
+
+    /// Give this process its own copy of root_fs (for chroot isolation).
+    /// The new root_fs shares mount points but has independent root/cwd.
+    pub fn unshare_root_fs(&self) {
+        let cloned = self.root_fs.borrow().lock().clone();
+        *self.root_fs.borrow_mut() = Arc::new(SpinLock::new(cloned));
     }
 
     /// The opened files table (full lock with interrupt disable).
@@ -794,16 +888,72 @@ impl Process {
 
     /// Terminates the **current** process by a signal.
     pub fn exit_by_signal(signal: Signal) -> ! {
-        let pid = current_process().pid().as_i32();
-        warn!("PID {} killed by signal {}", pid, signal);
+        let current = current_process();
+        let pid = current.pid().as_i32();
+        let cmdline = current.cmdline();
+        warn!("PID {} ({}) killed by signal {}", pid, cmdline.as_str(), signal);
         if pid == 1 {
             crate::syscalls::dump_pid1_trace();
         }
+
+        // ── Crash report ────────────────────────────────────────────
+        // Collect per-process syscall trace.
+        let trace = current.dump_trace();
+        let mut sc_tuples: [(u16, i32, u32, u32); 32] = [(0, 0, 0, 0); 32];
+        let sc_count = core::cmp::min(trace.len(), 32);
+        for (i, e) in trace.iter().enumerate().take(sc_count) {
+            sc_tuples[i] = (e.nr, e.result, e.arg0, e.arg1);
+        }
+
+        // Collect VMA map (up to 64 entries). Skip if the VM lock is
+        // already held to avoid deadlock (best-effort in crash path).
+        let mut vma_buf: [(usize, usize, &str); 64] = [(0, 0, ""); 64];
+        let mut vma_count = 0;
+        if let Some(vm_arc) = current.vm().as_ref() {
+            if !vm_arc.is_locked() {
+                let vm_guard = vm_arc.lock_no_irq();
+                for vma in vm_guard.vm_areas().iter() {
+                    if vma_count >= 64 {
+                        break;
+                    }
+                    let vt = match vma.area_type() {
+                        VmAreaType::Anonymous => "anon",
+                        VmAreaType::File { .. } => "file",
+                    };
+                    vma_buf[vma_count] = (vma.start().value(), vma.end().value(), vt);
+                    vma_count += 1;
+                }
+            }
+        }
+
+        // Get fsbase (FS segment base, points to TLS on x86_64).
+        let fsbase = current.arch().fsbase.load() as usize;
+
+        let signal_name = debug::signal_name(signal);
+
+        debug::emit(DebugFilter::PROCESS, &DebugEvent::CrashReport {
+            pid,
+            signal: signal as i32,
+            signal_name,
+            cmdline: cmdline.as_str(),
+            fault_addr: 0,
+            ip: 0,
+            fsbase,
+            rax: 0, rbx: 0, rcx: 0, rdx: 0,
+            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
+            r8: 0, r9: 0, r10: 0, r11: 0,
+            r12: 0, r13: 0, r14: 0, r15: 0,
+            rflags: 0,
+            syscalls: &sc_tuples[..sc_count],
+            vmas: &vma_buf[..vma_count],
+        });
+
         debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExit {
             pid,
             status: 128 + signal,
             by_signal: true,
         });
+        drop(cmdline);
         Process::exit(128 + signal);
     }
 
@@ -1017,7 +1167,8 @@ impl Process {
         current.opened_files.lock().close_cloexec_files();
         current.cmdline.borrow_mut().set_by_argv(argv);
 
-        let entry = setup_userspace(executable_path, argv, envp, &current.root_fs)?;
+        let root_fs = current.root_fs();
+        let entry = setup_userspace(executable_path, argv, envp, &root_fs)?;
 
         // de_thread: per POSIX, execve terminates all other threads in the
         // thread group.  Kill siblings NOW — after setup_userspace succeeds
@@ -1092,7 +1243,7 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(vm)))),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs: parent.root_fs().clone(),
+            root_fs: AtomicRefCell::new(parent.root_fs()),
             arch,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
             signal_pending: AtomicU32::new(0),
@@ -1114,6 +1265,7 @@ impl Process {
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
+            syscall_trace: SyscallTrace::new(),
         });
 
         // Inherit parent's cgroup and register child.
@@ -1175,7 +1327,7 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs: parent.root_fs().clone(),
+            root_fs: AtomicRefCell::new(parent.root_fs()),
             arch,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
@@ -1197,6 +1349,7 @@ impl Process {
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
+            syscall_trace: SyscallTrace::new(),
         });
 
         let parent_cg = parent.cgroup();
@@ -1261,7 +1414,7 @@ impl Process {
             // Share address space, fds, and signal handlers.
             vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
             opened_files: Arc::clone(&parent.opened_files),
-            root_fs: parent.root_fs.clone(),
+            root_fs: AtomicRefCell::new(parent.root_fs()),
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
@@ -1282,6 +1435,7 @@ impl Process {
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
+            syscall_trace: SyscallTrace::new(),
             arch,
         });
 
@@ -1697,7 +1851,7 @@ fn do_elf_binfmt(
             Auxv::Phdr(v) => v.value(),
             _ => 0,
         };
-        warn!("dynamic link: ip={:#x} main_entry={:#x} AT_BASE={:#x} AT_PHDR={:#x} heap={:#x} main_base_offset={:#x}",
+        trace!("dynamic link: ip={:#x} main_entry={:#x} AT_BASE={:#x} AT_PHDR={:#x} heap={:#x} main_base_offset={:#x}",
               ip.value(), main_entry, interp_base_uaddr.value(),
               phdr_val, new_heap_bottom, main_base_offset);
     } else {

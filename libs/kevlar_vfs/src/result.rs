@@ -53,6 +53,7 @@ pub enum Errno {
     ENOTEMPTY = 39,
     ELOOP = 40,
 
+    EAFNOSUPPORT = 97,
     EADDRINUSE = 98,
     EADDRNOTAVAIL = 99,
     ENETDOWN = 100,
@@ -64,6 +65,8 @@ pub enum Errno {
     EISCONN = 106,
     ENOTCONN = 107,
     ECONNREFUSED = 111,
+    EALREADY = 114,
+    EINPROGRESS = 115,
 }
 
 impl Errno {
@@ -107,6 +110,7 @@ impl Errno {
             Errno::ENOSYS => "ENOSYS",
             Errno::ENOTEMPTY => "ENOTEMPTY",
             Errno::ELOOP => "ELOOP",
+            Errno::EAFNOSUPPORT => "EAFNOSUPPORT",
             Errno::EADDRINUSE => "EADDRINUSE",
             Errno::EADDRNOTAVAIL => "EADDRNOTAVAIL",
             Errno::ENETDOWN => "ENETDOWN",
@@ -118,6 +122,8 @@ impl Errno {
             Errno::EISCONN => "EISCONN",
             Errno::ENOTCONN => "ENOTCONN",
             Errno::ECONNREFUSED => "ECONNREFUSED",
+            Errno::EALREADY => "EALREADY",
+            Errno::EINPROGRESS => "EINPROGRESS",
         }
     }
 }
