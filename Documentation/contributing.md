@@ -11,16 +11,12 @@ Add an SPDX header to every new `.rs` file:
 
 ## Clean-Room Requirements
 
-Kevlar's permissive license depends on clean-room provenance. When implementing
-new subsystems:
+Kevlar is a clean-room implementation of the Linux ABI:
 
-1. **Document your references** in [clean-room-log.md](provenance/clean-room-log.md)
-2. **Use Linux man pages and POSIX specifications** as the primary reference for
+1. **Use Linux man pages and POSIX specifications** as the primary reference for
    syscall semantics
-3. **Never copy** GPL-licensed kernel code (Linux, RTEMS, etc.)
-4. **Man pages** are always safe to reference for interface specifications
-
-See [Licensing](provenance/licensing.md) for the full rationale.
+2. **Never copy** GPL-licensed kernel code (Linux, RTEMS, etc.)
+3. **Man pages** are always safe to reference for interface specifications
 
 ## Code Style
 

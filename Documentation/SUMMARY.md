@@ -4,7 +4,6 @@
 
 # User Guide
 
-- [Kernel Parameters](kernel-parameters.md)
 - [Contributing](contributing.md)
 
 # Architecture
@@ -18,16 +17,6 @@
 - [Filesystems](architecture/filesystems.md)
 - [Networking](architecture/networking.md)
 - [Hardware Abstraction](architecture/hal.md)
-
-# Hacking
-
-- [Debugging 101](hacking/debugging-101.md)
-
-# Provenance
-
-- [Source Attribution](provenance/source-attribution.md)
-- [Licensing](provenance/licensing.md)
-- [Clean-Room Log](provenance/clean-room-log.md)
 
 # Blog
 
