@@ -15,8 +15,8 @@ fn create_file(path: &Path, flags: OpenFlags, mode: FileMode) -> Result<INode> {
         .parent_and_basename()
         .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
 
-    current_process()
-        .root_fs()
+    let root_fs = current_process().root_fs();
+    root_fs
         .lock_no_irq()
         .lookup_dir(parent_dir)?
         .create_file(name, mode)
@@ -41,7 +41,8 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        let root_fs = current.root_fs().lock_no_irq();
+        let root_fs_arc = current.root_fs();
+        let root_fs = root_fs_arc.lock_no_irq();
         let mut opened_files = current.opened_files_no_irq();
 
         let path_comp = root_fs.lookup_path_at(&opened_files, &CwdOrFd::AtCwd, path, true)?;

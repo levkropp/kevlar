@@ -22,6 +22,9 @@ pub trait NetworkStackService: Send + Sync {
     /// Create a new Unix domain socket.
     fn create_unix_socket(&self) -> Result<Arc<dyn FileLike>>;
 
+    /// Create a new ICMP ping socket.
+    fn create_icmp_socket(&self) -> Result<Arc<dyn FileLike>>;
+
     /// Process pending inbound/outbound packets. Called from deferred IRQ work.
     fn process_packets(&self);
 }

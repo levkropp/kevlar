@@ -143,10 +143,12 @@ impl MountTable {
     }
 }
 
+#[derive(Clone)]
 pub struct MountPoint {
     fs: Arc<dyn FileSystem>,
 }
 
+#[derive(Clone)]
 pub struct RootFs {
     root_path: Arc<PathComponent>,
     cwd_path: Arc<PathComponent>,
@@ -211,6 +213,14 @@ impl RootFs {
     /// Changes the current working directory.
     pub fn chdir(&mut self, path: &Path) -> Result<()> {
         self.cwd_path = self.lookup_path(path, true)?;
+        Ok(())
+    }
+
+    /// Changes the root directory (chroot).
+    pub fn chroot(&mut self, path: &Path) -> Result<()> {
+        let new_root = self.lookup_path(path, true)?;
+        self.root_path = new_root.clone();
+        self.cwd_path = new_root;
         Ok(())
     }
 

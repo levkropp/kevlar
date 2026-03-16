@@ -22,11 +22,13 @@ impl<'a> SyscallHandler<'a> {
                 .path()
                 .resolve_absolute_path()
         } else {
-            current_process()
-                .root_fs()
-                .lock_no_irq()
-                .lookup_no_symlink_follow(path)?
-                .readlink()?
+            {
+                let root_fs = current_process().root_fs();
+                root_fs
+                    .lock_no_irq()
+                    .lookup_no_symlink_follow(path)?
+                    .readlink()?
+            }
         };
 
         if buf_size < resolved_path.as_str().as_bytes().len() {

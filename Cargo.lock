@@ -220,6 +220,7 @@ name = "kevlar_ext2"
 version = "0.1.0"
 dependencies = [
  "kevlar_api",
+ "kevlar_platform",
  "kevlar_utils",
  "kevlar_vfs",
  "log",

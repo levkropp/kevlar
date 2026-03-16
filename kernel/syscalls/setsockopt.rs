@@ -22,6 +22,8 @@ const SO_PASSCRED: c_int = 16;
 const SO_RCVBUF: c_int = 8;
 const SO_SNDBUF: c_int = 7;
 const SO_REUSEPORT: c_int = 15;
+const SO_RCVTIMEO: c_int = 20;
+const SO_SNDTIMEO: c_int = 21;
 
 // IPPROTO_TCP options.
 const TCP_NODELAY: c_int = 1;
@@ -38,7 +40,7 @@ impl<'a> SyscallHandler<'a> {
         match level {
             SOL_SOCKET => match optname {
                 SO_REUSEADDR | SO_KEEPALIVE | SO_PASSCRED | SO_RCVBUF | SO_SNDBUF
-                | SO_REUSEPORT => {
+                | SO_REUSEPORT | SO_RCVTIMEO | SO_SNDTIMEO => {
                     // Accept silently — these are stubs.
                     Ok(0)
                 }

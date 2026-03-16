@@ -22,7 +22,8 @@ fn create_file_at(
 
     let current = current_process();
     let opened_files = current.opened_files_no_irq();
-    let root_fs = current.root_fs().lock_no_irq();
+    let root_fs_arc = current.root_fs();
+    let root_fs = root_fs_arc.lock_no_irq();
     let parent_path = root_fs.lookup_path_at(&opened_files, cwd_or_fd, parent_dir, true)?;
     parent_path.inode.as_dir()?.create_file(name, mode)
 }
@@ -49,7 +50,8 @@ impl<'a> SyscallHandler<'a> {
         // holding the opened_files lock during path resolution to prevent
         // deadlocks (e.g., /proc/self/fd/N needs the fd table during lookup).
         let path_comp = {
-            let root_fs = current.root_fs().lock_no_irq();
+            let root_fs_arc = current.root_fs();
+            let root_fs = root_fs_arc.lock_no_irq();
             if path.is_absolute() || matches!(dirfd, CwdOrFd::AtCwd) {
                 root_fs.lookup_path(path, true)?
             } else {

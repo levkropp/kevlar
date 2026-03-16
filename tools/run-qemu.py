@@ -137,6 +137,8 @@ def main():
     parser.add_argument("--append-cmdline", action="append")
     parser.add_argument("--disk", help="VirtIO block device disk image file")
     parser.add_argument("--log-serial")
+    parser.add_argument("--batch", action="store_true",
+                        help="Use plain stdio serial (no monitor). Works with pipes.")
     parser.add_argument("--save-dump", metavar="FILE",
                         help="Intercept serial output and save any crash dump to FILE")
     parser.add_argument("--qemu")
@@ -201,6 +203,22 @@ def main():
     kernel_path = kernel_path_arg.replace('\\', '/') if platform.system() == "Windows" else kernel_path_arg
 
     argv = [qemu_bin] + qemu["args"] + ["-kernel", kernel_path]
+    if args.batch:
+        # Replace mon:stdio with plain stdio serial for non-interactive use.
+        argv = [a for a in argv if a not in ("mon:stdio",)]
+        # Remove the "-serial" before where "mon:stdio" was
+        new_argv = []
+        skip = False
+        for a in argv:
+            if a == "-serial":
+                skip = True
+                continue
+            if skip:
+                skip = False
+                continue
+            new_argv.append(a)
+        argv = new_argv
+        argv += ["-serial", "stdio", "-monitor", "none"]
     cmdline = []
     if not args.gui:
         argv += ["-nographic"]
@@ -218,13 +236,17 @@ def main():
     if args.append_cmdline:
         cmdline += args.append_cmdline
     if args.log_serial:
-        argv += ["-serial", args.log_serial]
-        cmdline += ["serial1=on"]
+        # Add a second serial port that writes to a file.
+        argv += ["-serial", f"file:{args.log_serial}"]
     if args.qemu_args:
         argv += args.qemu_args
 
     if cmdline:
         argv += ["-append", " ".join(cmdline)]
+
+    # Print exit hint for interactive sessions.
+    if sys.stdout.isatty():
+        print("\x1b[36mPress Ctrl-A X to exit QEMU\x1b[0m", file=sys.stderr)
 
     # Windows doesn't support preexec_fn with os.setsid
     is_windows = platform.system() == "Windows"
@@ -246,27 +268,36 @@ def main():
 
         def _intercept_stdout():
             nonlocal capturing, saved
-            for raw in p.stdout:
-                sys.stdout.buffer.write(raw)
+            line_buf = b""
+            while True:
+                chunk = p.stdout.read1(4096) if hasattr(p.stdout, 'read1') else p.stdout.read(1)
+                if not chunk:
+                    break
+                # Pass through immediately (unbuffered).
+                sys.stdout.buffer.write(chunk)
                 sys.stdout.buffer.flush()
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
-                    capturing = True
-                    dump_lines.clear()
-                elif line == "===KEVLAR_CRASH_DUMP_END===":
-                    capturing = False
-                    try:
-                        data = base64.b64decode("".join(dump_lines))
-                        with open(args.save_dump, "wb") as f:
-                            f.write(data)
-                        print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
-                              f"({len(data)} bytes)", file=sys.stderr)
-                        saved = True
-                    except Exception as e:
-                        print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
-                              file=sys.stderr)
-                elif capturing:
-                    dump_lines.append(line)
+                # Accumulate for crash dump detection.
+                line_buf += chunk
+                while b"\n" in line_buf:
+                    raw_line, line_buf = line_buf.split(b"\n", 1)
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                    if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
+                        capturing = True
+                        dump_lines.clear()
+                    elif line == "===KEVLAR_CRASH_DUMP_END===":
+                        capturing = False
+                        try:
+                            data = base64.b64decode("".join(dump_lines))
+                            with open(args.save_dump, "wb") as f:
+                                f.write(data)
+                            print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
+                                  f"({len(data)} bytes)", file=sys.stderr)
+                            saved = True
+                        except Exception as e:
+                            print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
+                                  file=sys.stderr)
+                    elif capturing:
+                        dump_lines.append(line)
 
         t = threading.Thread(target=_intercept_stdout, daemon=True)
         t.start()

@@ -204,6 +204,10 @@ pub static INITIAL_ROOT_FS: Once<Arc<SpinLock<RootFs>>> = Once::new();
 pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootInfo) -> ! {
     logger::init();
 
+    // Re-enable auto-wrap (SeaBIOS sends ESC[?7l which disables it).
+    // Without this, lines >80 chars corrupt terminal row tracking in
+    // Konsole, xterm, and other VT100 emulators.
+    kevlar_platform::print!("\x1b[?7h");
     info!("Booting Kevlar...");
     let mut profiler = StopWatch::start();
 
@@ -265,6 +269,10 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         &bootinfo.virtio_mmio_devices,
     );
     profiler.lap_time("drivers init");
+
+    // Populate sysfs with device entries now that drivers are initialized.
+    sysfs::populate();
+    profiler.lap_time("sysfs populate");
 
     // Connect to the network.
     net::init_and_start_dhcp_discover(bootinfo);

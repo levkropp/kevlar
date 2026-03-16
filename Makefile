@@ -205,7 +205,7 @@ build-crate:
 	$(MAKE) initramfs
 
 	$(PROGRESS) "CARGO" "kernel"
-	$(CARGO) build $(CARGOFLAGS) --manifest-path kernel/Cargo.toml
+	@time $(CARGO) build $(CARGOFLAGS) --manifest-path kernel/Cargo.toml
 
 .PHONY: initramfs
 initramfs: $(INITRAMFS_PATH)
@@ -225,6 +225,21 @@ iso: build
 .PHONY: run
 run: build
 	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH) --kvm                                           \
+		--save-dump kevlar.dump                                        \
+		--append-cmdline "init=/sbin/init"                             \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+# `make run-sh` — bare BusyBox shell (no OpenRC, no init)
+.PHONY: run-sh
+run-sh: build
+	$(PYTHON3) tools/run-qemu.py                                           \
 		--arch $(ARCH)                                                 \
 		--save-dump kevlar.dump                                        \
 		$(if $(GUI),--gui,)                                            \
@@ -236,9 +251,7 @@ run: build
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
-# Interactive milestone runners: `make run-alpine`, `make run-systemd`
-# These use KVM and pass the appropriate init= cmdline.
-
+# `make run-alpine` — Alpine boot with KVM (alias for `make run KVM=1`)
 .PHONY: run-alpine
 run-alpine: build
 	$(PYTHON3) tools/run-qemu.py                                           \
@@ -281,6 +294,31 @@ run-disk: build disk
 	$(PYTHON3) tools/run-qemu.py                                           \
 		--arch $(ARCH)                                                 \
 		--disk build/disk.img                                          \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(KVM),--kvm,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+.PHONY: alpine-disk
+alpine-disk: build/alpine-disk.img
+
+build/alpine-disk.img: testing/Dockerfile
+	$(PROGRESS) "MKDISK" build/alpine-disk.img
+	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+	$(DOCKER) build --target alpine_disk -t kevlar-alpine-disk -f testing/Dockerfile .
+	$(DOCKER) create --name kevlar-alpine-tmp kevlar-alpine-disk
+	$(DOCKER) cp kevlar-alpine-tmp:/alpine-disk.img build/alpine-disk.img
+	$(DOCKER) rm kevlar-alpine-tmp
+
+.PHONY: run-apk
+run-apk: build alpine-disk
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH)                                                 \
+		--disk build/alpine-disk.img                                   \
 		$(if $(GUI),--gui,)                                            \
 		$(if $(KVM),--kvm,)                                            \
 		$(if $(GDB),--gdb,)                                            \
@@ -591,6 +629,51 @@ test-m9:
 	echo "$$PASS/$$((PASS+FAIL)) passed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi
 
+# ─── BusyBox Comprehensive Test Suite ────────────────────────────────────────
+
+.PHONY: test-busybox
+test-busybox:
+	$(PROGRESS) "TEST" "BusyBox applet suite (102 tests)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-busybox-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
+		/tmp/kevlar-test-busybox-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-busybox-$(PROFILE).log; then \
+		echo "BUSYBOX TESTS: some failures"; \
+		grep -c '^TEST_PASS' /tmp/kevlar-test-busybox-$(PROFILE).log || true; \
+		grep -c '^TEST_FAIL' /tmp/kevlar-test-busybox-$(PROFILE).log || true; \
+		exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-busybox-$(PROFILE).log; then \
+		echo "ALL BUSYBOX TESTS PASSED"; \
+	fi
+
+.PHONY: test-busybox-smp
+test-busybox-smp:
+	$(PROGRESS) "TEST" "BusyBox applet suite (4 CPUs)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-busybox-smp-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
+		/tmp/kevlar-test-busybox-smp-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-busybox-smp-$(PROFILE).log; then \
+		echo "BUSYBOX SMP TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-busybox-smp-$(PROFILE).log; then \
+		echo "ALL BUSYBOX SMP TESTS PASSED"; \
+	fi
+
+# Workload benchmarks: BusyBox applet execution patterns under KVM
+.PHONY: bench-workloads
+bench-workloads:
+	$(PROGRESS) "BENCH" "workload benchmarks (KVM)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full exec_true,shell_noop,pipe_grep,file_tree,sed_pipeline,sort_uniq,tar_extract"
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-bench-workloads-$(PROFILE).log; true
+	@grep '^BENCH ' /tmp/kevlar-bench-workloads-$(PROFILE).log || echo "(no BENCH output found)"
+
 # ─── M6.5 Contract Tests ────────────────────────────────────────────────────
 
 .PHONY: build-contracts
@@ -763,7 +846,7 @@ build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcar
 ifeq ($(OS),Windows_NT)
 	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"
 else
-	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile .
+	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile . 2>&1 | $(PYTHON3) tools/docker-progress.py
 endif
 	$(PROGRESS) "EXPORT" testing
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"

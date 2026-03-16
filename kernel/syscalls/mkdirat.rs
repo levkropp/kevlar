@@ -9,7 +9,8 @@ use crate::{process::current_process, syscalls::SyscallHandler};
 impl<'a> SyscallHandler<'a> {
     pub fn sys_mkdirat(&mut self, dirfd: CwdOrFd, path: &Path, mode: FileMode) -> Result<isize> {
         let current = current_process();
-        let root_fs = current.root_fs().lock();
+        let root_fs_arc = current.root_fs();
+        let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
 
         let (parent_path, name) = root_fs.lookup_parent_path_at(

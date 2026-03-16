@@ -49,6 +49,12 @@ impl SerialPort {
     }
 
     pub fn print_char(&self, ch: u8) {
+        // Filter control bytes that corrupt terminal state.
+        // NUL (0x00) and SI/SO (0x0e/0x0f) switch character sets in VT100
+        // terminals, making subsequent text invisible.
+        if ch == 0 || ch == 0x0e || ch == 0x0f {
+            return;
+        }
         if ch == b'\n' && option_env!("DISABLE_AUTO_CR_PRINT").is_none() {
             self.send_char(b'\r');
         }

@@ -16,7 +16,8 @@ impl<'a> SyscallHandler<'a> {
         flags: AtFlags,
     ) -> Result<isize> {
         let current = current_process();
-        let root_fs = current.root_fs().lock();
+        let root_fs_arc = current.root_fs();
+        let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
         let src = root_fs.lookup_path_at(
             &opened_files,

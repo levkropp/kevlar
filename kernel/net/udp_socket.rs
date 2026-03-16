@@ -94,6 +94,7 @@ impl FileLike for UdpSocket {
     ) -> Result<(usize, SockAddr)> {
         let mut writer = UserBufWriter::from(buf);
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
+            process_packets();
             let mut sockets = SOCKETS.lock();
             let socket = sockets.get_mut::<udp::Socket>(self.handle);
             match socket.recv() {
@@ -112,6 +113,7 @@ impl FileLike for UdpSocket {
     }
 
     fn poll(&self) -> Result<PollStatus> {
+        process_packets();
         let sockets = SOCKETS.lock();
         let socket: &udp::Socket = sockets.get(self.handle);
 

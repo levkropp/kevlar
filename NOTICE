@@ -1,13 +1,23 @@
 Kevlar Kernel
-Copyright 2026 Kevlar Contributors
+Copyright 2026 Lev Kropp
 Licensed under MIT OR Apache-2.0 OR BSD-2-Clause
 
-This product includes software originally developed by:
+This product is a derivative work of the following software:
+
+- Kerla (Copyright 2021 Seiya Nuta and The Kerla Authors, MIT OR Apache-2.0)
+  https://github.com/nuta/kerla
+  Monolithic kernel written in Rust; original codebase from which Kevlar was
+  forked. Kevlar has since been substantially rewritten and extended, but
+  retains Kerla-derived code throughout the kernel, platform, and library
+  crates. Per the sublicensing rights granted under the MIT license, these
+  portions are redistributed under Kevlar's tri-license (MIT OR Apache-2.0 OR
+  BSD-2-Clause). The original Kerla copyright is retained in LICENSE.md.
 
 - boot2dump (Copyright 2021 Seiya Nuta, MIT OR Apache-2.0)
   https://github.com/nuta/boot2dump
-  Crash dump utility - used as-is, not rewritten
+  Crash dump utility - used as-is in the boot2dump/ directory, not rewritten.
+  See boot2dump/LICENSE.md for its standalone license.
 
 - smoltcp (Copyright whitequark, 0-clause BSD)
   https://github.com/smoltcp-rs/smoltcp
-  TCP/IP networking library
+  TCP/IP networking library, used as a Cargo dependency.

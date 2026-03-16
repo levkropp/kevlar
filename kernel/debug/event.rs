@@ -135,6 +135,26 @@ pub enum DebugEvent<'a> {
         total_calls: u64,       // total calls since trace enabled
         entries: &'a [(usize, usize, usize, usize)], // (dst, src, len, ret_addr)
     },
+    /// Comprehensive crash report emitted when a process is killed by a signal.
+    /// Includes per-process syscall trace, VMA map, and register state.
+    CrashReport {
+        pid: i32,
+        signal: i32,
+        signal_name: &'a str,
+        cmdline: &'a str,
+        fault_addr: usize,
+        ip: usize,
+        fsbase: usize,
+        rax: u64, rbx: u64, rcx: u64, rdx: u64,
+        rsi: u64, rdi: u64, rbp: u64, rsp: u64,
+        r8: u64, r9: u64, r10: u64, r11: u64,
+        r12: u64, r13: u64, r14: u64, r15: u64,
+        rflags: u64,
+        /// Recent syscalls: (nr, result, arg0, arg1).
+        syscalls: &'a [(u16, i32, u32, u32)],
+        /// VM areas: (start, end, type_str).
+        vmas: &'a [(usize, usize, &'a str)],
+    },
 }
 
 impl<'a> DebugEvent<'a> {
@@ -275,6 +295,63 @@ impl<'a> DebugEvent<'a> {
                     write!(w,
                         r#"{{"dst":{:#x},"src":{:#x},"len":{},"ret":{:#x}}}"#,
                         dst, src, len, ret_addr
+                    )?;
+                }
+                w.write_str("]}")?;
+            }
+            DebugEvent::CrashReport {
+                pid, signal, signal_name, cmdline, fault_addr, ip, fsbase,
+                rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp,
+                r8, r9, r10, r11, r12, r13, r14, r15, rflags,
+                syscalls, vmas,
+            } => {
+                write!(w,
+                    r#"{{"type":"crash_report","pid":{},"signal":{},"signal_name":"{}","cmdline":""#,
+                    pid, signal, signal_name
+                )?;
+                // Escape cmdline for JSON.
+                for ch in cmdline.chars() {
+                    match ch {
+                        '"' => w.write_str("\\\"")?,
+                        '\\' => w.write_str("\\\\")?,
+                        '\n' => w.write_str("\\n")?,
+                        '\r' => w.write_str("\\r")?,
+                        c => w.write_char(c)?,
+                    }
+                }
+                write!(w,
+                    r#"","fault_addr":{:#x},"ip":{:#x},"fsbase":{:#x},"regs":{{"#,
+                    fault_addr, ip, fsbase
+                )?;
+                write!(w,
+                    r#""rax":{:#x},"rbx":{:#x},"rcx":{:#x},"rdx":{:#x},"rsi":{:#x},"rdi":{:#x},"rbp":{:#x},"rsp":{:#x}"#,
+                    rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp
+                )?;
+                write!(w,
+                    r#","r8":{:#x},"r9":{:#x},"r10":{:#x},"r11":{:#x},"r12":{:#x},"r13":{:#x},"r14":{:#x},"r15":{:#x},"rflags":{:#x}}}"#,
+                    r8, r9, r10, r11, r12, r13, r14, r15, rflags
+                )?;
+                // Syscall trace array.
+                w.write_str(r#","syscalls":["#)?;
+                for (i, (nr, result, a0, a1)) in syscalls.iter().enumerate() {
+                    if i > 0 {
+                        w.write_char(',')?;
+                    }
+                    let name = crate::syscalls::syscall_name_by_number(*nr as usize);
+                    write!(w,
+                        r#"{{"nr":{},"name":"{}","result":{},"a0":{:#x},"a1":{:#x}}}"#,
+                        nr, name, result, a0, a1
+                    )?;
+                }
+                // VMA array.
+                w.write_str(r#"],"vmas":["#)?;
+                for (i, (start, end, type_str)) in vmas.iter().enumerate() {
+                    if i > 0 {
+                        w.write_char(',')?;
+                    }
+                    write!(w,
+                        r#"{{"start":{:#x},"end":{:#x},"type":"{}"}}"#,
+                        start, end, type_str
                     )?;
                 }
                 w.write_str("]}")?;

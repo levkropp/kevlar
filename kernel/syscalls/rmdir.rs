@@ -11,7 +11,8 @@ impl<'a> SyscallHandler<'a> {
             .parent_and_basename()
             .ok_or_else::<Error, _>(|| Errno::ENOENT.into())?;
 
-        let root_fs = current_process().root_fs().lock();
+        let root_fs_arc = current_process().root_fs();
+        let root_fs = root_fs_arc.lock();
         let parent_dir = root_fs.lookup_dir(parent)?;
         parent_dir.rmdir(name)?;
         Ok(0)

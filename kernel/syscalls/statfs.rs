@@ -70,16 +70,16 @@ impl StatfsBuf {
     fn ext2() -> StatfsBuf {
         StatfsBuf {
             f_type: EXT2_SUPER_MAGIC,
-            f_bsize: 1024,
+            f_bsize: 4096,
             f_blocks: 16384,
-            f_bfree: 0,
-            f_bavail: 0,
-            f_files: 4096,
-            f_ffree: 0,
+            f_bfree: 8192,
+            f_bavail: 8192,
+            f_files: 16384,
+            f_ffree: 8192,
             f_fsid: [0, 0],
             f_namelen: 255,
-            f_frsize: 1024,
-            f_flags: 1, // ST_RDONLY
+            f_frsize: 4096,
+            f_flags: 0,
             f_spare: [0; 4],
         }
     }
@@ -97,7 +97,7 @@ impl StatfsBuf {
             Some("proc") => StatfsBuf::procfs(),
             Some("sysfs") => StatfsBuf::sysfs(),
             Some("cgroup2") | Some("cgroup") => StatfsBuf::cgroup2(),
-            Some("ext2") => StatfsBuf::ext2(),
+            Some("ext2") | Some("ext3") | Some("ext4") => StatfsBuf::ext2(),
             _ => StatfsBuf::tmpfs(),
         }
     }
@@ -111,10 +111,10 @@ impl<'a> SyscallHandler<'a> {
     }
 
     pub fn sys_fstatfs(&mut self, fd: Fd, buf: UserVAddr) -> Result<isize> {
-        // Validate the fd exists.
-        let _opened_file = current_process().get_opened_file_by_fd(fd)?;
-        // All our filesystems are tmpfs for now.
-        let sfs = StatfsBuf::tmpfs();
+        let opened_file = current_process().get_opened_file_by_fd(fd)?;
+        // Determine filesystem type from the file's path.
+        let path = opened_file.path().resolve_absolute_path();
+        let sfs = StatfsBuf::for_path(&path);
         buf.write(&sfs)?;
         Ok(0)
     }

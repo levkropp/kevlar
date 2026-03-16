@@ -26,12 +26,14 @@ impl<'a> SyscallHandler<'a> {
             match &dirfd {
                 CwdOrFd::Fd(fd) => current.get_opened_file_by_fd(*fd)?.inode().stat()?,
                 CwdOrFd::AtCwd => {
-                    let root_fs = current.root_fs().lock_no_irq();
+                    let root_fs_arc = current.root_fs();
+                    let root_fs = root_fs_arc.lock_no_irq();
                     root_fs.lookup(Path::new("/"))?.stat()?
                 }
             }
         } else {
-            let root_fs = current.root_fs().lock_no_irq();
+            let root_fs_arc = current.root_fs();
+            let root_fs = root_fs_arc.lock_no_irq();
             let opened_files = current.opened_files_no_irq();
             let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, follow_symlink)?;
             path_comp.inode.stat()?

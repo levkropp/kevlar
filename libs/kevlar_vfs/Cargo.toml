@@ -2,6 +2,7 @@
 name = "kevlar_vfs"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0 OR BSD-2-Clause"
 description = "VFS trait definitions and shared types for the Kevlar kernel."
 
 [dependencies]

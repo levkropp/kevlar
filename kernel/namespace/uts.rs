@@ -14,9 +14,11 @@ pub struct UtsNamespace {
 
 impl UtsNamespace {
     pub fn new() -> UtsNamespace {
+        let mut hostname = [0u8; 65];
+        hostname[..6].copy_from_slice(b"kevlar");
         UtsNamespace {
-            hostname: SpinLock::new([0u8; 65]),
-            hostname_len: AtomicUsize::new(0),
+            hostname: SpinLock::new(hostname),
+            hostname_len: AtomicUsize::new(6),
             domainname: SpinLock::new([0u8; 65]),
             domainname_len: AtomicUsize::new(0),
         }

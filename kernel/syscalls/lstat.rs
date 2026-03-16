@@ -6,8 +6,8 @@ use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_lstat(&mut self, path: &Path, buf: UserVAddr) -> Result<isize> {
-        let stat = current_process()
-            .root_fs()
+        let root_fs = current_process().root_fs();
+        let stat = root_fs
             .lock_no_irq()
             .lookup_no_symlink_follow(path)?
             .stat()?;

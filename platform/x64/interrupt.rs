@@ -238,7 +238,18 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             // Hot path: user-mode page fault → demand paging.
             // Check the common case (CAUSED_BY_USER) first with a single branch.
             if reason.contains(PageFaultReason::CAUSED_BY_USER) {
-                let unaligned_vaddr = UserVAddr::new(cr2());
+                let fault_addr = cr2();
+                // Stash registers for crash diagnostics. This is ~20 relaxed
+                // atomic stores (~10ns) — negligible on 2900ns page faults.
+                let cpu = super::cpu_id() as usize;
+                crate::crash_regs::stash(cpu, &[
+                    frame.rax, frame.rbx, frame.rcx, frame.rdx,
+                    frame.rsi, frame.rdi, frame.rbp, frame.rsp,
+                    frame.r8,  frame.r9,  frame.r10, frame.r11,
+                    frame.r12, frame.r13, frame.r14, frame.r15,
+                    frame.rip, frame.rflags, fault_addr as u64,
+                ]);
+                let unaligned_vaddr = UserVAddr::new(fault_addr);
                 handler().handle_page_fault(unaligned_vaddr, frame.rip as usize, reason);
             } else {
                 // Cold path: kernel fault or usercopy fault.
