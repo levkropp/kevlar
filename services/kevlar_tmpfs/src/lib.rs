@@ -39,22 +39,15 @@ fn alloc_inode_no() -> INodeNo {
     INodeNo::new(NEXT_INODE_NO.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Allocate a unique filesystem device ID.
-/// Each filesystem instance gets a unique ID to prevent inode number
-/// collisions in the mount point table.
-pub fn alloc_dev_id() -> usize {
-    static NEXT_DEV_ID: AtomicUsize = AtomicUsize::new(1);
-    NEXT_DEV_ID.fetch_add(1, Ordering::Relaxed)
-}
-
 pub struct TmpFs {
     root_dir: Arc<Dir>,
+    #[allow(dead_code)]
     dev_id: usize,
 }
 
 impl TmpFs {
     pub fn new() -> TmpFs {
-        let dev_id = alloc_dev_id();
+        let dev_id = kevlar_vfs::inode::alloc_dev_id();
         TmpFs {
             root_dir: Arc::new(Dir::new(INodeNo::new(1), dev_id)),
             dev_id,
@@ -387,7 +380,16 @@ impl FileLike for File {
     ) -> Result<usize> {
         let mut data = self.data.lock_no_irq();
         let mut reader = UserBufReader::from(buf);
-        data.resize(offset + reader.remaining_len(), 0);
+        let new_len = offset + reader.remaining_len();
+        if new_len > data.len() {
+            // Use exact capacity to avoid Vec's doubling strategy which
+            // can exceed the kernel heap chunk size limit.
+            let cap = data.capacity();
+            if new_len > cap {
+                data.reserve_exact(new_len - cap);
+            }
+            data.resize(new_len, 0);
+        }
         reader.read_bytes(&mut data[offset..])
     }
 
