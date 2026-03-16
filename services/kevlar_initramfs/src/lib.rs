@@ -91,6 +91,7 @@ enum InitramFsINode {
 
 struct InitramFsDir {
     filename: &'static str,
+    dev_id: usize,
     stat: Stat,
     files: HashMap<&'static str, InitramFsINode>,
 }
@@ -98,6 +99,10 @@ struct InitramFsDir {
 impl Directory for InitramFsDir {
     fn stat(&self) -> Result<Stat> {
         Ok(self.stat)
+    }
+
+    fn dev_id(&self) -> usize {
+        self.dev_id
     }
 
     fn link(&self, _name: &str, _link_to: &INode) -> Result<()> {
@@ -192,10 +197,13 @@ impl fmt::Debug for InitramFsSymlink {
 
 pub struct InitramFs {
     root_dir: Arc<InitramFsDir>,
+    #[allow(dead_code)]
+    dev_id: usize,
 }
 
 impl InitramFs {
     pub fn new(fs_image: &'static [u8]) -> InitramFs {
+        let dev_id = kevlar_vfs::inode::alloc_dev_id();
         let mut image = BytesParser::new(fs_image);
         let mut root_files = HashMap::new();
         let mut num_files = 0;
@@ -294,6 +302,7 @@ impl InitramFs {
                     filename,
                     InitramFsINode::Directory(Arc::new(InitramFsDir {
                         filename,
+                        dev_id,
                         files: HashMap::new(),
                         stat: Stat {
                             inode_no: INodeNo::new(ino),
@@ -333,6 +342,7 @@ impl InitramFs {
         InitramFs {
             root_dir: Arc::new(InitramFsDir {
                 filename: "",
+                dev_id,
                 stat: Stat {
                     inode_no: INodeNo::new(2),
                     mode: FileMode::new(S_IFDIR | 0o755),
@@ -340,6 +350,7 @@ impl InitramFs {
                 },
                 files: root_files,
             }),
+            dev_id,
         }
     }
 }

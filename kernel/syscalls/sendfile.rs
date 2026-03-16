@@ -36,6 +36,7 @@ impl<'a> SyscallHandler<'a> {
 
         let mut total = 0usize;
         let mut buf = [0u8; 4096];
+        let mut out_offset = out_file.pos();
 
         while total < count {
             let chunk = min(count - total, buf.len());
@@ -46,7 +47,7 @@ impl<'a> SyscallHandler<'a> {
 
             let mut written = 0;
             while written < n {
-                let w = out_filelike.write(0, UserBuffer::from(&buf[written..n]), &out_options)?;
+                let w = out_filelike.write(out_offset + written, UserBuffer::from(&buf[written..n]), &out_options)?;
                 if w == 0 {
                     break;
                 }
@@ -54,13 +55,15 @@ impl<'a> SyscallHandler<'a> {
             }
 
             offset += n;
+            out_offset += written;
             total += written;
             if written < n {
                 break;
             }
         }
 
-        // Update offset: write back to pointer or advance file position.
+        // Update positions.
+        out_file.set_pos(out_offset);
         if let Some(ptr) = offset_ptr {
             ptr.write::<i64>(&(offset as i64))?;
         } else {
