@@ -30,11 +30,12 @@
 #include <time.h>
 #include <unistd.h>
 
-/* statx — define manually for musl compatibility. */
+/* statx — define manually for older musl that lacks it. */
 #ifndef __NR_statx
 #define __NR_statx 332
 #endif
 
+#ifndef STATX_BASIC_STATS
 struct statx_timestamp { int64_t tv_sec; uint32_t tv_nsec; int32_t _pad; };
 struct statx {
     uint32_t stx_mask;
@@ -56,10 +57,11 @@ struct statx {
     uint32_t stx_dio_mem_align, stx_dio_offset_align;
     uint64_t _spare3[12];
 };
+#define STATX_BASIC_STATS 0x000007ffU
+#endif
 
 #define EXT2_SUPER_MAGIC  0xEF53L
 #define TMPFS_MAGIC       0x01021994L
-#define STATX_BASIC_STATS 0x000007ffU
 
 static int pass_count = 0;
 static int fail_count = 0;

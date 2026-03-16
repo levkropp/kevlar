@@ -11,20 +11,33 @@ fully permissively licensed.
 
 ## Current Status
 
-**M5 Phase 4 complete.** 107+ syscalls implemented. The following work:
+**M10 (Alpine text-mode boot) in progress.** 141 syscall modules, 121+ dispatch
+entries. What works today:
 
-- Static and dynamic (PIE) musl-linked binaries
+- glibc and musl dynamically-linked binaries (PIE)
 - BusyBox interactive shell on x86\_64 and ARM64
-- TCP/UDP networking via virtio-net (smoltcp 0.12)
+- Alpine Linux boots with OpenRC init and getty login
+- ext2 read-write filesystem on VirtIO block
+- TCP/UDP/ICMP networking via virtio-net (smoltcp 0.12)
 - Unix domain sockets with SCM\_RIGHTS
-- Full POSIX signal semantics (SA\_SIGINFO, sigaltstack, sigprocmask)
-- Job control and terminal management (SIGTSTP, SIGCONT, tcsetpgrp)
+- SMP: per-CPU scheduling, work stealing, TLB shootdown, clone threads
+- Full POSIX signals (SA\_SIGINFO, sigaltstack, lock-free sigprocmask)
 - epoll, eventfd, inotify, timerfd, signalfd
-- Mount namespace (bind mounts, pivot\_root)
-- procfs and devfs (including /proc/[pid]/maps, /proc/[pid]/fd/, /proc/cpuinfo)
-- Process capabilities and prctl
-- vDSO for fast clock\_gettime (10 ns, 2× faster than Linux KVM)
-- KVM-accelerated performance matching or exceeding Linux for many syscalls
+- cgroups v2 (pids controller), UTS/mount/PID namespaces
+- procfs, sysfs, devfs
+- vDSO clock\_gettime (~10 ns, 2x faster than Linux KVM)
+- 4 compile-time safety profiles (Fortress to Ludicrous)
+
+### Milestones
+
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| M1–M6 | **Complete** | Static/dynamic binaries, terminal, job control, epoll, unix sockets, SMP threading, ext2, benchmarks |
+| M7: /proc + glibc | **Complete** | Full /proc, glibc compatibility, futex ops |
+| M8: cgroups + namespaces | **Complete** | cgroups v2, UTS/mount/PID namespaces, pivot\_root |
+| M9: Init system | **Complete** | Syscall gaps, init sequence, OpenRC boots |
+| M10: Alpine text-mode | **In Progress** | getty login, ext2 rw, networking, APK |
+| M11: Alpine graphical | Planned | Framebuffer, Wayland |
 
 ## Architecture
 
@@ -34,10 +47,11 @@ containment at ring boundaries. See [The Ringkernel Architecture](architecture/r
 
 ## Vision
 
-Kevlar's goal is to run the Linux ecosystem — including Wine and complex desktop
-applications — on a permissively licensed, memory-safe kernel. It occupies a unique
-niche: a true Linux-ABI kernel (not a compatibility shim), built on clean
-MIT/Apache-2.0/BSD-2-Clause Rust foundations.
+Kevlar's goal is to become a permissively-licensed drop-in Linux kernel replacement
+that runs modern distributions (targeting Kubuntu 24.04) with performance and
+security matching or exceeding Linux. It occupies a unique niche: a true Linux-ABI
+kernel (not a compatibility shim), built on clean MIT/Apache-2.0/BSD-2-Clause Rust
+foundations.
 
 ## Links
 

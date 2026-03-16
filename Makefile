@@ -240,10 +240,9 @@ run: build
 .PHONY: run-sh
 run-sh: build
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH)                                                 \
+		--arch $(ARCH) --kvm                                           \
 		--save-dump kevlar.dump                                        \
 		$(if $(GUI),--gui,)                                            \
-		$(if $(KVM),--kvm,)                                            \
 		$(if $(GDB),--gdb,)                                            \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
@@ -281,21 +280,33 @@ run-systemd: build
 .PHONY: disk
 disk: build/disk.img
 
-build/disk.img: testing/Dockerfile testing/disk_hello.c
+build/disk.img: testing/disk_hello.c
 	$(PROGRESS) "MKDISK" build/disk.img
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+ifdef USE_DOCKER
 	$(DOCKER) build --target disk_image -t kevlar-disk-image -f testing/Dockerfile .
 	$(DOCKER) create --name kevlar-disk-tmp kevlar-disk-image
 	$(DOCKER) cp kevlar-disk-tmp:/disk.img build/disk.img
 	$(DOCKER) rm kevlar-disk-tmp
+else
+	musl-gcc -static -O2 -o build/disk_hello testing/disk_hello.c
+	mkdir -p build/disk_root/subdir
+	cp build/disk_hello build/disk_root/hello
+	printf 'hello from ext2\n' > build/disk_root/greeting.txt
+	printf 'nested file\n' > build/disk_root/subdir/nested.txt
+	ln -sf greeting.txt build/disk_root/link.txt
+	chmod +x build/disk_root/hello
+	dd if=/dev/zero of=build/disk.img bs=1M count=16 2>/dev/null
+	mke2fs -t ext2 -d build/disk_root build/disk.img
+	rm -rf build/disk_root build/disk_hello
+endif
 
 .PHONY: run-disk
 run-disk: build disk
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH)                                                 \
+		--arch $(ARCH) --kvm                                           \
 		--disk build/disk.img                                          \
 		$(if $(GUI),--gui,)                                            \
-		$(if $(KVM),--kvm,)                                            \
 		$(if $(GDB),--gdb,)                                            \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
@@ -306,21 +317,24 @@ run-disk: build disk
 .PHONY: alpine-disk
 alpine-disk: build/alpine-disk.img
 
-build/alpine-disk.img: testing/Dockerfile
+build/alpine-disk.img:
 	$(PROGRESS) "MKDISK" build/alpine-disk.img
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+ifdef USE_DOCKER
 	$(DOCKER) build --target alpine_disk -t kevlar-alpine-disk -f testing/Dockerfile .
 	$(DOCKER) create --name kevlar-alpine-tmp kevlar-alpine-disk
 	$(DOCKER) cp kevlar-alpine-tmp:/alpine-disk.img build/alpine-disk.img
 	$(DOCKER) rm kevlar-alpine-tmp
+else
+	$(PYTHON3) tools/build-alpine-disk.py build/alpine-disk.img
+endif
 
 .PHONY: run-apk
 run-apk: build alpine-disk
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH)                                                 \
+		--arch $(ARCH) --kvm                                           \
 		--disk build/alpine-disk.img                                   \
 		$(if $(GUI),--gui,)                                            \
-		$(if $(KVM),--kvm,)                                            \
 		$(if $(GDB),--gdb,)                                            \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
@@ -333,9 +347,8 @@ test-alpine: alpine-disk
 	$(PROGRESS) "TEST" "Alpine integration suite (7 layers)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine"
 	timeout 180 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/alpine-disk.img \
-		$(if $(KVM),--kvm,) \
-		$(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) --disk build/alpine-disk.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-alpine-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|SKIP|LAYER|test_alpine:)' \
 		/tmp/kevlar-test-alpine-$(PROFILE).log || echo "(no output)"
@@ -413,7 +426,7 @@ test-integration: disk
 	$(PROGRESS) "TEST" "syscall correctness tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-$(PROFILE).log || echo "(no TEST output found)"
 	@if grep -q '^FAIL' /tmp/kevlar-test-$(PROFILE).log; then \
@@ -430,7 +443,7 @@ test-ext2: disk
 	$(PROGRESS) "TEST" "ext2 filesystem tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-ext2-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-ext2-$(PROFILE).log || echo "(no TEST output found)"
 	@if grep -q '^FAIL' /tmp/kevlar-test-ext2-$(PROFILE).log; then \
@@ -444,7 +457,7 @@ test-storage: build/disk.img
 	$(PROGRESS) "TEST" "M5 storage integration tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-storage"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-storage-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
 		/tmp/kevlar-test-storage-$(PROFILE).log || echo "(no TEST output found)"
@@ -459,7 +472,7 @@ test-threads:
 	$(PROGRESS) "TEST" "M6 threading (1 CPU)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-threads-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-threads-$(PROFILE).log || echo "(no TEST output found)"
@@ -474,7 +487,7 @@ test-threads-smp:
 	$(PROGRESS) "TEST" "M6 threading (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-threads-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-threads-smp-$(PROFILE).log || echo "(no TEST output found)"
@@ -489,7 +502,7 @@ test-smp:
 	$(PROGRESS) "TEST" "M6 SMP boot (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE)
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-smp-$(PROFILE).log; true
 	@grep -E 'CPU \(LAPIC|smp:|online' /tmp/kevlar-test-smp-$(PROFILE).log || echo "(no SMP output found)"
 
@@ -499,7 +512,7 @@ test-regression-smp:
 	$(PROGRESS) "TEST" "M6 Phase 5 regression: mini_systemd on 4 CPUs"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-regression-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-regression-smp-$(PROFILE).log || echo "(no TEST output found)"
@@ -524,7 +537,7 @@ test-glibc-hello:
 	$(PROGRESS) "TEST" "M7 glibc hello world"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/hello-glibc"
 	timeout 60 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-glibc-hello.log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|hello from glibc)' \
 		/tmp/kevlar-test-glibc-hello.log || echo "(no TEST output found)"
@@ -539,7 +552,7 @@ test-glibc-threads:
 	$(PROGRESS) "TEST" "M7 glibc pthreads (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads-glibc"
 	timeout 180 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-glibc-threads.log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-glibc-threads.log || echo "(no TEST output found)"
@@ -564,7 +577,7 @@ test-cgroups-ns:
 	$(PROGRESS) "TEST" "M8 cgroups + namespaces (14 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-cgroups-ns"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-cgroups-ns-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-cgroups-ns-$(PROFILE).log || echo "(no TEST output found)"
@@ -579,8 +592,8 @@ test-systemd-boot:
 	$(PROGRESS) "TEST" "M9 systemd boot (real systemd PID 1)"
 	$(MAKE) build PROFILE=$(PROFILE)
 	timeout 60 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) \
-		-- -append "pci=off init=/usr/lib/systemd/systemd" 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) \
+		-- -mem-prealloc -append "pci=off init=/usr/lib/systemd/systemd" 2>&1 \
 		| tee /tmp/kevlar-test-systemd-boot.log; true
 	@grep -aE 'systemd|Reached|target|Started|Failed|exited' \
 		/tmp/kevlar-test-systemd-boot.log || echo "(no systemd output found)"
@@ -590,7 +603,7 @@ test-systemd-v3:
 	$(PROGRESS) "TEST" "M9 systemd init-sequence (25 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd-v3"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-systemd-v3-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
 		/tmp/kevlar-test-systemd-v3-$(PROFILE).log || echo "(no TEST output found)"
@@ -652,8 +665,8 @@ test-m9:
 test-busybox:
 	$(PROGRESS) "TEST" "BusyBox applet suite (102 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
-	timeout 600 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-busybox-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
 		/tmp/kevlar-test-busybox-$(PROFILE).log || echo "(no TEST output found)"
@@ -671,7 +684,7 @@ test-busybox-smp:
 	$(PROGRESS) "TEST" "BusyBox applet suite (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
 	timeout 300 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) -- -smp 4 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-busybox-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
 		/tmp/kevlar-test-busybox-smp-$(PROFILE).log || echo "(no TEST output found)"
@@ -690,6 +703,41 @@ bench-workloads:
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-workloads-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-workloads-$(PROFILE).log || echo "(no BENCH output found)"
+
+# dd diagnostic: find exact block size / count where dd hangs
+.PHONY: test-busybox-dd
+test-busybox-dd:
+	$(PROGRESS) "TEST" "dd diagnostic (KVM)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/dd-diag"
+	timeout 30 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-dd-diag.log; true
+	@grep -E '^\s+(OK|FAIL|HANG)|^Phase|^===' /tmp/kevlar-test-dd-diag.log || echo "(no output)"
+
+# BusyBox workload benchmarks: real BusyBox operations under KVM
+.PHONY: bench-busybox
+bench-busybox:
+	$(PROGRESS) "BENCH" "BusyBox workload benchmarks (KVM)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite --bench-only --full"
+	timeout 30 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-bench-busybox-kvm-$(PROFILE).log; true
+	@grep '^BENCH ' /tmp/kevlar-bench-busybox-kvm-$(PROFILE).log > /tmp/kevlar-bench-busybox-$(PROFILE).txt 2>/dev/null; \
+	 lines=$$(wc -l < /tmp/kevlar-bench-busybox-$(PROFILE).txt 2>/dev/null || echo 0); \
+	 if [ "$$lines" -gt 0 ]; then echo "Wrote $$lines benchmarks to /tmp/kevlar-bench-busybox-$(PROFILE).txt"; \
+	 else echo "(no BENCH output found)"; fi
+
+# Run BusyBox benchmarks on Linux for baseline comparison
+.PHONY: bench-busybox-linux
+bench-busybox-linux:
+	$(PROGRESS) "BENCH" "BusyBox workload benchmarks (Linux baseline)"
+	@mkdir -p build
+	gcc -static -O2 -o build/busybox-suite.linux testing/busybox_suite.c
+	build/busybox-suite.linux --bench-only --full 2>/dev/null | tee /tmp/linux-bench-busybox.log
+	@grep '^BENCH ' /tmp/linux-bench-busybox.log > /tmp/linux-bench-busybox.txt 2>/dev/null; \
+	 lines=$$(wc -l < /tmp/linux-bench-busybox.txt 2>/dev/null || echo 0); \
+	 if [ "$$lines" -gt 0 ]; then echo "Wrote $$lines benchmarks to /tmp/linux-bench-busybox.txt"; \
+	 else echo "(no BENCH output found)"; fi
 
 # ─── M6.5 Contract Tests ────────────────────────────────────────────────────
 
@@ -758,7 +806,7 @@ bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench"
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-$(PROFILE).log; true
 	@grep 'BENCH' /tmp/kevlar-bench-$(PROFILE).log || echo "(no BENCH output found)"
 
@@ -813,9 +861,8 @@ benchmark-quick:
 .PHONY: debug
 debug: build
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH)                                                 \
+		--arch $(ARCH) --kvm                                           \
 		$(if $(GUI),--gui,)                                            \
-		$(if $(KVM),--kvm,)                                            \
 		--gdb                                                          \
 		--log-serial "file:debug.jsonl"                                \
 		--append-cmdline "debug=all"                                   \
@@ -855,19 +902,37 @@ clean:
 	$(CARGO) clean
 	rm -rf *.elf *.iso *.bin *.symbols isofiles
 
+# Clean native initramfs build caches.
+.PHONY: clean-initramfs
+clean-initramfs:
+	rm -rf build/native-cache/local-bin build/native-cache/local-lib
+	rm -f build/testing.initramfs build/testing.arm64.initramfs
+
+# Clean all native caches including external packages (BusyBox, curl, etc.)
+.PHONY: clean-initramfs-all
+clean-initramfs-all:
+	rm -rf build/native-cache build/initramfs-rootfs
+	rm -f build/testing.initramfs build/testing.arm64.initramfs
+
 #
 #  Build Rules
 #
 build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard testing/*/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
-	$(PROGRESS) "BUILD" testing
 ifeq ($(OS),Windows_NT)
+	$(PROGRESS) "BUILD" testing
 	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"
-else
-	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile . 2>&1 | $(PYTHON3) tools/docker-progress.py
-endif
 	$(PROGRESS) "EXPORT" testing
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing
+else ifdef USE_DOCKER
+	$(PROGRESS) "BUILD" testing
+	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile . 2>&1 | $(PYTHON3) tools/docker-progress.py
+	$(PROGRESS) "EXPORT" testing
+	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing
+else
+	$(PYTHON3) tools/build-initramfs.py $@
+endif
 
 build/$(IMAGE_FILENAME).initramfs: tools/docker2initramfs.py Makefile
 	$(PROGRESS) "EXPORT" $(IMAGE)

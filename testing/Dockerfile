@@ -336,6 +336,8 @@ RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
     ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
 COPY testing/busybox_suite.c /busybox_suite.c
 RUN musl-gcc -static -O2 -o /busybox-suite /busybox_suite.c
+COPY testing/dd_diag.c /dd_diag.c
+RUN musl-gcc -static -O2 -o /dd-diag /dd_diag.c
 
 #
 #  Network diagnostic test binary (musl static)
@@ -420,6 +422,7 @@ COPY --from=mini_storage /mini-storage /bin/mini-storage
 COPY --from=mini_threads /mini-threads /bin/mini-threads
 COPY --from=mini_cgroups_ns /mini-cgroups-ns /bin/mini-cgroups-ns
 COPY --from=busybox_suite /busybox-suite /bin/busybox-suite
+COPY --from=busybox_suite /dd-diag /bin/dd-diag
 COPY --from=mini_systemd_v3 /mini-systemd-v3 /bin/mini-systemd-v3
 # systemd v245 binaries + glibc runtime
 COPY --from=systemd_build /systemd-root/usr/lib/systemd/ /usr/lib/systemd/
@@ -439,7 +442,7 @@ COPY --from=mini_threads_glibc /mini-threads-glibc /bin/mini-threads-glibc
 COPY --from=contracts /contracts/contract-* /bin/
 
 RUN ["/bin/busybox", "--install", "-s"]
-RUN mkdir -p /etc /dev /tmp /mnt /var/www/html /run /var/log/journal \
+RUN mkdir -p /etc /dev /proc /sys /tmp /mnt /var/www/html /run /var/log/journal \
     && ln -sf /run /var/run
 # OpenRC service manager (Alpine): binaries, libs, service scripts, runlevels
 COPY --from=openrc /sbin/openrc /sbin/openrc

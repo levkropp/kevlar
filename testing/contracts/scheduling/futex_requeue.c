@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 static int futex_op(uint32_t *uaddr, int op, uint32_t val,
