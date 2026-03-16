@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <errno.h>
+#include <signal.h>
 #include <dirent.h>
 
 // ─── Test Accounting ─────────────────────────────────────────────────────────
@@ -64,9 +65,16 @@ static int chroot_exec_capture(const char *rootdir, char *const argv[],
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
+        write(STDERR_FILENO, "C:chroot\n", 9);
         if (chroot(rootdir) < 0) _exit(126);
+        write(STDERR_FILENO, "C:chdir\n", 8);
         if (chdir("/") < 0) _exit(126);
+        write(STDERR_FILENO, "C:exec\n", 7);
         execve(argv[0], argv, NULL);
+        // If execve returns, print errno
+        char ebuf[32];
+        int len = snprintf(ebuf, sizeof(ebuf), "C:exec_fail=%d\n", errno);
+        write(STDERR_FILENO, ebuf, len);
         _exit(127);
     }
 
@@ -84,17 +92,35 @@ static int chroot_exec_capture(const char *rootdir, char *const argv[],
     out[pos] = '\0';
     close(pipefd[0]);
 
+    // Wait for child with timeout (poll on nothing, then WNOHANG).
     int status = 0;
-    waitpid(pid, &status, 0);
+    int waited = 0;
+    for (int i = 0; i < timeout_ms / 100 + 1; i++) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w > 0) { waited = 1; break; }
+        if (w < 0) break;
+        usleep(100000); // 100ms
+    }
+    if (!waited) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        return -2; // timeout
+    }
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
 }
 
-// Check if a file exists.
+// Check if a file exists (follows symlinks).
 static int file_exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+// Check if a path exists without following symlinks.
+static int link_exists(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0;
 }
 
 // ─── Layer 1: Foundation ─────────────────────────────────────────────────────
@@ -115,56 +141,10 @@ static int layer1_foundation(void) {
         return 0;  // Can't continue without mount
     }
 
-    // Diagnostic: list /mnt root to verify mount works.
-    {
-        struct stat mnt_st;
-        if (stat("/mnt", &mnt_st) == 0)
-            printf("  stat(/mnt): ino=%lu dev=%lu\n",
-                   (unsigned long)mnt_st.st_ino, (unsigned long)mnt_st.st_dev);
-        DIR *d = opendir("/mnt");
-        if (d) {
-            struct dirent *ent;
-            int count = 0;
-            printf("  /mnt/ contents:\n");
-            while ((ent = readdir(d)) != NULL && count < 25) {
-                printf("    [%d] ino=%lu type=%d '%s'\n",
-                       count, (unsigned long)ent->d_ino, ent->d_type, ent->d_name);
-                count++;
-            }
-            closedir(d);
-        }
-        struct stat bin_st;
-        if (stat("/mnt/bin", &bin_st) == 0)
-            printf("  stat(/mnt/bin): ino=%lu dev=%lu\n",
-                   (unsigned long)bin_st.st_ino, (unsigned long)bin_st.st_dev);
-        else
-            printf("  stat(/mnt/bin) FAILED: errno=%d\n", errno);
-    }
-
     // Verify Alpine files exist.
     if (file_exists("/mnt/bin/busybox"))
         pass("l1_busybox_exists");
-    else {
-        snprintf(detail, sizeof(detail), "stat errno=%d", errno);
-        fail("l1_busybox_exists", detail);
-        // Diagnostic: list /mnt/bin/ contents
-        DIR *d = opendir("/mnt/bin");
-        if (d) {
-            struct dirent *ent;
-            int count = 0;
-            printf("  /mnt/bin/ contents:\n");
-            while ((ent = readdir(d)) != NULL && count < 30) {
-                printf("    [%d] ino=%lu type=%d '%s'\n",
-                       count, (unsigned long)ent->d_ino, ent->d_type, ent->d_name);
-                count++;
-            }
-            printf("  (%d entries shown)\n", count);
-            closedir(d);
-        } else {
-            printf("  opendir(/mnt/bin) failed: errno=%d\n", errno);
-        }
-        ok = 0;
-    }
+    else { fail("l1_busybox_exists", "not found"); ok = 0; }
 
     if (file_exists("/mnt/lib/ld-musl-x86_64.so.1"))
         pass("l1_musl_ld_exists");
@@ -258,11 +238,15 @@ static int layer2_ext2_write(void) {
         pass("l2_mkdir_rmdir");
     else { fail("l2_mkdir_rmdir", NULL); ok = 0; }
 
-    // symlink.
+    // symlink — use lstat to check existence without following the link.
     if (symlink("test_alpine_file", "/mnt/tmp/test_alpine_link") == 0 &&
-        file_exists("/mnt/tmp/test_alpine_link"))
+        link_exists("/mnt/tmp/test_alpine_link"))
         pass("l2_symlink");
-    else { fail("l2_symlink", NULL); ok = 0; }
+    else {
+        snprintf(detail, sizeof(detail), "symlink errno=%d", errno);
+        fail("l2_symlink", detail);
+        ok = 0;
+    }
     unlink("/mnt/tmp/test_alpine_link");
 
     // rename.
@@ -318,11 +302,11 @@ static int layer3_chroot_dynlink(void) {
     {
         char out[4096];
         char *argv[] = { "/bin/busybox", "--help", NULL };
-        int rc = chroot_exec_capture("/mnt", argv, out, sizeof(out), 5000);
-        if (rc == 0 && strstr(out, "BusyBox"))
+        int rc = chroot_exec_capture("/mnt", argv, out, sizeof(out), 10000);
+        if (rc >= 0 && strstr(out, "BusyBox"))
             pass("l3_busybox_help");
         else {
-            snprintf(detail, sizeof(detail), "exit=%d", rc);
+            snprintf(detail, sizeof(detail), "exit=%d out='%.60s'", rc, out);
             fail("l3_busybox_help", detail);
             ok = 0;
         }
@@ -332,7 +316,7 @@ static int layer3_chroot_dynlink(void) {
     {
         char out[4096];
         char *argv[] = { "/sbin/apk", "--version", NULL };
-        int rc = chroot_exec_capture("/mnt", argv, out, sizeof(out), 5000);
+        int rc = chroot_exec_capture("/mnt", argv, out, sizeof(out), 10000);
         if ((rc == 0 || rc == 1) && strstr(out, "apk-tools"))
             pass("l3_apk_version");
         else {

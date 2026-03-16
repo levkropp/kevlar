@@ -13,6 +13,7 @@ kevlar/
 ├── libs/
 │   └── kevlar_vfs/  # Shared VFS types (#![forbid(unsafe_code)])
 └── services/
+    ├── kevlar_ext2/        # ext2 read-write filesystem (#![forbid(unsafe_code)])
     ├── kevlar_tmpfs/       # tmpfs (#![forbid(unsafe_code)])
     └── kevlar_initramfs/   # initramfs parser (#![forbid(unsafe_code)])
 ```
