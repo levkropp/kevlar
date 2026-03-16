@@ -31,9 +31,4 @@
 
 # Blog
 
-- [Reviving Kerla](blog/001-reviving-kerla.md)
-- [Syscall Roadmap](blog/002-syscall-roadmap.md)
-- [M1: BusyBox Boots](blog/003-milestone-1-busybox-boots.md)
-- [M1.5: ARM64](blog/004-milestone-1.5-arm64.md)
-- [M2: Dynamic Linking](blog/005-milestone-2-dynamic-linking.md)
-- [M3: Job Control](blog/006-milestone-3-job-control-and-terminal.md)
+- [Ringkernel Phase 1](blog/007-ringkernel-phase-1-platform-extraction.md)
