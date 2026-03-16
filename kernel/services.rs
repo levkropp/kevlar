@@ -9,10 +9,13 @@
 //! types (`Arc<SmoltcpNetworkStack>`) — the compiler monomorphizes and inlines
 //! all service calls, eliminating vtable dispatch. Panics crash the kernel.
 use alloc::sync::Arc;
-use kevlar_platform::capabilities::{self, Cap, NetAccess};
+use kevlar_platform::capabilities::{self, NetAccess};
 use kevlar_utils::once::Once;
 
+#[allow(unused_imports)]
 use crate::net::service::NetworkStackService;
+#[cfg(any(feature = "profile-fortress", feature = "profile-balanced"))]
+use kevlar_platform::capabilities::Cap;
 
 /// Call a service closure, catching panics under Fortress/Balanced profiles.
 ///

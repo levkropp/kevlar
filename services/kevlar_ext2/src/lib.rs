@@ -442,6 +442,7 @@ struct Ext2Inner {
     blocks_per_group: u32,
     first_data_block: u32,
     state: SpinLock<Ext2MutableState>,
+    dev_id: usize,
 }
 
 impl Ext2Inner {
@@ -1269,6 +1270,7 @@ impl Ext2Filesystem {
                     free_blocks_count,
                     free_inodes_count,
                 }),
+                dev_id: kevlar_vfs::inode::alloc_dev_id(),
             }),
         }))
     }
@@ -1434,6 +1436,10 @@ impl Directory for Ext2Dir {
 
     fn inode_no(&self) -> Result<INodeNo> {
         Ok(INodeNo::new(self.inode_num as usize))
+    }
+
+    fn dev_id(&self) -> usize {
+        self.fs.dev_id
     }
 
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {

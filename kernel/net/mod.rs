@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::deferred_job::DeferredJob;
+use crate::net::service::NetworkStackService as _;
 use crate::{
     poll::POLL_WAIT_QUEUE, process::WaitQueue, timer::read_monotonic_clock, timer::MonotonicClock,
 };

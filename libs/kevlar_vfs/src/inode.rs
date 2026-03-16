@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::fmt::{self, Debug};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::path::PathBuf;
 use crate::result::{Errno, Error, Result};
@@ -10,6 +11,14 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use bitflags::bitflags;
 use kevlar_utils::downcast::Downcastable;
+
+/// Allocate a unique filesystem device ID.
+/// Each filesystem instance should call this once to get a unique ID,
+/// preventing inode number collisions in the mount point table.
+pub fn alloc_dev_id() -> usize {
+    static NEXT_DEV_ID: AtomicUsize = AtomicUsize::new(1);
+    NEXT_DEV_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// The inode number.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
