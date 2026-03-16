@@ -154,7 +154,7 @@ usercopy2:
 memset_user:
     mov rcx, rdx
     cld
-usercopy3:
     mov al, sil
+usercopy3:
     rep stosb
     ret

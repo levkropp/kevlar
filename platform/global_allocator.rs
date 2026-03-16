@@ -9,7 +9,7 @@ use crate::arch::PAGE_SIZE;
 use crate::page_allocator::{alloc_pages, AllocPageFlags};
 
 const ORDER: usize = 32;
-const KERNEL_HEAP_CHUNK_SIZE: usize = 1024 * 1024; // 1MiB
+const KERNEL_HEAP_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MiB
 
 #[global_allocator]
 static ALLOCATOR: LockedHeapWithRescue<ORDER> = LockedHeapWithRescue::new(expand_kernel_heap);
