@@ -10,13 +10,13 @@ kernel with the fault isolation of a microkernel — without IPC overhead.
 ```
     ┌─────────────────────────────────────────────────────────┐
     │  Ring 2: Services  (safe Rust, panic-contained)         │
-    │  ┌──────┐ ┌──────┐ ┌──────┐ ┌────────┐ ┌───────────┐  │
-    │  │ tmpfs│ │procfs│ │ext4fs│ │smoltcp │ │virtio_net │  │
-    │  └──┬───┘ └──┬───┘ └──┬───┘ └───┬────┘ └─────┬─────┘  │
-    │     │        │        │         │             │         │
-    │  ═══╪════════╪════════╪═════════╪═════════════╪═════    │
+    │  ┌──────┐ ┌──────┐ ┌─────┐ ┌────────┐ ┌───────────┐   │
+    │  │ tmpfs│ │procfs│ │ ext2│ │smoltcp │ │virtio_net │   │
+    │  └──┬───┘ └──┬───┘ └──┬──┘ └───┬────┘ └─────┬─────┘   │
+    │     │        │        │        │             │          │
+    │  ═══╪════════╪════════╪════════╪═════════════╪═════     │
     │     │   catch_unwind boundary (panic containment)       │
-    │  ═══╪════════╪════════╪═════════╪═════════════╪═════    │
+    │  ═══╪════════╪════════╪════════╪═════════════╪═════     │
     │                                                         │
     │  Ring 1: Core  (safe Rust, trusted)                     │
     │  ┌────────┐ ┌──────────┐ ┌─────┐ ┌───────┐ ┌──────┐   │
@@ -29,7 +29,7 @@ kernel with the fault isolation of a microkernel — without IPC overhead.
     │                                                         │
     │  Ring 0: Platform  (unsafe Rust, minimal TCB)           │
     │  ┌──────┐ ┌──────┐ ┌────────┐ ┌─────┐ ┌──────────┐    │
-    │  │paging│ │ctxsw │ │usercopy│ │ IRQ │ │ boot/HW  │    │
+    │  │paging│ │ctxsw │ │usercopy│ │ SMP │ │ boot/HW  │    │
     │  └──────┘ └──────┘ └────────┘ └─────┘ └──────────┘    │
     └─────────────────────────────────────────────────────────┘
 ```
@@ -38,10 +38,11 @@ kernel with the fault isolation of a microkernel — without IPC overhead.
 
 ### 1. Unsafe code is confined to Ring 0
 
-Only the `kevlar_platform` crate may contain `unsafe` blocks. All other crates
-use `#![forbid(unsafe_code)]`. The platform crate exposes safe APIs that
-encapsulate all hardware interaction, page table manipulation, context switching,
-and user-kernel memory copying.
+Only the `kevlar_platform` crate may contain `unsafe` blocks. The kernel crate
+enforces `#![deny(unsafe_code)]` (with 7 annotated exceptions). All service crates
+use `#![forbid(unsafe_code)]`. The platform crate exposes safe APIs that encapsulate
+all hardware interaction, page table manipulation, context switching, and user-kernel
+memory copying.
 
 **Target: <10% of kernel code is unsafe.** The platform layer is kept thin so
 the unsafe surface area stays small and auditable.
@@ -53,40 +54,45 @@ fault isolation requires separate address spaces and IPC), Kevlar catches panics
 ring boundaries using `catch_unwind`:
 
 - **Ring 2 → Ring 1:** A panicking service (filesystem, driver, network stack)
-  has its panic caught by the Core. The Core logs the failure, drops the
-  service's state, and can restart it. Other services continue running.
+  has its panic caught by the Core. The Core logs the failure and returns `EIO`
+  to the caller. Other services continue running.
 
 - **Ring 1 → Ring 0:** A panicking Core module is caught by the Platform.
-  This is a more serious failure but can still be logged and potentially
-  recovered (e.g., reset the scheduler, reinitialize a subsystem).
+  This is a more serious failure but can still be logged and potentially recovered.
 
-This requires that code at ring boundaries is **unwind-safe**: it must not
-hold locks or leave shared state in an inconsistent state when unwinding.
-Ring boundaries use message-passing patterns (submit work, receive results)
-rather than shared mutable state.
+This requires `panic = "unwind"` mode (Fortress and Balanced profiles). Performance
+and Ludicrous profiles use `panic = "abort"` and skip `catch_unwind` for speed.
+
+```rust
+pub fn call_service<F, R>(service_name: &str, f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R> + UnwindSafe,
+{
+    match std::panic::catch_unwind(f) {
+        Ok(result) => result,
+        Err(panic_info) => {
+            log::error!("service '{}' panicked: {:?}", service_name, panic_info);
+            Err(Errno::EIO.into())
+        }
+    }
+}
+```
 
 ### 3. Capability-based access control
 
-Services don't get raw references to Core APIs. Instead, they receive
-**capability tokens** — unforgeable typed handles that grant specific
-permissions. A filesystem service receives a `PageAllocCap` (can allocate
-pages), `BlockDevCap` (can read/write blocks), and `InodeCap` (can register
-inodes) — but never a `PageTableCap` (can't manipulate page tables directly).
+Services receive **capability tokens** — unforgeable typed handles that grant specific
+permissions. A filesystem service receives a `PageAllocCap` (can allocate pages) and
+`BlockDevCap` (can read/write blocks) — but never a `PageTableCap`.
 
-Capabilities are zero-cost wrappers (newtypes around references) that are
-erased at compile time. No runtime overhead.
+The token implementation varies by safety profile:
+- **Fortress**: Runtime-validated nonce (unforgeable at runtime).
+- **Balanced**: Zero-cost newtype (type system proves authorization at compile time).
+- **Performance/Ludicrous**: Compiled away entirely.
 
 ```rust
-/// A capability to allocate physical page frames.
-/// Only the Core can mint these; Services receive them at registration.
-pub struct PageAllocCap<'a> {
-    allocator: &'a dyn FrameAllocator,
-}
-
-impl PageAllocCap<'_> {
-    pub fn alloc(&self, count: usize) -> Result<OwnedFrames> { ... }
-    pub fn alloc_zeroed(&self, count: usize) -> Result<OwnedFrames> { ... }
-    // No dealloc — frames are freed on drop via RAII
+pub struct Cap<T> {
+    nonce: u64,          // Fortress: validated at ring boundary
+    _marker: PhantomData<T>,
 }
 ```
 
@@ -107,281 +113,119 @@ the performance cost.
 |-----------------------|------------|-------------|-------------|--------------------------|
 | Address space         | Single     | Multiple    | Single      | **Single**               |
 | Isolation mechanism   | None       | HW (MMU)    | Type system (2 tiers) | **Type system (3 tiers)**|
-| Fault containment     | None       | Process     | None        | **catch_unwind at rings**|
+| Fault containment     | None       | Process     | None        | **catch\_unwind at rings**|
 | IPC overhead          | N/A        | High        | None        | **None**                 |
 | Driver restart        | No         | Yes         | No          | **Yes (Ring 2)**         |
 | TCB (% of code)       | 100%       | ~5%         | ~10-15%     | **<10% target**          |
-| Performance vs Linux  | Baseline   | -10-30%     | ~parity     | **~parity target**       |
+| Performance vs Linux  | Baseline   | -10-30%     | ~parity     | **~parity or faster**    |
 | Panic behavior        | Kernel crash | Service crash | Kernel crash | **Service restart**   |
 
 ## Ring 0: The Platform (`kevlar_platform`)
 
 The Platform is the only crate that touches hardware. It provides safe APIs
-for everything above it. Target size: ~3,000 lines of unsafe code.
+for everything above it.
 
-### Subsystems
-
-#### Memory: Frames and Page Tables
+### Key Safe APIs
 
 ```rust
-/// A physical page frame with exclusive ownership.
-/// Cannot be aliased. Contents are zeroed on allocation.
-/// The frame is freed when dropped.
+// Physical page frames with exclusive ownership
 pub struct OwnedFrame { /* private */ }
-
 impl OwnedFrame {
-    /// Read bytes from this frame. Returns a copy, never a reference.
     pub fn read(&self, offset: usize, buf: &mut [u8]) -> Result<()>;
-
-    /// Write bytes to this frame.
     pub fn write(&self, offset: usize, data: &[u8]) -> Result<()>;
-
-    /// Physical address (for page table mapping). Cannot be dereferenced
-    /// in safe code — only the Platform can convert PAddr to pointers.
     pub fn paddr(&self) -> PAddr;
 }
 
-/// Page table handle. Can map/unmap user pages.
-/// Cannot be constructed in safe code — only Platform creates these.
-pub struct PageTable { /* private */ }
-
-impl PageTable {
-    pub fn map_user_page(&mut self, vaddr: UserVAddr, frame: &OwnedFrame, perms: PagePerms);
-    pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<OwnedFrame>;
-    pub fn switch(&self);  // Make this the active page table
-}
-```
-
-Key safety invariant: `OwnedFrame` never hands out `&[u8]` or `&mut [u8]`
-to its backing memory. All access is through copy operations (`read`/`write`).
-This prevents safe code from holding references into physical memory that
-could be invalidated by page table changes.
-
-#### User-Kernel Boundary
-
-```rust
-/// A validated user-space virtual address.
-/// Can only be constructed by the Platform after bounds checking.
-pub struct UserPtr<T> { /* private */ }
-
+// Validated user-space address (Pod = Copy + repr(C))
+pub struct UserPtr<T: Pod> { /* private */ }
 impl<T: Pod> UserPtr<T> {
-    /// Copy a value from user space. Returns owned data, never a reference.
     pub fn read(&self) -> Result<T>;
-
-    /// Copy a value to user space.
     pub fn write(&self, value: &T) -> Result<()>;
 }
 
-/// Copy a byte slice from user space.
-pub fn copy_from_user(src: UserVAddr, dst: &mut [u8]) -> Result<()>;
-
-/// Copy a byte slice to user space.
-pub fn copy_to_user(dst: UserVAddr, src: &[u8]) -> Result<()>;
-```
-
-The `Pod` trait (Plain Old Data) ensures only `Copy` + `repr(C)` types cross
-the user-kernel boundary. No references, no pointers, no types with drop
-glue. This prevents TOCTOU and use-after-free across the boundary.
-
-#### Context Switch and Tasks
-
-```rust
-/// An opaque kernel task. The Platform manages the kernel stack,
-/// saved registers, and FPU state internally.
+// Opaque kernel task
 pub struct Task { /* private */ }
 
-impl Task {
-    pub fn new_user(entry: UserVAddr, stack: UserVAddr, page_table: &PageTable) -> Result<Task>;
-    pub fn fork(parent_regs: &SavedRegs) -> Result<(Task, SavedRegs)>;
-}
-
-/// Yield the current task. The scheduler (Ring 1) decides what runs next.
-pub fn switch_to(next: &Task);
-
-/// Enter user mode. Returns when a syscall, interrupt, or fault occurs.
-pub fn enter_usermode(task: &mut Task) -> UserEvent;
-
-pub enum UserEvent {
-    Syscall { number: usize, args: [usize; 6] },
-    PageFault { addr: UserVAddr, write: bool },
-    Interrupt { vector: u8 },
-    Signal,
+// Three lock variants
+pub struct SpinLock<T> { /* ... */ }
+impl<T> SpinLock<T> {
+    pub fn lock(&self) -> SpinLockGuard<T>;           // cli/sti
+    pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<T>; // no cli/sti
+    pub fn lock_preempt(&self) -> SpinLockGuardPreempt<T>; // IF=1, preempt disabled
 }
 ```
 
-The `enter_usermode` → `UserEvent` pattern is the key innovation for the
-user-kernel boundary. Instead of the Platform calling up into the Core
-(which requires the Core to trust the Platform's call conventions), the
-Platform returns a value describing what happened. The Core then dispatches
-the event in safe Rust.
+See [Platform / HAL](hal.md) for the full details including SMP boot, TLB shootdown,
+usercopy, and the vDSO.
 
-#### Interrupts and Timers
-
-```rust
-/// Register a handler for an IRQ line. The handler runs in interrupt
-/// context (no sleeping, no allocations).
-pub fn register_irq(irq: u32, handler: fn(irq: u32));
-
-/// Acknowledge an interrupt (send EOI).
-pub fn ack_irq(irq: u32);
-
-/// Register a periodic timer callback.
-pub fn register_timer(hz: u32, handler: fn());
-
-/// Read a monotonic nanosecond timestamp.
-pub fn monotonic_nanos() -> u64;
-```
-
-### What's NOT in Ring 0
-
-The Platform does NOT contain:
-- Syscall dispatch logic (Ring 1)
-- Process/thread lifecycle management (Ring 1)
-- Scheduling policy (Ring 1)
-- VFS or any filesystem (Ring 1/2)
-- Network stack (Ring 2)
-- Device drivers (Ring 2)
-- Signal delivery logic (Ring 1)
-
-## Ring 1: The Core (`kevlar_core`)
+## Ring 1: The Core (`kernel/`)
 
 The Core implements OS policies using only safe Rust and Platform APIs.
 It is trusted (a Core panic is serious) but contains no unsafe code.
 
-`#![forbid(unsafe_code)]`
+`#![deny(unsafe_code)]`
 
 ### Subsystems
 
-- **Process Manager** — process lifecycle, PID allocation, parent/child tracking
-- **Scheduler** — round-robin (upgradeable to CFS), task selection, run queues
-- **Virtual Memory Manager** — VMA tracking, demand paging policy, mmap/munmap
-- **VFS Layer** — path resolution, mount table, inode/dentry cache, file descriptor table
-- **Signal Manager** — signal delivery, handler dispatch, default actions
-- **Syscall Dispatcher** — decodes `UserEvent::Syscall` into typed calls
+- **Process Manager** — lifecycle, PID allocation, parent/child, thread groups, cgroups, namespaces
+- **Scheduler** — per-CPU round-robin with work stealing (up to 8 CPUs)
+- **Virtual Memory** — VMA tracking, demand paging, CoW, transparent huge pages
+- **VFS Layer** — path resolution, mount table, inode/dentry cache, fd table
+- **Signal Manager** — delivery, handler dispatch, lock-free mask, signalfd
+- **Syscall Dispatcher** — 141 syscall modules, 121+ dispatch entries
 
-### Panic Containment for Services
+## Ring 2: Services
 
-```rust
-/// Call a Ring 2 service, catching panics.
-/// If the service panics, return Err and log the failure.
-pub fn call_service<F, R>(service_name: &str, f: F) -> Result<R>
-where
-    F: FnOnce() -> Result<R> + UnwindSafe,
-{
-    match std::panic::catch_unwind(f) {
-        Ok(result) => result,
-        Err(panic_info) => {
-            log::error!("service '{}' panicked: {:?}", service_name, panic_info);
-            Err(Errno::EIO.into())
-        }
-    }
-}
-```
-
-The Core wraps every call into Ring 2 with `catch_unwind`. A filesystem
-that panics during `read()` returns `EIO` to the caller instead of taking
-down the kernel.
-
-## Ring 2: Services (`kevlar_svc_*`)
-
-Services are individual crates, each with `#![forbid(unsafe_code)]`.
-They implement specific functionality through traits defined by the Core.
+Services are individual crates, each with `#![forbid(unsafe_code)]`. They implement
+functionality through traits defined in `libs/kevlar_vfs`:
 
 ```rust
-// In kevlar_core:
-pub trait Filesystem: Send + Sync + UnwindSafe {
-    fn lookup(&self, parent: InodeRef, name: &str) -> Result<InodeRef>;
-    fn read(&self, inode: InodeRef, offset: usize, buf: &mut [u8]) -> Result<usize>;
-    fn write(&self, inode: InodeRef, offset: usize, data: &[u8]) -> Result<usize>;
-    // ...
+// In libs/kevlar_vfs:
+pub trait FileSystem: Send + Sync {
+    fn root_dir(&self) -> Result<Arc<dyn Directory>>;
 }
 
-// In kevlar_svc_tmpfs:
+// In services/kevlar_ext2:
 #![forbid(unsafe_code)]
 
-pub struct TmpFs { /* ... */ }
-
-impl Filesystem for TmpFs {
-    fn lookup(&self, parent: InodeRef, name: &str) -> Result<InodeRef> {
-        // Pure safe Rust implementation
+pub struct Ext2Fs { /* ... */ }
+impl FileSystem for Ext2Fs {
+    fn root_dir(&self) -> Result<Arc<dyn Directory>> {
+        // Pure safe Rust, reads from block device
     }
-    // ...
 }
 ```
 
-### Service Registration
+Current service crates:
+- `services/kevlar_tmpfs` — in-memory read-write filesystem
+- `services/kevlar_initramfs` — cpio newc archive parser (boot-time)
+- `services/kevlar_ext2` — ext2/3/4 read-write filesystem on VirtIO block
 
-```rust
-// During kernel init:
-let tmpfs = TmpFs::new(page_alloc_cap);
-core.register_filesystem("tmpfs", Box::new(tmpfs));
+Services that are not yet extracted (too tightly coupled to kernel internals):
+smoltcp networking, procfs, sysfs, devfs.
 
-let net = SmoltcpStack::new(net_cap);
-core.register_network_stack(Box::new(net));
-```
+## Implementation Status
 
-Services receive capability tokens at registration time that constrain
-what Platform resources they can access.
-
-## Migration Plan
-
-The ringkernel architecture will be implemented incrementally, without
-breaking the existing kernel. The plan has four phases:
+All four phases of the ringkernel implementation are complete:
 
 ### Phase 1: Extract the Platform ✓
 
-Completed. All unsafe code moved from `kernel/` into `kevlar_platform`.
-Safe wrapper APIs created (`pod.rs`, `page_ops.rs`, `sync.rs`, `random.rs`,
-`mem.rs`). The kernel crate enforces `#![deny(unsafe_code)]` with only 7
-annotated exceptions across 4 files.
+All unsafe code moved from `kernel/` into `kevlar_platform`. Safe wrapper APIs
+created. The kernel crate enforces `#![deny(unsafe_code)]`.
 
 ### Phase 2: Define Core Traits ✓
 
-Completed. Service traits defined at the Ring 2 boundaries:
-
-- `NetworkStackService` trait (`kernel/net/service.rs`) — socket creation
-  and packet processing. `SmoltcpNetworkStack` implements it.
-- `SchedulerPolicy` trait (`kernel/process/scheduler.rs`) — pluggable
-  scheduling algorithms. `Scheduler` (round-robin) implements it.
-- `ServiceRegistry` (`kernel/services.rs`) — centralized access to Ring 2
-  services. Socket creation in syscalls now goes through the registry.
-- VFS traits (`FileSystem`, `Directory`, `FileLike`, `Symlink`) were already
-  well-defined; documented with Ring 2 boundary annotations.
+Service traits defined at Ring 2 boundaries: `NetworkStackService`,
+`SchedulerPolicy`, `FileSystem`, `Directory`, `FileLike`, `Symlink`.
+`ServiceRegistry` provides centralized access to Ring 2 services.
 
 ### Phase 3: Extract Services ✓
 
-Completed. Shared VFS types extracted to `libs/kevlar_vfs` crate
-(`#![forbid(unsafe_code)]`). First two service crates created:
+Shared VFS types extracted to `libs/kevlar_vfs` (`#![forbid(unsafe_code)]`).
+Three service crates created: `kevlar_tmpfs`, `kevlar_initramfs`, `kevlar_ext2`.
 
-- `services/kevlar_tmpfs` — in-memory temporary filesystem, `#![forbid(unsafe_code)]`
-- `services/kevlar_initramfs` — cpio newc initramfs parser, `#![forbid(unsafe_code)]`
+### Phase 4: Safety Profiles ✓
 
-Kernel modules re-export from the service crates so all existing imports
-continue working. `SockAddr`/`IpEndpoint` conversions converted from orphan
-trait impls to freestanding functions.
-
-Deferred: smoltcp, devfs, procfs — too tightly coupled to kernel internals
-for now (wait queue, IRQ handling, process state).
-
-### Phase 4: Safety Profiles
-
-Add configurable safety/performance profiles via Cargo features. Four
-profiles — Fortress, Balanced, Performance, Ludicrous — control the ring
-count, catch_unwind, frame access model, and capability checking at compile
-time. See [Safety Profiles](safety-profiles.md) for the full design.
-
-## Provenance
-
-This architecture is an original design for Kevlar. It was informed by published
-research on safe OS design (design concepts only; no code from any source was copied):
-
-| Reference | License | What we studied | What we took |
-|-----------|---------|-----------------|--------------|
-| RedLeaf   | MIT     | Language domain concept | The idea of panic-based fault containment |
-| Tock OS   | MIT/Apache-2.0 | Capability-based capsule design | Capability tokens for service access control |
-| Theseus   | MIT     | Intralingual OS design | Confirmation that safe-Rust-only services are viable |
-
-The three-ring structure, `catch_unwind`-based fault containment,
-`enter_usermode` → `UserEvent` return pattern, `OwnedFrame` with
-copy-only access, `Pod`-constrained `UserPtr`, and capability-token
-service registration are original to Kevlar.
+Four compile-time safety profiles (Fortress, Balanced, Performance, Ludicrous)
+control ring count, catch\_unwind, frame access, and capability checking.
+See [Safety Profiles](safety-profiles.md).
