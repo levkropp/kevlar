@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! inotify(7) — File/directory change notification.
 //!
-//! Provenance: Own (Linux inotify(7) man page, FreeBSD linux_inotify.c BSD-2-Clause).
+//! Provenance: Own (Linux inotify(7) man page).
 use core::fmt;
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 

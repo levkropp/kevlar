@@ -131,8 +131,7 @@ printf("TEST_PASS epoll\n");
 
 ## Reference
 
-- FreeBSD: `sys/compat/linux/linux_event.c` (epoll emulation via kqueue)
-- Man pages: epoll(7), epoll_create(2), epoll_ctl(2), epoll_wait(2)
+- Linux man pages: epoll(7), epoll_create(2), epoll_ctl(2), epoll_wait(2)
 
 ## Estimated Complexity
 

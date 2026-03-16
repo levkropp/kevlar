@@ -15,9 +15,8 @@ Kevlar's permissive license depends on clean-room provenance. When implementing
 new subsystems:
 
 1. **Document your references** in [clean-room-log.md](provenance/clean-room-log.md)
-2. **Use FreeBSD linuxulator** (BSD-2-Clause) as the primary reference for Linux
-   syscall semantics — it is the cleanest BSD-licensed implementation of the
-   Linux ABI
+2. **Use Linux man pages and POSIX specifications** as the primary reference for
+   syscall semantics
 3. **Never copy** GPL-licensed kernel code (Linux, RTEMS, etc.)
 4. **Man pages** are always safe to reference for interface specifications
 

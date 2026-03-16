@@ -207,10 +207,8 @@ proper threading, also need:
 
 ## Reference Sources
 
-- FreeBSD `sys/kern/kern_thr.c` (BSD-2-Clause) — thread creation
-- FreeBSD `sys/kern/kern_umtx.c` (BSD-2-Clause) — userspace mutexes
+- Linux man pages: clone(2), futex(2) — flag specifications and semantics
 - musl `src/thread/` — pthread implementation (MIT license)
-- Linux clone(2) man page — flag specifications
 - OSDev wiki — Threading, TLS
 
 ## Testing

@@ -52,7 +52,7 @@ and summarizes the crash context.
 
 ## Verbose logging
 
-See [Logging](../logging.md) for controlling log verbosity with `LOG=`.
+Use `LOG=trace make run` to control log verbosity.
 
 ## QEMU exits without a kernel panic message
 

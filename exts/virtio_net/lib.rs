@@ -101,8 +101,8 @@ impl VirtioNet {
             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5],
         );
 
-        let tx_ring_len = virtio.virtq(VIRTIO_NET_QUEUE_RX).num_descs() as usize;
-        let rx_ring_len = virtio.virtq(VIRTIO_NET_QUEUE_TX).num_descs() as usize;
+        let tx_ring_len = virtio.virtq(VIRTIO_NET_QUEUE_TX).num_descs() as usize;
+        let rx_ring_len = virtio.virtq(VIRTIO_NET_QUEUE_RX).num_descs() as usize;
         let tx_buffer = alloc_pages(
             (align_up(PACKET_LEN_MAX * tx_ring_len, PAGE_SIZE)) / PAGE_SIZE,
             AllocPageFlags::KERNEL,
@@ -143,9 +143,9 @@ impl VirtioNet {
             return;
         }
 
+
         let is_modern = self.virtio.is_modern();
         let rx_virtq = self.virtio.virtq_mut(VIRTIO_NET_QUEUE_RX);
-
         while let Some(VirtqUsedChain { descs, total_len }) = rx_virtq.pop_used() {
             debug_assert!(descs.len() == 1);
             let addr = match descs[0] {
@@ -199,6 +199,11 @@ impl VirtioNet {
                 len: PACKET_LEN_MAX,
             }])
         }
+
+        // Notify the device that new RX buffers are available.
+        // Without this, the device may stop delivering packets after
+        // consuming all initial descriptors.
+        rx_virtq.notify();
     }
 
     fn mac_addr(&self) -> MacAddress {

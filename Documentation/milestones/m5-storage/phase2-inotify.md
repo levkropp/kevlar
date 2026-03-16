@@ -113,7 +113,6 @@ other event sources (timers, signals, sockets).
 
 ## Reference Sources
 
-- FreeBSD `sys/compat/linux/linux_inotify.c` (BSD-2-Clause) — linuxulator
 - Linux inotify(7) man page — interface specification
 - OSDev wiki — inotify implementation notes
 

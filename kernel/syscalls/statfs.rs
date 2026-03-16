@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
-// Provenance: Own (Linux statfs(2) man page, FreeBSD vfs_syscalls.c BSD-2-Clause).
+// Provenance: Own (Linux statfs(2) man page).
 use crate::fs::mount::MountTable;
 use crate::fs::opened_file::Fd;
 use crate::fs::path::Path;

@@ -44,8 +44,7 @@ Phase 6 is the final integration pass.
   - No new `unsafe` in the kernel crate
   - New pseudo-filesystems (/proc, /sys) remain kernel-coupled for now
 - Each phase gets an integration test binary in `integration_tests/`
-- Reference sources: FreeBSD `sys/compat/linux/` (BSD-2-Clause),
-  POSIX/Linux man pages, Linux kernel documentation
+- Reference sources: POSIX/Linux man pages, Linux kernel documentation
 
 ## Key Design Decisions (to make during implementation)
 

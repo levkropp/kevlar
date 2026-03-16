@@ -1243,7 +1243,13 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(vm)))),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs: AtomicRefCell::new(parent.root_fs()),
+            root_fs: AtomicRefCell::new({
+                // Clone RootFs so child gets its own cwd — chdir in the child
+                // must not affect the parent (POSIX semantics).
+                let parent_fs = parent.root_fs();
+                let cloned = parent_fs.lock().clone();
+                Arc::new(SpinLock::new(cloned))
+            }),
             arch,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
             signal_pending: AtomicU32::new(0),
@@ -1327,7 +1333,11 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs: AtomicRefCell::new(parent.root_fs()),
+            root_fs: AtomicRefCell::new({
+                let parent_fs = parent.root_fs();
+                let cloned = parent_fs.lock().clone();
+                Arc::new(SpinLock::new(cloned))
+            }),
             arch,
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),

@@ -147,9 +147,7 @@ printf("TEST_PASS event_fds (%d events)\n", n);
 
 ## Reference
 
-- FreeBSD: `sys/compat/linux/linux_event.c` (signalfd, timerfd, eventfd)
 - Linux man pages: signalfd(2), timerfd_create(2), eventfd(2)
-- Linux: `fs/signalfd.c`, `fs/timerfd.c`, `fs/eventfd.c`
 
 ## Estimated Complexity
 

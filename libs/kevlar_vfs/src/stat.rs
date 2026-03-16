@@ -129,8 +129,12 @@ pub struct Stat {
     pub blksize: BlockSize,
     pub blocks: BlockCount,
     pub atime: Time,
+    pub atime_nsec: Time,
     pub mtime: Time,
+    pub mtime_nsec: Time,
     pub ctime: Time,
+    pub ctime_nsec: Time,
+    pub _unused: [isize; 3],
 }
 
 impl Stat {
@@ -139,17 +143,21 @@ impl Stat {
             dev: DevId(0),
             inode_no: INodeNo::new(0),
             mode: FileMode(0),
-            nlink: NLink(0),
+            nlink: NLink(1),
             uid: UId(0),
             gid: GId(0),
             pad0: 0,
             rdev: DevId(0),
             size: FileSize(0),
-            blksize: BlockSize(0),
+            blksize: BlockSize(4096),
             blocks: BlockCount(0),
             atime: Time(0),
+            atime_nsec: Time(0),
             mtime: Time(0),
+            mtime_nsec: Time(0),
             ctime: Time(0),
+            ctime_nsec: Time(0),
+            _unused: [0; 3],
         }
     }
 }

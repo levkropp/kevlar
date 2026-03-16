@@ -5,7 +5,7 @@
 //! bidirectional byte-stream I/O with poll support, and SCM_RIGHTS fd passing
 //! via sendmsg/recvmsg ancillary data.
 //!
-//! Provenance: Own (Linux unix(7), cmsg(3) man pages; FreeBSD uipc_usrreq.c).
+//! Provenance: Own (Linux unix(7), cmsg(3) man pages).
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 

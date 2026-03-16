@@ -172,7 +172,6 @@ fn ap_entry(cpu_id: u32) -> ! {
 
 - Intel SDM Volume 3, Chapter 8 — MP Initialization Protocol
 - ARM Architecture Reference Manual — PSCI specification
-- FreeBSD `sys/x86/x86/mp_x86.c` (BSD-2-Clause) — AP boot
 - OSDev wiki — SMP, APIC, MADT parsing
 
 ## Testing

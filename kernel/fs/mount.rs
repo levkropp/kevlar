@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::{
     file_system::FileSystem,
-    inode::{Directory, FileLike, INode, INodeNo},
+    inode::{Directory, FileLike, INode, INodeNo, MountKey},
     opened_file::OpenedFileTable,
     opened_file::PathComponent,
     path::Path,
@@ -152,7 +152,7 @@ pub struct MountPoint {
 pub struct RootFs {
     root_path: Arc<PathComponent>,
     cwd_path: Arc<PathComponent>,
-    mount_points: HashMap<INodeNo, MountPoint>,
+    mount_points: HashMap<MountKey, MountPoint>,
     symlink_follow_limit: usize,
 }
 
@@ -174,7 +174,7 @@ impl RootFs {
 
     pub fn mount(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
         self.mount_points
-            .insert(dir.stat()?.inode_no, MountPoint { fs });
+            .insert(dir.mount_key()?, MountPoint { fs });
         Ok(())
     }
 
@@ -300,8 +300,8 @@ impl RootFs {
     }
 
     fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<&MountPoint>> {
-        let inode_no = dir.inode_no()?;
-        Ok(self.mount_points.get(&inode_no))
+        let key = dir.mount_key()?;
+        Ok(self.mount_points.get(&key))
     }
 
     /// Resolves a path into `PathComponent`. If `follow_symlink` is `true`,

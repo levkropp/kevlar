@@ -147,7 +147,6 @@ The ext2 filesystem (Phase 6) uses `BlockDevice` without knowing it's VirtIO.
 
 - VirtIO specification v1.2 (OASIS standard) — Section 5.2 Block Device
 - Existing Kevlar VirtIO-net driver — queue/transport infrastructure
-- FreeBSD `sys/dev/virtio/block/virtio_blk.c` (BSD-2-Clause)
 
 ## Testing
 

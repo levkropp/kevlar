@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //
-// Provenance: Own (Linux sendfile(2) man page, FreeBSD kern_sendfile.c BSD-2-Clause).
+// Provenance: Own (Linux sendfile(2) man page).
 use crate::fs::opened_file::Fd;
 use crate::prelude::*;
 use crate::process::current_process;

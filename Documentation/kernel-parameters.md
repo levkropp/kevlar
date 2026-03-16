@@ -6,7 +6,7 @@ Kernel parameters configure Kevlar at boot time.
 
 | Name | Description | Example |
 |------|-------------|---------|
-| `log` | Logging level (see [Logging](logging.md)) | `log=trace` |
+| `log` | Logging level | `log=trace` |
 | `serial1` | Send kernel log to secondary serial port | `serial1=on` |
 | `dhcp` | Set to `off` to disable the DHCP client | `dhcp=off` |
 | `ip4` | Static IPv4 address with prefix length | `ip4=10.0.0.123/24` |

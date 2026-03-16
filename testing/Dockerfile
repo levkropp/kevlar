@@ -337,6 +337,28 @@ RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
 COPY testing/busybox_suite.c /busybox_suite.c
 RUN musl-gcc -static -O2 -o /busybox-suite /busybox_suite.c
 
+#
+#  Network diagnostic test binary (musl static)
+#
+FROM ubuntu:24.04 AS test_net
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/test_net.c /test_net.c
+RUN musl-gcc -static -O2 -o /test-net /test_net.c
+
+#
+#  Alpine integration test binary (musl static)
+#
+FROM ubuntu:24.04 AS test_alpine
+RUN apt-get update && apt-get install -qy musl-tools linux-libc-dev binutils
+RUN ln -sf /usr/include/linux /usr/include/x86_64-linux-musl/linux && \
+    ln -sf /usr/include/asm-generic /usr/include/x86_64-linux-musl/asm-generic && \
+    ln -sf /usr/include/x86_64-linux-gnu/asm /usr/include/x86_64-linux-musl/asm
+COPY testing/test_alpine.c /test_alpine.c
+RUN musl-gcc -static -O2 -o /test-alpine /test_alpine.c
+
 FROM alpine:3.21 AS apk_static
 RUN apk add --no-cache apk-tools-static
 
@@ -385,6 +407,8 @@ COPY --from=dropbear /build/dropbear /build/dropbearkey /bin/
 COPY --from=curl     /build/src/curl /bin
 COPY --from=apk_static /sbin/apk.static /bin/apk.static
 COPY --from=test_ext2_rw /test-ext2-rw /bin/test-ext2-rw
+COPY --from=test_net /test-net /bin/test-net
+COPY --from=test_alpine /test-alpine /bin/test-alpine
 COPY --from=dyntest  /hello-dynamic /bin/hello-dynamic
 COPY --from=dyntest  /ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
 COPY --from=bash       /build/bash /bin/bash

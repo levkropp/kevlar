@@ -108,9 +108,7 @@ and VM infrastructure for it.
 
 ## Reference Sources
 
-- FreeBSD `sys/kern/kern_sendfile.c` (BSD-2-Clause) — sendfile
-- FreeBSD `sys/kern/vfs_syscalls.c` (BSD-2-Clause) — copy_file_range
-- Linux sendfile(2), splice(2), tee(2), copy_file_range(2) man pages
+- Linux man pages: sendfile(2), splice(2), tee(2), copy_file_range(2)
 
 ## Testing
 

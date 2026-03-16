@@ -430,6 +430,7 @@ dependencies = [
  "cfg-if",
  "defmt 0.3.100",
  "heapless",
+ "log",
  "managed",
 ]
 
