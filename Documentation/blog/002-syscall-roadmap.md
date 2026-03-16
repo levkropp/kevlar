@@ -1,1 +1,0 @@
-../../blog/002-syscall-roadmap.md

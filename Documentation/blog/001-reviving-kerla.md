@@ -1,1 +1,0 @@
-../../blog/001-reviving-kerla.md
