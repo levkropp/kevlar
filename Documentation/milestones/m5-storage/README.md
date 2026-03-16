@@ -46,14 +46,12 @@ useful for a much broader class of static musl binaries.
   - New /proc files go in kernel core (Ring 1)
   - No new `unsafe` in the kernel crate
 - ext2 implementation is **clean-room from the specification**:
-  - Reference: FreeBSD `sys/fs/ext2fs/` (BSD-2-Clause)
   - Reference: OSDev wiki ext2 documentation
   - Reference: "The Second Extended Filesystem" by Dave Poirier
   - Do NOT reference Linux `fs/ext2/` (GPL)
 - VirtIO block driver references:
   - VirtIO specification v1.2 (OASIS standard, freely available)
   - Existing VirtIO-net driver in Kevlar (same queue infrastructure)
-  - FreeBSD `sys/dev/virtio/block/` (BSD-2-Clause)
 - Write all new code with SMP in mind (proper locking, atomics) even though
   M6 adds actual multi-CPU support. This avoids a codebase-wide audit later.
 

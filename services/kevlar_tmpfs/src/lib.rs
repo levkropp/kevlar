@@ -39,14 +39,25 @@ fn alloc_inode_no() -> INodeNo {
     INodeNo::new(NEXT_INODE_NO.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Allocate a unique filesystem device ID.
+/// Each filesystem instance gets a unique ID to prevent inode number
+/// collisions in the mount point table.
+pub fn alloc_dev_id() -> usize {
+    static NEXT_DEV_ID: AtomicUsize = AtomicUsize::new(1);
+    NEXT_DEV_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct TmpFs {
     root_dir: Arc<Dir>,
+    dev_id: usize,
 }
 
 impl TmpFs {
     pub fn new() -> TmpFs {
+        let dev_id = alloc_dev_id();
         TmpFs {
-            root_dir: Arc::new(Dir::new(INodeNo::new(1))),
+            root_dir: Arc::new(Dir::new(INodeNo::new(1), dev_id)),
+            dev_id,
         }
     }
 
@@ -79,19 +90,24 @@ struct DirInner {
 
 pub struct Dir {
     inode_no: INodeNo,
+    dev_id: usize,
     stat: Stat,
+    mode: SpinLock<FileMode>,
     inner: SpinLock<DirInner>,
 }
 
 impl Dir {
-    pub fn new(inode_no: INodeNo) -> Dir {
+    pub fn new(inode_no: INodeNo, dev_id: usize) -> Dir {
+        let mode = FileMode::new(S_IFDIR | 0o755);
         Dir {
             inode_no,
+            dev_id,
             stat: Stat {
                 inode_no,
-                mode: FileMode::new(S_IFDIR | 0o755),
+                mode,
                 ..Stat::zeroed()
             },
+            mode: SpinLock::new(mode),
             inner: SpinLock::new(DirInner {
                 files: HashMap::new(),
             }),
@@ -99,7 +115,7 @@ impl Dir {
     }
 
     pub fn add_dir(&self, name: &str) -> Arc<Dir> {
-        let dir = Arc::new(Dir::new(alloc_inode_no()));
+        let dir = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
         self.inner
             .lock_no_irq()
             .files
@@ -162,11 +178,25 @@ impl Directory for Dir {
     }
 
     fn stat(&self) -> Result<Stat> {
-        Ok(self.stat)
+        let mut st = self.stat;
+        st.mode = *self.mode.lock_no_irq();
+        Ok(st)
+    }
+
+    fn chmod(&self, mode: FileMode) -> Result<()> {
+        // Preserve file type bits (S_IFDIR), update permission bits only
+        let mut m = self.mode.lock_no_irq();
+        let type_bits = m.as_u32() & 0o170000;
+        *m = FileMode::new(type_bits | (mode.as_u32() & 0o7777));
+        Ok(())
     }
 
     fn inode_no(&self) -> Result<INodeNo> {
         Ok(self.inode_no)
+    }
+
+    fn dev_id(&self) -> usize {
+        self.dev_id
     }
 
     fn link(&self, name: &str, link_to: &INode) -> Result<()> {
@@ -221,12 +251,12 @@ impl Directory for Dir {
     }
 
     fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
-        let inode = Arc::new(Dir::new(alloc_inode_no()));
-        self.inner
-            .lock_no_irq()
-            .files
-            .insert(name.into(), TmpFsINode::Directory(inode.clone()));
-
+        let mut dir_lock = self.inner.lock_no_irq();
+        if dir_lock.files.contains_key(name) {
+            return Err(Errno::EEXIST.into());
+        }
+        let inode = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
+        dir_lock.files.insert(name.into(), TmpFsINode::Directory(inode.clone()));
         Ok((inode as Arc<dyn Directory>).into())
     }
 
@@ -305,17 +335,20 @@ impl fmt::Debug for Dir {
 struct File {
     data: SpinLock<Vec<u8>>,
     stat: Stat,
+    mode: SpinLock<FileMode>,
 }
 
 impl File {
     pub fn new(inode_no: INodeNo) -> File {
+        let mode = FileMode::new(S_IFREG | 0o644);
         File {
             data: SpinLock::new(Vec::new()),
             stat: Stat {
                 inode_no,
-                mode: FileMode::new(S_IFREG | 0o644),
+                mode,
                 ..Stat::zeroed()
             },
+            mode: SpinLock::new(mode),
         }
     }
 }
@@ -324,8 +357,16 @@ impl FileLike for File {
     fn stat(&self) -> Result<Stat> {
         use kevlar_vfs::stat::FileSize;
         let mut stat = self.stat;
+        stat.mode = *self.mode.lock_no_irq();
         stat.size = FileSize(self.data.lock_no_irq().len() as isize);
         Ok(stat)
+    }
+
+    fn chmod(&self, mode: FileMode) -> Result<()> {
+        let mut m = self.mode.lock_no_irq();
+        let type_bits = m.as_u32() & 0o170000;
+        *m = FileMode::new(type_bits | (mode.as_u32() & 0o7777));
+        Ok(())
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {

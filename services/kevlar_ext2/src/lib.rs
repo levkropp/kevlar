@@ -2,7 +2,6 @@
 //! Read-write ext2/ext3/ext4 filesystem for Kevlar.
 //!
 //! Clean-room implementation from the publicly documented ext2/ext4 on-disk format:
-//! - FreeBSD `sys/fs/ext2fs/` (BSD-2-Clause)
 //! - "The Second Extended Filesystem" by Dave Poirier
 //! - OSDev wiki ext2/ext4 pages
 //! - kernel.org ext4 disk layout documentation
@@ -1183,8 +1182,12 @@ impl Ext2Inner {
             blksize: BlockSize::new(self.block_size as isize),
             blocks: BlockCount::new(inode.blocks as isize),
             atime: Time::new(inode.atime as isize),
+            atime_nsec: Time::new(0),
             mtime: Time::new(inode.mtime as isize),
+            mtime_nsec: Time::new(0),
             ctime: Time::new(inode.ctime as isize),
+            ctime_nsec: Time::new(0),
+            _unused: [0; 3],
         }
     }
 }

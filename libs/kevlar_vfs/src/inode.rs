@@ -26,6 +26,21 @@ impl INodeNo {
     }
 }
 
+/// A unique mount key combining filesystem device ID and inode number.
+/// This prevents inode number collisions across different filesystems
+/// in the mount point table.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct MountKey {
+    pub dev_id: usize,
+    pub inode_no: INodeNo,
+}
+
+impl MountKey {
+    pub fn new(dev_id: usize, inode_no: INodeNo) -> Self {
+        Self { dev_id, inode_no }
+    }
+}
+
 /// Options for opened files.
 #[derive(Debug, Copy, Clone)]
 pub struct OpenOptions {
@@ -147,6 +162,11 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         Err(Error::new(Errno::EINVAL))
     }
 
+    /// `fchmod(2)`.
+    fn chmod(&self, _mode: FileMode) -> Result<()> {
+        Ok(()) // silently succeed for filesystems that don't support it
+    }
+
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -246,6 +266,16 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn inode_no(&self) -> Result<INodeNo> {
         self.stat().map(|s| s.inode_no)
     }
+    /// Returns a filesystem-unique device ID. Each filesystem instance
+    /// should return a unique value so that mount points keyed by
+    /// (dev_id, inode_no) don't collide across filesystems.
+    fn dev_id(&self) -> usize {
+        0
+    }
+    /// Returns the mount key for this directory.
+    fn mount_key(&self) -> Result<MountKey> {
+        Ok(MountKey::new(self.dev_id(), self.inode_no()?))
+    }
     /// `readdir(2)`.
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>>;
     /// `link(2)`.
@@ -265,6 +295,10 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     /// `rename(2)` — move an entry from this directory to another.
     fn rename(&self, _old_name: &str, _new_dir: &Arc<dyn Directory>, _new_name: &str) -> Result<()> {
         Err(Error::new(Errno::ENOSYS))
+    }
+    /// `fchmod(2)`.
+    fn chmod(&self, _mode: FileMode) -> Result<()> {
+        Ok(()) // silently succeed for filesystems that don't support it
     }
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
@@ -352,9 +386,12 @@ impl INode {
     }
 
     /// `chmod(2)`
-    pub fn chmod(&self, _mode: FileMode) -> Result<()> {
-        // FIXME: Ignore all chmod requests for now.
-        Ok(())
+    pub fn chmod(&self, mode: FileMode) -> Result<()> {
+        match self {
+            INode::FileLike(file) => file.chmod(mode),
+            INode::Directory(dir) => dir.chmod(mode),
+            INode::Symlink(_) => Ok(()), // symlink chmod is a no-op on Linux too
+        }
     }
 }
 

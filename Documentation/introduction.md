@@ -5,10 +5,9 @@ that unmodified Linux programs run on Kevlar directly. It is not a Linux fork or
 translation layer; it is a clean-room implementation of the Linux syscall interface
 on a new kernel.
 
-Licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**, Kevlar draws on FreeBSD's
-linuxulator (BSD-2-Clause) as the primary reference for Linux syscall semantics.
-This gives Kevlar a provably clean-room path to Linux ABI compatibility while
-remaining fully permissively licensed.
+Licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**, Kevlar is a clean-room
+implementation derived from Linux man pages and POSIX specifications, remaining
+fully permissively licensed.
 
 ## Current Status
 
@@ -37,8 +36,8 @@ containment at ring boundaries. See [The Ringkernel Architecture](architecture/r
 
 Kevlar's goal is to run the Linux ecosystem — including Wine and complex desktop
 applications — on a permissively licensed, memory-safe kernel. It occupies a unique
-niche: more Linux-native than FreeBSD's linuxulator (Kevlar *is* a Linux-ABI kernel,
-not a compatibility shim), but built on clean BSD/MIT-licensed Rust foundations.
+niche: a true Linux-ABI kernel (not a compatibility shim), built on clean
+MIT/Apache-2.0/BSD-2-Clause Rust foundations.
 
 ## Links
 

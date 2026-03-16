@@ -34,7 +34,6 @@ static RX_PACKET_QUEUE: Once<SpinLock<ArrayQueue<Vec<u8>>>> = Once::new();
 
 pub fn receive_ethernet_frame(frame: &[u8]) {
     if RX_PACKET_QUEUE.lock().push(frame.to_vec()).is_err() {
-        // TODO: Introduce warn_once! macro
         warn!("the rx packet queue is full; dropping an incoming packet");
     }
 

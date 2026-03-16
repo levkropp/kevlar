@@ -146,7 +146,6 @@ them in the procfs directory tree.
 ## Reference Sources
 
 - Linux proc(5) man page — format specifications
-- FreeBSD `sys/compat/linprocfs/` (BSD-2-Clause) — Linux-compatible /proc
 
 ## Testing
 

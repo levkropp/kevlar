@@ -47,9 +47,6 @@ VFS logic, process management, and networking are written in safe Rust.
 | M7: Container runtime | ~145 | Planned | namespaces, seccomp, clone3 |
 | M8: Kubuntu 24.04 desktop | ~170 | Planned | SysV IPC, ptrace, io\_uring |
 
-See [Documentation/compatibility.md](Documentation/compatibility.md) for the
-full syscall-by-syscall status.
-
 ## Goals
 
 1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
@@ -59,8 +56,8 @@ full syscall-by-syscall status.
    microkernel-style fault isolation via `catch_unwind` at ring boundaries
 4. **Configurable safety** — Four compile-time profiles from Fortress (maximum safety)
    to Ludicrous (maximum performance)
-5. **Clean-room provenance** — Syscall semantics derived from FreeBSD's linuxulator
-   (BSD-2-Clause); no GPL code ever copied
+5. **Clean-room provenance** — Syscall semantics derived from Linux man pages and
+   POSIX specifications; no GPL code ever copied
 
 ## Building
 
@@ -75,17 +72,14 @@ make ARCH=arm64 RELEASE=1 run  # ARM64 (release for TCG performance)
 
 **Windows users**: The Makefile automatically uses WSL2. Just run `make run` - it works!
 
-See [Documentation/quickstart.md](Documentation/quickstart.md) for full build
-instructions including Docker, prerequisites, and make targets.
-
 ## Provenance & Attribution
 
 | Source | License | Usage |
 |--------|---------|-------|
+| [Kerla](https://github.com/nuta/kerla) | MIT OR Apache-2.0 | Fork base (substantially rewritten) |
 | boot2dump | MIT OR Apache-2.0 | Crash dump utility (used as-is) |
-| [FreeBSD](https://github.com/freebsd/freebsd-src) | BSD-2-Clause | Primary reference for Linux syscall semantics |
 
-All kernel code is original Kevlar implementation. See [Documentation/provenance/](Documentation/provenance/) for details.
+All kernel code is original or derived from Kerla. See [Documentation/provenance/](Documentation/provenance/) for details.
 
 ## Documentation
 

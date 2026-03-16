@@ -158,8 +158,6 @@ printf("TEST_PASS unix_fd_passing\n");
 
 ## Reference
 
-- FreeBSD: `sys/kern/uipc_usrreq.c` (AF_UNIX), `sys/kern/uipc_rights.c`
-  (SCM_RIGHTS)
 - Linux man pages: unix(7), cmsg(3), sendmsg(2), recvmsg(2)
 
 ## Estimated Complexity

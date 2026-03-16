@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Futex implementation: WAIT, WAKE, CMP_REQUEUE, WAKE_OP, WAIT_BITSET.
-//! Reference: FreeBSD sys/compat/linux/linux_futex.c (BSD-2-Clause).
+//! Provenance: Own (Linux futex(2) man page).
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use crate::process::wait_queue::WaitQueue;

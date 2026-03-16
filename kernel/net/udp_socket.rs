@@ -21,6 +21,7 @@ static INUSE_ENDPOINTS: SpinLock<BTreeSet<u16>> = SpinLock::new(BTreeSet::new())
 
 pub struct UdpSocket {
     handle: SocketHandle,
+    peer: SpinLock<Option<IpEndpoint>>,
 }
 
 impl UdpSocket {
@@ -29,7 +30,7 @@ impl UdpSocket {
         let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 4096]);
         let inner = udp::Socket::new(rx_buffer, tx_buffer);
         let handle = SOCKETS.lock().add(inner);
-        Arc::new(UdpSocket { handle })
+        Arc::new(UdpSocket { handle, peer: SpinLock::new(None) })
     }
 }
 
@@ -64,15 +65,37 @@ impl FileLike for UdpSocket {
         Ok(())
     }
 
+    fn connect(&self, sockaddr: SockAddr, _options: &OpenOptions) -> Result<()> {
+        let endpoint = super::sockaddr_to_endpoint(sockaddr)?;
+        *self.peer.lock_no_irq() = Some(endpoint);
+
+        // Auto-bind if not yet bound (musl expects connect on UDP to bind).
+        let mut sockets = SOCKETS.lock();
+        let socket = sockets.get_mut::<udp::Socket>(self.handle);
+        if !socket.is_open() {
+            let mut inuse_endpoints = INUSE_ENDPOINTS.lock();
+            let mut port = 49152;
+            while inuse_endpoints.contains(&port) {
+                port += 1;
+            }
+            let bind_ep = IpEndpoint::new(smoltcp::wire::IpAddress::v4(0, 0, 0, 0), port);
+            socket.bind(bind_ep).map_err(|_| Errno::EADDRINUSE)?;
+            inuse_endpoints.insert(port);
+        }
+        Ok(())
+    }
+
     fn sendto(
         &self,
         buf: UserBuffer<'_>,
         sockaddr: Option<SockAddr>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        let endpoint = super::sockaddr_to_endpoint(
-            sockaddr.ok_or_else(|| Error::new(Errno::EINVAL))?,
-        )?;
+        let endpoint = match sockaddr {
+            Some(sa) => super::sockaddr_to_endpoint(sa)?,
+            None => self.peer.lock_no_irq()
+                .ok_or_else(|| Error::new(Errno::EINVAL))?,
+        };
         let mut sockets = SOCKETS.lock();
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
         let mut reader = UserBufReader::from(buf);

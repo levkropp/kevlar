@@ -109,8 +109,7 @@ but with explicit offset (doesn't update file position).
 
 ## Reference Sources
 
-- FreeBSD `sys/kern/vfs_syscalls.c` — statfs implementation (BSD-2-Clause)
-- POSIX / Linux man pages — utimensat(2), statx(2), preadv(2)
+- Linux man pages: statfs(2), utimensat(2), statx(2), preadv(2)
 
 ## Testing
 

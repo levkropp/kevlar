@@ -154,8 +154,6 @@ printf("TEST_PASS process_caps\n");
 ## Reference
 
 - Linux man pages: prctl(2), capabilities(7), capget(2), memfd_create(2)
-- FreeBSD: `sys/compat/linux/linux_misc.c` (prctl emulation)
-- Linux: `kernel/sys.c` (prctl), `security/commoncap.c` (capabilities)
 
 ## Estimated Complexity
 

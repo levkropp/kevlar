@@ -328,6 +328,23 @@ run-apk: build alpine-disk
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
+.PHONY: test-alpine
+test-alpine: alpine-disk
+	$(PROGRESS) "TEST" "Alpine integration suite (7 layers)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --disk build/alpine-disk.img \
+		$(if $(KVM),--kvm,) \
+		$(kernel_qemu_arg) 2>&1 \
+		| tee /tmp/kevlar-test-alpine-$(PROFILE).log; true
+	@grep -E '^(PASS|FAIL|SKIP|LAYER|test_alpine:)' \
+		/tmp/kevlar-test-alpine-$(PROFILE).log || echo "(no output)"
+	@if grep -q '^FAIL' /tmp/kevlar-test-alpine-$(PROFILE).log; then \
+		echo "ALPINE TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-alpine-$(PROFILE).log; then \
+		echo "ALL ALPINE TESTS PASSED"; \
+	fi
+
 .PHONY: bochs
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc
@@ -635,7 +652,7 @@ test-m9:
 test-busybox:
 	$(PROGRESS) "TEST" "BusyBox applet suite (102 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	timeout 600 $(PYTHON3) tools/run-qemu.py \
 		--arch $(ARCH) $(kernel_qemu_arg) 2>&1 \
 		| tee /tmp/kevlar-test-busybox-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \

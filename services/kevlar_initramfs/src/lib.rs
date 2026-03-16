@@ -140,11 +140,20 @@ impl Directory for InitramFsDir {
         })
     }
 
-    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_file(&self, name: &str, _mode: FileMode) -> Result<INode> {
+        // Per POSIX: return EEXIST if name exists, EROFS otherwise.
+        if self.files.contains_key(name) {
+            return Err(Errno::EEXIST.into());
+        }
         Err(Errno::EROFS.into())
     }
 
-    fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
+        // Per POSIX: return EEXIST if name exists, EROFS otherwise.
+        // This is critical for mkdir -p which ignores EEXIST but fails on EROFS.
+        if self.files.contains_key(name) {
+            return Err(Errno::EEXIST.into());
+        }
         Err(Errno::EROFS.into())
     }
 }

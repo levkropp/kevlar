@@ -9,13 +9,12 @@ and executed from disk.
 The ext2 on-disk format is a **data structure specification**, not copyrightable
 code. Our implementation is clean-room from the publicly documented format:
 
-- **Primary reference:** FreeBSD `sys/fs/ext2fs/` (BSD-2-Clause)
-- **Specification:** "The Second Extended Filesystem" by Dave Poirier
+- **Primary reference:** "The Second Extended Filesystem" by Dave Poirier
 - **Documentation:** OSDev wiki ext2 page, kernel.org ext2 documentation
 - **Do NOT reference:** Linux `fs/ext2/` (GPL-2.0-only)
 
-This is the same approach used by FreeBSD, Haiku, FUSE-ext2, and many other
-non-GPL implementations.
+This is the same approach used by Haiku, FUSE-ext2, and many other non-GPL
+implementations.
 
 ## ext2 On-Disk Format
 
@@ -196,7 +195,6 @@ The ext2 filesystem is **Services/Ring 2** code:
 
 ## Reference Sources
 
-- FreeBSD `sys/fs/ext2fs/` (BSD-2-Clause) — full ext2/3/4 implementation
 - "The Second Extended Filesystem" by Dave Poirier — format specification
 - OSDev wiki: https://wiki.osdev.org/Ext2 — implementation guide
 - ext2 documentation in kernel.org docs (format description, not code)

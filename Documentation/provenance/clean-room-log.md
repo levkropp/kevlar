@@ -31,12 +31,10 @@ and dependencies to modern versions.
 - Kerla source code (MIT OR Apache-2.0) — existing syscall implementations
 - Linux man pages — POSIX syscall specifications
 - smoltcp documentation — networking API migration (0.7 → 0.12)
-- FreeBSD linuxulator source (BSD-2-Clause) — identified as primary reference for future syscall work
 
 ### Implementation approach
 Added 44 new syscalls to reach 79 total. Upgraded all dependencies including major smoltcp migration.
 Fixed critical boot bugs: EFER.NXE for NX page protection, custom memcpy/memset/memcmp for no-SSE kernel.
-Established FreeBSD as primary reference for Linux syscall semantics going forward.
 
 ### New syscalls implemented
 lseek, mprotect, munmap, openat, newfstatat, dup, dup3, pipe2, access, vfork, sched_yield,

@@ -1,43 +1,25 @@
 # Licensing
 
-Kevlar is tri-licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**. The original
-Kerla upstream was MIT OR Apache-2.0; BSD-2-Clause was added to align with
-FreeBSD, the primary reference for syscall semantics.
+Kevlar is tri-licensed under **MIT OR Apache-2.0 OR BSD-2-Clause**.
 
 ## License Compatibility
 
 | Source Project | License | Compatible? | Usage in Kevlar |
 |----------------|---------|-------------|-----------------|
-| Kerla | MIT OR Apache-2.0 | Yes (identical) | Fork base, all original kernel code |
-| FreeBSD | BSD-2-Clause | Yes | Reference for Linux compat layer (linuxulator) and POSIX syscall semantics |
+| Kerla | MIT OR Apache-2.0 | Yes (sublicensed) | Fork base |
 | smoltcp | 0-clause BSD | Yes | TCP/IP networking library (Cargo dependency) |
 | Linux kernel | GPL-2.0 | No (code) | Man pages and POSIX specs only; never copy implementation |
 
-## FreeBSD as Primary Reference
+## Clean-Room Approach
 
-FreeBSD's linuxulator (`sys/compat/linux/`) is a complete Linux syscall compatibility
-layer maintained by the FreeBSD project under the BSD-2-Clause license. It provides:
+Kevlar is a clean-room implementation of the Linux ABI. When implementing syscalls,
+the authoritative references are:
 
-1. **Battle-tested Linux syscall semantics** — FreeBSD developers have mapped every
-   Linux syscall to its correct behavior, including edge cases and error conditions
-2. **Clean-room safety** — Re-implementing FreeBSD's C code in Rust constitutes a
-   language transformation, not code copying. The BSD license permits both study and
-   adaptation.
-3. **Linux-focused perspective** — FreeBSD's linuxulator specifically targets Linux
-   binary compatibility, exactly matching Kevlar's goals
+1. Linux man pages — for syscall interface specifications and behavior
+2. POSIX standards — for standard semantics
+3. Hardware specifications (ext2 spec, Intel SDM, ARM ARM) — for device/format details
 
-When implementing a new syscall, the recommended reference order is:
-1. FreeBSD linuxulator (`sys/compat/linux/`) — for Linux-specific semantics
-2. FreeBSD kernel (`sys/kern/`, `sys/vm/`) — for POSIX-standard implementations
-3. Linux man pages — for POSIX specification details (never the implementation)
-
-## BSD Compatibility
-
-When porting BSD-licensed code to Rust, we:
-
-1. Retain the original copyright notice in the file
-2. Add an entry to the `NOTICE` file at the repository root
-3. Document the port in the [Clean-Room Implementation Log](clean-room-log.md)
+No proprietary or GPL-licensed source code is consulted for implementation.
 
 ## Why Not GPL?
 

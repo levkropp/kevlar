@@ -95,6 +95,11 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_timer_irq(&self) -> bool {
+        // Run deferred jobs — this processes network packets queued by
+        // the virtio-net IRQ handler. Safe because SpinLock::lock() disables
+        // interrupts, so the timer can't fire while SCHEDULER is held.
+        crate::deferred_job::run_deferred_jobs();
+
         crate::timer::handle_timer_irq()
     }
 
@@ -313,6 +318,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         let sys_root = SYS_FS.as_ref().root_dir().expect("sysfs root");
         let fs_dir = sys_root
             .create_dir("fs", kevlar_vfs::stat::FileMode::new(0o755))
+            .or_else(|e| {
+                // If already exists, look it up instead.
+                if e.errno() == kevlar_vfs::result::Errno::EEXIST {
+                    match sys_root.lookup("fs")? {
+                        kevlar_vfs::inode::INode::Directory(d) => return Ok(kevlar_vfs::inode::INode::Directory(d)),
+                        _ => {}
+                    }
+                }
+                Err(e)
+            })
             .and_then(|inode| match inode {
                 kevlar_vfs::inode::INode::Directory(d) => Ok(d),
                 _ => Err(kevlar_vfs::result::Error::new(kevlar_vfs::result::Errno::ENOTDIR)),
@@ -320,6 +335,15 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
             .expect("failed to create /sys/fs");
         let cgroup_dir = fs_dir
             .create_dir("cgroup", kevlar_vfs::stat::FileMode::new(0o755))
+            .or_else(|e| {
+                if e.errno() == kevlar_vfs::result::Errno::EEXIST {
+                    match fs_dir.lookup("cgroup")? {
+                        kevlar_vfs::inode::INode::Directory(d) => return Ok(kevlar_vfs::inode::INode::Directory(d)),
+                        _ => {}
+                    }
+                }
+                Err(e)
+            })
             .and_then(|inode| match inode {
                 kevlar_vfs::inode::INode::Directory(d) => Ok(d),
                 _ => Err(kevlar_vfs::result::Error::new(kevlar_vfs::result::Errno::ENOTDIR)),

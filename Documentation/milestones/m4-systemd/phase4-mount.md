@@ -134,8 +134,6 @@ printf("TEST_PASS mount\n");
 
 ## Reference
 
-- FreeBSD: `sys/kern/vfs_mount.c` (mount infrastructure)
-- Linux: `fs/namespace.c` (mount), `fs/proc/` (procfs)
 - Linux man pages: mount(2), proc(5)
 
 ## Estimated Complexity
