@@ -1,63 +1,61 @@
 # Kevlar
 
-A permissively licensed Rust kernel for running Linux binaries.
+A permissively licensed Rust kernel that runs unmodified Linux binaries.
 
 ## Overview
 
-Kevlar implements the Linux ABI so that unmodified Linux programs run directly
-on it — not through a compatibility shim, but because Kevlar *is* a Linux-ABI
-kernel. It was originally forked from [Kerla](https://github.com/nuta/kerla), but all
-kernel code has been rewritten and is now original Kevlar code (MIT/Apache-2.0/BSD-2-Clause).
-
-Kevlar uses the **ringkernel** architecture: a single-address-space kernel with
-three concentric trust zones enforced by Rust's type system. Unsafe code is
-confined to the `platform/` crate (<10% of the codebase). All syscall handlers,
-VFS logic, process management, and networking are written in safe Rust.
+Kevlar implements the Linux ABI so that real Linux programs — glibc, musl,
+BusyBox, Alpine's APK, OpenRC — run on it directly. It is not a compatibility
+shim; it *is* a Linux-ABI kernel written from scratch in safe Rust.
 
 **License:** MIT OR Apache-2.0 OR BSD-2-Clause
 
 ## Current Status
 
-**M5 Phase 4 complete.** 107+ syscalls implemented.
+**M10 (Alpine text-mode boot) in progress.** 141 syscall modules, 121+
+dispatch entries.
 
-- Static and dynamic (PIE) musl-linked binaries
-- BusyBox interactive shell on x86\_64 and ARM64 (QEMU)
-- TCP/UDP networking via virtio-net (smoltcp 0.12)
+What works today:
+
+- glibc and musl dynamically-linked binaries (PIE)
+- BusyBox interactive shell on x86\_64 and ARM64
+- Alpine Linux boots with OpenRC init and getty login
+- ext2 read-write filesystem on VirtIO block
+- TCP/UDP/ICMP networking via virtio-net (smoltcp 0.12)
 - Unix domain sockets with SCM\_RIGHTS
-- Full POSIX signal semantics (SA\_SIGINFO, sigaltstack, lock-free sigprocmask)
-- Job control and terminal management (SIGTSTP, SIGCONT, tcsetpgrp)
+- SMP: per-CPU scheduling, work stealing, TLB shootdown, clone threads
+- Full POSIX signals (SA\_SIGINFO, sigaltstack, lock-free sigprocmask)
 - epoll, eventfd, inotify, timerfd, signalfd
-- Mount namespace support (bind mounts)
-- procfs and devfs (/proc/[pid]/maps, /proc/[pid]/fd/, /proc/cpuinfo)
-- Process capabilities and prctl
-- vDSO for fast clock\_gettime (~10 ns; 2× faster than Linux KVM)
-- KVM performance at or above Linux for many syscalls (getpid: 200 ns)
+- cgroups v2 (pids controller), UTS/mount/PID namespaces
+- procfs, sysfs, devfs
+- vDSO clock\_gettime (~10 ns, 2x faster than Linux KVM)
+- 4 compile-time safety profiles (Fortress to Ludicrous)
 
 ## Roadmap
 
-| Milestone | Syscalls | Status | Description |
-|-----------|----------|--------|-------------|
-| M1: Static Busybox | ~50 | **Complete** | Core syscalls for static musl binaries |
-| M1.5: ARM64 | -- | **Complete** | ARM64 port; BusyBox boots on QEMU virt |
-| M2: Dynamic linking | ~55 | **Complete** | PIE + musl ld-linux; pread64, futex, madvise |
-| M3: Terminal + Job Control | ~80 | **Complete** | Terminal, job control, symlinks, clone |
-| M4: systemd-compatible PID 1 | ~110 | **Complete** | epoll, unix sockets, mount, caps; 15/15 integration tests |
-| M5: Persistent Storage | ~120 | In Progress | statx, inotify, procfs done; VirtIO block + ext2 next |
-| M6: Full networking | ~130 | Planned | AF\_NETLINK, accept4 |
-| M7: Container runtime | ~145 | Planned | namespaces, seccomp, clone3 |
-| M8: Kubuntu 24.04 desktop | ~170 | Planned | SysV IPC, ptrace, io\_uring |
+| Milestone | Status | Description |
+|-----------|--------|-------------|
+| M1-M6 | **Complete** | Static/dynamic binaries, terminal, job control, epoll, unix sockets, SMP threading, ext2, benchmarks |
+| M7: /proc + glibc | **Complete** | Full /proc, glibc compatibility, futex ops |
+| M8: cgroups + namespaces | **Complete** | cgroups v2, UTS/mount/PID namespaces, pivot\_root |
+| M9: Init system | **Complete** | Syscall gaps, init sequence, OpenRC boots |
+| M10: Alpine text-mode | **In Progress** | getty login, ext2 rw, networking, APK |
+| M11: Alpine graphical | Planned | Framebuffer, Wayland |
 
-## Goals
+**Ultimate goal:** Run Kubuntu 24.04 with full desktop, matching or exceeding
+Linux performance.
 
-1. **Full Linux ABI compatibility** — Run real Linux userspace binaries unmodified
-2. **Permissive licensing** — All code is MIT/Apache-2.0/BSD-2-Clause or compatible
-3. **Ringkernel architecture** — Three-ring safety design: unsafe Platform (<10% TCB),
-   safe Core, panic-contained Services. Near-monolithic performance with
-   microkernel-style fault isolation via `catch_unwind` at ring boundaries
-4. **Configurable safety** — Four compile-time profiles from Fortress (maximum safety)
-   to Ludicrous (maximum performance)
-5. **Clean-room provenance** — Syscall semantics derived from Linux man pages and
-   POSIX specifications; no GPL code ever copied
+## Architecture
+
+Kevlar uses the **ringkernel** design — three concentric trust zones in a
+single address space, enforced by Rust's type system:
+
+- **Platform** (Ring 0) — all unsafe code, <10% of codebase
+- **Core** (Ring 1) — safe Rust, OS policy (`#![deny(unsafe_code)]`)
+- **Services** (Ring 2) — safe Rust, panic-contained via `catch_unwind`
+  (`#![forbid(unsafe_code)]`)
+
+Near-monolithic performance with microkernel-style fault isolation.
 
 ## Building
 
@@ -66,35 +64,29 @@ rustup install nightly
 rustup override set nightly
 rustup component add llvm-tools-preview rust-src
 
-make run               # Build and boot on x86_64
-make ARCH=arm64 RELEASE=1 run  # ARM64 (release for TCG performance)
+make run                       # x86_64 in QEMU
+make ARCH=arm64 RELEASE=1 run  # ARM64
+make bench-kvm                 # KVM benchmarks
 ```
 
-**Windows users**: The Makefile automatically uses WSL2. Just run `make run` - it works!
+Windows: the Makefile uses WSL2 automatically.
 
-## Provenance & Attribution
+## Provenance
 
-| Source | License | Usage |
-|--------|---------|-------|
-| [Kerla](https://github.com/nuta/kerla) | MIT OR Apache-2.0 | Fork base (substantially rewritten) |
-| boot2dump | MIT OR Apache-2.0 | Crash dump utility (used as-is) |
-
-All kernel code is original or derived from Kerla. See [Documentation/provenance/](Documentation/provenance/) for details.
-
-## Documentation
-
-- [Documentation/](Documentation/) — Architecture, syscall coverage, provenance log
-- [Documentation/blog/](Documentation/blog/) — Development milestone blog posts
+Originally forked from [Kerla](https://github.com/nuta/kerla) (MIT OR
+Apache-2.0) by Seiya Nuta. Substantially rewritten — see
+[Documentation/provenance/](Documentation/provenance/) for the full
+attribution and clean-room log.
 
 ## License
 
 Licensed under any of:
 
-- MIT license ([LICENSE.md](LICENSE.md))
-- Apache License, Version 2.0 ([LICENSE.md](LICENSE.md))
-- BSD-2-Clause license ([LICENSE.md](LICENSE.md))
+- MIT license
+- Apache License, Version 2.0
+- BSD-2-Clause license
 
-at your option.
+at your option. See [LICENSE.md](LICENSE.md).
 
 ### Contribution
 
