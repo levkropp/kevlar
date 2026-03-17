@@ -764,6 +764,7 @@ impl Process {
 
     /// Terminates the **current** process.
     pub fn exit(status: c_int) -> ! {
+        let _exit_span = debug::tracer::span_guard(debug::tracer::span::EXIT_TOTAL);
         let current = current_process();
         if current.pid == PId::new(1) {
             // Dump syscall profile before halting (if profiling was enabled).
@@ -771,6 +772,9 @@ impl Process {
                 debug::profiler::dump_syscall_profile(
                     crate::syscalls::syscall_name_by_number,
                 );
+            }
+            if debug::tracer::is_enabled() {
+                debug::tracer::dump_span_profile();
             }
             // Dump PID 1 syscall trace for debugging.
             warn!("PID 1 exiting with status {}", status);
@@ -834,7 +838,7 @@ impl Process {
             // Close opened files here instead of in Drop::drop because `proc`
             // is not dropped until it's joined by the parent process. Drop them
             // to make pipes closed.
-            current.opened_files.lock().close_all();
+            current.opened_files.lock_no_irq().close_all();
         }
 
         PROCESSES.lock().remove(&current.pid);
@@ -1163,12 +1167,19 @@ impl Process {
         argv: &[&[u8]],
         envp: &[&[u8]],
     ) -> Result<()> {
+        let _exec_span = debug::tracer::span_guard(debug::tracer::span::EXEC_TOTAL);
         let current = current_process();
-        current.opened_files.lock().close_cloexec_files();
+        {
+            let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_CLOSE_CLOEXEC);
+            current.opened_files.lock().close_cloexec_files();
+        }
         current.cmdline.borrow_mut().set_by_argv(argv);
 
         let root_fs = current.root_fs();
-        let entry = setup_userspace(executable_path, argv, envp, &root_fs)?;
+        let entry = {
+            let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SETUP_USERSPACE);
+            setup_userspace(executable_path, argv, envp, &root_fs)?
+        };
 
         // de_thread: per POSIX, execve terminates all other threads in the
         // thread group.  Kill siblings NOW — after setup_userspace succeeds
@@ -1179,6 +1190,7 @@ impl Process {
         // use-after-free even if a sibling is still executing on another CPU
         // for a few hundred nanoseconds after we mark it ExitedWith.
         {
+            let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_DE_THREAD);
             let tgid = current.tgid;
             let siblings: Vec<Arc<Process>> = {
                 let table = PROCESSES.lock();
@@ -1203,8 +1215,11 @@ impl Process {
 
         // Per POSIX, reset signal handlers to SIG_DFL on exec (handler
         // function pointers from the old address space are no longer valid).
-        current.signals.lock().reset_on_exec();
-        current.signaled_frame.store(None);
+        {
+            let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SIGNAL_RESET);
+            current.signals.lock().reset_on_exec();
+            current.signaled_frame.store(None);
+        }
 
         entry.vm.page_table().switch();
         *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
@@ -1219,6 +1234,7 @@ impl Process {
     /// Creates a new process. The calling process (`self`) will be the parent
     /// process of the created process. Returns the created child process.
     pub fn fork(parent: &Arc<Process>, parent_frame: &PtRegs) -> Result<Arc<Process>> {
+        let _fork_span = debug::tracer::span_guard(debug::tracer::span::FORK_TOTAL);
         // Check cgroup pids.max limit before allocating resources.
         crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
 
@@ -1226,8 +1242,11 @@ impl Process {
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
         let arch = parent.arch.fork(parent_frame);
-        let vm = parent.vm().as_ref().unwrap().lock().fork()?;
-        let opened_files = parent.opened_files().lock().clone(); // TODO: #88 has to address this
+        let vm = {
+            let _g = debug::tracer::span_guard(debug::tracer::span::FORK_PAGE_TABLE);
+            parent.vm().as_ref().unwrap().lock().fork()?
+        };
+        let opened_files = parent.opened_files().lock().clone();
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
         let parent_umask = parent.umask.load();
@@ -1555,6 +1574,98 @@ fn do_script_binfmt(
     do_setup_userspace(shebang_path, &argv, envp, root_fs, false)
 }
 
+/// Convert ELF p_flags to MMapProt.  The bit positions differ:
+///   PF_X = 1  →  PROT_EXEC = 4
+///   PF_W = 2  →  PROT_WRITE = 2
+///   PF_R = 4  →  PROT_READ = 1
+fn elf_flags_to_prot(p_flags: u32) -> MMapProt {
+    let mut prot = MMapProt::empty();
+    if p_flags & 4 != 0 { prot |= MMapProt::PROT_READ; }   // PF_R
+    if p_flags & 2 != 0 { prot |= MMapProt::PROT_WRITE; }  // PF_W
+    if p_flags & 1 != 0 { prot |= MMapProt::PROT_EXEC; }   // PF_X
+    prot
+}
+
+// --- VMA template cache ---
+// Caches the VMA layout produced by load_elf_segments for frequently exec'd
+// binaries (e.g. BusyBox). On cache hit, skips ELF segment iteration and
+// gap filling, directly adding the cached VMA entries to the new VM.
+// Only used for static executables (base_offset=0, same addresses every time).
+
+struct VmaTemplateEntry {
+    start: usize,
+    len: usize,
+    prot_bits: i32,
+    is_file: bool,
+    file_offset: usize,
+    file_size: usize,
+}
+
+static VMA_TEMPLATE_CACHE: SpinLock<Option<hashbrown::HashMap<usize, Vec<VmaTemplateEntry>>>> =
+    SpinLock::new(None);
+
+fn vma_template_lookup(file_ptr: usize) -> Option<Vec<VmaTemplateEntry>> {
+    let cache = VMA_TEMPLATE_CACHE.lock_no_irq();
+    cache.as_ref().and_then(|map| map.get(&file_ptr).map(|v| {
+        v.iter().map(|e| VmaTemplateEntry {
+            start: e.start,
+            len: e.len,
+            prot_bits: e.prot_bits,
+            is_file: e.is_file,
+            file_offset: e.file_offset,
+            file_size: e.file_size,
+        }).collect()
+    }))
+}
+
+fn save_vma_template(file_ptr: usize, vm: &Vm, vma_start_idx: usize) {
+    let entries: Vec<VmaTemplateEntry> = vm.vm_areas()[vma_start_idx..]
+        .iter()
+        .map(|vma| {
+            let (is_file, file_offset, file_size) = match vma.area_type() {
+                VmAreaType::File { offset, file_size, .. } => (true, *offset, *file_size),
+                VmAreaType::Anonymous => (false, 0, 0),
+            };
+            VmaTemplateEntry {
+                start: vma.start().value(),
+                len: vma.end().value() - vma.start().value(),
+                prot_bits: vma.prot().bits(),
+                is_file,
+                file_offset,
+                file_size,
+            }
+        })
+        .collect();
+    let mut cache = VMA_TEMPLATE_CACHE.lock_no_irq();
+    let map = cache.get_or_insert_with(hashbrown::HashMap::new);
+    map.insert(file_ptr, entries);
+}
+
+fn apply_vma_template(
+    vm: &mut Vm,
+    template: &[VmaTemplateEntry],
+    file: &Arc<dyn FileLike>,
+) -> Result<()> {
+    for entry in template {
+        let area_type = if entry.is_file {
+            VmAreaType::File {
+                file: file.clone(),
+                offset: entry.file_offset,
+                file_size: entry.file_size,
+            }
+        } else {
+            VmAreaType::Anonymous
+        };
+        vm.add_vm_area_with_prot(
+            UserVAddr::new_nonnull(entry.start)?,
+            entry.len,
+            area_type,
+            MMapProt::from_bits_truncate(entry.prot_bits),
+        )?;
+    }
+    Ok(())
+}
+
 /// Load PT_LOAD segments from an ELF into the VM, then fill inter-segment
 /// gaps with anonymous VMAs so that addresses within the full page-aligned
 /// span are always backed by a VMA.  This is required because libc (e.g.
@@ -1585,10 +1696,11 @@ fn load_elf_segments(
         } else {
             VmAreaType::Anonymous
         };
-        vm.add_vm_area(
+        vm.add_vm_area_with_prot(
             UserVAddr::new_nonnull(seg_start)?,
             phdr.p_memsz as usize,
             area_type,
+            elf_flags_to_prot(phdr.p_flags),
         )?;
 
         // Track the page-aligned range this segment occupies.
@@ -1669,6 +1781,640 @@ fn load_elf_segments(
     Ok(())
 }
 
+/// Pre-map pages from the page cache into the new address space during exec.
+/// For immutable file-backed VMAs (initramfs), this eliminates demand-paging
+/// faults (each a ~500ns KVM VM exit) by mapping cached pages directly.
+///
+/// Two-pass strategy:
+///   Pass 1: For each PDE-aligned 2MB region with enough cached pages, map a
+///           huge page (from HUGE_PAGE_CACHE, or assembled from 4KB pages).
+///           Reduces ~233 TLB entries to 1 for BusyBox text, and enables KVM
+///           to use 2MB EPT entries, eliminating costly 2D page walks.
+///   Pass 2: Map remaining 4KB cached pages, skipping huge-page-covered regions.
+fn prefault_cached_pages(vm: &mut Vm) {
+    use crate::mm::page_fault::{PAGE_CACHE, huge_page_cache_lookup, huge_page_cache_insert};
+    use crate::mm::vm::VmAreaType;
+    use alloc::sync::Arc;
+    use kevlar_platform::arch::{PAGE_SIZE, HUGE_PAGE_SIZE};
+    use kevlar_utils::alignment::align_down;
+
+    let cache_guard = PAGE_CACHE.lock_no_irq();
+    let cache_map = match cache_guard.as_ref() {
+        Some(map) if !map.is_empty() => map,
+        _ => return,
+    };
+
+    // Collect VMA info for immutable file-backed VMAs.
+    #[allow(dead_code)]
+    struct VmaInfo {
+        file_ptr: usize,
+        file: Arc<dyn kevlar_vfs::inode::FileLike>,
+        offset: usize,
+        file_size: usize,
+        vma_start: usize,
+        vma_end: usize,
+    }
+    let mut vma_infos: Vec<VmaInfo> = Vec::new();
+    for vma_idx in 0..vm.vm_areas().len() {
+        let vma = &vm.vm_areas()[vma_idx];
+        if let VmAreaType::File { file, offset, file_size } = vma.area_type() {
+            if file.is_content_immutable() {
+                vma_infos.push(VmaInfo {
+                    file_ptr: Arc::as_ptr(file) as *const () as usize,
+                    file: file.clone(),
+                    offset: *offset,
+                    file_size: *file_size,
+                    vma_start: vma.start().value(),
+                    vma_end: vma.end().value(),
+                });
+            }
+        }
+    }
+
+    // --- Pass 1: Huge page prefaulting ---
+    const PAGES_PER_HUGE: usize = HUGE_PAGE_SIZE / PAGE_SIZE; // 512
+    const ASSEMBLE_THRESHOLD: usize = 128;
+    {
+        // Collect unique PDE-aligned candidates from all VMAs.
+        struct HugeCandidate {
+            file_ptr: usize,
+            huge_vaddr: usize,
+        }
+        let mut candidates: Vec<HugeCandidate> = Vec::new();
+
+        for info in &vma_infos {
+            let vma_page_start = kevlar_utils::alignment::align_up(info.vma_start, PAGE_SIZE);
+            let pde_start = align_down(vma_page_start, HUGE_PAGE_SIZE);
+            let pde_end = kevlar_utils::alignment::align_up(info.vma_end, HUGE_PAGE_SIZE);
+
+            let mut huge_addr = pde_start;
+            while huge_addr < pde_end {
+                if !candidates.iter().any(|c| c.huge_vaddr == huge_addr) {
+                    candidates.push(HugeCandidate {
+                        file_ptr: info.file_ptr,
+                        huge_vaddr: huge_addr,
+                    });
+                }
+                huge_addr += HUGE_PAGE_SIZE;
+            }
+        }
+
+        for cand in &candidates {
+            let huge_uaddr = match kevlar_platform::address::UserVAddr::new_nonnull(cand.huge_vaddr) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if !vm.page_table().is_pde_empty(huge_uaddr) {
+                continue;
+            }
+
+            // Key the huge page cache by (file_ptr, huge_vaddr) to avoid
+            // file-offset-to-vaddr mapping issues across segments.
+            let huge_index = cand.huge_vaddr / HUGE_PAGE_SIZE;
+
+            if let Some((huge_paddr, _bitmap)) = huge_page_cache_lookup(cand.file_ptr, huge_index) {
+                // Map as a single 2MB huge PDE (RX). One TLB entry instead of ~284.
+                // Unpopulated sub-pages are zero-filled (correct for BSS/gap).
+                // Write faults (e.g. .data) trigger split_huge_page → CoW path.
+                kevlar_platform::page_refcount::page_ref_inc_huge(huge_paddr);
+                vm.page_table_mut().map_huge_user_page(huge_uaddr, huge_paddr, 5);
+                continue;
+            }
+
+            // Count cached 4KB pages in this 2MB virtual region.
+            let mut cached_count = 0;
+            for i in 0..PAGES_PER_HUGE {
+                let sub_vaddr = cand.huge_vaddr + i * PAGE_SIZE;
+                for info in &vma_infos {
+                    if info.file_ptr != cand.file_ptr {
+                        continue;
+                    }
+                    if sub_vaddr >= info.vma_start && sub_vaddr < info.vma_end {
+                        let ov = sub_vaddr - info.vma_start;
+                        if ov < info.file_size {
+                            let pi = (info.offset + ov) / PAGE_SIZE;
+                            if cache_map.contains_key(&(info.file_ptr, pi)) {
+                                cached_count += 1;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if cached_count < ASSEMBLE_THRESHOLD {
+                continue;
+            }
+
+            // Assemble a huge page by populating each 4KB sub-page.
+            // For each sub-page at vaddr V = huge_base + i*4K, find the VMA
+            // covering V and read file data at the correct offset. Use the
+            // 4KB page cache when available (fast path) for cached pages.
+            //
+            // NOTE: file-to-vaddr mapping differs per ELF segment, so we
+            // must look up the VMA per sub-page, not use a linear offset.
+            let huge_paddr = match kevlar_platform::page_allocator::alloc_huge_page() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            kevlar_platform::page_ops::zero_huge_page(huge_paddr);
+
+            // Track which sub-pages have content via a u64x8 bitmap (512 bits).
+            // Using a bitmap instead of [bool; 512] to avoid kernel stack overflow
+            // (kernel stack is only 16KB on x86_64).
+            let mut populated = [0u64; 8];
+            for i in 0..PAGES_PER_HUGE {
+                let sub_vaddr = cand.huge_vaddr + i * PAGE_SIZE;
+                let sub_end = sub_vaddr + PAGE_SIZE;
+                let dst_paddr = kevlar_platform::address::PAddr::new(
+                    huge_paddr.value() + i * PAGE_SIZE
+                );
+
+                for info in &vma_infos {
+                    if info.file_ptr != cand.file_ptr {
+                        continue;
+                    }
+                    if info.vma_end <= sub_vaddr || info.vma_start >= sub_end {
+                        continue;
+                    }
+                    let (offset_in_page, file_offset, copy_len);
+                    if sub_vaddr < info.vma_start {
+                        // VMA starts mid-page — this page straddles an anonymous
+                        // gap VMA and a file VMA. Populate the file portion;
+                        // the gap portion is already zero from zero_huge_page.
+                        offset_in_page = info.vma_start - sub_vaddr;
+                        file_offset = info.offset;
+                        copy_len = core::cmp::min(info.file_size, PAGE_SIZE - offset_in_page);
+                    } else {
+                        let offset_in_vma = sub_vaddr - info.vma_start;
+                        offset_in_page = 0;
+                        if offset_in_vma >= info.file_size {
+                            continue;
+                        }
+                        file_offset = info.offset + offset_in_vma;
+                        copy_len = core::cmp::min(info.file_size - offset_in_vma, PAGE_SIZE);
+                    }
+                    if copy_len == 0 {
+                        continue;
+                    }
+                    let page_index = file_offset / PAGE_SIZE;
+
+                    // Only use the page cache for full, page-aligned sub-pages.
+                    // Boundary/partial pages can't safely use the cache because:
+                    // 1. The page_index may collide with a different VMA's partial
+                    //    page (e.g. .rodata's last page only has 0x1f0 bytes, rest
+                    //    zeros; .data's boundary page at the same index needs
+                    //    different content at the overlapping offset).
+                    // 2. A full-page copy would overwrite the zero-filled gap.
+                    let use_cache = offset_in_page == 0 && copy_len == PAGE_SIZE;
+                    if use_cache {
+                        if let Some(&src_paddr) = cache_map.get(&(info.file_ptr, page_index)) {
+                            #[cfg(not(feature = "profile-fortress"))]
+                            {
+                                let src = kevlar_platform::page_ops::page_as_slice(src_paddr);
+                                let dst = kevlar_platform::page_ops::page_as_slice_mut(dst_paddr);
+                                dst.copy_from_slice(src);
+                            }
+                            #[cfg(feature = "profile-fortress")]
+                            {
+                                let mut tmp = [0u8; PAGE_SIZE];
+                                let src_frame = kevlar_platform::page_ops::PageFrame::new(src_paddr);
+                                src_frame.read(0, &mut tmp);
+                                let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(dst_paddr);
+                                dst_frame.write(0, &tmp);
+                            }
+                            populated[i / 64] |= 1u64 << (i % 64);
+                            break;
+                        }
+                    }
+                    // Cache miss or partial page: read from file.
+                    {
+                        #[cfg(not(feature = "profile-fortress"))]
+                        {
+                            let dst = kevlar_platform::page_ops::page_as_slice_mut(dst_paddr);
+                            let _ = info.file.read(
+                                file_offset,
+                                (&mut dst[offset_in_page..(offset_in_page + copy_len)]).into(),
+                                &crate::fs::opened_file::OpenOptions::readwrite(),
+                            );
+                        }
+                        #[cfg(feature = "profile-fortress")]
+                        {
+                            let mut tmp = [0u8; PAGE_SIZE];
+                            let _ = info.file.read(
+                                file_offset,
+                                (&mut tmp[..copy_len]).into(),
+                                &crate::fs::opened_file::OpenOptions::readwrite(),
+                            );
+                            let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(dst_paddr);
+                            dst_frame.write(offset_in_page, &tmp[..copy_len]);
+                        }
+                        populated[i / 64] |= 1u64 << (i % 64);
+                    }
+
+                    break;
+                }
+            }
+
+            let bitmap = populated;
+
+            // Verify assembled content against backing files (debug only).
+            if debug::is_enabled(DebugFilter::KWAB_VERIFY) {
+                verify_huge_page_assembly(
+                    huge_paddr, cand.huge_vaddr, &populated, vm, cand.file_ptr,
+                );
+            }
+
+            // Init per-sub-page refcounts: 1 for mapping + 1 for cache.
+            kevlar_platform::page_refcount::page_ref_init_huge(huge_paddr);
+            kevlar_platform::page_refcount::page_ref_inc_huge(huge_paddr);
+            huge_page_cache_insert(cand.file_ptr, huge_index, huge_paddr, bitmap);
+
+            // Map as a single 2MB huge PDE (RX). One TLB entry covers
+            // all text/rodata sub-pages. Unpopulated sub-pages are zero-filled
+            // (correct for BSS/gap). Write faults trigger split → CoW.
+            vm.page_table_mut().map_huge_user_page(huge_uaddr, huge_paddr, 5);
+        }
+    }
+
+    // --- Pass 2: 4KB page prefaulting ---
+    // Skip pages within huge PDE regions (already fully mapped in pass 1).
+    for info in &vma_infos {
+        let mut addr = if info.vma_start % PAGE_SIZE == 0 {
+            info.vma_start
+        } else {
+            kevlar_utils::alignment::align_up(info.vma_start, PAGE_SIZE)
+        };
+
+        while addr + PAGE_SIZE <= info.vma_end && (addr - info.vma_start) < info.file_size {
+            // Skip entire 2MB region if a huge PDE covers it.
+            let huge_base = align_down(addr, HUGE_PAGE_SIZE);
+            if let Ok(huge_uaddr) = kevlar_platform::address::UserVAddr::new_nonnull(huge_base) {
+                if vm.page_table().is_huge_mapped(huge_uaddr).is_some() {
+                    addr = huge_base + HUGE_PAGE_SIZE;
+                    continue;
+                }
+            }
+
+            let uaddr = kevlar_platform::address::UserVAddr::new_nonnull(addr).unwrap();
+            let offset_in_vma = addr - info.vma_start;
+            let offset_in_file = info.offset + offset_in_vma;
+            let page_index = offset_in_file / PAGE_SIZE;
+
+            if let Some(&cached_paddr) = cache_map.get(&(info.file_ptr, page_index)) {
+                if vm.page_table_mut().try_map_user_page_with_prot(uaddr, cached_paddr, 5) {
+                    kevlar_platform::page_refcount::page_ref_inc(cached_paddr);
+                }
+            }
+
+            addr += PAGE_SIZE;
+        }
+    }
+}
+
+/// Verify assembled huge page content against backing files.
+///
+/// For each populated sub-page, reads the expected content directly from the
+/// file (ground truth) and compares byte-by-byte. Emits `HugePageVerifyFail`
+/// for any mismatch. Only runs when `KWAB_VERIFY` debug filter is enabled.
+fn verify_huge_page_assembly(
+    huge_paddr: kevlar_platform::address::PAddr,
+    huge_vaddr: usize,
+    populated: &[u64; 8],
+    vm: &Vm,
+    file_ptr: usize,
+) {
+    use crate::mm::vm::VmAreaType;
+    use kevlar_platform::arch::PAGE_SIZE;
+
+    let pid = current_process().pid().as_i32();
+    let mut failures = 0u32;
+    let mut verified = 0u32;
+
+    for i in 0..512usize {
+        // Only check populated sub-pages.
+        if populated[i / 64] & (1u64 << (i % 64)) == 0 {
+            continue;
+        }
+
+        let sub_vaddr = huge_vaddr + i * PAGE_SIZE;
+        let sub_paddr = kevlar_platform::address::PAddr::new(
+            huge_paddr.value() + i * PAGE_SIZE,
+        );
+
+        // Find covering VMA by scanning all vm_areas (not just vma_infos).
+        let mut found_vma = false;
+        for vma_idx in 0..vm.vm_areas().len() {
+            let vma = &vm.vm_areas()[vma_idx];
+            let vs = vma.start().value();
+            let ve = vma.end().value();
+            if sub_vaddr >= ve || sub_vaddr + PAGE_SIZE <= vs {
+                continue;
+            }
+
+            if let VmAreaType::File { file, offset, file_size } = vma.area_type() {
+                if Arc::as_ptr(file) as *const () as usize != file_ptr {
+                    continue;
+                }
+                found_vma = true;
+
+                // Compute expected content using the same logic as demand fault.
+                let mut expected = [0u8; PAGE_SIZE];
+                let (off_in_page, file_off, copy_len);
+                if sub_vaddr < vs {
+                    off_in_page = vs - sub_vaddr;
+                    file_off = *offset;
+                    copy_len = core::cmp::min(*file_size, PAGE_SIZE - off_in_page);
+                } else {
+                    let off_in_vma = sub_vaddr - vs;
+                    off_in_page = 0;
+                    if off_in_vma >= *file_size {
+                        break; // BSS region — expected is all zeros
+                    }
+                    file_off = *offset + off_in_vma;
+                    copy_len = core::cmp::min(*file_size - off_in_vma, PAGE_SIZE);
+                }
+
+                if copy_len > 0 {
+                    let _ = file.read(
+                        file_off,
+                        (&mut expected[off_in_page..(off_in_page + copy_len)]).into(),
+                        &crate::fs::opened_file::OpenOptions::readwrite(),
+                    );
+                }
+
+                // Compare against actual content in the huge page sub-page.
+                let mut actual_buf = [0u8; PAGE_SIZE];
+                #[cfg(not(feature = "profile-fortress"))]
+                {
+                    let actual = kevlar_platform::page_ops::page_as_slice(sub_paddr);
+                    actual_buf.copy_from_slice(actual);
+                }
+                #[cfg(feature = "profile-fortress")]
+                {
+                    let frame = kevlar_platform::page_ops::PageFrame::new(sub_paddr);
+                    frame.read(0, &mut actual_buf);
+                }
+                let mut first_diff = None;
+                for b in 0..PAGE_SIZE {
+                    if actual_buf[b] != expected[b] {
+                        first_diff = Some((b, expected[b], actual_buf[b]));
+                        break;
+                    }
+                }
+                if let Some((diff_off, exp_byte, act_byte)) = first_diff {
+                    failures += 1;
+                    let vma_type = if vma.prot().bits() & 2 != 0 { "file_rw" } else { "file_ro" };
+                    debug::emit(DebugFilter::KWAB_VERIFY, &DebugEvent::HugePageVerifyFail {
+                        pid,
+                        huge_base: huge_vaddr,
+                        sub_page: i as u16,
+                        first_diff: diff_off as u16,
+                        expected_byte: exp_byte,
+                        actual_byte: act_byte,
+                        vma_start: vs,
+                        vma_type,
+                    });
+                } else {
+                    verified += 1;
+                }
+                break;
+            }
+        }
+
+        if !found_vma {
+            // Sub-page populated but no file VMA covers it — should be all zeros.
+            let mut actual_buf = [0u8; PAGE_SIZE];
+            #[cfg(not(feature = "profile-fortress"))]
+            {
+                let actual = kevlar_platform::page_ops::page_as_slice(sub_paddr);
+                actual_buf.copy_from_slice(actual);
+            }
+            #[cfg(feature = "profile-fortress")]
+            {
+                let frame = kevlar_platform::page_ops::PageFrame::new(sub_paddr);
+                frame.read(0, &mut actual_buf);
+            }
+            let nonzero = actual_buf.iter().position(|&b| b != 0);
+            if let Some(diff_off) = nonzero {
+                failures += 1;
+                debug::emit(DebugFilter::KWAB_VERIFY, &DebugEvent::HugePageVerifyFail {
+                    pid,
+                    huge_base: huge_vaddr,
+                    sub_page: i as u16,
+                    first_diff: diff_off as u16,
+                    expected_byte: 0,
+                    actual_byte: actual_buf[diff_off],
+                    vma_start: 0,
+                    vma_type: "none",
+                });
+            } else {
+                verified += 1;
+            }
+        }
+    }
+
+    debug::emit(DebugFilter::KWAB_VERIFY, &DebugEvent::PageVerifyOk {
+        pid,
+        verified,
+        failed: failures,
+    });
+}
+
+/// Pre-map zero pages for small anonymous VMAs (gap padding) and BSS pages
+/// (file-backed VMAs past file_size) during exec. These are typically 1-8
+/// pages that would otherwise cause demand faults (~2µs each under KVM).
+/// Skip large anonymous VMAs (stack, heap) to avoid wasting memory.
+fn prefault_small_anonymous(vm: &mut Vm) {
+    use kevlar_platform::arch::PAGE_SIZE;
+    use kevlar_utils::alignment::align_up;
+
+    const MAX_PREFAULT_PAGES: usize = 8;
+
+    for vma_idx in 0..vm.vm_areas().len() {
+        let vma = &vm.vm_areas()[vma_idx];
+        let prot_flags = vma.prot().bits();
+        if prot_flags == 0 {
+            continue; // PROT_NONE
+        }
+        let vma_start = vma.start().value();
+        let vma_end = vma.end().value();
+
+        let prefault_start = match vma.area_type() {
+            VmAreaType::Anonymous => {
+                // Small anonymous VMAs (gaps, padding).
+                let num_pages = (vma_end - vma_start) / PAGE_SIZE;
+                if num_pages == 0 || num_pages > MAX_PREFAULT_PAGES {
+                    continue;
+                }
+                align_up(vma_start, PAGE_SIZE)
+            }
+            VmAreaType::File { file_size, .. } => {
+                // BSS tail: zeroed pages past file_size in file-backed VMAs.
+                let bss_start = align_up(vma_start + file_size, PAGE_SIZE);
+                if bss_start >= vma_end {
+                    continue;
+                }
+                let bss_pages = (vma_end - bss_start) / PAGE_SIZE;
+                if bss_pages == 0 || bss_pages > MAX_PREFAULT_PAGES {
+                    continue;
+                }
+                bss_start
+            }
+        };
+
+        let mut addr = prefault_start;
+        while addr + PAGE_SIZE <= vma_end {
+            let uaddr = match UserVAddr::new_nonnull(addr) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let paddr = match alloc_pages(1, AllocPageFlags::KERNEL) {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            kevlar_platform::page_ops::zero_page(paddr);
+            kevlar_platform::page_refcount::page_ref_init(paddr);
+            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, paddr, prot_flags) {
+                // Already mapped (e.g. within a huge PDE) — free the page.
+                if kevlar_platform::page_refcount::page_ref_dec(paddr) {
+                    kevlar_platform::page_allocator::free_pages(paddr, 1);
+                }
+            }
+            addr += PAGE_SIZE;
+        }
+    }
+}
+
+/// Verify that every mapped page in a file-backed VMA has the correct content.
+/// Compares mapped page bytes against the backing file. Emits PageVerifyFail
+/// for each mismatch. Called after prefault when `debug=kwab-verify`.
+fn verify_prefaulted_pages(vm: &Vm) {
+    use crate::mm::vm::VmAreaType;
+    use kevlar_platform::arch::PAGE_SIZE;
+
+    let pid = crate::process::current_process().pid().as_i32();
+    let mut verified = 0u32;
+    let mut failed = 0u32;
+
+    for vma_idx in 0..vm.vm_areas().len() {
+        let vma = &vm.vm_areas()[vma_idx];
+        let (file, offset, file_size, vma_start, vma_end) = match vma.area_type() {
+            VmAreaType::File { file, offset, file_size } => {
+                if !file.is_content_immutable() { continue; }
+                (file.clone(), *offset, *file_size, vma.start().value(), vma.end().value())
+            }
+            _ => continue,
+        };
+
+        let mut addr = kevlar_utils::alignment::align_up(vma_start, PAGE_SIZE);
+        while addr + PAGE_SIZE <= vma_end {
+            let offset_in_vma = addr - vma_start;
+            if offset_in_vma >= file_size { break; }
+
+            let uaddr = kevlar_platform::address::UserVAddr::new_nonnull(addr).unwrap();
+            if let Some(mapped_paddr) = vm.page_table().lookup_paddr(uaddr) {
+                // Read expected content from the file.
+                let file_off = offset + offset_in_vma;
+                let copy_len = core::cmp::min(PAGE_SIZE, file_size - offset_in_vma);
+                let mut expected = [0u8; PAGE_SIZE];
+                let _ = file.read(
+                    file_off,
+                    (&mut expected[..copy_len]).into(),
+                    &crate::fs::opened_file::OpenOptions::readwrite(),
+                );
+
+                // Read actual content from the mapped page.
+                #[cfg(not(feature = "profile-fortress"))]
+                let actual = kevlar_platform::page_ops::page_as_slice(mapped_paddr);
+                #[cfg(feature = "profile-fortress")]
+                let actual_buf = {
+                    let mut buf = [0u8; PAGE_SIZE];
+                    kevlar_platform::page_ops::PageFrame::new(mapped_paddr).read(0, &mut buf);
+                    buf
+                };
+                #[cfg(feature = "profile-fortress")]
+                let actual = &actual_buf[..];
+
+                // Compare.
+                let mut mismatch = false;
+                for i in 0..copy_len {
+                    if actual[i] != expected[i] {
+                        debug::emit(DebugFilter::KWAB_VERIFY, &DebugEvent::PageVerifyFail {
+                            pid,
+                            vaddr: addr,
+                            first_diff: i as u16,
+                            expected_byte: expected[i],
+                            actual_byte: actual[i],
+                            file_offset: file_off,
+                            vma_start,
+                        });
+                        failed += 1;
+                        mismatch = true;
+                        break;
+                    }
+                }
+                if !mismatch {
+                    verified += 1;
+                }
+            }
+            addr += PAGE_SIZE;
+        }
+    }
+
+    debug::emit(DebugFilter::KWAB_VERIFY, &DebugEvent::PageVerifyOk {
+        pid, verified, failed,
+    });
+}
+
+/// Audit VM: check that PTE state matches VMA protection for all VMAs.
+/// Emits a VmAudit event with per-VMA statistics. Called after prefault
+/// when `debug=kwab-audit`.
+fn audit_vm(vm: &Vm) {
+    use kevlar_platform::arch::PAGE_SIZE;
+
+    let pid = crate::process::current_process().pid().as_i32();
+    let mut entries: [(usize, usize, u8, u16, u16, u16); 32] = [(0, 0, 0, 0, 0, 0); 32];
+    let mut count = 0;
+
+    for vma_idx in 0..vm.vm_areas().len() {
+        if count >= 32 { break; }
+        let vma = &vm.vm_areas()[vma_idx];
+        let vma_start = vma.start().value();
+        let vma_end = vma.end().value();
+        let prot = vma.prot().bits() as u8;
+
+        let mut mapped = 0u16;
+        let mut unmapped = 0u16;
+        let mut perm_mismatch = 0u16;
+
+        let mut addr = kevlar_utils::alignment::align_up(vma_start, PAGE_SIZE);
+        while addr + PAGE_SIZE <= vma_end {
+            let uaddr = kevlar_platform::address::UserVAddr::new_nonnull(addr).unwrap();
+            if let Some(pte_val) = vm.page_table().lookup_pte_entry(uaddr) {
+                mapped += 1;
+                // Check: if VMA has PROT_EXEC (bit 2) but PTE has NX (bit 63)
+                let pte_nx = (pte_val >> 63) != 0;
+                let vma_exec = prot & 4 != 0;
+                if vma_exec && pte_nx {
+                    perm_mismatch += 1;
+                }
+            } else {
+                unmapped += 1;
+            }
+            addr += PAGE_SIZE;
+        }
+
+        entries[count] = (vma_start, vma_end, prot, mapped, unmapped, perm_mismatch);
+        count += 1;
+    }
+
+    debug::emit(DebugFilter::KWAB_AUDIT, &DebugEvent::VmAudit {
+        pid,
+        entries: &entries[..count],
+    });
+}
+
 fn do_elf_binfmt(
     executable: &Arc<dyn FileLike>,
     argv: &[&[u8]],
@@ -1678,7 +2424,10 @@ fn do_elf_binfmt(
     root_fs: &Arc<SpinLock<RootFs>>,
 ) -> Result<UserspaceEntry> {
     let file_header_top = USER_STACK_TOP;
-    let elf = Elf::parse(buf)?;
+    let elf = {
+        let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_ELF_PARSE);
+        Elf::parse(buf)?
+    };
 
     trace!("do_elf_binfmt: e_type={}, is_dyn={}", elf.header().e_type, elf.is_dyn());
 
@@ -1703,7 +2452,10 @@ fn do_elf_binfmt(
     }
 
     let mut random_bytes = [0u8; 16];
-    read_secure_random(((&mut random_bytes) as &mut [u8]).into())?;
+    {
+        let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_RANDOM);
+        read_secure_random(((&mut random_bytes) as &mut [u8]).into())?;
+    }
 
     // Build auxiliary vectors. We'll add AT_BASE and AT_ENTRY if we have an interpreter.
     let mut auxv = Vec::new();
@@ -1874,10 +2626,13 @@ fn do_elf_binfmt(
             return Err(Errno::E2BIG.into());
         }
 
-        vm = Vm::new(
-            UserVAddr::new(user_stack_bottom).unwrap(),
-            UserVAddr::new(user_heap_bottom).unwrap(),
-        )?;
+        vm = {
+            let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_VM_NEW);
+            Vm::new(
+                UserVAddr::new(user_stack_bottom).unwrap(),
+                UserVAddr::new(user_heap_bottom).unwrap(),
+            )?
+        };
 
         // Map file header pages.
         for i in 0..(buf.len() / PAGE_SIZE) {
@@ -1888,9 +2643,37 @@ fn do_elf_binfmt(
         }
 
         // Register main executable's PT_LOAD segments.
-        load_elf_segments(&mut vm, elf.program_headers(), 0, executable)?;
+        // Use VMA template cache when available to skip ELF iteration + gap filling.
+        {
+            let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_LOAD_SEGMENTS);
+            let file_ptr = Arc::as_ptr(executable) as *const () as usize;
+            if let Some(template) = vma_template_lookup(file_ptr) {
+                apply_vma_template(&mut vm, &template, executable)?;
+            } else {
+                let vma_count_before = vm.vm_areas().len();
+                load_elf_segments(&mut vm, elf.program_headers(), 0, executable)?;
+                save_vma_template(file_ptr, &vm, vma_count_before);
+            }
+        }
 
         ip = elf.entry()?;
+    }
+
+    // Pre-map pages from the page cache into the new address space.
+    // This eliminates demand-paging faults for cached initramfs pages,
+    // each of which would be a ~500ns KVM VM exit.
+    {
+        let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_PREFAULT);
+        prefault_cached_pages(&mut vm);
+        prefault_small_anonymous(&mut vm);
+    }
+
+    // kwab diagnostic tools — verify prefaulted pages and audit VM state.
+    if debug::is_enabled(DebugFilter::KWAB_VERIFY) {
+        verify_prefaulted_pages(&vm);
+    }
+    if debug::is_enabled(DebugFilter::KWAB_AUDIT) {
+        audit_vm(&vm);
     }
 
     // Map vDSO page (read + execute, no write) into the new address space.
@@ -1901,23 +2684,26 @@ fn do_elf_binfmt(
     }
 
     // Build init stack.
-    let init_stack_len = align_up(estimate_user_init_stack_size(argv, envp, &auxv), PAGE_SIZE);
-    let init_stack_pages = alloc_pages(init_stack_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
-    let user_sp = init_user_stack(
-        init_stack_top,
-        init_stack_pages.as_vaddr().add(init_stack_len),
-        init_stack_pages.as_vaddr(),
-        argv,
-        envp,
-        &auxv,
-    )?;
-    for i in 0..(init_stack_len / PAGE_SIZE) {
-        vm.page_table_mut().map_user_page(
-            init_stack_top.sub(((init_stack_len / PAGE_SIZE) - i) * PAGE_SIZE),
-            init_stack_pages.add(i * PAGE_SIZE),
-        );
-    }
-
+    let user_sp = {
+        let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_STACK);
+        let init_stack_len = align_up(estimate_user_init_stack_size(argv, envp, &auxv), PAGE_SIZE);
+        let init_stack_pages = alloc_pages(init_stack_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
+        let sp = init_user_stack(
+            init_stack_top,
+            init_stack_pages.as_vaddr().add(init_stack_len),
+            init_stack_pages.as_vaddr(),
+            argv,
+            envp,
+            &auxv,
+        )?;
+        for i in 0..(init_stack_len / PAGE_SIZE) {
+            vm.page_table_mut().map_user_page(
+                init_stack_top.sub(((init_stack_len / PAGE_SIZE) - i) * PAGE_SIZE),
+                init_stack_pages.add(i * PAGE_SIZE),
+            );
+        }
+        sp
+    };
     Ok(UserspaceEntry { vm, ip, user_sp })
 }
 
@@ -1932,13 +2718,19 @@ fn do_setup_userspace(
 ) -> Result<UserspaceEntry> {
     // Read the ELF header in the executable file.
     let file_header_len = PAGE_SIZE;
-    let file_header_pages = alloc_pages(file_header_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
-    #[allow(unsafe_code)]
-    let buf =
-        unsafe { core::slice::from_raw_parts_mut(file_header_pages.as_mut_ptr(), file_header_len) };
-
-    let executable = executable_path.inode.as_file()?;
-    executable.read(0, buf.into(), &OpenOptions::readwrite())?;
+    let file_header_pages;
+    let executable;
+    let buf;
+    {
+        let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_HDR_READ);
+        file_header_pages = alloc_pages(file_header_len / PAGE_SIZE, AllocPageFlags::KERNEL)?;
+        #[allow(unsafe_code)]
+        let buf_mut =
+            unsafe { core::slice::from_raw_parts_mut(file_header_pages.as_mut_ptr(), file_header_len) };
+        executable = executable_path.inode.as_file()?;
+        executable.read(0, buf_mut.into(), &OpenOptions::readwrite())?;
+        buf = buf_mut as &[u8];
+    }
 
     if handle_shebang && buf.starts_with(b"#!") && buf.contains(&b'\n') {
         return do_script_binfmt(&executable_path, argv, envp, root_fs, buf);

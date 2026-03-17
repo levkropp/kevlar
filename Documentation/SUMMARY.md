@@ -96,3 +96,8 @@
   - [Crash Diagnostics](blog/068-crash-diagnostics.md)
   - [The Mount Key Collision](blog/069-mount-key-collision.md)
   - [BusyBox Tests and Benchmarks](blog/070-busybox-benchmarks.md)
+  - [Page Cache and Exec Prefaulting](blog/071-page-cache-and-exec-prefaulting.md)
+  - [RDRAND and Exec Parity](blog/072-rdrand-and-exec-parity.md)
+  - [Benchmark Regression Hunt](blog/073-benchmark-regression-hunt.md)
+  - [Huge Page Prefault & Refcount Redesign](blog/074-huge-page-prefault-and-refcount-redesign.md)
+  - [Huge Page Assembly Fix](blog/075-huge-page-assembly-fix.md)
