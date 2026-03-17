@@ -918,20 +918,27 @@ clean-initramfs-all:
 #  Build Rules
 #
 build/testing.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard testing/*/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
+ifdef USE_DOCKER
 ifeq ($(OS),Windows_NT)
 	$(PROGRESS) "BUILD" testing
 	$(PYTHON3) -c "import subprocess, os; docker_dir = os.path.dirname(r'$(DOCKER_PATH)'); os.environ['PATH'] = docker_dir + os.pathsep + os.environ.get('PATH', ''); subprocess.run([r'$(DOCKER_PATH)', 'build', '-t', 'kevlar-testing', '-f', 'testing/Dockerfile', '.'], check=True)"
 	$(PROGRESS) "EXPORT" testing
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing
-else ifdef USE_DOCKER
+else
 	$(PROGRESS) "BUILD" testing
 	$(DOCKER) build -t kevlar-testing -f testing/Dockerfile . 2>&1 | $(PYTHON3) tools/docker-progress.py
 	$(PROGRESS) "EXPORT" testing
 	$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	$(PYTHON3) tools/docker2initramfs.py $@ kevlar-testing
+endif
+else
+ifeq ($(OS),Windows_NT)
+	$(PROGRESS) "WSL" "build-initramfs.py"
+	wsl python3 tools/build-initramfs.py $@
 else
 	$(PYTHON3) tools/build-initramfs.py $@
+endif
 endif
 
 build/$(IMAGE_FILENAME).initramfs: tools/docker2initramfs.py Makefile

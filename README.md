@@ -69,7 +69,7 @@ make ARCH=arm64 RELEASE=1 run  # ARM64
 make bench-kvm                 # KVM benchmarks
 ```
 
-Windows: the Makefile uses WSL2 automatically.
+**Windows:** The Makefile uses WSL2 automatically. See [Documentation/building.md](Documentation/building.md) for WSL setup instructions.
 
 ## Provenance
 
