@@ -101,6 +101,7 @@ def compile_all_local():
         ("testing/dd_diag.c",            "dd-diag",          []),
         ("testing/test_net.c",           "test-net",         []),
         ("testing/test_alpine.c",        "test-alpine",      []),
+        ("testing/fork_exec_stress.c",   "fork-exec-stress", []),
         ("testing/disk_hello.c",         "disk_hello",       []),
     ]
     for src_rel, name, extra in musl_bins:
