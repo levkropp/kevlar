@@ -12,11 +12,14 @@ use crate::{
     },
 };
 use core::cmp::min;
+use core::sync::atomic::{AtomicU64, Ordering};
+use hashbrown::HashMap;
 use kevlar_platform::{
-    address::UserVAddr,
+    address::{PAddr, UserVAddr},
     arch::{PageFaultReason, PAGE_SIZE, HUGE_PAGE_SIZE},
     page_allocator::{alloc_page, alloc_page_batch, alloc_huge_page, AllocPageFlags},
     page_ops::{zero_page, zero_huge_page},
+    spinlock::SpinLock,
 };
 #[cfg(not(feature = "profile-fortress"))]
 use kevlar_platform::page_ops::page_as_slice_mut;
@@ -24,6 +27,44 @@ use kevlar_platform::page_ops::page_as_slice_mut;
 use kevlar_platform::page_ops::PageFrame;
 
 use crate::process::signal::Signal;
+
+// --- Page fault profiling counters ---
+pub static PAGE_FAULT_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static PAGE_FAULT_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+// --- Initramfs page cache ---
+// Key: (file_data_ptr, page_index_in_file) → cached physical page.
+// Only used for immutable files (initramfs). Entries never need invalidation.
+pub static PAGE_CACHE: SpinLock<Option<HashMap<(usize, usize), PAddr>>> = SpinLock::new(None);
+
+/// Cache of 2MB huge pages assembled from PAGE_CACHE entries during exec prefaulting.
+/// Key: (file_data_ptr, huge_page_index) where index = huge_vaddr / HUGE_PAGE_SIZE.
+/// Value: (PAddr, [u64; 8] bitmap) — base physical address + which sub-pages have content.
+/// The bitmap tracks which of the 512 sub-pages were populated (from cache or file).
+/// Only populated sub-pages should be mapped; others should be demand-faulted.
+pub static HUGE_PAGE_CACHE: SpinLock<Option<HashMap<(usize, usize), (PAddr, [u64; 8])>>> = SpinLock::new(None);
+
+pub fn page_cache_lookup(file_ptr: usize, page_index: usize) -> Option<PAddr> {
+    let cache = PAGE_CACHE.lock_no_irq();
+    cache.as_ref().and_then(|map| map.get(&(file_ptr, page_index)).copied())
+}
+
+fn page_cache_insert(file_ptr: usize, page_index: usize, paddr: PAddr) {
+    let mut cache = PAGE_CACHE.lock_no_irq();
+    let map = cache.get_or_insert_with(HashMap::new);
+    map.insert((file_ptr, page_index), paddr);
+}
+
+pub fn huge_page_cache_lookup(file_ptr: usize, huge_index: usize) -> Option<(PAddr, [u64; 8])> {
+    let cache = HUGE_PAGE_CACHE.lock_no_irq();
+    cache.as_ref().and_then(|map| map.get(&(file_ptr, huge_index)).copied())
+}
+
+pub fn huge_page_cache_insert(file_ptr: usize, huge_index: usize, paddr: PAddr, bitmap: [u64; 8]) {
+    let mut cache = HUGE_PAGE_CACHE.lock_no_irq();
+    let map = cache.get_or_insert_with(HashMap::new);
+    map.insert((file_ptr, huge_index), (paddr, bitmap));
+}
 
 /// Emit a CrashReport debug event and then kill the process.
 ///
@@ -100,6 +141,29 @@ fn emit_crash_and_exit(signal: Signal, fault_addr: usize, ip: usize) -> ! {
 }
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
+    // Hierarchical tracer: record page fault with faulting address.
+    let _htrace_guard = crate::debug::htrace::enter_guard(
+        crate::debug::htrace::id::PAGE_FAULT,
+        unaligned_vaddr.map_or(0, |v| v.value() as u32),
+    );
+
+    // Profile page fault latency when the syscall profiler is enabled.
+    let pf_start = if crate::debug::profiler::is_enabled() {
+        kevlar_platform::arch::read_clock_counter()
+    } else {
+        0
+    };
+
+    handle_page_fault_inner(unaligned_vaddr, ip, _reason);
+
+    if pf_start != 0 {
+        let elapsed = kevlar_platform::arch::read_clock_counter().saturating_sub(pf_start);
+        PAGE_FAULT_COUNT.fetch_add(1, Ordering::Relaxed);
+        PAGE_FAULT_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
+    }
+}
+
+fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
     // Usercopy fault debug check — only in debug builds to avoid hot-path overhead.
     #[cfg(debug_assertions)]
     #[cfg(target_arch = "x86_64")]
@@ -165,7 +229,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Allocate and zero the page BEFORE acquiring the VM lock.
     // This keeps the lock hold time minimal (just VMA lookup + PTE write).
-    let paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+    let mut paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
         Ok(p) => p,
         Err(_) => {
             debug_warn!(
@@ -186,7 +250,6 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             let pid = current.pid().as_i32();
             if pid == 1 {
                 warn!("PAGE FAULT NO VMA: addr={:#x} ip={:#x}", unaligned_vaddr.value(), ip);
-                // Dump all VMAs for diagnosis.
                 for (i, vma) in vm.vm_areas().iter().enumerate() {
                     let vt = match vma.area_type() {
                         VmAreaType::Anonymous => "anon",
@@ -217,8 +280,12 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         }
     };
 
-    // PID 1 page fault trace: disabled to reduce serial output under KVM.
-    // Enable with: debug=fault on kernel cmdline.
+    // Page cache state — set inside the File match arm, used after for refcount init.
+    let mut cache_hit = false;
+    let mut cache_shared = false; // true when paddr is a shared cached page
+    let mut is_cacheable = false;
+    let mut offset_in_file = 0;
+    let mut cache_file_ptr: usize = 0; // Arc data ptr for cache key
 
     match vma.area_type() {
         VmAreaType::Anonymous => { /* Zero-filled by zero_page above. */ }
@@ -228,7 +295,6 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             file_size,
         } => {
             let offset_in_page;
-            let offset_in_file;
             let copy_len;
             if aligned_vaddr < vma.start() {
                 // The VMA starts partway through this page. Place file data
@@ -248,10 +314,66 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                 }
             }
 
-            if copy_len > 0 {
-                // Fortress: read file into a stack buffer, then copy to
-                // the page frame without exposing a raw &mut [u8] to
-                // physical memory.
+            // --- Page cache for immutable files (initramfs) ---
+            let vma_readonly = vma.prot().bits() & 2 == 0;
+            is_cacheable = file.is_content_immutable()
+                && offset_in_page == 0
+                && copy_len > 0
+                && vma_readonly;
+
+            if is_cacheable {
+                cache_file_ptr = alloc::sync::Arc::as_ptr(file) as *const () as usize;
+                let page_index = offset_in_file / PAGE_SIZE;
+
+                if let Some(cached_paddr) = page_cache_lookup(cache_file_ptr, page_index) {
+                    cache_hit = true;
+                    let vma_writable = vma.prot().bits() & 2 != 0;
+                    if !vma_writable {
+                        // Read-only VMA: share the cached physical page directly.
+                        kevlar_platform::page_allocator::free_pages(paddr, 1);
+                        kevlar_platform::page_refcount::page_ref_inc(cached_paddr);
+                        paddr = cached_paddr;
+                        cache_shared = true;
+                    } else {
+                        // Writable VMA: copy cached content to fresh page (CoW-style).
+                        #[cfg(not(feature = "profile-fortress"))]
+                        {
+                            let src = kevlar_platform::page_ops::page_as_slice(cached_paddr);
+                            let dst = page_as_slice_mut(paddr);
+                            dst.copy_from_slice(src);
+                        }
+                        #[cfg(feature = "profile-fortress")]
+                        {
+                            let mut tmp = [0u8; PAGE_SIZE];
+                            let src_frame = PageFrame::new(cached_paddr);
+                            src_frame.read(0, &mut tmp);
+                            let mut dst_frame = PageFrame::new(paddr);
+                            dst_frame.write(0, &tmp);
+                        }
+                    }
+                }
+            }
+
+            // --- Direct physical mapping (Experiment 3) ---
+            let mut direct_mapped = false;
+            if !cache_hit && copy_len == PAGE_SIZE && is_cacheable
+                && crate::process::DIRECT_MAP_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                if let Some(data_base) = file.data_vaddr() {
+                    let page_vaddr = data_base + offset_in_file;
+                    if page_vaddr % PAGE_SIZE == 0 {
+                        let direct_paddr = kevlar_platform::address::VAddr::new(page_vaddr).as_paddr();
+                        kevlar_platform::page_refcount::page_ref_init_kernel_image(direct_paddr);
+                        kevlar_platform::page_allocator::free_pages(paddr, 1);
+                        paddr = direct_paddr;
+                        cache_shared = true; // Prevent page_ref_init later.
+                        let page_index = offset_in_file / PAGE_SIZE;
+                        page_cache_insert(cache_file_ptr, page_index, direct_paddr);
+                        direct_mapped = true;
+                    }
+                }
+            }
+
+            if !cache_hit && !direct_mapped && copy_len > 0 {
                 #[cfg(feature = "profile-fortress")]
                 {
                     let mut tmp = [0u8; PAGE_SIZE];
@@ -266,8 +388,6 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
                     frame.write(offset_in_page, dst);
                 }
 
-                // Other profiles: write directly into the page via
-                // page_as_slice_mut for zero-copy performance.
                 #[cfg(not(feature = "profile-fortress"))]
                 {
                     let buf = page_as_slice_mut(paddr);
@@ -306,6 +426,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
     let vma_start_value = vma.start().value();
     let vma_end_value = vma.end().value();
     let is_anonymous = matches!(vma.area_type(), VmAreaType::Anonymous);
+    let vma_is_shared = vma.is_shared();
 
     // Emit successful fault resolution event (only in debug builds).
     #[cfg(debug_assertions)]
@@ -336,7 +457,7 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
             if vm.page_table().is_pde_empty(huge_vaddr) {
                 if let Ok(huge_paddr) = alloc_huge_page() {
                     zero_huge_page(huge_paddr);
-                    kevlar_platform::page_refcount::page_ref_init(huge_paddr);
+                    kevlar_platform::page_refcount::page_ref_init_huge(huge_paddr);
                     vm.page_table_mut().map_huge_user_page(
                         huge_vaddr,
                         huge_paddr,
@@ -378,6 +499,13 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
         if is_cow_write {
             // Get the old physical page from the existing PTE.
             if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                if vma_is_shared {
+                    // MAP_SHARED: restore writable without copying.
+                    // Both parent and child keep the same physical page.
+                    vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    return;
+                }
                 let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
                 if refcount > 1 {
                     // Shared page: allocate new page, copy content, map writable.
@@ -426,7 +554,18 @@ pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason:
 
     // Initialize the page's reference count to 1 (sole owner).
     // CoW fork will increment to 2 when sharing the page.
-    kevlar_platform::page_refcount::page_ref_init(paddr);
+    // Skip for shared cached pages — their refcount is already managed.
+    if !cache_shared {
+        kevlar_platform::page_refcount::page_ref_init(paddr);
+
+        // Insert into page cache on miss. Must happen AFTER page_ref_init so
+        // the process mapping has refcount 1, then the cache bumps it to 2.
+        if is_cacheable && !cache_hit {
+            let page_index = offset_in_file / PAGE_SIZE;
+            kevlar_platform::page_refcount::page_ref_inc(paddr);
+            page_cache_insert(cache_file_ptr, page_index, paddr);
+        }
+    }
 
     // Fault-around: for anonymous mappings, prefault adjacent pages to reduce
     // the number of page faults (and their associated exception + EPT overhead).

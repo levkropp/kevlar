@@ -11,6 +11,8 @@ impl<'a> SyscallHandler<'a> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
         // Debug: log stderr writes from PID 1 (systemd error messages).
+        // Only in debug builds to avoid hot-path overhead in release benchmarks.
+        #[cfg(debug_assertions)]
         if fd.as_int() == 2 && current_process().pid().as_i32() == 1 && len > 0 {
             let mut buf = [0u8; 256];
             let copy_len = min(len, buf.len());
@@ -21,9 +23,9 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        let opened_file = current_process().get_opened_file_by_fd(fd)?;
-        let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
-
-        Ok(written_len as isize)
+        current_process().with_file(fd, |opened_file| {
+            let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
+            Ok(written_len as isize)
+        })
     }
 }

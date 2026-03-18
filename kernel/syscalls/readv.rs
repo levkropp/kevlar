@@ -13,24 +13,25 @@ impl<'a> SyscallHandler<'a> {
         iov_uaddr: UserVAddr,
         iovcnt: usize,
     ) -> Result<isize> {
-        let opened_file = current_process().get_opened_file_by_fd(fd)?;
-        let mut total = 0usize;
+        current_process().with_file(fd, |opened_file| {
+            let mut total = 0usize;
 
-        for i in 0..iovcnt {
-            let iov_addr = iov_uaddr.add(i * core::mem::size_of::<IoVec>());
-            let iov = iov_addr.read::<IoVec>()?;
-            if iov.len == 0 {
-                continue;
+            for i in 0..iovcnt {
+                let iov_addr = iov_uaddr.add(i * core::mem::size_of::<IoVec>());
+                let iov = iov_addr.read::<IoVec>()?;
+                if iov.len == 0 {
+                    continue;
+                }
+
+                let buf = UserBufferMut::from_uaddr(iov.base, iov.len);
+                let read_len = opened_file.read(buf)?;
+                total += read_len;
+                if read_len < iov.len {
+                    break;
+                }
             }
 
-            let buf = UserBufferMut::from_uaddr(iov.base, iov.len);
-            let read_len = opened_file.read(buf)?;
-            total += read_len;
-            if read_len < iov.len {
-                break;
-            }
-        }
-
-        Ok(total as isize)
+            Ok(total as isize)
+        })
     }
 }

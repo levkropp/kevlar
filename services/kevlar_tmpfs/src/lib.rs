@@ -9,14 +9,14 @@
 
 extern crate alloc;
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::Cow, string::String, sync::Arc, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use hashbrown::HashMap;
 use kevlar_platform::spinlock::SpinLock;
-use kevlar_utils::{downcast::downcast, once::Once};
+use kevlar_utils::{downcast::{downcast, Downcastable}, once::Once};
 
 use kevlar_vfs::{
     file_system::FileSystem,
@@ -24,7 +24,6 @@ use kevlar_vfs::{
         DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions,
         Symlink as SymlinkTrait,
     },
-    path::PathBuf,
     result::{Errno, Error, Result},
     stat::{FileMode, Stat, S_IFDIR, S_IFLNK, S_IFREG},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
@@ -139,8 +138,24 @@ impl Directory for Dir {
     }
 
     fn readdir(&self, index: usize) -> Result<Option<DirEntry>> {
+        // Synthesize "." and ".." as the first two entries.
+        if index == 0 {
+            return Ok(Some(DirEntry {
+                inode_no: self.inode_no,
+                file_type: FileType::Directory,
+                name: String::from("."),
+            }));
+        }
+        if index == 1 {
+            return Ok(Some(DirEntry {
+                inode_no: self.inode_no, // parent not tracked; use self
+                file_type: FileType::Directory,
+                name: String::from(".."),
+            }));
+        }
+
         let dir_lock = self.inner.lock_no_irq();
-        let (name, inode) = match dir_lock.files.iter().nth(index) {
+        let (name, inode) = match dir_lock.files.iter().nth(index - 2) {
             Some(entry) => entry,
             None => {
                 return Ok(None);
@@ -194,7 +209,14 @@ impl Directory for Dir {
 
     fn link(&self, name: &str, link_to: &INode) -> Result<()> {
         let tmpfs_inode = match link_to {
-            INode::FileLike(file_like) => TmpFsINode::File(file_like.clone()),
+            INode::FileLike(file_like) => {
+                // Increment nlink for tmpfs files. Deref through Arc to avoid
+                // the Arc<dyn FileLike> downcast bug.
+                if let Some(file) = (**file_like).as_any().downcast_ref::<File>() {
+                    file.nlink.fetch_add(1, Ordering::Relaxed);
+                }
+                TmpFsINode::File(file_like.clone())
+            }
             INode::Directory(dir) => {
                 let dir: &Arc<Dir> = downcast(dir).unwrap();
                 TmpFsINode::Directory(dir.clone())
@@ -260,6 +282,12 @@ impl Directory for Dir {
             Some(TmpFsINode::File(_)) | Some(TmpFsINode::Symlink(_)) => {}
             None => return Err(Errno::ENOENT.into()),
         }
+        // Decrement nlink for tmpfs files.
+        if let Some(TmpFsINode::File(file_like)) = dir_lock.files.get(name) {
+            if let Some(file) = (**file_like).as_any().downcast_ref::<File>() {
+                file.nlink.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
         dir_lock.files.remove(name);
         Ok(())
     }
@@ -282,9 +310,11 @@ impl Directory for Dir {
     }
 
     fn rename(&self, old_name: &str, new_dir: &Arc<dyn Directory>, new_name: &str) -> Result<()> {
-        let new_dir: &Arc<Dir> = downcast(new_dir).ok_or_else(|| Error::new(Errno::EXDEV))?;
+        // Deref through Arc to dispatch via vtable (avoids Arc<dyn> downcast bug).
+        let new_dir: &Dir = (**new_dir).as_any().downcast_ref::<Dir>()
+            .ok_or_else(|| Error::new(Errno::EXDEV))?;
         let self_ptr = self as *const Dir as usize;
-        let new_ptr = &**new_dir as *const Dir as usize;
+        let new_ptr = new_dir as *const Dir as usize;
 
         // Handle same-directory rename without deadlock.
         if self_ptr == new_ptr {
@@ -329,6 +359,7 @@ struct File {
     data: SpinLock<Vec<u8>>,
     stat: Stat,
     mode: SpinLock<FileMode>,
+    nlink: AtomicUsize,
 }
 
 impl File {
@@ -342,16 +373,18 @@ impl File {
                 ..Stat::zeroed()
             },
             mode: SpinLock::new(mode),
+            nlink: AtomicUsize::new(1),
         }
     }
 }
 
 impl FileLike for File {
     fn stat(&self) -> Result<Stat> {
-        use kevlar_vfs::stat::FileSize;
+        use kevlar_vfs::stat::{FileSize, NLink};
         let mut stat = self.stat;
         stat.mode = *self.mode.lock_no_irq();
         stat.size = FileSize(self.data.lock_no_irq().len() as isize);
+        stat.nlink = NLink::new(self.nlink.load(Ordering::Relaxed));
         Ok(stat)
     }
 
@@ -368,8 +401,22 @@ impl FileLike for File {
             return Ok(0);
         }
 
-        let mut writer = UserBufWriter::from(buf);
-        writer.write_bytes(&data[offset..])
+        let available = &data[offset..];
+        let copy_len = core::cmp::min(available.len(), buf.len());
+
+        // For small reads (≤ PAGE_SIZE), copy to a stack buffer under the lock
+        // then release the lock before the usercopy. This reduces lock hold time
+        // from usercopy duration to a fast memcpy.
+        if copy_len <= 4096 {
+            let mut tmp = [0u8; 4096];
+            tmp[..copy_len].copy_from_slice(&available[..copy_len]);
+            drop(data);
+            let mut writer = UserBufWriter::from(buf);
+            writer.write_bytes(&tmp[..copy_len])
+        } else {
+            let mut writer = UserBufWriter::from(buf);
+            writer.write_bytes(available)
+        }
     }
 
     fn write(
@@ -415,8 +462,8 @@ impl SymlinkTrait for TmpFsSymlink {
         Ok(self.stat)
     }
 
-    fn linked_to(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(self.target.clone()))
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
+        Ok(Cow::Borrowed(&self.target))
     }
 }
 

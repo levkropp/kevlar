@@ -13,31 +13,37 @@ use crate::user_buffer::UserBufWriter;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_readlink(&mut self, path: &Path, buf: UserVAddr, buf_size: usize) -> Result<isize> {
-        let resolved_path = if path.as_str().starts_with("/proc/self/fd/") {
-            // TODO: Implement procfs
+        // Handle /proc/self/fd/N: resolve from the fd table directly.
+        if path.as_str().starts_with("/proc/self/fd/") {
             let fd = path.as_str()["/proc/self/fd/".len()..].parse().unwrap();
-            current_process()
+            let resolved_path = current_process()
                 .opened_files_no_irq()
                 .get(Fd::new(fd))?
                 .path()
-                .resolve_absolute_path()
-        } else {
-            {
-                let root_fs = current_process().root_fs();
-                root_fs
-                    .lock_no_irq()
-                    .lookup_no_symlink_follow(path)?
-                    .readlink()?
+                .resolve_absolute_path();
+            let bytes = resolved_path.as_str().as_bytes();
+            if buf_size < bytes.len() {
+                return Err(Errno::ERANGE.into());
             }
-        };
+            let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
+            writer.write_bytes(bytes)?;
+            // POSIX: readlink does NOT write a NUL terminator.
+            return Ok(bytes.len() as isize);
+        }
 
-        if buf_size < resolved_path.as_str().as_bytes().len() {
+        let root_fs = current_process().root_fs();
+        let inode = root_fs
+            .lock_no_irq()
+            .lookup_no_symlink_follow(path)?;
+        let resolved = inode.readlink()?;
+        let bytes = resolved.as_bytes();
+        if buf_size < bytes.len() {
             return Err(Errno::ERANGE.into());
         }
 
         let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
-        writer.write_bytes(resolved_path.as_str().as_bytes())?;
-        writer.write(0u8)?;
-        Ok(writer.pos() as isize)
+        writer.write_bytes(bytes)?;
+        // POSIX: readlink does NOT write a NUL terminator.
+        Ok(bytes.len() as isize)
     }
 }

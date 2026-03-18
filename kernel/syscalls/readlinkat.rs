@@ -24,17 +24,24 @@ impl<'a> SyscallHandler<'a> {
         let current = current_process();
         let root_fs_arc = current.root_fs();
         let root_fs = root_fs_arc.lock();
-        let opened_files = current.opened_files().lock();
-        let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, false)?;
-        let resolved = path_comp.inode.readlink()?;
+        // Fast path: use lookup_inode to avoid PathComponent heap allocations.
+        // Falls back to full lookup_path for ".." or intermediate symlinks.
+        let inode = if path.is_absolute() || matches!(dirfd, CwdOrFd::AtCwd) {
+            root_fs.lookup_inode(path, false)?
+        } else {
+            let opened_files = current.opened_files_no_irq();
+            root_fs.lookup_path_at(&opened_files, &dirfd, path, false)?.inode.clone()
+        };
+        let resolved = inode.readlink()?;
+        let bytes = resolved.as_bytes();
 
-        if buf_size < resolved.as_str().as_bytes().len() {
+        if buf_size < bytes.len() {
             return Err(Errno::ERANGE.into());
         }
 
         let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
-        writer.write_bytes(resolved.as_str().as_bytes())?;
-        writer.write(0u8)?;
-        Ok(writer.pos() as isize)
+        writer.write_bytes(bytes)?;
+        // POSIX: readlink does NOT write a NUL terminator.
+        Ok(bytes.len() as isize)
     }
 }

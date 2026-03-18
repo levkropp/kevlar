@@ -2,11 +2,11 @@
 use core::fmt::{self, Debug};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::path::PathBuf;
 use crate::result::{Errno, Error, Result};
 use crate::socket_types::{RecvFromFlags, ShutdownHow, SockAddr};
 use crate::stat::{FileMode, Stat};
 use crate::user_buffer::{UserBuffer, UserBufferMut};
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::sync::Arc;
 use bitflags::bitflags;
@@ -132,7 +132,7 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     }
 
     /// `readlink(2)`.
-    fn readlink(&self) -> Result<PathBuf> {
+    fn readlink(&self) -> Result<Cow<'_, str>> {
         // "EINVAL - The named file is not a symbolic link." -- readlink(2)
         Err(Error::new(Errno::EINVAL))
     }
@@ -144,6 +144,25 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         // timerfd, signalfd) override this when they have data available.
         // This prevents epoll spin loops on procfs/regular files.
         Ok(PollStatus::empty())
+    }
+
+    /// Generation counter for edge-triggered epoll.  Incremented on every
+    /// state change (read, write, close).  Returns 0 if not implemented
+    /// (default), which makes ET fall back to level-triggered behavior.
+    fn poll_gen(&self) -> u64 {
+        0
+    }
+
+    /// Whether this file supports lseek. Pipes, sockets, and eventfds return
+    /// false (lseek returns ESPIPE).
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    /// For sockets: return the socket type (SOCK_STREAM=1, SOCK_DGRAM=2).
+    /// Non-socket files return 0.
+    fn socket_type(&self) -> i32 {
+        0
     }
 
     /// `ioctl(2)`.
@@ -179,6 +198,20 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether this file's content is immutable and demand-paged pages can be
+    /// cached across processes (e.g., initramfs files backed by `&'static [u8]`).
+    /// Default: false.
+    fn is_content_immutable(&self) -> bool {
+        false
+    }
+
+    /// Returns the kernel virtual address of the file's backing data, if it
+    /// is `&'static [u8]` (e.g. initramfs). The kernel can convert this to a
+    /// physical address for zero-copy mapping of page-aligned interior pages.
+    fn data_vaddr(&self) -> Option<usize> {
+        None
     }
 
     // --- Socket-specific methods (Phase 3: move to SocketOps trait) ---
@@ -314,7 +347,7 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
         Ok(())
     }
     /// `readlink(2)`.
-    fn readlink(&self) -> Result<PathBuf> {
+    fn readlink(&self) -> Result<Cow<'_, str>> {
         // "EINVAL - The named file is not a symbolic link." -- readlink(2)
         Err(Error::new(Errno::EINVAL))
     }
@@ -325,7 +358,7 @@ pub trait Symlink: Debug + Send + Sync + Downcastable {
     /// `stat(2)`.
     fn stat(&self) -> Result<Stat>;
     /// The path linked to.
-    fn linked_to(&self) -> Result<PathBuf>;
+    fn linked_to(&self) -> Result<Cow<'_, str>>;
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -367,6 +400,14 @@ impl INode {
         matches!(self, INode::Directory(_))
     }
 
+    /// Whether this inode supports lseek (false for pipes, sockets, etc.).
+    pub fn is_seekable(&self) -> bool {
+        match self {
+            INode::FileLike(file) => file.is_seekable(),
+            INode::Directory(_) | INode::Symlink(_) => false,
+        }
+    }
+
     /// `stat(2)`.
     pub fn stat(&self) -> Result<Stat> {
         match self {
@@ -386,7 +427,7 @@ impl INode {
     }
 
     /// `readlink(2)`.
-    pub fn readlink(&self) -> Result<PathBuf> {
+    pub fn readlink(&self) -> Result<Cow<'_, str>> {
         match self {
             INode::FileLike(file) => file.readlink(),
             INode::Symlink(file) => file.linked_to(),

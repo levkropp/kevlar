@@ -11,7 +11,6 @@ use crate::fs::inode::PollStatus;
 use crate::prelude::*;
 use crate::user_buffer::UserBufferMut;
 use crate::{net::*, user_buffer::UserBuffer};
-use atomic_refcell::AtomicRefCell;
 use bitflags::bitflags;
 use crossbeam::atomic::AtomicCell;
 
@@ -124,15 +123,20 @@ impl PathComponent {
 pub struct OpenedFile {
     path: Arc<PathComponent>,
     pos: AtomicCell<usize>,
-    options: AtomicRefCell<OpenOptions>,
+    options: AtomicCell<OpenOptions>,
+    /// Cached from FileLike::is_seekable() at open time. Avoids a vtable
+    /// dispatch on every read/write for non-seekable files (pipes, sockets).
+    seekable: bool,
 }
 
 impl OpenedFile {
     pub fn new(path: Arc<PathComponent>, options: OpenOptions, pos: usize) -> OpenedFile {
+        let seekable = path.inode.is_seekable();
         OpenedFile {
             path,
             pos: AtomicCell::new(pos),
-            options: AtomicRefCell::new(options),
+            options: AtomicCell::new(options),
+            seekable,
         }
     }
 
@@ -153,7 +157,7 @@ impl OpenedFile {
     }
 
     pub fn options(&self) -> OpenOptions {
-        *self.options.borrow()
+        self.options.load()
     }
 
     pub fn path(&self) -> &Arc<PathComponent> {
@@ -164,47 +168,78 @@ impl OpenedFile {
         &self.path.inode
     }
 
-    pub fn read(&self, buf: UserBufferMut<'_>) -> Result<usize> {
-        // Avoid holding self.options and self.pos locks by copying.
-        let options = self.options();
-        let pos = self.pos();
+    #[inline]
+    pub fn is_seekable(&self) -> bool {
+        self.seekable
+    }
 
-        let read_len = self.as_file()?.read(pos, buf, &options)?;
-        self.pos.fetch_add(read_len);
+    #[inline]
+    pub fn read(&self, buf: UserBufferMut<'_>) -> Result<usize> {
+        let file = self.as_file()?;
+
+        // Fast path for non-seekable files (pipes, /dev/null, sockets):
+        // skip pos load/store — they don't use file position.
+        if !self.seekable {
+            let options = self.options.load();
+            return file.read(0, buf, &options);
+        }
+
+        let options = self.options.load();
+        let pos = self.pos();
+        let read_len = file.read(pos, buf, &options)?;
+        if read_len > 0 {
+            self.pos.fetch_add(read_len);
+        }
         Ok(read_len)
     }
 
+    #[inline]
     pub fn write(&self, buf: UserBuffer<'_>) -> Result<usize> {
-        let options = self.options();
+        let file = self.as_file()?;
+
+        // Fast path for non-seekable files (pipes, /dev/null, sockets):
+        // skip pos load/store and O_APPEND check.
+        if !self.seekable {
+            let options = self.options.load();
+            return file.write(0, buf, &options);
+        }
+
+        let options = self.options.load();
         let pos = if options.append {
             // O_APPEND: always write at the end of the file.
-            let size = self.as_file()?.stat()?.size.0 as usize;
+            let size = file.stat()?.size.0 as usize;
             self.pos.store(size);
             size
         } else {
             self.pos()
         };
 
-        let written_len = self.as_file()?.write(pos, buf, &options)?;
+        let written_len = file.write(pos, buf, &options)?;
         self.pos.fetch_add(written_len);
         Ok(written_len)
     }
 
     pub fn set_cloexec(&self, cloexec: bool) {
         // FIXME: Modify LocalOpenedFile as well!
-        self.options.borrow_mut().close_on_exec = cloexec;
+        let mut opts = self.options.load();
+        opts.close_on_exec = cloexec;
+        self.options.store(opts);
     }
 
     pub fn set_flags(&self, flags: OpenFlags) -> Result<()> {
         if flags.contains(OpenFlags::O_NONBLOCK) {
-            self.options.borrow_mut().nonblock = true;
+            let mut opts = self.options.load();
+            opts.nonblock = true;
+            self.options.store(opts);
         }
 
         Ok(())
     }
 
     pub fn set_nonblock(&self, nonblock: bool) {
-        self.options.borrow_mut().nonblock = nonblock;
+        let mut opts = self.options.load();
+        opts.nonblock = nonblock;
+        self.options.store(opts);
     }
 
     pub fn fsync(&self) -> Result<()> {
@@ -326,6 +361,25 @@ impl OpenedFileTable {
         }
     }
 
+    /// Returns the per-fd close-on-exec flag (FD_CLOEXEC).
+    pub fn get_cloexec(&self, fd: Fd) -> Result<bool> {
+        match self.files.get(fd.as_usize()) {
+            Some(Some(local)) => Ok(local.close_on_exec),
+            _ => Err(Error::new(Errno::EBADF)),
+        }
+    }
+
+    /// Sets the per-fd close-on-exec flag (FD_CLOEXEC).
+    pub fn set_cloexec(&mut self, fd: Fd, cloexec: bool) -> Result<()> {
+        match self.files.get_mut(fd.as_usize()) {
+            Some(Some(local)) => {
+                local.close_on_exec = cloexec;
+                Ok(())
+            }
+            _ => Err(Error::new(Errno::EBADF)),
+        }
+    }
+
     /// Closes an opened file.
     pub fn close(&mut self, fd: Fd) -> Result<()> {
         match self.files.get_mut(fd.as_usize()) {
@@ -339,12 +393,14 @@ impl OpenedFileTable {
     /// Opens a file.
     pub fn open(&mut self, path: Arc<PathComponent>, options: OpenOptions) -> Result<Fd> {
         self.alloc_fd(None).and_then(|fd| {
+            let seekable = path.inode.is_seekable();
             self.open_with_fixed_fd(
                 fd,
                 Arc::new(OpenedFile {
                     path,
-                    options: AtomicRefCell::new(options),
+                    options: AtomicCell::new(options),
                     pos: AtomicCell::new(0),
+                    seekable,
                 }),
                 options,
             )
@@ -365,14 +421,17 @@ impl OpenedFileTable {
             if let Some(new_inode) = file.open(&options)? {
                 // Replace inode if FileLike::open returned Some. Currently it's
                 // used only for /dev/ptmx.
+                let new_path = Arc::new(PathComponent {
+                    name: opened_file.path.name.clone(),
+                    parent_dir: opened_file.path.parent_dir.clone(),
+                    inode: new_inode.into(),
+                });
+                let seekable = new_path.inode.is_seekable();
                 opened_file = Arc::new(OpenedFile {
                     pos: AtomicCell::new(0),
-                    options: AtomicRefCell::new(options),
-                    path: Arc::new(PathComponent {
-                        name: opened_file.path.name.clone(),
-                        parent_dir: opened_file.path.parent_dir.clone(),
-                        inode: new_inode.into(),
-                    }),
+                    options: AtomicCell::new(options),
+                    path: new_path,
+                    seekable,
                 })
             }
         }
