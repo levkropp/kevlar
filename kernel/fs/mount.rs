@@ -286,7 +286,7 @@ impl RootFs {
                         if follow_symlink {
                             if let INode::Symlink(symlink) = &inode {
                                 let linked_to = symlink.linked_to()?;
-                                return self.lookup_inode(&linked_to, follow_symlink);
+                                return self.lookup_inode(Path::new(&*linked_to), follow_symlink);
                             }
                         }
                         return Ok(inode);
@@ -379,6 +379,7 @@ impl RootFs {
         follow_symlink: bool,
         symlink_follow_limit: usize,
     ) -> Result<Arc<PathComponent>> {
+        let _span = crate::debug::tracer::span_guard(crate::debug::tracer::span::PATH_LOOKUP);
         if path.is_empty() {
             return Err(Error::new(Errno::ENOENT));
         }
@@ -430,7 +431,8 @@ impl RootFs {
                         }
 
                         let linked_to = symlink.linked_to()?;
-                        let follow_from = if linked_to.is_absolute() {
+                        let linked_path = Path::new(&*linked_to);
+                        let follow_from = if linked_path.is_absolute() {
                             &self.root_path
                         } else {
                             &parent_dir
@@ -438,7 +440,7 @@ impl RootFs {
 
                         let dst_path = self.do_lookup_path(
                             follow_from,
-                            &linked_to,
+                            linked_path,
                             follow_symlink,
                             symlink_follow_limit - 1,
                         )?;
@@ -464,7 +466,8 @@ impl RootFs {
                         }
 
                         let linked_to = symlink.linked_to()?;
-                        let follow_from = if linked_to.is_absolute() {
+                        let linked_path = Path::new(&*linked_to);
+                        let follow_from = if linked_path.is_absolute() {
                             &self.root_path
                         } else {
                             &parent_dir
@@ -472,7 +475,7 @@ impl RootFs {
 
                         return self.do_lookup_path(
                             follow_from,
-                            &linked_to,
+                            linked_path,
                             follow_symlink,
                             symlink_follow_limit - 1,
                         );

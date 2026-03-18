@@ -28,6 +28,7 @@ use crate::{
 use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use arrayvec::ArrayString;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -119,6 +120,22 @@ pub(super) static PROCESSES: SpinLock<ProcessTable> = SpinLock::new(BTreeMap::ne
 pub static EXITED_PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
 
 static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+// --- Experiment toggles ---
+// Flip these to measure each optimization independently.
+// When false, the experiment's code path is bypassed and the original behavior is used.
+/// Experiment 1: Ghost-fork (share VM on fork, block parent until child exec/exit).
+/// Currently disabled — SIGCHLD delivery races with the ghost-fork wake
+/// predicate, causing fork() to return EINTR. Needs a non-signalable wait
+/// or signal masking around the sleep. Keeping the infrastructure for future work.
+pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
+pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Experiment 3: Direct physical mapping (map initramfs pages directly, no copy).
+/// Currently disabled — adds conditional overhead to every page fault for
+/// an alignment check that rarely succeeds (CPIO uses 4-byte alignment).
+/// Exp 2 alone is faster. Would need page-aligned initramfs builder to help.
+pub static DIRECT_MAP_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Wait queue for vfork parents. Woken when the child calls _exit or exec.
 pub static VFORK_WAIT_QUEUE: kevlar_utils::once::Once<WaitQueue> = kevlar_utils::once::Once::new();
 
@@ -245,6 +262,16 @@ pub struct Process {
     /// Per-process syscall trace ring buffer (last 32 syscalls).
     /// Used for crash diagnostics — always recorded, no debug flag needed.
     syscall_trace: SyscallTrace,
+    /// Resolved executable path (after symlink resolution).
+    /// Used for /proc/[pid]/exe symlink.  Set by execve, inherited by fork.
+    exe_path: SpinLock<ArrayString<256>>,
+    /// Set to true when this ghost-fork child has exec'd or exited.
+    /// Used by the parent's VFORK_WAIT_QUEUE predicate to detect completion.
+    pub ghost_fork_done: AtomicBool,
+    /// Saved signal mask from rt_sigsuspend, restored by rt_sigreturn.
+    sigsuspend_saved_mask: AtomicU64,
+    /// True when `sigsuspend_saved_mask` contains a valid mask to restore.
+    sigsuspend_has_mask: AtomicBool,
 }
 
 impl Process {
@@ -288,6 +315,10 @@ impl Process {
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(0),
             syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(ArrayString::new()),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -331,6 +362,12 @@ impl Process {
             OpenOptions::empty(),
         )?;
 
+        let resolved_exe = {
+            let p = executable_path.resolve_absolute_path();
+            let mut s = ArrayString::<256>::new();
+            let _ = s.try_push_str(p.as_str());
+            s
+        };
         let entry = setup_userspace(executable_path, argv, &[], &root_fs)?;
         let pid = PId::new(1);
         let process_group = ProcessGroup::new(PgId::new(1));
@@ -368,6 +405,10 @@ impl Process {
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
             syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(resolved_exe),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -527,6 +568,11 @@ impl Process {
         self.cmdline.borrow()
     }
 
+    /// Returns the resolved executable path (for /proc/[pid]/exe).
+    pub fn exe_path_string(&self) -> String {
+        String::from(self.exe_path.lock_no_irq().as_str())
+    }
+
     // ── UID/GID accessors ────────────────────────────────────────────
     pub fn uid(&self) -> u32 { self.uid.load(Ordering::Relaxed) }
     pub fn euid(&self) -> u32 { self.euid.load(Ordering::Relaxed) }
@@ -624,6 +670,23 @@ impl Process {
     #[inline(always)]
     pub fn sigset_store(&self, set: SigSet) {
         self.sigset.store(set.bits(), Ordering::Relaxed);
+    }
+
+    /// Save the old signal mask for restoration by rt_sigreturn after sigsuspend.
+    pub fn sigsuspend_save_mask(&self, mask: SigSet) {
+        self.sigsuspend_saved_mask.store(mask.bits(), Ordering::Relaxed);
+        self.sigsuspend_has_mask.store(true, Ordering::Release);
+    }
+
+    /// If a sigsuspend mask was saved, restore it and return true.
+    pub fn sigsuspend_restore_mask(&self) -> bool {
+        if self.sigsuspend_has_mask.swap(false, Ordering::Acquire) {
+            let bits = self.sigsuspend_saved_mask.load(Ordering::Relaxed);
+            self.sigset_store(SigSet::from_raw(bits));
+            true
+        } else {
+            false
+        }
     }
 
     /// Gets the current umask.
@@ -762,6 +825,25 @@ impl Process {
         Ok(self.opened_files.lock_no_irq().get(fd)?.clone())
     }
 
+    /// Call `f` with a borrowed reference to the opened file, avoiding an Arc
+    /// clone on the unshared-fd-table fast path.
+    ///
+    /// `f` must not call back into the fd table (no close, no open).
+    #[inline]
+    pub fn with_file<F, R>(&self, fd: Fd, f: F) -> Result<R>
+    where
+        F: FnOnce(&OpenedFile) -> Result<R>,
+    {
+        #[cfg(not(feature = "profile-fortress"))]
+        if Arc::strong_count(&self.opened_files) == 1 {
+            #[allow(unsafe_code)]
+            let table = unsafe { self.opened_files.get_unchecked() };
+            return f(table.get(fd)?);
+        }
+        let file = self.opened_files.lock_no_irq().get(fd)?.clone();
+        f(&file)
+    }
+
     /// Terminates the **current** process.
     pub fn exit(status: c_int) -> ! {
         let _exit_span = debug::tracer::span_guard(debug::tracer::span::EXIT_TOTAL);
@@ -775,6 +857,13 @@ impl Process {
             }
             if debug::tracer::is_enabled() {
                 debug::tracer::dump_span_profile();
+            }
+            if debug::htrace::is_enabled() {
+                debug::htrace::dump_all_cpus();
+            }
+            // Always dump htrace on non-zero exit — helps diagnose test failures.
+            if status != 0 && !debug::htrace::is_enabled() {
+                debug::htrace::dump_all_cpus();
             }
             // Dump PID 1 syscall trace for debugging.
             warn!("PID 1 exiting with status {}", status);
@@ -822,6 +911,13 @@ impl Process {
             EXITED_PROCESSES.lock().push(current.clone());
         }
 
+        // Ghost-fork / vfork: set done flag BEFORE sending SIGCHLD.
+        // SIGCHLD can wake the parent from sleep_signalable_until; if
+        // ghost_fork_done is still false at that point, the parent gets
+        // EINTR instead of the child PID — breaking fork().
+        current.ghost_fork_done.store(true, Ordering::Release);
+        current.wake_vfork_parent();
+
         if !is_thread {
             if let Some(parent) = current.parent.upgrade() {
                 if parent.signals().lock().nocldwait() {
@@ -852,9 +948,6 @@ impl Process {
             }
             crate::syscalls::futex::futex_wake_addr(ctid_addr, 1);
         }
-
-        // Wake vfork parent if this process was created by vfork.
-        current.wake_vfork_parent();
 
         JOIN_WAIT_QUEUE.wake_all();
         switch();
@@ -963,6 +1056,11 @@ impl Process {
 
     /// Sends a signal.
     pub fn send_signal(&self, signal: Signal) {
+        crate::debug::htrace::enter(
+            crate::debug::htrace::id::SIGNAL_SEND,
+            ((self.pid().as_i32() as u32) << 8) | (signal as u32),
+        );
+
         // SIGCONT always continues a stopped process, even if SIGCONT is blocked.
         if signal == SIGCONT {
             self.continue_process();
@@ -975,6 +1073,7 @@ impl Process {
         // should NOT be queued or interrupt sleep — matching POSIX/Linux behavior.
         // If the user installs a handler (SigAction::Handler), we do queue it.
         if matches!(action, SigAction::Ignore) {
+            crate::debug::htrace::exit(crate::debug::htrace::id::SIGNAL_SEND, 0);
             return;
         }
 
@@ -986,6 +1085,7 @@ impl Process {
 
         // Wake poll/epoll waiters so signalfd can detect the new signal.
         crate::poll::POLL_WAIT_QUEUE.wake_all();
+        crate::debug::htrace::exit(crate::debug::htrace::id::SIGNAL_SEND, signal as u32);
     }
 
     /// Returns `true` if there's a deliverable (pending AND unblocked) signal.
@@ -1175,6 +1275,14 @@ impl Process {
         }
         current.cmdline.borrow_mut().set_by_argv(argv);
 
+        // Store resolved executable path for /proc/[pid]/exe.
+        {
+            let resolved = executable_path.resolve_absolute_path();
+            let mut ep = current.exe_path.lock_no_irq();
+            ep.clear();
+            let _ = ep.try_push_str(resolved.as_str());
+        }
+
         let root_fs = current.root_fs();
         let entry = {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SETUP_USERSPACE);
@@ -1224,6 +1332,11 @@ impl Process {
         entry.vm.page_table().switch();
         *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
 
+        // Ghost-fork / vfork: wake blocked parent now that exec has replaced
+        // the address space. The parent's VM is no longer shared.
+        current.ghost_fork_done.store(true, Ordering::Release);
+        current.wake_vfork_parent();
+
         current
             .arch
             .setup_execve_stack(frame, entry.ip, entry.user_sp);
@@ -1242,9 +1355,18 @@ impl Process {
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
         let arch = parent.arch.fork(parent_frame);
-        let vm = {
+        // Ghost-fork: share parent's VM instead of duplicating the page table.
+        // Since fork+exec immediately replaces the address space, the duplicated
+        // page table is 100% wasted work (~14µs). The parent is blocked in
+        // sys_fork() until the child exec's or exits (vfork semantics).
+        let ghost = GHOST_FORK_ENABLED.load(Ordering::Relaxed);
+        let vm = if ghost {
+            let _g = debug::tracer::span_guard(debug::tracer::span::FORK_GHOST);
+            parent.vm().clone()
+        } else {
             let _g = debug::tracer::span_guard(debug::tracer::span::FORK_PAGE_TABLE);
-            parent.vm().as_ref().unwrap().lock().fork()?
+            let forked = parent.vm().as_ref().unwrap().lock().fork()?;
+            Some(Arc::new(SpinLock::new(forked)))
         };
         let opened_files = parent.opened_files().lock().clone();
         let process_group = parent.process_group();
@@ -1260,7 +1382,7 @@ impl Process {
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             children: SpinLock::new(Vec::new()),
-            vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(vm)))),
+            vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
             root_fs: AtomicRefCell::new({
                 // Clone RootFs so child gets its own cwd — chdir in the child
@@ -1270,7 +1392,7 @@ impl Process {
                 Arc::new(SpinLock::new(cloned))
             }),
             arch,
-            signals: Arc::new(SpinLock::new(SignalDelivery::new())), // TODO: #88 has to address this
+            signals: Arc::new(SpinLock::new(parent.signals.lock().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
@@ -1283,7 +1405,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
-            vfork_parent: None,
+            vfork_parent: if ghost { Some(parent.pid()) } else { None },
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
@@ -1291,6 +1413,10 @@ impl Process {
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
             syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(parent.exe_path.lock_no_irq().clone()),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
         });
 
         // Inherit parent's cgroup and register child.
@@ -1358,7 +1484,7 @@ impl Process {
                 Arc::new(SpinLock::new(cloned))
             }),
             arch,
-            signals: Arc::new(SpinLock::new(SignalDelivery::new())),
+            signals: Arc::new(SpinLock::new(parent.signals.lock().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
@@ -1379,6 +1505,10 @@ impl Process {
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
             syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(parent.exe_path.lock_no_irq().clone()),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
         });
 
         let parent_cg = parent.cgroup();
@@ -1465,6 +1595,10 @@ impl Process {
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
             syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(parent.exe_path.lock_no_irq().clone()),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
             arch,
         });
 
@@ -1661,9 +1795,115 @@ fn apply_vma_template(
             entry.len,
             area_type,
             MMapProt::from_bits_truncate(entry.prot_bits),
+            false,
         )?;
     }
     Ok(())
+}
+
+// --- Prefault template cache (Experiment 2) ---
+// Caches the actual (vaddr, paddr, prot_flags) mappings produced by
+// prefault_cached_pages for a given binary. On cache hit, replays the
+// mappings directly (skip HashMap lookups, VMA iteration, huge page assembly).
+
+use kevlar_platform::address::PAddr;
+
+struct PrefaultTemplate {
+    entries: Vec<(usize, PAddr, i32)>,
+    huge_entries: Vec<(usize, PAddr, i32)>,
+}
+
+static PREFAULT_TEMPLATE_CACHE: SpinLock<Option<hashbrown::HashMap<usize, PrefaultTemplate>>> =
+    SpinLock::new(None);
+
+fn prefault_template_lookup(file_ptr: usize) -> Option<bool> {
+    let cache = PREFAULT_TEMPLATE_CACHE.lock_no_irq();
+    cache.as_ref().and_then(|map| map.get(&file_ptr).map(|_| true))
+}
+
+fn apply_prefault_template(vm: &mut Vm, file_ptr: usize) {
+    use kevlar_utils::alignment::align_down;
+    use kevlar_platform::arch::HUGE_PAGE_SIZE;
+
+    let cache = PREFAULT_TEMPLATE_CACHE.lock_no_irq();
+    let template = match cache.as_ref().and_then(|map| map.get(&file_ptr)) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Map huge pages first.
+    for &(vaddr, paddr, flags) in &template.huge_entries {
+        if let Ok(uaddr) = UserVAddr::new_nonnull(vaddr) {
+            if vm.page_table().is_pde_empty(uaddr) {
+                kevlar_platform::page_refcount::page_ref_inc_huge(paddr);
+                vm.page_table_mut().map_huge_user_page(uaddr, paddr, flags);
+            }
+        }
+    }
+
+    // Map 4KB pages, skipping those inside huge page regions.
+    for &(vaddr, paddr, flags) in &template.entries {
+        if let Ok(uaddr) = UserVAddr::new_nonnull(vaddr) {
+            let huge_base = align_down(vaddr, HUGE_PAGE_SIZE);
+            if let Ok(huge_uaddr) = UserVAddr::new_nonnull(huge_base) {
+                if vm.page_table().is_huge_mapped(huge_uaddr).is_some() {
+                    continue;
+                }
+            }
+            kevlar_platform::page_refcount::page_ref_inc(paddr);
+            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, paddr, flags) {
+                kevlar_platform::page_refcount::page_ref_dec(paddr);
+            }
+        }
+    }
+}
+
+fn build_and_save_prefault_template(vm: &Vm, file_ptr: usize) {
+    use kevlar_utils::alignment::align_down;
+    use kevlar_platform::arch::HUGE_PAGE_SIZE;
+
+    let mut entries = Vec::new();
+    let mut huge_entries = Vec::new();
+
+    for vma in vm.vm_areas() {
+        if let VmAreaType::File { file, .. } = vma.area_type() {
+            if !file.is_content_immutable() { continue; }
+            if Arc::as_ptr(file) as *const () as usize != file_ptr { continue; }
+
+            let prot_flags = vma.prot().bits();
+            let vma_start = vma.start().value();
+            let vma_end = vma.end().value();
+
+            let mut addr = align_up(vma_start, PAGE_SIZE);
+            while addr + PAGE_SIZE <= vma_end {
+                let uaddr = UserVAddr::new_nonnull(addr).unwrap();
+                // Check for huge page mapping.
+                let huge_base = align_down(addr, HUGE_PAGE_SIZE);
+                if let Ok(huge_uaddr) = UserVAddr::new_nonnull(huge_base) {
+                    if let Some(pde_val) = vm.page_table().is_huge_mapped(huge_uaddr) {
+                        if !huge_entries.iter().any(|&(va, _, _): &(usize, PAddr, i32)| va == huge_base) {
+                            let paddr = PAddr::new((pde_val & 0x7ffffffffffff000) as usize);
+                            huge_entries.push((huge_base, paddr, 5));
+                        }
+                        addr = huge_base + HUGE_PAGE_SIZE;
+                        continue;
+                    }
+                }
+                if let Some(paddr) = vm.page_table().lookup_paddr(uaddr) {
+                    entries.push((addr, paddr, prot_flags));
+                }
+                addr += PAGE_SIZE;
+            }
+        }
+    }
+
+    if entries.is_empty() && huge_entries.is_empty() {
+        return;
+    }
+
+    let mut cache = PREFAULT_TEMPLATE_CACHE.lock_no_irq();
+    let map = cache.get_or_insert_with(hashbrown::HashMap::new);
+    map.insert(file_ptr, PrefaultTemplate { entries, huge_entries });
 }
 
 /// Load PT_LOAD segments from an ELF into the VM, then fill inter-segment
@@ -1701,6 +1941,7 @@ fn load_elf_segments(
             phdr.p_memsz as usize,
             area_type,
             elf_flags_to_prot(phdr.p_flags),
+            false,
         )?;
 
         // Track the page-aligned range this segment occupies.
@@ -2070,6 +2311,7 @@ fn prefault_cached_pages(vm: &mut Vm) {
             addr += PAGE_SIZE;
         }
     }
+
 }
 
 /// Verify assembled huge page content against backing files.
@@ -2664,7 +2906,17 @@ fn do_elf_binfmt(
     // each of which would be a ~500ns KVM VM exit.
     {
         let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_PREFAULT);
-        prefault_cached_pages(&mut vm);
+        let file_ptr_for_template = Arc::as_ptr(executable) as *const () as usize;
+        let use_template = PREFAULT_TEMPLATE_ENABLED.load(Ordering::Relaxed);
+        if use_template && prefault_template_lookup(file_ptr_for_template).is_some() {
+            let _g2 = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_TEMPLATE);
+            apply_prefault_template(&mut vm, file_ptr_for_template);
+        } else {
+            prefault_cached_pages(&mut vm);
+            if use_template {
+                build_and_save_prefault_template(&vm, file_ptr_for_template);
+            }
+        }
         prefault_small_anonymous(&mut vm);
     }
 
@@ -2702,6 +2954,7 @@ fn do_elf_binfmt(
                 init_stack_pages.add(i * PAGE_SIZE),
             );
         }
+
         sp
     };
     Ok(UserspaceEntry { vm, ip, user_sp })

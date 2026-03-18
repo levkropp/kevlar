@@ -15,11 +15,11 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let len = min(len, MAX_READ_WRITE_LEN);
 
-        let opened_file = current_process().get_opened_file_by_fd(fd)?;
-        let read_len = opened_file
-            .as_file()?
-            .read(offset, UserBufferMut::from_uaddr(uaddr, len), &opened_file.options())?;
-
-        Ok(read_len as isize)
+        current_process().with_file(fd, |opened_file| {
+            let read_len = opened_file
+                .as_file()?
+                .read(offset, UserBufferMut::from_uaddr(uaddr, len), &opened_file.options())?;
+            Ok(read_len as isize)
+        })
     }
 }

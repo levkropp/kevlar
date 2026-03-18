@@ -2,12 +2,12 @@
 //! /proc/self symlink and /proc/[pid]/ per-process directories.
 use core::fmt;
 
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 
 use kevlar_vfs::{
     inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions, Symlink},
-    path::PathBuf,
     result::{Errno, Error, Result},
     stat::{FileMode, Stat, S_IFLNK, S_IFDIR, S_IFREG},
     user_buffer::{UserBufWriter, UserBufferMut},
@@ -36,9 +36,9 @@ impl Symlink for ProcSelfSymlink {
         })
     }
 
-    fn linked_to(&self) -> Result<PathBuf> {
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
         let pid = current_process().pid().as_i32();
-        Ok(PathBuf::from(alloc::format!("/proc/{}", pid)))
+        Ok(Cow::Owned(alloc::format!("/proc/{}", pid)))
     }
 }
 
@@ -102,12 +102,12 @@ impl Directory for ProcPidDir {
                 Arc::new(ProcPidEnviron { pid: self.pid }) as Arc<dyn FileLike>
             )),
             "exe" => {
-                // Symlink to executable (stub: returns /bin/unknown).
-                let cmdline = Process::find_by_pid(self.pid)
-                    .map(|p| p.cmdline().argv0().to_string())
+                // Symlink to the resolved executable path.
+                let exe = Process::find_by_pid(self.pid)
+                    .map(|p| p.exe_path_string())
                     .unwrap_or_else(|| String::from("/bin/unknown"));
-                Ok(INode::FileLike(
-                    Arc::new(ProcPidExeStub(cmdline)) as Arc<dyn FileLike>
+                Ok(INode::Symlink(
+                    Arc::new(ProcPidExeLink(exe)) as Arc<dyn Symlink>
                 ))
             }
             _ => Err(Error::new(Errno::ENOENT)),
@@ -128,7 +128,7 @@ impl Directory for ProcPidDir {
             ("status", FileType::Regular),
             ("cmdline", FileType::Regular),
             ("comm", FileType::Regular),
-            ("exe", FileType::Regular),
+            ("exe", FileType::Link),
             ("maps", FileType::Regular),
             ("cgroup", FileType::Regular),
             ("mountinfo", FileType::Regular),
@@ -567,8 +567,8 @@ impl Symlink for ProcFdLink {
         })
     }
 
-    fn linked_to(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(self.0.clone()))
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
+        Ok(Cow::Borrowed(&self.0))
     }
 }
 
@@ -590,22 +590,22 @@ impl FileLike for ProcFdSymlink {
         })
     }
 
-    fn readlink(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(self.0.clone()))
+    fn readlink(&self) -> Result<Cow<'_, str>> {
+        Ok(Cow::Borrowed(&self.0))
     }
 }
 
-// ── /proc/<pid>/exe (stub) ──────────────────────────────────────────
+// ── /proc/<pid>/exe (symlink to resolved executable) ────────────────
 
-struct ProcPidExeStub(String);
+struct ProcPidExeLink(String);
 
-impl fmt::Debug for ProcPidExeStub {
+impl fmt::Debug for ProcPidExeLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ProcPidExeStub({})", self.0)
+        write!(f, "ProcPidExeLink({})", self.0)
     }
 }
 
-impl FileLike for ProcPidExeStub {
+impl Symlink for ProcPidExeLink {
     fn stat(&self) -> Result<Stat> {
         Ok(Stat {
             mode: FileMode::new(S_IFLNK | 0o777),
@@ -613,8 +613,8 @@ impl FileLike for ProcPidExeStub {
         })
     }
 
-    fn readlink(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(self.0.clone()))
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
+        Ok(Cow::Borrowed(&self.0))
     }
 }
 

@@ -11,7 +11,7 @@
 
 extern crate alloc;
 
-use alloc::{string::ToString, sync::Arc};
+use alloc::{borrow::Cow, string::ToString, sync::Arc};
 use core::fmt;
 use hashbrown::HashMap;
 use kevlar_utils::byte_size::ByteSize;
@@ -72,6 +72,14 @@ impl FileLike for InitramFsFile {
 
     fn stat(&self) -> Result<Stat> {
         Ok(self.stat)
+    }
+
+    fn is_content_immutable(&self) -> bool {
+        true
+    }
+
+    fn data_vaddr(&self) -> Option<usize> {
+        Some(self.data.as_ptr() as usize)
     }
 }
 
@@ -182,8 +190,8 @@ impl SymlinkTrait for InitramFsSymlink {
         Ok(self.stat)
     }
 
-    fn linked_to(&self) -> Result<PathBuf> {
-        Ok(self.dst.clone())
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
+        Ok(Cow::Borrowed(self.dst.as_str()))
     }
 }
 

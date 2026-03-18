@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -31,7 +32,6 @@ use kevlar_vfs::{
         DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions, PollStatus,
         Symlink as SymlinkTrait,
     },
-    path::PathBuf,
     result::{Errno, Error, Result},
     stat::{
         BlockCount, BlockSize, DevId, FileMode, FileSize, GId, NLink, Stat, Time, UId, S_IFDIR,
@@ -1901,25 +1901,31 @@ impl SymlinkTrait for Ext2Symlink {
         Ok(self.fs.make_stat(self.inode_num, &inode))
     }
 
-    fn linked_to(&self) -> Result<PathBuf> {
+    fn linked_to(&self) -> Result<Cow<'_, str>> {
         let inode = self.inode.lock_no_irq();
         let size = inode.file_size() as usize;
         if size <= 60 && !inode.uses_extents() {
             // Inline symlink: target stored in i_block[0..14] (60 bytes).
-            let block_bytes: Vec<u8> = inode
-                .block
-                .iter()
-                .flat_map(|b| b.to_le_bytes())
-                .collect();
+            // Use a stack buffer instead of Vec to avoid heap allocation.
+            let mut buf = [0u8; 60];
+            let mut pos = 0;
+            for b in &inode.block {
+                let bytes = b.to_le_bytes();
+                let remaining = size.saturating_sub(pos);
+                let copy_len = core::cmp::min(bytes.len(), remaining);
+                if copy_len == 0 { break; }
+                buf[pos..pos + copy_len].copy_from_slice(&bytes[..copy_len]);
+                pos += copy_len;
+            }
             let target =
-                core::str::from_utf8(&block_bytes[..size]).map_err(|_| Error::new(Errno::EIO))?;
-            Ok(PathBuf::from(target))
+                core::str::from_utf8(&buf[..size]).map_err(|_| Error::new(Errno::EIO))?;
+            Ok(Cow::Owned(String::from(target)))
         } else {
             // Block-based symlink.
             let data = self.fs.read_file_data(&inode, 0, size)?;
             let target =
                 core::str::from_utf8(&data).map_err(|_| Error::new(Errno::EIO))?;
-            Ok(PathBuf::from(target))
+            Ok(Cow::Owned(String::from(target)))
         }
     }
 }
