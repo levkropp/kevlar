@@ -147,12 +147,15 @@ ifneq ($(PROFILE),$(filter $(PROFILE),fortress balanced performance ludicrous))
 $(error "Supported PROFILE values: fortress, balanced, performance, ludicrous")
 endif
 
+# Comma for use in $(if ...) expansions (Make can't embed literal commas).
+comma := ,
+export FEATURES  ?=
 export RUSTFLAGS = -Z emit-stack-sizes
 CARGOFLAGS += -Z build-std=core,alloc
 CARGOFLAGS += -Z json-target-spec
 CARGOFLAGS += --target $(target_json)
 CARGOFLAGS += $(if $(RELEASE),--release,)
-CARGOFLAGS += --no-default-features --features profile-$(PROFILE)
+CARGOFLAGS += --no-default-features --features profile-$(PROFILE)$(if $(FEATURES),$(comma)$(FEATURES),)
 TESTCARGOFLAGS += --package kevlar_kernel -Z unstable-options
 TESTCARGOFLAGS += --config "target.$(ARCH).runner = './tools/run-unittests.sh'"
 WATCHFLAGS += --clear
@@ -959,6 +962,28 @@ debug: build
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
 		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+# ktrace: high-bandwidth binary tracing via debugcon.
+# Builds with all ktrace features enabled and boots with debugcon output.
+.PHONY: run-ktrace
+run-ktrace:
+	$(PROGRESS) "KTRACE" "profile-$(PROFILE)"
+	$(MAKE) build PROFILE=$(PROFILE) FEATURES=ktrace-all
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH) --kvm                                           \
+		--ktrace ktrace.bin                                            \
+		--save-dump kevlar.dump                                        \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+# Decode a ktrace binary dump to text timeline or Perfetto JSON.
+.PHONY: decode-ktrace
+decode-ktrace:
+	$(PYTHON3) tools/ktrace-decode.py ktrace.bin $(KTRACE_ARGS)
 
 # Start the MCP debug server (run alongside `make debug`).
 .PHONY: mcp-debug

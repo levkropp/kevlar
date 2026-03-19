@@ -39,5 +39,7 @@ bitflags! {
         const KWAB_AUDIT  = 0x1000;
         /// Hierarchical call tracer (per-CPU ring of enter/exit events with depth).
         const HTRACE = 0x2000;
+        /// ktrace: high-bandwidth binary tracing (per-CPU ring + debugcon dump).
+        const KTRACE = 0x4000;
     }
 }

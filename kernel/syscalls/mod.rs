@@ -737,6 +737,18 @@ fn resolve_path(uaddr: usize) -> Result<PathBuf> {
     Ok(Path::new(UserCStr::new(UserVAddr::new_nonnull(uaddr)?, PATH_MAX)?.as_str()).to_path_buf())
 }
 
+/// Returns true for trivial, read-only, non-blocking syscalls where we can
+/// skip per-call accounting (tick_stime, record_syscall, profiler, htrace)
+/// to save ~5ns per call.
+#[inline(always)]
+fn is_lean_syscall(n: usize) -> bool {
+    matches!(n,
+        SYS_GETPID | SYS_GETTID | SYS_GETUID | SYS_GETEUID |
+        SYS_GETGID | SYS_GETEGID | SYS_GETPRIORITY | SYS_UNAME |
+        SYS_GETTIMEOFDAY
+    )
+}
+
 pub struct SyscallHandler<'a> {
     pub frame: &'a mut PtRegs,
 }
@@ -757,6 +769,38 @@ impl<'a> SyscallHandler<'a> {
         a6: usize,
         n: usize,
     ) -> Result<isize> {
+        // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
+        // Saves ~5ns/call by eliding tick_stime, record_syscall, profiler, htrace.
+        if is_lean_syscall(n) && !debug::get_filter().intersects(DebugFilter::SYSCALL | DebugFilter::CANARY) {
+            // ktrace: still record syscall enter/exit on the lean path.
+            #[cfg(feature = "ktrace-syscall")]
+            crate::debug::ktrace::trace(crate::debug::ktrace::event::SYSCALL_ENTER,
+                n as u32, a1 as u32, (a1 >> 32) as u32, a2 as u32, (a2 >> 32) as u32);
+
+            let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n);
+
+            #[cfg(feature = "ktrace-syscall")]
+            {
+                let rv = match &ret { Ok(v) => *v, Err(e) => -(e.errno() as isize) };
+                crate::debug::ktrace::trace(crate::debug::ktrace::event::SYSCALL_EXIT,
+                    n as u32, rv as u32, (rv >> 32) as u32, 0, 0);
+            }
+
+            // Write result to frame before signal delivery.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let rax_val = match &ret {
+                    Ok(v) => *v as u64,
+                    Err(e) => (-(e.errno() as isize)) as u64,
+                };
+                self.frame.rax = rax_val;
+            }
+            if let Err(err) = Process::try_delivering_signal(self.frame) {
+                debug_warn!("failed to setup the signal stack: {:?}", err);
+            }
+            return ret;
+        }
+
         // Single atomic load for all debug checks — avoids 5 separate
         // atomic loads on the fast path when debugging is disabled.
         let dbg = debug::get_filter();
@@ -810,6 +854,11 @@ impl<'a> SyscallHandler<'a> {
         let _htrace_guard = debug::htrace::enter_guard(
             debug::htrace::id::SYSCALL, n as u32);
 
+        // ktrace: binary trace of syscall enter.
+        #[cfg(feature = "ktrace-syscall")]
+        crate::debug::ktrace::trace(crate::debug::ktrace::event::SYSCALL_ENTER,
+            n as u32, a1 as u32, (a1 >> 32) as u32, a2 as u32, (a2 >> 32) as u32);
+
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if dbg_syscall {
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::SyscallExit {
@@ -825,6 +874,14 @@ impl<'a> SyscallHandler<'a> {
 
         // Per-syscall cycle profiler: record TSC at exit.
         debug::profiler::syscall_exit(n, prof_start);
+
+        // ktrace: binary trace of syscall exit.
+        #[cfg(feature = "ktrace-syscall")]
+        {
+            let rv = match &ret { Ok(v) => *v, Err(e) => -(e.errno() as isize) };
+            crate::debug::ktrace::trace(crate::debug::ktrace::event::SYSCALL_EXIT,
+                n as u32, rv as u32, (rv >> 32) as u32, 0, 0);
+        }
 
         // Record to per-process syscall trace ring buffer (unconditional —
         // just a few atomic writes, always available for crash diagnostics).

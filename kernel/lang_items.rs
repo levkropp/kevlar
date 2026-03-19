@@ -176,6 +176,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // Dump the hierarchical tracer if enabled — shows nested call chains.
     crate::debug::htrace::dump_all_cpus();
 
+    // ktrace: dump binary trace via debugcon (fast — ~400ms for 2MB).
+    #[cfg(feature = "ktrace")]
+    if crate::debug::ktrace::is_enabled() {
+        crate::debug::ktrace::dump();
+    }
+
     unsafe {
         warn!("preparing a crash dump...");
         KERNEL_LOG_BUF.force_unlock();

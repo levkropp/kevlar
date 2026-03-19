@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--gui", action="store_true")
     parser.add_argument("--gdb", action="store_true")
     parser.add_argument("--kvm", action="store_true")
+    parser.add_argument("--ktrace", metavar="FILE", nargs="?", const="ktrace.bin",
+                        help="Enable debugcon ktrace output (default: ktrace.bin)")
     parser.add_argument("--append-cmdline", action="append")
     parser.add_argument("--disk", help="VirtIO block device disk image file")
     parser.add_argument("--log-serial")
@@ -233,6 +235,16 @@ def main():
                      "-device", "virtio-blk-device,drive=drive0"]
         else:
             argv += ["-drive", f"file={disk_path},format=raw,if=virtio"]
+    if args.ktrace:
+        # ISA debugcon device — writes to host file at ~5 MB/s on KVM.
+        ktrace_path = args.ktrace
+        argv += [
+            "-chardev", f"file,id=ktrace,path={ktrace_path}",
+            "-device", "isa-debugcon,chardev=ktrace,iobase=0xe9",
+        ]
+        cmdline.append("debug=ktrace")
+        print(f"\x1b[36mktrace: binary trace will be written to {ktrace_path}\x1b[0m",
+              file=sys.stderr)
     if args.append_cmdline:
         cmdline += args.append_cmdline
     if args.log_serial:

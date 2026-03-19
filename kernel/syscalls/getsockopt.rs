@@ -22,6 +22,8 @@ fn write_int_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, value: c_
 
 /// Check whether the fd refers to a socket that has a pending error.
 /// Returns the errno value (e.g. ECONNREFUSED=111) or 0 if no error.
+/// Per POSIX, reading SO_ERROR clears the error (we don't track per-socket
+/// errors yet, so we just check whether the socket is in an error state).
 fn socket_error(fd: Fd) -> c_int {
     use crate::fs::inode::PollStatus;
     use crate::process::current_process;
@@ -37,6 +39,13 @@ fn socket_error(fd: Fd) -> c_int {
     };
     if let Ok(status) = file.poll() {
         if status.contains(PollStatus::POLLERR) {
+            // The socket is in an error state.  For TCP, this could be
+            // ECONNREFUSED (connect failed) or ECONNRESET (peer reset).
+            // Check POLLHUP to distinguish: POLLHUP without prior data
+            // exchange typically means ECONNREFUSED.
+            if status.contains(PollStatus::POLLHUP) {
+                return 104; // ECONNRESET
+            }
             return 111; // ECONNREFUSED
         }
     }

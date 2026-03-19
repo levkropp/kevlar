@@ -32,6 +32,8 @@ pub mod tsc;
 mod tss;
 pub mod vdso;
 pub mod task;
+#[cfg(feature = "ktrace")]
+pub mod debugcon;
 mod vga;
 
 pub use backtrace::Backtrace;

@@ -223,8 +223,16 @@ impl FileLike for TcpSocket {
             local_port = port;
         }
 
+        // Resolve 0.0.0.0 → interface IP so SYN goes out with the correct source.
+        let local_addr = if local_endpoint.addr.is_unspecified() {
+            let iface = INTERFACE.lock();
+            iface.ipv4_addr().map(IpAddress::Ipv4).unwrap_or(local_endpoint.addr)
+        } else {
+            local_endpoint.addr
+        };
+
         let listen_endpoint = IpListenEndpoint {
-            addr: Some(local_endpoint.addr),
+            addr: Some(local_addr),
             port: local_port,
         };
 
@@ -243,6 +251,14 @@ impl FileLike for TcpSocket {
         // Submit a SYN packet.
         process_packets();
 
+        #[cfg(feature = "ktrace-net")]
+        {
+            let IpAddress::Ipv4(v4) = remote_endpoint.addr;
+            let ip_u32 = u32::from_be_bytes(v4.octets());
+            crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_CONNECT,
+                0, ip_u32, remote_endpoint.port as u32, 0, 0);
+        }
+
         if options.nonblock {
             return Err(Errno::EINPROGRESS.into());
         }
@@ -260,7 +276,7 @@ impl FileLike for TcpSocket {
         })
     }
 
-    fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
+    fn write(&self, _offset: usize, buf: UserBuffer<'_>, options: &OpenOptions) -> Result<usize> {
         let mut total_len = 0;
         let mut reader = UserBufReader::from(buf);
         loop {
@@ -274,9 +290,30 @@ impl FileLike for TcpSocket {
 
             process_packets();
             match copied_len {
-                Ok(0) => {
+                Ok(0) if total_len > 0 || options.nonblock => {
+                    // We already wrote something, or nonblocking — return.
                     WRITTEN_BYTES_TOTAL.fetch_add(total_len, Ordering::SeqCst);
+                    #[cfg(feature = "ktrace-net")]
+                    crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_SEND,
+                        0, total_len as u32, total_len as u32, 0, 0);
                     return Ok(total_len);
+                }
+                Ok(0) => {
+                    // Send buffer full, blocking mode, nothing written yet.
+                    // Wait for buffer space to become available.
+                    SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
+                        process_packets();
+                        let sockets = SOCKETS.lock();
+                        let socket: &tcp::Socket = sockets.get(self.handle);
+                        if socket.can_send() {
+                            Ok(Some(()))
+                        } else if !socket.may_send() {
+                            Err(Errno::ECONNRESET.into())
+                        } else {
+                            Ok(None)
+                        }
+                    })?;
+                    // Buffer space available — retry the send loop.
                 }
                 Ok(copied_len) => {
                     // Continue writing.
@@ -305,7 +342,7 @@ impl FileLike for TcpSocket {
                 });
 
             match copied_len {
-                Ok(0) | Err(tcp::RecvError::Finished) => {
+                Ok(0) => {
                     if options.nonblock {
                         Err(Errno::EAGAIN.into())
                     } else {
@@ -313,9 +350,16 @@ impl FileLike for TcpSocket {
                         Ok(None)
                     }
                 }
+                Err(tcp::RecvError::Finished) => {
+                    // Remote sent FIN — return EOF (0 bytes read).
+                    Ok(Some(0))
+                }
                 Ok(copied_len) => {
                     // Continue reading.
                     READ_BYTES_TOTAL.fetch_add(copied_len, Ordering::SeqCst);
+                    #[cfg(feature = "ktrace-net")]
+                    crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_RECV,
+                        0, copied_len as u32, copied_len as u32, 0, 0);
                     Ok(Some(copied_len))
                 }
                 Err(_) => Err(Errno::ECONNRESET.into()),
@@ -362,10 +406,22 @@ impl FileLike for TcpSocket {
             status |= PollStatus::POLLOUT;
         }
 
-        // Report error for failed nonblocking connect.
+        // Report POLLIN for EOF: remote sent FIN, read() would return 0
+        // immediately. This lets poll/epoll wake the application.
+        if !socket.may_recv() && matches!(socket.state(),
+            tcp::State::CloseWait | tcp::State::LastAck |
+            tcp::State::TimeWait | tcp::State::Closing) {
+            status |= PollStatus::POLLIN;
+        }
+
+        // Report error for failed nonblocking connect or reset.
         if socket.state() == tcp::State::Closed {
             status |= PollStatus::POLLERR;
         }
+
+        #[cfg(feature = "ktrace-net")]
+        crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_POLL,
+            0, 0, status.bits() as u32, 0, 0);
 
         Ok(status)
     }

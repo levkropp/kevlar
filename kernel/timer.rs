@@ -63,6 +63,10 @@ pub fn read_wall_clock() -> WallClock {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct MonotonicClock {
     ticks: usize,
+    /// TSC-based nanosecond snapshot taken at creation time (x86_64 only).
+    /// This allows `elapsed_msecs()` to compute real elapsed wall-clock
+    /// time instead of always reading the current TSC.
+    ns_snapshot: usize,
 }
 
 impl MonotonicClock {
@@ -75,11 +79,10 @@ impl MonotonicClock {
     }
 
     pub fn nanosecs(self) -> usize {
-        // Use TSC for nanosecond resolution when available.
         #[cfg(target_arch = "x86_64")]
         {
-            if kevlar_platform::arch::tsc::is_calibrated() {
-                return kevlar_platform::arch::tsc::nanoseconds_since_boot() as usize;
+            if self.ns_snapshot != 0 {
+                return self.ns_snapshot;
             }
         }
         // Fallback to tick-based timing.
@@ -94,8 +97,21 @@ impl MonotonicClock {
 }
 
 pub fn read_monotonic_clock() -> MonotonicClock {
+    let ns = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if kevlar_platform::arch::tsc::is_calibrated() {
+                kevlar_platform::arch::tsc::nanoseconds_since_boot() as usize
+            } else {
+                0
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        { 0 }
+    };
     MonotonicClock {
         ticks: MONOTONIC_TICKS.load(Ordering::Relaxed),
+        ns_snapshot: ns,
     }
 }
 

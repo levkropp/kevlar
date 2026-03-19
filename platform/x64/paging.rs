@@ -265,21 +265,26 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
             if flags & PageAttrs::USER.bits() == 0 {
                 continue; // Skip kernel mappings.
             }
+            let rc = crate::page_refcount::page_ref_count(paddr);
+            if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                continue; // Not tracked or kernel image — skip.
+            }
             if crate::page_refcount::page_ref_dec(paddr) {
                 crate::page_allocator::free_pages(paddr, 1);
             }
         } else if level == 2 && is_huge_page_pde(entry) {
             // 2MB huge page: decrement refcount on ALL 512 sub-PFNs,
             // free each individually when its refcount reaches 0.
-            // After split+CoW, sub-pages may have divergent refcounts,
-            // so we must handle each independently. The buddy allocator
-            // coalesces freed pages back into larger blocks.
             let flags = entry_flags(entry);
             if flags & PageAttrs::USER.bits() == 0 {
                 continue;
             }
             for sub_i in 0..512usize {
                 let sub = PAddr::new(paddr.value() + sub_i * PAGE_SIZE);
+                let rc = crate::page_refcount::page_ref_count(sub);
+                if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                    continue;
+                }
                 if crate::page_refcount::page_ref_dec(sub) {
                     crate::page_allocator::free_pages(sub, 1);
                 }
@@ -813,3 +818,8 @@ impl PageTable {
     }
 
 }
+
+// TODO: Add Drop for PageTable to free the PML4 page. Currently the PML4
+// (4 KB per process) is leaked. Intermediate tables are freed by
+// teardown_user_pages() via Vm::Drop. The PML4 free requires verifying
+// it's not the boot page table and not currently loaded in CR3.

@@ -41,6 +41,8 @@ pub mod emit;
 pub mod event;
 pub mod filter;
 pub mod htrace;
+#[cfg(feature = "ktrace")]
+pub mod ktrace;
 pub mod profiler;
 pub mod tracer;
 pub mod usercopy;
@@ -91,6 +93,17 @@ pub fn init(debug_cmdline: Option<&str>) {
     // Enable hierarchical call tracer for debugging call chains.
     if filter.contains(DebugFilter::HTRACE) {
         htrace::enable();
+    }
+
+    // Enable ktrace binary tracing.
+    #[cfg(feature = "ktrace")]
+    if filter.contains(DebugFilter::KTRACE) {
+        ktrace::enable();
+        // Write an initial dump immediately so the debugcon file has valid
+        // data even if QEMU is killed before PID 1 exits.  The PID 1 exit
+        // path writes a final dump with all accumulated events.
+        ktrace::dump();
+        info!("ktrace: enabled (per-CPU ring buffers, debugcon dump)");
     }
 
     if !filter.is_empty() {

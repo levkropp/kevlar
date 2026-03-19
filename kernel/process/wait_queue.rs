@@ -57,6 +57,10 @@ impl WaitQueue {
                 self.waiter_count.fetch_add(1, Ordering::Relaxed);
             }
 
+            #[cfg(feature = "ktrace-sched")]
+            crate::debug::ktrace::trace(crate::debug::ktrace::event::WAITQ_SLEEP,
+                self as *const _ as u32, 0, 0, 0, 0);
+
             // Yield CPU. We'll be woken by wake_all/wake_one which removes
             // us from the queue and sets us Runnable.
             switch();
@@ -114,11 +118,17 @@ impl WaitQueue {
         use crate::debug::htrace;
         htrace::enter(htrace::id::WAKE_ALL, self.waiter_count.load(Ordering::Relaxed) as u32);
         let mut queue = self.queue.lock();
+        let mut woken_count = 0u32;
         while let Some(process) = queue.pop_front() {
             self.waiter_count.fetch_sub(1, Ordering::Relaxed);
             process.resume();
+            woken_count += 1;
         }
         htrace::exit(htrace::id::WAKE_ALL, 0);
+
+        #[cfg(feature = "ktrace-sched")]
+        crate::debug::ktrace::trace(crate::debug::ktrace::event::WAITQ_WAKE,
+            self as *const _ as u32, woken_count, 0, 0, 0);
     }
 
     pub fn wake_n(&self, max: u32) -> u32 {

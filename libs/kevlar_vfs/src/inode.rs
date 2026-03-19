@@ -406,10 +406,12 @@ impl INode {
     }
 
     /// Whether this inode supports lseek (false for pipes, sockets, etc.).
+    /// Directories are seekable on Linux (used by telldir/seekdir).
     pub fn is_seekable(&self) -> bool {
         match self {
             INode::FileLike(file) => file.is_seekable(),
-            INode::Directory(_) | INode::Symlink(_) => false,
+            INode::Directory(_) => true,
+            INode::Symlink(_) => false,
         }
     }
 
