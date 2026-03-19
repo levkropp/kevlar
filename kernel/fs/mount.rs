@@ -22,6 +22,7 @@ struct MountEntry {
     parent_id: u32,
     fstype: String,
     mountpoint: String,
+    readonly: bool,
 }
 
 static MOUNT_ENTRIES: SpinLock<VecDeque<MountEntry>> = SpinLock::new(VecDeque::new());
@@ -40,6 +41,7 @@ impl MountTable {
             mount_id: root_id, parent_id: 0,
             fstype: String::from("initramfs"),
             mountpoint: String::from("/"),
+            readonly: false,
         });
         for (fstype, mp) in &[("proc", "/proc"), ("devtmpfs", "/dev"), ("tmpfs", "/tmp"), ("sysfs", "/sys"), ("cgroup2", "/sys/fs/cgroup")] {
             let id = NEXT_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
@@ -47,11 +49,16 @@ impl MountTable {
                 mount_id: id, parent_id: root_id,
                 fstype: String::from(*fstype),
                 mountpoint: String::from(*mp),
+                readonly: false,
             });
         }
     }
 
     pub fn add(fstype: &str, mountpoint: &str) {
+        Self::add_with_flags(fstype, mountpoint, false);
+    }
+
+    pub fn add_with_flags(fstype: &str, mountpoint: &str, readonly: bool) {
         use core::sync::atomic::Ordering;
         // Find parent mount ID via longest-prefix match.
         let entries = MOUNT_ENTRIES.lock();
@@ -66,7 +73,18 @@ impl MountTable {
             mount_id: id, parent_id,
             fstype: String::from(fstype),
             mountpoint: String::from(mountpoint),
+            readonly,
         });
+    }
+
+    /// Returns true if `path` is under a read-only mount point.
+    pub fn is_readonly(path: &str) -> bool {
+        let entries = MOUNT_ENTRIES.lock();
+        entries.iter()
+            .filter(|e| path.starts_with(e.mountpoint.as_str()))
+            .max_by_key(|e| e.mountpoint.len())
+            .map(|e| e.readonly)
+            .unwrap_or(false)
     }
 
     pub fn remove(mountpoint: &str) {
@@ -146,6 +164,7 @@ impl MountTable {
 #[derive(Clone)]
 pub struct MountPoint {
     fs: Arc<dyn FileSystem>,
+    pub readonly: bool,
 }
 
 #[derive(Clone)]
@@ -175,7 +194,14 @@ impl RootFs {
     pub fn mount(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
         self.mount_points
             .lock_no_irq()
-            .insert(dir.mount_key()?, MountPoint { fs });
+            .insert(dir.mount_key()?, MountPoint { fs, readonly: false });
+        Ok(())
+    }
+
+    pub fn mount_readonly(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
+        self.mount_points
+            .lock_no_irq()
+            .insert(dir.mount_key()?, MountPoint { fs, readonly: true });
         Ok(())
     }
 

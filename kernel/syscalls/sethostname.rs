@@ -12,8 +12,11 @@ impl<'a> SyscallHandler<'a> {
         let mut buf = [0u8; 64];
         let copy_len = core::cmp::min(len, 64);
         name.read_bytes(&mut buf[..copy_len])?;
-        let ns = current_process().namespaces();
+        let proc = current_process();
+        let ns = proc.namespaces();
         ns.uts.set_hostname(&buf[..copy_len])?;
+        // Invalidate the cached utsname so uname(2) sees the new hostname.
+        proc.rebuild_cached_utsname();
         Ok(0)
     }
 
@@ -22,8 +25,10 @@ impl<'a> SyscallHandler<'a> {
         let mut buf = [0u8; 64];
         let copy_len = core::cmp::min(len, 64);
         name.read_bytes(&mut buf[..copy_len])?;
-        let ns = current_process().namespaces();
+        let proc = current_process();
+        let ns = proc.namespaces();
         ns.uts.set_domainname(&buf[..copy_len])?;
+        proc.rebuild_cached_utsname();
         Ok(0)
     }
 }

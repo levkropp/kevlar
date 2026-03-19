@@ -15,7 +15,8 @@ const FUTEX_WAKE_OP: i32 = 5;
 const FUTEX_WAIT_BITSET: i32 = 9;
 const FUTEX_WAKE_BITSET: i32 = 10;
 const FUTEX_PRIVATE_FLAG: i32 = 128;
-const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG);
+const FUTEX_CLOCK_REALTIME: i32 = 256;
+const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
 static FUTEX_QUEUES: SpinLock<Option<BTreeMap<usize, &'static WaitQueue>>> =
     SpinLock::new(None);
