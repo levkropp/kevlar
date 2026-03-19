@@ -46,6 +46,7 @@ pub struct VmArea {
     len: usize,
     area_type: VmAreaType,
     prot: MMapProt,
+    is_shared: bool,
 }
 
 impl VmArea {
@@ -57,6 +58,11 @@ impl VmArea {
     #[inline(always)]
     pub fn prot(&self) -> MMapProt {
         self.prot
+    }
+
+    #[inline(always)]
+    pub fn is_shared(&self) -> bool {
+        self.is_shared
     }
 
     #[inline(always)]
@@ -104,6 +110,7 @@ impl Vm {
             len: USER_STACK_TOP.value() - stack_bottom.value(),
             area_type: VmAreaType::Anonymous,
             prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
+            is_shared: false,
         };
 
         let heap_vma = VmArea {
@@ -111,6 +118,7 @@ impl Vm {
             len: 0,
             area_type: VmAreaType::Anonymous,
             prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
+            is_shared: false,
         };
 
         Ok(Vm {
@@ -187,6 +195,7 @@ impl Vm {
             len,
             area_type,
             MMapProt::PROT_READ | MMapProt::PROT_WRITE | MMapProt::PROT_EXEC,
+            false,
         )
     }
 
@@ -196,6 +205,7 @@ impl Vm {
         len: usize,
         area_type: VmAreaType,
         prot: MMapProt,
+        shared: bool,
     ) -> Result<()> {
         start.access_ok(len)?;
 
@@ -208,6 +218,7 @@ impl Vm {
             len,
             area_type,
             prot,
+            is_shared: shared,
         });
 
         Ok(())
@@ -302,6 +313,7 @@ impl Vm {
                     len: start.value() - vma_start,
                     area_type: removed.area_type.clone(),
                     prot: removed.prot,
+                    is_shared: removed.is_shared,
                 });
             }
 
@@ -313,6 +325,7 @@ impl Vm {
                     len: vma_end - end,
                     area_type: removed.area_type.clone_with_shift(shift),
                     prot: removed.prot,
+                    is_shared: removed.is_shared,
                 });
             }
 
@@ -367,6 +380,7 @@ impl Vm {
                     len: start.value() - vma_start,
                     area_type: removed.area_type.clone(),
                     prot: removed.prot,
+                    is_shared: removed.is_shared,
                 });
             }
 
@@ -379,6 +393,7 @@ impl Vm {
                 len: mid_end - mid_start,
                 area_type: removed.area_type.clone_with_shift(mid_shift),
                 prot: new_prot,
+                is_shared: removed.is_shared,
             });
 
             // Right piece (keeps old prot): [end, vma_end)
@@ -389,6 +404,7 @@ impl Vm {
                     len: vma_end - end,
                     area_type: removed.area_type.clone_with_shift(right_shift),
                     prot: removed.prot,
+                    is_shared: removed.is_shared,
                 });
             }
 
@@ -397,6 +413,18 @@ impl Vm {
 
         self.vm_areas.extend(new_areas);
         Ok(())
+    }
+
+    /// Extend a VMA's length. The caller must ensure the extension range is free.
+    /// `vma_start` identifies the VMA by its start address.
+    pub fn extend_vma(&mut self, vma_start: UserVAddr, additional: usize) -> Result<()> {
+        for vma in self.vm_areas.iter_mut() {
+            if vma.start == vma_start {
+                vma.len += additional;
+                return Ok(());
+            }
+        }
+        Err(Errno::ESRCH.into())
     }
 
     pub fn is_free_vaddr_range(&self, start: UserVAddr, len: usize) -> bool {
@@ -425,3 +453,14 @@ impl Vm {
         Ok(aligned_next)
     }
 }
+
+// TODO: Add Drop for Vm that calls teardown_user_pages once page table
+// teardown is fully debugged. Currently disabled — see Experiment 4 notes:
+// teardown_user_pages frees pages from the page cache and shared CoW
+// mappings, causing use-after-free when the same pages are still mapped
+// in other processes or referenced by the page cache.
+// impl Drop for Vm {
+//     fn drop(&mut self) {
+//         self.page_table.teardown_user_pages();
+//     }
+// }

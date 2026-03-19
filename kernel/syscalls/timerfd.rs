@@ -66,4 +66,28 @@ impl<'a> SyscallHandler<'a> {
         timer.settime(value_sec, value_nsec, interval_sec, interval_nsec);
         Ok(0)
     }
+
+    /// `timerfd_gettime(fd, curr_value)` — get remaining time on a timer.
+    pub fn sys_timerfd_gettime(&mut self, fd: Fd, curr_value_ptr: UserVAddr) -> Result<isize> {
+        let table = current_process().opened_files().lock();
+        let file = table.get(fd)?.as_file()?;
+        let timer = (**file).as_any().downcast_ref::<TimerFd>()
+            .ok_or(Error::new(Errno::EINVAL))?;
+
+        let (remaining_ns, interval_ns) = timer.gettime();
+
+        // Write struct itimerspec { it_interval, it_value } — each is a timespec.
+        let mut buf = [0u8; ITIMERSPEC_SIZE];
+        // it_interval.tv_sec
+        buf[0..8].copy_from_slice(&((interval_ns / 1_000_000_000) as i64).to_ne_bytes());
+        // it_interval.tv_nsec
+        buf[8..16].copy_from_slice(&((interval_ns % 1_000_000_000) as i64).to_ne_bytes());
+        // it_value.tv_sec
+        buf[16..24].copy_from_slice(&((remaining_ns / 1_000_000_000) as i64).to_ne_bytes());
+        // it_value.tv_nsec
+        buf[24..32].copy_from_slice(&((remaining_ns % 1_000_000_000) as i64).to_ne_bytes());
+
+        curr_value_ptr.write_bytes(&buf)?;
+        Ok(0)
+    }
 }

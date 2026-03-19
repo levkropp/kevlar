@@ -20,12 +20,11 @@ impl<'a> SyscallHandler<'a> {
         let mut opened_files = current.opened_files_no_irq();
         match cmd {
             F_GETFD => {
-                let file = opened_files.get(fd)?;
-                let cloexec = if file.options().close_on_exec { 1 } else { 0 };
+                let cloexec = if opened_files.get_cloexec(fd)? { 1 } else { 0 };
                 Ok(cloexec)
             }
             F_SETFD => {
-                opened_files.get(fd)?.set_cloexec(arg == 1);
+                opened_files.set_cloexec(fd, arg == 1)?;
                 Ok(0)
             }
             F_GETFL => {

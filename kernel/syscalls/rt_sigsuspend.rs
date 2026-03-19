@@ -16,16 +16,17 @@ impl<'a> SyscallHandler<'a> {
 
         let current = current_process();
 
-        // Save old mask and set new one (lock-free).
+        // Save old mask, install temporary mask.
         let old_mask = current.sigset_load();
         current.sigset_store(new_mask);
 
-        // Sleep until a signal arrives. The signal will be delivered in
-        // try_delivering_signal on return from the syscall.
-        crate::process::switch();
+        // Stash old_mask for rt_sigreturn to restore after the handler runs.
+        // We must NOT restore it here — the temporary mask must remain active
+        // so try_delivering_signal can deliver the pending signal.
+        current.sigsuspend_save_mask(old_mask);
 
-        // Restore old mask.
-        current.sigset_store(old_mask);
+        // Block until a signal arrives.
+        crate::poll::POLL_WAIT_QUEUE.sleep_signalable_until(|| Ok(None))?;
 
         // sigsuspend always returns EINTR.
         Err(Errno::EINTR.into())

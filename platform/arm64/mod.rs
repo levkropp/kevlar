@@ -69,6 +69,11 @@ pub fn broadcast_halt_ipi() {
     // PANICKED=true and halt on their next interrupt.
 }
 
+/// Read RTC epoch seconds. ARM64 has no CMOS; returns 0 (boot-relative).
+pub fn read_rtc_epoch_secs() -> u64 {
+    0
+}
+
 pub const PAGE_SIZE: usize = 4096;
 pub const TICK_HZ: usize = 50;
 

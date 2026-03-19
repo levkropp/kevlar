@@ -6,8 +6,10 @@ use crate::{prelude::*, syscalls::SyscallHandler};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_pause(&mut self) -> Result<isize> {
-        // Yield to the scheduler; signal delivery happens on syscall return.
-        crate::process::switch();
+        // Block until a signal arrives. sleep_signalable_until returns
+        // Err(EINTR) when has_pending_signals() becomes true.
+        crate::poll::POLL_WAIT_QUEUE.sleep_signalable_until(|| Ok(None))?;
+        // Unreachable: sleep_signalable_until always returns Err(EINTR) here.
         Err(Errno::EINTR.into())
     }
 }

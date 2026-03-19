@@ -10,6 +10,7 @@ use kevlar_platform::address::UserVAddr;
 const AT_EMPTY_PATH: i32 = 0x1000;
 const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 const STATX_BASIC_STATS: u32 = 0x07ff;
+const STATX_MNT_ID: u32 = 0x1000;
 
 #[repr(C)]
 struct StatxTimestamp {
@@ -82,7 +83,7 @@ impl<'a> SyscallHandler<'a> {
 
         let ts_zero = StatxTimestamp { tv_sec: 0, tv_nsec: 0, _pad: 0 };
         let stx = StatxBuf {
-            stx_mask: STATX_BASIC_STATS,
+            stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
             stx_blksize: 4096,
             stx_attributes: 0,
             stx_nlink: 1,

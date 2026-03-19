@@ -245,6 +245,12 @@ def build_busybox():
         'CONFIG_UBIUPDATEVOL=y': '# CONFIG_UBIUPDATEVOL is not set',
         'CONFIG_UBIRENAME=y': '# CONFIG_UBIRENAME is not set',
         'CONFIG_TC=y': '# CONFIG_TC is not set',
+        # Enable standalone shell: ash dispatches BusyBox applets internally
+        # (NOFORK = run in same process, NOEXEC = fork but skip exec).
+        # Requires working /proc/self/exe (readlink → /bin/busybox).
+        '# CONFIG_FEATURE_PREFER_APPLETS is not set': 'CONFIG_FEATURE_PREFER_APPLETS=y',
+        '# CONFIG_FEATURE_SH_STANDALONE is not set': 'CONFIG_FEATURE_SH_STANDALONE=y',
+        '# CONFIG_FEATURE_SH_NOFORK is not set': 'CONFIG_FEATURE_SH_NOFORK=y',
     }.items():
         config = config.replace(old, new)
     (bdir / ".config").write_text(config)
@@ -389,32 +395,113 @@ def build_bash():
     return out
 
 
+def harvest_host_systemd():
+    """Copy the host's systemd binary + all shared library deps into ext-bin.
+
+    Works on any system with /usr/lib/systemd/systemd installed.
+    Returns True if successful.
+    """
+    import re
+
+    host_bin = Path("/usr/lib/systemd/systemd")
+    if not host_bin.exists():
+        return False
+
+    EXT_BIN.mkdir(parents=True, exist_ok=True)
+    systemd_libs_dir = EXT_BIN / "systemd-libs"
+    systemd_libs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect all shared library dependencies recursively via ldd.
+    seen = set()
+    queue = [str(host_bin)]
+    lib_paths = []
+    while queue:
+        binary = queue.pop(0)
+        if binary in seen:
+            continue
+        seen.add(binary)
+        try:
+            r = run(["ldd", binary], capture_output=True, text=True, check=False)
+        except Exception:
+            continue
+        for line in r.stdout.splitlines():
+            m = re.search(r'=> (/\S+)', line)
+            if m:
+                path = m.group(1)
+                if path not in seen:
+                    queue.append(path)
+            m = re.search(r'^\s*(/\S+)', line)
+            if m and '=>' not in line and 'vdso' not in line:
+                path = m.group(1)
+                if path not in seen:
+                    queue.append(path)
+
+    # Copy systemd binary.
+    shutil.copy2(host_bin, EXT_BIN / "systemd")
+    os.chmod(EXT_BIN / "systemd", 0o755)
+
+    # Copy all library dependencies.
+    for path in sorted(seen):
+        if path == str(host_bin):
+            continue
+        p = Path(path)
+        if p.exists() and p.is_file():
+            dest = systemd_libs_dir / p.name
+            if not dest.exists():
+                shutil.copy2(p, dest)
+            # Keep symlink names too (e.g. libcrypt.so.2 → libcrypt.so.2.0.0)
+            lib_paths.append((p, dest))
+
+    # Copy additional systemd helpers if present on host.
+    for extra in ["systemd-journald", "systemctl"]:
+        src = Path("/usr/lib/systemd") / extra
+        if src.exists():
+            shutil.copy2(src, EXT_BIN / extra)
+            os.chmod(EXT_BIN / extra, 0o755)
+
+    host_ver_r = run([str(host_bin), "--version"], capture_output=True, text=True, check=False)
+    ver_line = host_ver_r.stdout.split('\n')[0].strip() if host_ver_r.stdout else "unknown"
+    log("HARVEST", f"systemd from host ({ver_line})")
+    return True
+
+
 def build_systemd():
-    """Build systemd v245 from source (optional, requires meson < 1.0).
+    """Get systemd binaries — try from-source build first, fall back to host harvest.
 
     Returns True if systemd binaries are available, False otherwise.
     """
     systemd_bin = EXT_BIN / "systemd"
-    libsystemd = EXT_BIN / "libsystemd-shared-245.so"
-    if systemd_bin.exists() and libsystemd.exists():
+
+    # Check if we already have a cached binary (from any method).
+    if systemd_bin.exists():
         return True
 
-    # Check meson version — systemd v245 needs meson < 1.0
+    # Method 1: Build from source (requires meson < 1.0 for v245).
     meson = shutil.which("meson")
-    if not meson:
-        log("SKIP", "systemd (meson not found)")
-        return False
+    if meson:
+        try:
+            r = run(["meson", "--version"], capture_output=True, text=True)
+            ver = r.stdout.strip()
+            major = int(ver.split(".")[0])
+            if major < 1:
+                return _build_systemd_from_source()
+            else:
+                log("SKIP", f"systemd from-source (meson {ver} too new for v245)")
+        except (subprocess.CalledProcessError, ValueError):
+            pass
 
-    try:
-        r = run(["meson", "--version"], capture_output=True, text=True)
-        ver = r.stdout.strip()
-        major = int(ver.split(".")[0])
-        if major >= 1:
-            log("SKIP", f"systemd (meson {ver} too new, needs < 1.0)")
-            return False
-    except (subprocess.CalledProcessError, ValueError):
-        log("SKIP", "systemd (cannot determine meson version)")
-        return False
+    # Method 2: Harvest the host's systemd binary + shared libs.
+    if harvest_host_systemd():
+        return True
+
+    log("SKIP", "systemd (no meson < 1.0, no host systemd)")
+    return False
+
+
+def _build_systemd_from_source():
+    """Build systemd v245 from source (requires meson < 1.0)."""
+    systemd_bin = EXT_BIN / "systemd"
+    libsystemd = EXT_BIN / "libsystemd-shared-245.so"
 
     tarball = download(
         "https://github.com/systemd/systemd-stable/archive/refs/tags/v245.7.tar.gz",
@@ -436,8 +523,8 @@ def build_systemd():
              "-Dpam=false", "-Dselinux=false", "-Dapparmor=false",
              "-Daudit=false", "-Dseccomp=false", "-Dutmp=false",
              "-Dgcrypt=false", "-Dp11kit=false", "-Dgnutls=false",
-             "-Dopenssl=false", "-Dcurl=false", "-Dtpm=false",
-             "-Dzlib=false", "-Dbzip2=false", "-Dzstd=false",
+             "-Dopenssl=false", "-Dtpm=false",
+             "-Dzlib=false", "-Dbzip2=false",
              "-Dlz4=false", "-Dxz=false", "-Dpolkit=false",
              "-Dblkid=false", "-Dkmod=false", "-Didn=false",
              "-Dresolve=false", "-Dnetworkd=false", "-Dtimesyncd=false",
@@ -464,7 +551,6 @@ def build_systemd():
         os.chmod(systemd_bin, 0o755)
         os.chmod(libsystemd, 0o755)
 
-        # Also grab systemd-journald and systemctl if built
         for extra in ["systemd-journald", "systemctl"]:
             p = bdir / "builddir" / extra
             if p.exists():
@@ -603,7 +689,10 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
               "var/www/html", "run", "var/log/journal",
               "lib", "lib64", "lib/x86_64-linux-gnu",
               "etc/systemd/system/multi-user.target.wants",
-              "usr/lib/systemd/system", "usr/lib/systemd"]:
+              "usr/lib/systemd/system", "usr/lib/systemd",
+              "etc/runlevels/sysinit", "etc/runlevels/boot",
+              "etc/runlevels/default", "etc/runlevels/shutdown",
+              "etc/runlevels/nonetwork"]:
         (ROOTFS / d).mkdir(parents=True, exist_ok=True)
 
     # var/run → run
@@ -627,22 +716,48 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     # ── systemd binaries ──
     if have_systemd:
         systemd_bin = EXT_BIN / "systemd"
-        libsystemd = EXT_BIN / "libsystemd-shared-245.so"
         if systemd_bin.exists():
             shutil.copy2(systemd_bin, ROOTFS / "usr/lib/systemd/systemd")
             os.chmod(ROOTFS / "usr/lib/systemd/systemd", 0o755)
-        if libsystemd.exists():
-            shutil.copy2(libsystemd, ROOTFS / "lib/systemd/libsystemd-shared-245.so")
-            # Also copy to standard search path
-            shutil.copy2(libsystemd,
+
+        # v245 from-source build: single shared lib
+        libsystemd_245 = EXT_BIN / "libsystemd-shared-245.so"
+        if libsystemd_245.exists():
+            (ROOTFS / "lib" / "systemd").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(libsystemd_245, ROOTFS / "lib/systemd/libsystemd-shared-245.so")
+            shutil.copy2(libsystemd_245,
                          ROOTFS / "lib/x86_64-linux-gnu/libsystemd-shared-245.so")
+
+        # Host-harvested systemd: all deps collected in systemd-libs/
+        systemd_libs_dir = EXT_BIN / "systemd-libs"
+        if systemd_libs_dir.exists():
+            for lib_file in systemd_libs_dir.iterdir():
+                if not lib_file.is_file():
+                    continue
+                name = lib_file.name
+                if name == "ld-linux-x86-64.so.2":
+                    dest = ROOTFS / "lib64" / name
+                elif "libsystemd-" in name:
+                    # systemd private libs go to /usr/lib/systemd/
+                    dest = ROOTFS / "usr" / "lib" / "systemd" / name
+                else:
+                    dest = ROOTFS / "lib/x86_64-linux-gnu" / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not dest.exists():
+                    shutil.copy2(lib_file, dest)
+                # Also symlink into /usr/lib/ for Arch-style distros where
+                # the dynamic linker's default search path is /usr/lib.
+                usr_lib_dest = ROOTFS / "usr" / "lib" / name
+                if not usr_lib_dest.exists() and "libsystemd-" not in name:
+                    os.symlink(f"/lib/x86_64-linux-gnu/{name}", str(usr_lib_dest))
+
         for extra in ["systemd-journald", "systemctl"]:
             src = EXT_BIN / extra
             if src.exists():
                 shutil.copy2(src, ROOTFS / "usr/lib/systemd" / extra)
                 os.chmod(ROOTFS / "usr/lib/systemd" / extra, 0o755)
 
-        # systemd runtime libs (from host glibc)
+        # systemd runtime libs (from host glibc) — covers the non-harvested case
         glibc = find_glibc_libs()
         for name, src_path in glibc.items():
             if name == "ld-linux-x86-64.so.2":
@@ -783,7 +898,7 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
             os.symlink("/etc/systemd/system/kevlar-getty.service", str(link))
 
     # ── Other testing files ──
-    for name in ["debug_init.sh", "test_apk_update.sh"]:
+    for name in ["debug_init.sh", "test_apk_update.sh", "test_m10_apk.sh"]:
         src = ROOT / "testing" / name
         if src.exists():
             shutil.copy2(src, ROOTFS / name)
@@ -801,7 +916,9 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
         shutil.copy2(www, ROOTFS / "var" / "www" / "html" / "index.html")
 
     # ── Override resolv.conf and generate machine-id ──
-    (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 1.1.1.1\n")
+    # Use QEMU's user-mode network DNS forwarder (10.0.2.3).
+    # Direct DNS (e.g. 1.1.1.1) may not work from QEMU guest.
+    (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
 
 

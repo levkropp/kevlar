@@ -17,6 +17,15 @@ impl<'a> SyscallHandler<'a> {
                 Ok(0)
             }
             LINUX_REBOOT_CMD_RESTART | LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
+                // Dump profiler/tracer data before halting.
+                if crate::debug::profiler::is_enabled() {
+                    crate::debug::profiler::dump_syscall_profile(
+                        crate::syscalls::syscall_name_by_number,
+                    );
+                }
+                if crate::debug::tracer::is_enabled() {
+                    crate::debug::tracer::dump_span_profile();
+                }
                 info!("Halting the system by reboot(2) cmd={:#x}", cmd);
                 halt();
             }

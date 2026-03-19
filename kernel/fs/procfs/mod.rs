@@ -63,7 +63,7 @@ impl ProcFs {
         let sys_dir = static_root.add_dir("sys");
         let sys_kernel_dir = sys_dir.add_dir("kernel");
         sys_kernel_dir.add_file("hostname", Arc::new(ProcSysHostname) as Arc<dyn FileLike>);
-        sys_kernel_dir.add_file("osrelease", Arc::new(ProcSysStaticFile("4.0.0\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("osrelease", Arc::new(ProcSysStaticFile("6.19.8\n")) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("ostype", Arc::new(ProcSysStaticFile("Linux\n")) as Arc<dyn FileLike>);
         let sys_random_dir = sys_kernel_dir.add_dir("random");
         sys_random_dir.add_file("boot_id", Arc::new(ProcSysBootId) as Arc<dyn FileLike>);
@@ -71,6 +71,11 @@ impl ProcFs {
         sys_kernel_dir.add_file("pid_max", Arc::new(ProcSysStaticFile("32768\n")) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("overflowuid", Arc::new(ProcSysStaticFile("65534\n")) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("overflowgid", Arc::new(ProcSysStaticFile("65534\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("kptr_restrict", Arc::new(ProcSysStaticFile("1\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("dmesg_restrict", Arc::new(ProcSysStaticFile("0\n")) as Arc<dyn FileLike>);
+        let sys_vm_dir = sys_dir.add_dir("vm");
+        sys_vm_dir.add_file("overcommit_memory", Arc::new(ProcSysStaticFile("0\n")) as Arc<dyn FileLike>);
+        sys_vm_dir.add_file("max_map_count", Arc::new(ProcSysStaticFile("65530\n")) as Arc<dyn FileLike>);
         let sys_fs_dir = sys_dir.add_dir("fs");
         sys_fs_dir.add_file("nr_open", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
         sys_fs_dir.add_file("file-max", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
@@ -301,8 +306,11 @@ impl FileLike for ProcSysHostname {
     }
 }
 
-/// /proc/sys/kernel/random/boot_id — random UUID, generated once.
+/// /proc/sys/kernel/random/boot_id — random UUID, generated once per boot.
 struct ProcSysBootId;
+
+/// Cached boot UUID string (37 bytes: 36 hex+dash + newline).
+static BOOT_ID: ::spin::Once<[u8; 37]> = ::spin::Once::new();
 
 impl fmt::Debug for ProcSysBootId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -317,23 +325,27 @@ impl FileLike for ProcSysBootId {
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
         if offset > 0 { return Ok(0); }
-        // Generate a deterministic-ish UUID from boot tick count.
-        let mut bytes = [0u8; 16];
-        kevlar_platform::random::rdrand_fill(&mut bytes);
-        // Format as UUID: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-        bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-        bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
-        let s = alloc::format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15],
-        );
-        let sb = s.as_bytes();
-        let len = core::cmp::min(sb.len(), buf.len());
+        let id_bytes = BOOT_ID.call_once(|| {
+            let mut bytes = [0u8; 16];
+            kevlar_platform::random::rdrand_fill(&mut bytes);
+            // Format as UUID v4: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+            bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+            bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+            let s = alloc::format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+                bytes[8], bytes[9], bytes[10], bytes[11],
+                bytes[12], bytes[13], bytes[14], bytes[15],
+            );
+            let sb = s.as_bytes();
+            let mut out = [0u8; 37];
+            out[..sb.len()].copy_from_slice(sb);
+            out
+        });
+        let len = core::cmp::min(id_bytes.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
-        writer.write_bytes(&sb[..len])?;
+        writer.write_bytes(&id_bytes[..len])?;
         Ok(len)
     }
 }

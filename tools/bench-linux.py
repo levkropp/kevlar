@@ -28,12 +28,17 @@ def find_linux_kernel():
     release = os.uname().release
     candidates = [
         Path(f"/lib/modules/{release}/vmlinuz"),
+        Path(f"/usr/lib/modules/{release}/vmlinuz"),
         Path(f"/boot/vmlinuz-{release}"),
         Path("/boot/vmlinuz"),
     ]
     for p in candidates:
         if p.exists():
             return p
+    # Fallback: any vmlinuz under /usr/lib/modules (Arch UKI installs).
+    import glob
+    for g in sorted(glob.glob("/usr/lib/modules/*/vmlinuz"), reverse=True):
+        return Path(g)
     return None
 
 
@@ -57,13 +62,42 @@ def main():
         print("ERROR: Cannot find Linux kernel (vmlinuz). Install linux-image or set path.", file=sys.stderr)
         return 1
 
-    # Create minimal initramfs with bench as /init
+    # Create initramfs with bench as /init and BusyBox for workload benchmarks.
+    # Without BusyBox, shell_noop/pipe_grep/sed_pipeline would exec-fail
+    # immediately (no /bin/sh) and measure only fork+_exit(127) — not the
+    # actual workload.  Including the same BusyBox used by Kevlar ensures a
+    # fair apples-to-apples comparison.
+    busybox_bin = ROOT / "build" / "native-cache" / "ext-bin" / "busybox"
+    if not busybox_bin.exists():
+        print(f"WARNING: {busybox_bin} not found — workload benchmarks will "
+              "fail to exec (build Kevlar first to compile BusyBox).",
+              file=sys.stderr)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         rootfs = os.path.join(tmpdir, "rootfs")
-        for d in ("dev", "proc", "sys", "tmp"):
+        for d in ("bin", "sbin", "usr/bin", "usr/sbin",
+                  "dev", "proc", "sys", "tmp"):
             os.makedirs(os.path.join(rootfs, d))
         shutil.copy2(str(BENCH_BIN), os.path.join(rootfs, "init"))
         os.chmod(os.path.join(rootfs, "init"), 0o755)
+
+        # Install BusyBox + applet symlinks so workload benchmarks work.
+        if busybox_bin.exists():
+            bb_dest = os.path.join(rootfs, "bin", "busybox")
+            shutil.copy2(str(busybox_bin), bb_dest)
+            os.chmod(bb_dest, 0o755)
+            r = subprocess.run(
+                [bb_dest, "--list-full"],
+                capture_output=True, text=True,
+            )
+            for line in r.stdout.strip().split("\n"):
+                applet = line.strip()
+                if not applet:
+                    continue
+                dest = os.path.join(rootfs, applet)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if not os.path.exists(dest):
+                    os.symlink("/bin/busybox", dest)
 
         initramfs = os.path.join(tmpdir, "initramfs.gz")
         r = subprocess.run(

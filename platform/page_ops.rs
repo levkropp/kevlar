@@ -24,17 +24,41 @@ pub fn zero_page(paddr: PAddr) {
     }
 }
 
-/// Zero-fill a 2MB huge page in 4KB chunks.
+/// Zero-fill a 2MB huge page using non-temporal stores (MOVNTI).
 ///
-/// Under KVM, EPT entries for each 4KB page within a contiguous 2MB
-/// allocation are cold (buddy alloc only touches page 0).  Zeroing in
-/// 4KB chunks keeps each `rep stosq` within L1 cache, and the EPT
-/// violation per page is handled once — the CPU resumes `rep stosq`
-/// after KVM installs the entry.
+/// MOVNTI bypasses L1/L2/L3 cache via write-combining buffers, preventing
+/// 2MB of zeroing from evicting page table entries, VMA data, and the
+/// alloc cache from cache.  Under KVM, EPT violations still occur per-4KB
+/// sub-page (the CPU handles them transparently within the loop).
+/// Followed by `sfence` to ensure stores are globally visible before
+/// the page is mapped.
+///
+/// MOVNTI uses a 64-bit GP register (not XMM), so it respects the
+/// kernel's `-sse,-sse2,+soft-float` target.
 #[inline(always)]
 pub fn zero_huge_page(paddr: PAddr) {
-    for i in 0..512 {
-        zero_page(PAddr::new(paddr.value() + i * PAGE_SIZE));
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let ptr = paddr.as_mut_ptr::<u64>();
+        const QWORDS: usize = (512 * 4096) / 8; // 262144
+        core::arch::asm!(
+            "2:",
+            "movnti [{ptr}], {zero}",
+            "add {ptr}, 8",
+            "dec {count}",
+            "jnz 2b",
+            "sfence",
+            ptr   = inout(reg) ptr => _,
+            count = inout(reg) QWORDS => _,
+            zero  = in(reg) 0u64,
+            options(nostack),
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        for i in 0..512 {
+            zero_page(PAddr::new(paddr.value() + i * PAGE_SIZE));
+        }
     }
 }
 

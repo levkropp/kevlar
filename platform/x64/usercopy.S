@@ -25,10 +25,7 @@
 copy_from_user:
 copy_to_user:
     // ── Trace probe (only when enabled) ──
-    push rax
-    lea rax, [rip + ucopy_trace_on]
-    cmp qword ptr [rax], 0
-    pop rax
+    cmp qword ptr [rip + ucopy_trace_on], 0
     jne .Ltrace_entry
 .Ltrace_done:
 

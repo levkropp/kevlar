@@ -59,6 +59,47 @@ pub fn start_ap_preemption_timer() {
     unsafe { apic::lapic_timer_init(); }
 }
 
+/// Read the CMOS RTC and return seconds since Unix epoch.
+pub fn read_rtc_epoch_secs() -> u64 {
+    fn cmos_read(reg: u8) -> u8 {
+        unsafe {
+            x86::io::outb(0x70, reg);
+            x86::io::inb(0x71)
+        }
+    }
+    fn bcd_to_bin(bcd: u8) -> u8 {
+        (bcd & 0x0F) + (bcd >> 4) * 10
+    }
+
+    // Wait until RTC update-in-progress flag is clear.
+    while cmos_read(0x0A) & 0x80 != 0 {}
+
+    let sec = bcd_to_bin(cmos_read(0x00)) as u64;
+    let min = bcd_to_bin(cmos_read(0x02)) as u64;
+    let hour = bcd_to_bin(cmos_read(0x04)) as u64;
+    let day = bcd_to_bin(cmos_read(0x07)) as u64;
+    let month = bcd_to_bin(cmos_read(0x08)) as u64;
+    let year = bcd_to_bin(cmos_read(0x09)) as u64 + 2000;
+
+    // Convert to Unix timestamp (simplified, no leap seconds).
+    let mut days: u64 = 0;
+    let mut y = 1970;
+    while y < year {
+        days += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        y += 1;
+    }
+    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let mdays: [u64; 12] = [31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0;
+    while m < month.saturating_sub(1) as usize && m < 12 {
+        days += mdays[m];
+        m += 1;
+    }
+    days += day.saturating_sub(1);
+
+    days * 86400 + hour * 3600 + min * 60 + sec
+}
+
 /// Broadcast a "halt immediately" IPI to all CPUs except the current one.
 /// Called from the panic handler to freeze other CPUs and prevent interleaved
 /// output or double panics on the serial console.

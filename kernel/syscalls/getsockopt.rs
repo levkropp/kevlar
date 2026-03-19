@@ -59,8 +59,16 @@ impl<'a> SyscallHandler<'a> {
                 Ok(0)
             }
             (SOL_SOCKET, SO_TYPE) => {
-                // TODO: Return the actual socket type (SOCK_STREAM, SOCK_DGRAM).
-                write_int_opt(optval, optlen, 1)?; // SOCK_STREAM
+                use crate::process::current_process;
+                let proc = current_process();
+                let table = proc.opened_files().lock();
+                let stype = if let Ok(of) = table.get(fd) {
+                    if let Ok(file) = of.inode().as_file() {
+                        let t = file.socket_type();
+                        if t != 0 { t } else { 1 } // default SOCK_STREAM
+                    } else { 1 }
+                } else { 1 };
+                write_int_opt(optval, optlen, stype)?;
                 Ok(0)
             }
             (SOL_SOCKET, SO_RCVBUF) => {

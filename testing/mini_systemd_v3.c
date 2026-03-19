@@ -325,7 +325,7 @@ static int clock_boottime(void) {
 static int proc_sys_kernel(void) {
     char buf[128];
     if (read_file("/proc/sys/kernel/osrelease", buf, sizeof(buf)) < 0) return 0;
-    if (strstr(buf, "4.0.0") == NULL) return 0;
+    if (strstr(buf, "6.") == NULL && strstr(buf, "5.") == NULL) return 0;
     if (read_file("/proc/sys/kernel/random/boot_id", buf, sizeof(buf)) < 0) return 0;
     // boot_id is a UUID, should have dashes.
     return strchr(buf, '-') != NULL;

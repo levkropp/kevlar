@@ -44,7 +44,7 @@ impl<'a> SyscallHandler<'a> {
         let socket = services::call_service(|| {
             match (domain, socket_type, protocol) {
                 (AF_UNIX, SOCK_STREAM, 0) | (AF_UNIX, SOCK_DGRAM, 0) => {
-                    net.create_unix_socket()
+                    Ok(crate::net::unix_socket::UnixSocket::new_typed(socket_type) as Arc<dyn FileLike>)
                 }
                 (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
                     net.create_udp_socket()
@@ -66,7 +66,13 @@ impl<'a> SyscallHandler<'a> {
                         type_,
                         protocol
                     );
-                    Err(Errno::ENOSYS.into())
+                    // Match Linux errno: EAFNOSUPPORT for unknown families,
+                    // EINVAL for bad type within a known family.
+                    if domain != AF_UNIX && domain != AF_INET {
+                        Err(Errno::EAFNOSUPPORT.into())
+                    } else {
+                        Err(Errno::EINVAL.into())
+                    }
                 }
             }
         })?;
@@ -94,7 +100,7 @@ impl<'a> SyscallHandler<'a> {
             return Err(Errno::ENOSYS.into());
         }
 
-        let (a, b) = UnixStream::new_pair();
+        let (a, b) = UnixStream::new_pair_typed(socket_type);
 
         let mut table = current_process().opened_files().lock();
         let fd0 = table.open(

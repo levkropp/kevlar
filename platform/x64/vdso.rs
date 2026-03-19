@@ -228,7 +228,7 @@ unsafe fn write_hash(base: *mut u8) {
 // int __vdso_clock_gettime(clockid_t clock_id, struct timespec *tp)
 //
 // Handles CLOCK_MONOTONIC (1) via rdtsc + fixed-point multiply.
-// Returns -ENOSYS for other clock IDs (musl falls back to syscall).
+// Falls back to real syscall for other clock IDs (glibc doesn't retry).
 //
 // 0x200: cmp edi, 1
 // 0x203: jne .fallback
@@ -246,11 +246,12 @@ unsafe fn write_hash(base: *mut u8) {
 // 0x23a: mov [rsi+8], rdx
 // 0x23e: xor eax, eax                  ; return 0
 // 0x240: ret
-// 0x241: mov eax, -38                  ; -ENOSYS
-// 0x246: ret
+// 0x241: mov eax, 228                  ; SYS_clock_gettime
+// 0x246: syscall                       ; fall back to kernel
+// 0x248: ret
 
 #[rustfmt::skip]
-const VDSO_CODE: [u8; 71] = [
+const VDSO_CODE: [u8; 73] = [
     // cmp edi, 1
     0x83, 0xff, 0x01,
     // jne .fallback (rel32 = 0x38)
@@ -283,8 +284,10 @@ const VDSO_CODE: [u8; 71] = [
     0x31, 0xc0,
     // ret
     0xc3,
-    // .fallback: mov eax, -38 (-ENOSYS)
-    0xb8, 0xda, 0xff, 0xff, 0xff,
+    // .fallback: mov eax, 228 (SYS_clock_gettime)
+    0xb8, 0xe4, 0x00, 0x00, 0x00,
+    // syscall
+    0x0f, 0x05,
     // ret
     0xc3,
 ];

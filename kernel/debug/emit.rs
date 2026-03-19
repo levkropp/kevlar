@@ -95,6 +95,11 @@ pub fn parse_cmdline_filter(value: &str) -> DebugFilter {
             "panic" => filter |= DebugFilter::PANIC,
             "usercopy" | "ucopy" => filter |= DebugFilter::USERCOPY,
             "profile" | "prof" => filter |= DebugFilter::PROFILE,
+            "trace" | "tracer" => filter |= DebugFilter::TRACE,
+            "kwab-exec" | "kwab_exec" => filter |= DebugFilter::KWAB_EXEC,
+            "kwab-verify" | "kwab_verify" | "verify" => filter |= DebugFilter::KWAB_VERIFY,
+            "kwab-audit" | "kwab_audit" | "audit" => filter |= DebugFilter::KWAB_AUDIT,
+            "htrace" => filter |= DebugFilter::HTRACE,
             _ => {} // ignore unknown tokens
         }
     }

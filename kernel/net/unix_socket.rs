@@ -90,11 +90,13 @@ pub struct UnixStream {
     bound_path: SpinLock<Option<String>>,
     /// Peer path (for getpeername).
     peer_path: SpinLock<Option<String>>,
+    /// Socket type: SOCK_STREAM (1) or SOCK_DGRAM (2).
+    sock_type: i32,
 }
 
 impl UnixStream {
-    /// Create a connected pair of Unix streams.
-    pub fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
+    /// Create a connected pair of Unix sockets with the given type.
+    pub fn new_pair_typed(sock_type: i32) -> (Arc<UnixStream>, Arc<UnixStream>) {
         let buf_a = Arc::new(SpinLock::new(StreamInner {
             buf: RingBuffer::new(),
             ancillary: None,
@@ -115,6 +117,7 @@ impl UnixStream {
             our_peer_flag: peer_flag.clone(),
             bound_path: SpinLock::new(None),
             peer_path: SpinLock::new(None),
+            sock_type,
         });
         let b = Arc::new(UnixStream {
             tx: buf_b,
@@ -123,9 +126,15 @@ impl UnixStream {
             our_peer_flag: peer_flag,
             bound_path: SpinLock::new(None),
             peer_path: SpinLock::new(None),
+            sock_type,
         });
 
         (a, b)
+    }
+
+    /// Create a connected pair of Unix STREAM sockets (default).
+    pub fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
+        Self::new_pair_typed(1) // SOCK_STREAM
     }
 
     /// Push ancillary data to be received by the peer.
@@ -136,6 +145,51 @@ impl UnixStream {
     /// Pop ancillary data from our receive side.
     pub fn recv_ancillary(&self) -> Option<AncillaryData> {
         self.rx.lock().ancillary.as_mut()?.pop_front()
+    }
+
+    /// Read one DGRAM message (2-byte LE length prefix + payload) from the ring buffer.
+    fn dgram_read_one(
+        buf: &mut RingBuffer<u8, UNIX_STREAM_BUF_SIZE>,
+        writer: &mut UserBufWriter<'_>,
+    ) -> Result<()> {
+        // Peek at the 2-byte length header.
+        let mut hdr = [0u8; 2];
+        if let Some(b0) = buf.pop_slice(1) {
+            hdr[0] = b0[0];
+        } else {
+            return Ok(()); // No data.
+        }
+        if let Some(b1) = buf.pop_slice(1) {
+            hdr[1] = b1[0];
+        } else {
+            return Ok(()); // Incomplete header — shouldn't happen.
+        }
+        let msg_len = u16::from_le_bytes(hdr) as usize;
+
+        // Read exactly msg_len bytes (or until user buffer full).
+        let mut remaining = msg_len;
+        while remaining > 0 {
+            let to_read = core::cmp::min(remaining, writer.remaining_len());
+            if to_read == 0 {
+                // User buffer full — discard rest of message.
+                while remaining > 0 {
+                    if let Some(discard) = buf.pop_slice(remaining) {
+                        remaining -= discard.len();
+                    } else {
+                        break;
+                    }
+                }
+                break;
+            }
+            if let Some(src) = buf.pop_slice(to_read) {
+                let n = src.len();
+                writer.write_bytes(src)?;
+                remaining -= n;
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -154,6 +208,14 @@ impl FileLike for UnixStream {
         Ok(Stat::zeroed())
     }
 
+    fn socket_type(&self) -> i32 {
+        self.sock_type
+    }
+
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     fn read(
         &self,
         _offset: usize,
@@ -161,12 +223,18 @@ impl FileLike for UnixStream {
         options: &OpenOptions,
     ) -> Result<usize> {
         let mut writer = UserBufWriter::from(buf);
+        let is_dgram = self.sock_type == 2; // SOCK_DGRAM
 
         // Fast path.
         {
             let mut rx = self.rx.lock();
-            while let Some(src) = rx.buf.pop_slice(writer.remaining_len()) {
-                writer.write_bytes(src)?;
+            if is_dgram {
+                // DGRAM: read one length-prefixed message.
+                Self::dgram_read_one(&mut rx.buf, &mut writer)?;
+            } else {
+                while let Some(src) = rx.buf.pop_slice(writer.remaining_len()) {
+                    writer.write_bytes(src)?;
+                }
             }
 
             if writer.written_len() > 0 {
@@ -189,8 +257,12 @@ impl FileLike for UnixStream {
         let ret = POLL_WAIT_QUEUE.sleep_signalable_until(|| {
             let mut rx = self.rx.lock();
 
-            while let Some(src) = rx.buf.pop_slice(writer.remaining_len()) {
-                writer.write_bytes(src)?;
+            if is_dgram {
+                Self::dgram_read_one(&mut rx.buf, &mut writer)?;
+            } else {
+                while let Some(src) = rx.buf.pop_slice(writer.remaining_len()) {
+                    writer.write_bytes(src)?;
+                }
             }
 
             if writer.written_len() > 0 {
@@ -218,6 +290,7 @@ impl FileLike for UnixStream {
         }
 
         let mut reader = UserBufReader::from(buf);
+        let is_dgram = self.sock_type == 2; // SOCK_DGRAM
 
         // Fast path.
         {
@@ -226,28 +299,57 @@ impl FileLike for UnixStream {
                 return Err(Errno::EPIPE.into());
             }
 
-            let mut written = 0;
-            loop {
-                let dst = tx.buf.writable_contiguous();
-                if dst.is_empty() || reader.remaining_len() == 0 {
-                    break;
+            if is_dgram {
+                // DGRAM: write 2-byte LE length prefix + entire message atomically.
+                let msg_len = reader.remaining_len();
+                let needed = 2 + msg_len;
+                if tx.buf.free() >= needed {
+                    let hdr = (msg_len as u16).to_le_bytes();
+                    let dst = tx.buf.writable_contiguous();
+                    if dst.len() >= 2 {
+                        dst[..2].copy_from_slice(&hdr);
+                        tx.buf.advance_write(2);
+                    }
+                    let mut written = 0;
+                    while reader.remaining_len() > 0 {
+                        let dst = tx.buf.writable_contiguous();
+                        if dst.is_empty() { break; }
+                        let copied = reader.read_bytes(dst)?;
+                        if copied == 0 { break; }
+                        tx.buf.advance_write(copied);
+                        written += copied;
+                    }
+                    drop(tx);
+                    POLL_WAIT_QUEUE.wake_all();
+                    return Ok(written);
                 }
-                let copied = reader.read_bytes(dst)?;
-                if copied == 0 {
-                    break;
+                if options.nonblock {
+                    return Err(Errno::EAGAIN.into());
                 }
-                tx.buf.advance_write(copied);
-                written += copied;
-            }
+            } else {
+                let mut written = 0;
+                loop {
+                    let dst = tx.buf.writable_contiguous();
+                    if dst.is_empty() || reader.remaining_len() == 0 {
+                        break;
+                    }
+                    let copied = reader.read_bytes(dst)?;
+                    if copied == 0 {
+                        break;
+                    }
+                    tx.buf.advance_write(copied);
+                    written += copied;
+                }
 
-            if written > 0 {
-                drop(tx);
-                POLL_WAIT_QUEUE.wake_all();
-                return Ok(written);
-            }
+                if written > 0 {
+                    drop(tx);
+                    POLL_WAIT_QUEUE.wake_all();
+                    return Ok(written);
+                }
 
-            if options.nonblock {
-                return Err(Errno::EAGAIN.into());
+                if options.nonblock {
+                    return Err(Errno::EAGAIN.into());
+                }
             }
         }
 
@@ -534,12 +636,21 @@ enum SocketState {
 
 pub struct UnixSocket {
     state: SpinLock<SocketState>,
+    sock_type: i32,
 }
 
 impl UnixSocket {
     pub fn new() -> Arc<UnixSocket> {
         Arc::new(UnixSocket {
             state: SpinLock::new(SocketState::Created),
+            sock_type: 1, // SOCK_STREAM default
+        })
+    }
+
+    pub fn new_typed(sock_type: i32) -> Arc<UnixSocket> {
+        Arc::new(UnixSocket {
+            state: SpinLock::new(SocketState::Created),
+            sock_type,
         })
     }
 
@@ -567,6 +678,14 @@ fn sockaddr_un_path(sa: &SockAddrUn) -> Result<&str> {
 impl FileLike for UnixSocket {
     fn stat(&self) -> Result<Stat> {
         Ok(Stat::zeroed())
+    }
+
+    fn socket_type(&self) -> i32 {
+        self.sock_type
+    }
+
+    fn is_seekable(&self) -> bool {
+        false
     }
 
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {

@@ -20,7 +20,7 @@ impl<'a> SyscallHandler<'a> {
         }
 
         write_field(&mut utsname, 0, b"Linux");    // sysname
-        write_field(&mut utsname, 2, b"4.0.0");    // release
+        write_field(&mut utsname, 2, b"6.19.8");   // release
         write_field(&mut utsname, 3, b"Kevlar");   // version
         #[cfg(target_arch = "x86_64")]
         write_field(&mut utsname, 4, b"x86_64");   // machine

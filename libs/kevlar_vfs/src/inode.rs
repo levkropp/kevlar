@@ -153,6 +153,11 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         0
     }
 
+    /// Notify the file that an EPOLLET watcher was added or removed.
+    /// Used to skip expensive state_gen atomic RMW on the fast path
+    /// when no edge-triggered watchers exist.
+    fn notify_epoll_et(&self, _added: bool) {}
+
     /// Whether this file supports lseek. Pipes, sockets, and eventfds return
     /// false (lseek returns ESPIPE).
     fn is_seekable(&self) -> bool {
@@ -167,7 +172,7 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
 
     /// `ioctl(2)`.
     fn ioctl(&self, _cmd: usize, _arg: usize) -> Result<isize> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTTY))
     }
 
     /// `read(2)`.

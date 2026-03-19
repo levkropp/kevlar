@@ -6,7 +6,7 @@ use crate::syscalls::SyscallHandler;
 use kevlar_platform::{
     address::{PAddr, UserVAddr},
     arch::{PAGE_SIZE, HUGE_PAGE_SIZE},
-    page_allocator::free_pages,
+    page_allocator::{free_pages, free_huge_page_and_zero},
 };
 use kevlar_utils::alignment::is_aligned;
 
@@ -54,7 +54,28 @@ impl<'a> SyscallHandler<'a> {
             if is_aligned(cursor, HUGE_PAGE_SIZE) && cursor + HUGE_PAGE_SIZE <= end_value {
                 if let Some(hp_paddr) = vm.page_table_mut().unmap_huge_user_page(page_addr) {
                     vm.page_table().flush_tlb_local(page_addr);
-                    to_free.push((hp_paddr, 512));
+                    // Check if all 512 sub-pages are sole-owner (refcount 1).
+                    // If so, we can bulk-zero and pool the entire 2MB page.
+                    let mut all_sole_owner = true;
+                    for sub_i in 0..512usize {
+                        let sub = PAddr::new(hp_paddr.value() + sub_i * PAGE_SIZE);
+                        if kevlar_platform::page_refcount::page_ref_count(sub) != 1 {
+                            all_sole_owner = false;
+                            break;
+                        }
+                    }
+                    if all_sole_owner {
+                        // Marker: (base_paddr, 512) — handled specially in free loop.
+                        to_free.push((hp_paddr, 512));
+                    } else {
+                        // Divergent refcounts from CoW — free sub-pages individually.
+                        for sub_i in 0..512usize {
+                            to_free.push((
+                                PAddr::new(hp_paddr.value() + sub_i * PAGE_SIZE),
+                                1,
+                            ));
+                        }
+                    }
                     cursor += HUGE_PAGE_SIZE;
                     continue;
                 }
@@ -85,7 +106,14 @@ impl<'a> SyscallHandler<'a> {
         // Now safe to free all unmapped physical pages.
         // CoW: only free when refcount drops to 0.
         for (paddr, num) in to_free {
-            if kevlar_platform::page_refcount::page_ref_dec(paddr) {
+            if num == 512 {
+                // Sole-owner huge page: bulk dec refcounts, zero, and pool.
+                for sub_i in 0..512usize {
+                    let sub = PAddr::new(paddr.value() + sub_i * PAGE_SIZE);
+                    kevlar_platform::page_refcount::page_ref_dec(sub);
+                }
+                free_huge_page_and_zero(paddr);
+            } else if kevlar_platform::page_refcount::page_ref_dec(paddr) {
                 free_pages(paddr, num);
             }
         }

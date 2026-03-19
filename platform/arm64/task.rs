@@ -7,7 +7,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::address::{AccessError, UserVAddr, VAddr};
-use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
+use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::arch::PAGE_SIZE;
 use crate::arch::arm64_specific::cpu_local_head;
 use crate::arch::PtRegs;
@@ -208,12 +208,11 @@ impl ArchTask {
         }
     }
 
-    pub fn fork(&self, frame: &PtRegs) -> ArchTask {
+    pub fn fork(&self, frame: &PtRegs) -> Result<ArchTask, PageAllocError> {
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate kernel stack");
+        )?;
 
         let sp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -253,22 +252,20 @@ impl ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate interrupt stack");
+        )?;
         let syscall_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate syscall stack");
+        )?;
 
-        ArchTask {
+        Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(self.tpidr_el0.load()),
             interrupt_stack,
             syscall_stack,
             context_saved: AtomicBool::new(true),
             kernel_stack,
-        }
+        })
     }
 
     /// Returns the current TLS base (TPIDR_EL0) value.
@@ -279,12 +276,11 @@ impl ArchTask {
     /// Creates a new thread's arch state.
     /// `child_stack` is the user SP; `tpidr_el0_val` is the TLS base.
     /// x0 = 0 in the child (clone returns 0).
-    pub fn new_thread(frame: &PtRegs, child_stack: u64, tpidr_el0_val: u64) -> ArchTask {
+    pub fn new_thread(frame: &PtRegs, child_stack: u64, tpidr_el0_val: u64) -> Result<ArchTask, PageAllocError> {
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate kernel stack");
+        )?;
 
         let sp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -321,22 +317,20 @@ impl ArchTask {
         let interrupt_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate interrupt stack");
+        )?;
         let syscall_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate syscall stack");
+        )?;
 
-        ArchTask {
+        Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(tpidr_el0_val),
             interrupt_stack,
             syscall_stack,
             context_saved: AtomicBool::new(true),
             kernel_stack,
-        }
+        })
     }
 
     pub fn setup_execve_stack(

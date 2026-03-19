@@ -12,6 +12,8 @@ const PREEMPT_PER_TICKS: usize = 3;
 static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Ticks from the epoch (00:00:00 on 1 January 1970, UTC).
 static WALLCLOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
+/// Wall-clock epoch in nanoseconds (set once from CMOS RTC at boot).
+static WALLCLOCK_EPOCH_NS: AtomicUsize = AtomicUsize::new(0);
 static TIMERS: SpinLock<Vec<Timer>> = SpinLock::new(Vec::new());
 
 struct Timer {
@@ -36,16 +38,19 @@ pub struct WallClock {
 }
 
 impl WallClock {
+    pub fn nanosecs_from_epoch(self) -> usize {
+        // Base epoch (from CMOS RTC at boot) + ticks since boot.
+        let base = WALLCLOCK_EPOCH_NS.load(Ordering::Relaxed);
+        let tick_ns = self.ticks_from_epoch as u128 * 1_000_000_000 / TICK_HZ as u128;
+        base + tick_ns as usize
+    }
+
     pub fn secs_from_epoch(self) -> usize {
-        self.ticks_from_epoch / TICK_HZ
+        self.nanosecs_from_epoch() / 1_000_000_000
     }
 
     pub fn msecs_from_epoch(self) -> usize {
-        self.ticks_from_epoch * 1000 / TICK_HZ
-    }
-
-    pub fn nanosecs_from_epoch(self) -> usize {
-        self.msecs_from_epoch() * 1_000_000
+        self.nanosecs_from_epoch() / 1_000_000
     }
 }
 
@@ -99,6 +104,14 @@ pub fn monotonic_ticks() -> usize {
     MONOTONIC_TICKS.load(Ordering::Relaxed)
 }
 
+/// Initialize the wall-clock epoch from the platform's RTC.
+/// Must be called early in boot, before any wall-clock queries.
+pub fn init_wall_clock() {
+    let epoch_secs = kevlar_platform::arch::read_rtc_epoch_secs();
+    let epoch_ns = epoch_secs as usize * 1_000_000_000;
+    WALLCLOCK_EPOCH_NS.store(epoch_ns, Ordering::Relaxed);
+}
+
 /// `struct timeval`
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
@@ -118,6 +131,7 @@ impl Timeval {
 /// the interrupted thread's frame — the new thread will receive signals on its
 /// next preemption cycle.
 pub fn handle_timer_irq() -> bool {
+    crate::debug::htrace::enter(crate::debug::htrace::id::TIMER_IRQ, 0);
     {
         let mut timers = TIMERS.lock();
         for timer in timers.iter_mut() {
@@ -153,6 +167,8 @@ pub fn handle_timer_irq() -> bool {
 
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+
+    crate::debug::htrace::exit(crate::debug::htrace::id::TIMER_IRQ, 0);
 
     if ticks % PREEMPT_PER_TICKS == 0 && !kevlar_platform::arch::in_preempt() {
         return process::switch();

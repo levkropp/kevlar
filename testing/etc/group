@@ -1,1 +1,9 @@
 root:x:0:
+daemon:x:2:
+bin:x:3:
+sys:x:4:
+tty:x:5:
+disk:x:6:
+wheel:x:10:root
+uucp:x:14:
+nogroup:x:65534:

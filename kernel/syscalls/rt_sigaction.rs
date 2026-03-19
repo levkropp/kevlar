@@ -23,20 +23,10 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let signals = current_process().signals();
 
-        // Return the old action before overwriting it.
-        if let Some(oldact_ptr) = oldact {
-            let old_action = signals.lock().get_action(signum);
-            let handler_value: usize = match old_action {
-                SigAction::Ignore => SIG_IGN,
-                SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
-                SigAction::Handler { handler, .. } => handler.value(),
-            };
-            oldact_ptr.write::<usize>(&handler_value)?;
-        }
-
-        if let Some(act) = UserVAddr::new(act) {
-            // Read the entire sigaction struct in one usercopy (32 bytes)
-            // instead of 3 separate reads.
+        // Parse the new action from userspace (if provided) before taking the lock,
+        // so the usercopy happens outside the critical section.
+        let new_act_parsed = if let Some(act) = UserVAddr::new(act) {
+            // Read the entire sigaction struct in one usercopy (32 bytes).
             let raw: [usize; 4] = act.read::<[usize; 4]>()?;
             let handler = raw[0];
             let sa_flags = raw[1];
@@ -57,14 +47,32 @@ impl<'a> SyscallHandler<'a> {
                     restorer,
                 },
             };
+            Some((new_action, handler))
+        } else {
+            None
+        };
 
-            let mut signals = signals.lock();
-            signals.set_action(signum, new_action)?;
-
-            // Track explicit SIG_IGN on SIGCHLD for auto-reap semantics.
-            if signum == SIGCHLD {
-                signals.set_nocldwait(handler == SIG_IGN);
+        // Single lock acquisition for both read-old and write-new.
+        let old_action = {
+            let mut signals = signals.lock_no_irq();
+            let old = signals.get_action(signum);
+            if let Some((new_action, handler)) = new_act_parsed {
+                signals.set_action(signum, new_action)?;
+                if signum == SIGCHLD {
+                    signals.set_nocldwait(handler == SIG_IGN);
+                }
             }
+            old
+        };
+
+        // Write old action to userspace outside the lock.
+        if let Some(oldact_ptr) = oldact {
+            let handler_value: usize = match old_action {
+                SigAction::Ignore => SIG_IGN,
+                SigAction::Terminate | SigAction::Stop | SigAction::Continue => SIG_DFL,
+                SigAction::Handler { handler, .. } => handler.value(),
+            };
+            oldact_ptr.write::<usize>(&handler_value)?;
         }
 
         Ok(0)

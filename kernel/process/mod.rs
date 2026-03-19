@@ -17,10 +17,16 @@ pub mod signal;
 mod switch;
 pub mod wait_queue;
 
-pub use process::{gc_exited_processes, list_pids, process_count, read_process_stats, PId, Process, ProcessState, EXITED_PROCESSES, VFORK_WAIT_QUEUE};
+pub use process::{gc_exited_processes, list_pids, process_count, read_process_stats, PId, Process, ProcessState, EXITED_PROCESSES, VFORK_WAIT_QUEUE, GHOST_FORK_ENABLED, PREFAULT_TEMPLATE_ENABLED, DIRECT_MAP_ENABLED};
 pub use scheduler::SchedulerPolicy;
 pub use switch::switch;
 pub use wait_queue::WaitQueue;
+
+/// Returns true if no other processes are in any scheduler run queue.
+/// Lock-free check via atomic counter — used by sched_yield fast path.
+pub fn scheduler_is_empty() -> bool {
+    scheduler::runqueue_len() == 0
+}
 
 use self::scheduler::Scheduler;
 

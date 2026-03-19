@@ -222,6 +222,16 @@ impl SignalDelivery {
         self.pending |= 1 << (signal - 1);
     }
 
+    /// Clone signal dispositions for fork. Child inherits actions and
+    /// nocldwait but starts with no pending signals.
+    pub fn fork_clone(&self) -> SignalDelivery {
+        SignalDelivery {
+            pending: 0,
+            actions: self.actions,
+            nocldwait: self.nocldwait,
+        }
+    }
+
     /// Reset signal dispositions for execve: per POSIX, all signals with
     /// handler functions are reset to SIG_DFL.  SIG_IGN dispositions are
     /// preserved.  Pending signals are preserved.
@@ -243,6 +253,7 @@ pub struct SigSet(u64);
 impl SigSet {
     #[allow(dead_code)]
     pub const ZERO: Self = SigSet(0);
+    pub const ALL: Self = SigSet(!0u64);
 
     #[inline(always)]
     pub fn from_raw(v: u64) -> Self { SigSet(v) }

@@ -40,7 +40,9 @@ pub mod canary;
 pub mod emit;
 pub mod event;
 pub mod filter;
+pub mod htrace;
 pub mod profiler;
+pub mod tracer;
 pub mod usercopy;
 
 // Re-export commonly used items.
@@ -79,6 +81,16 @@ pub fn init(debug_cmdline: Option<&str>) {
     // Enable per-syscall cycle profiler when profile flag is set.
     if filter.contains(DebugFilter::PROFILE) {
         profiler::enable();
+    }
+
+    // Enable span tracer for exec/fork/page-fault phase profiling.
+    if filter.contains(DebugFilter::TRACE) {
+        tracer::enable();
+    }
+
+    // Enable hierarchical call tracer for debugging call chains.
+    if filter.contains(DebugFilter::HTRACE) {
+        htrace::enable();
     }
 
     if !filter.is_empty() {

@@ -125,6 +125,15 @@ pub fn switch() -> bool {
     // Re-enable preemption so the timer can preempt this thread normally.
     kevlar_platform::arch::preempt_enable();
 
+    // Eagerly free prev's kernel stacks if it just exited.  After
+    // switch_thread, prev's stacks are no longer in use on any CPU.
+    // This matches Linux's finish_task_switch() → put_task_stack() and
+    // prevents OOM under heavy fork/exit (zombies held stacks until GC).
+    if matches!(prev_state, ProcessState::ExitedWith(_)) {
+        #[allow(unsafe_code)]
+        unsafe { prev.arch().release_stacks(); }
+    }
+
     // Drop the `prev` clone here (decrements strong count by 1, mirroring the
     // clone() at the top of this function).  The exiting thread remains alive
     // via EXITED_PROCESSES; a non-exiting thread remains alive via PROCESSES.

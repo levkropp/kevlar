@@ -30,8 +30,14 @@ impl WaitQueue {
     where
         F: FnMut() -> Result<Option<R>>,
     {
+        use crate::debug::htrace;
+        let _htrace_guard = htrace::enter_guard(htrace::id::SLEEP_UNTIL, 0);
+
         // Fast path: condition already met — no queue ops at all.
-        match condition() {
+        htrace::enter(htrace::id::SLEEP_CALLBACK, 0);
+        let fast = condition();
+        htrace::exit(htrace::id::SLEEP_CALLBACK, 0);
+        match fast {
             Ok(Some(result)) => return Ok(result),
             Err(e) => return Err(e),
             Ok(None) => {}
@@ -55,8 +61,19 @@ impl WaitQueue {
             // us from the queue and sets us Runnable.
             switch();
 
-            // After waking: wake_all already removed us from the queue and
-            // decremented waiter_count. Just check the condition.
+            // After waking: check condition FIRST, then signals. This is
+            // critical for wait4: SIGCHLD wakes us AND the child is now a
+            // zombie. If we checked signals first, we'd return EINTR without
+            // ever seeing the exited child.
+
+            htrace::enter(htrace::id::SLEEP_CALLBACK, 1);
+            let result = condition();
+            htrace::exit(htrace::id::SLEEP_CALLBACK, 1);
+            match result {
+                Ok(Some(result)) => return Ok(result),
+                Err(e) => return Err(e),
+                Ok(None) => {} // condition not met — check if a signal woke us
+            }
 
             if current_process().has_pending_signals() {
                 // Signal woke us (not wake_all). We might still be in the
@@ -64,12 +81,6 @@ impl WaitQueue {
                 // Self-remove if still present.
                 self.try_remove_current();
                 return Err(Errno::EINTR.into());
-            }
-
-            match condition() {
-                Ok(Some(result)) => return Ok(result),
-                Err(e) => return Err(e),
-                Ok(None) => {} // spurious wake — re-enqueue and sleep again
             }
         }
     }
@@ -100,11 +111,14 @@ impl WaitQueue {
         if self.waiter_count.load(Ordering::Relaxed) == 0 {
             return;
         }
+        use crate::debug::htrace;
+        htrace::enter(htrace::id::WAKE_ALL, self.waiter_count.load(Ordering::Relaxed) as u32);
         let mut queue = self.queue.lock();
         while let Some(process) = queue.pop_front() {
             self.waiter_count.fetch_sub(1, Ordering::Relaxed);
             process.resume();
         }
+        htrace::exit(htrace::id::WAKE_ALL, 0);
     }
 
     pub fn wake_n(&self, max: u32) -> u32 {
