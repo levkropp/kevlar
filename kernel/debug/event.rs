@@ -135,50 +135,6 @@ pub enum DebugEvent<'a> {
         total_calls: u64,       // total calls since trace enabled
         entries: &'a [(usize, usize, usize, usize)], // (dst, src, len, ret_addr)
     },
-    /// Exec prefault page source trace (kwab-exec).
-    /// Each entry: (page_index_in_2MB_region, source_tag, file_page_index).
-    /// source_tag: 0=cache_hit, 1=file_read, 2=zero/unmapped.
-    ExecPrefault {
-        pid: i32,
-        vaddr: usize,
-        cached: u16,
-        file_read: u16,
-        zero: u16,
-        total: u16,
-    },
-    /// Post-exec page content verification failure (kwab-verify).
-    PageVerifyFail {
-        pid: i32,
-        vaddr: usize,
-        first_diff: u16,
-        expected_byte: u8,
-        actual_byte: u8,
-        file_offset: usize,
-        vma_start: usize,
-    },
-    /// Huge page assembly sub-page content mismatch (kwab-verify).
-    HugePageVerifyFail {
-        pid: i32,
-        huge_base: usize,
-        sub_page: u16,
-        first_diff: u16,
-        expected_byte: u8,
-        actual_byte: u8,
-        vma_start: usize,
-        vma_type: &'a str,  // "file_ro" | "file_rw" | "anon" | "none"
-    },
-    /// Post-exec page verification summary (kwab-verify).
-    PageVerifyOk {
-        pid: i32,
-        verified: u32,
-        failed: u32,
-    },
-    /// VM audit result (kwab-audit).
-    /// Each entry: (vma_start, vma_end, prot_bits, mapped_pages, unmapped_pages, perm_mismatches).
-    VmAudit {
-        pid: i32,
-        entries: &'a [(usize, usize, u8, u16, u16, u16)],
-    },
     /// Comprehensive crash report emitted when a process is killed by a signal.
     /// Includes per-process syscall trace, VMA map, and register state.
     CrashReport {
@@ -339,41 +295,6 @@ impl<'a> DebugEvent<'a> {
                     write!(w,
                         r#"{{"dst":{:#x},"src":{:#x},"len":{},"ret":{:#x}}}"#,
                         dst, src, len, ret_addr
-                    )?;
-                }
-                w.write_str("]}")?;
-            }
-            DebugEvent::ExecPrefault { pid, vaddr, cached, file_read, zero, total } => {
-                write!(w,
-                    r#"{{"type":"exec_prefault","pid":{},"vaddr":{:#x},"cached":{},"file_read":{},"zero":{},"total":{}}}"#,
-                    pid, vaddr, cached, file_read, zero, total
-                )?;
-            }
-            DebugEvent::PageVerifyFail { pid, vaddr, first_diff, expected_byte, actual_byte, file_offset, vma_start } => {
-                write!(w,
-                    r#"{{"type":"page_verify_fail","pid":{},"vaddr":{:#x},"first_diff":{},"expected":{:#x},"actual":{:#x},"file_offset":{:#x},"vma_start":{:#x}}}"#,
-                    pid, vaddr, first_diff, expected_byte, actual_byte, file_offset, vma_start
-                )?;
-            }
-            DebugEvent::HugePageVerifyFail { pid, huge_base, sub_page, first_diff, expected_byte, actual_byte, vma_start, vma_type } => {
-                write!(w,
-                    r#"{{"type":"huge_page_verify_fail","pid":{},"huge_base":{:#x},"sub_page":{},"first_diff":{},"expected":{:#x},"actual":{:#x},"vma_start":{:#x},"vma_type":"{}"}}"#,
-                    pid, huge_base, sub_page, first_diff, expected_byte, actual_byte, vma_start, vma_type
-                )?;
-            }
-            DebugEvent::PageVerifyOk { pid, verified, failed } => {
-                write!(w,
-                    r#"{{"type":"page_verify_ok","pid":{},"verified":{},"failed":{}}}"#,
-                    pid, verified, failed
-                )?;
-            }
-            DebugEvent::VmAudit { pid, entries } => {
-                write!(w, r#"{{"type":"vm_audit","pid":{},"vmas":["#, pid)?;
-                for (i, (start, end, prot, mapped, unmapped, mismatches)) in entries.iter().enumerate() {
-                    if i > 0 { w.write_char(',')?; }
-                    write!(w,
-                        r#"{{"start":{:#x},"end":{:#x},"prot":{},"mapped":{},"unmapped":{},"perm_mismatch":{}}}"#,
-                        start, end, prot, mapped, unmapped, mismatches
                     )?;
                 }
                 w.write_str("]}")?;

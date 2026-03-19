@@ -1,0 +1,3 @@
+[submodule "tools/ktrace"]
+	path = tools/ktrace
+	url = https://github.com/levkropp/ktrace
