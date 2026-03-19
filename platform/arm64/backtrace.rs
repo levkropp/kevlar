@@ -15,6 +15,11 @@ pub struct Backtrace {
 }
 
 impl Backtrace {
+    /// Construct a Backtrace from a saved frame pointer value (interface parity with x64).
+    pub fn from_rbp(fp: u64) -> Backtrace {
+        Backtrace { frame: fp as *const StackFrame }
+    }
+
     pub fn current_frame() -> Backtrace {
         let fp: u64;
         unsafe { asm!("mov {}, x29", out(reg) fp) };

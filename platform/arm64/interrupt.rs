@@ -26,7 +26,7 @@ const EC_INST_ABORT_CURR: u32 = 0b100001;   // Instruction abort from current EL
 /// Called from trap.S for synchronous exceptions.
 /// `from_user`: 0 = kernel, 1 = user.
 #[unsafe(no_mangle)]
-extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
+extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
     let esr: u64;
     let far: u64;
     unsafe {

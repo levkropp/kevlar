@@ -1194,7 +1194,7 @@ impl Process {
         }
 
         // Get fsbase (FS segment base, points to TLS on x86_64).
-        let fsbase = current.arch().fsbase.load() as usize;
+        let fsbase = current.arch().fsbase() as usize;
 
         let signal_name = debug::signal_name(signal);
 
@@ -1897,12 +1897,15 @@ impl Drop for Process {
         );
 
         // Free the per-process vDSO data page (allocated in fork/vfork).
-        let vdso_paddr = self.vdso_data_paddr.load(core::sync::atomic::Ordering::Relaxed);
-        if vdso_paddr != 0 {
-            kevlar_platform::page_allocator::free_pages(
-                kevlar_platform::address::PAddr::new(vdso_paddr as usize),
-                1,
-            );
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vdso_paddr = self.vdso_data_paddr.load(core::sync::atomic::Ordering::Relaxed);
+            if vdso_paddr != 0 {
+                kevlar_platform::page_allocator::free_pages(
+                    kevlar_platform::address::PAddr::new(vdso_paddr as usize),
+                    1,
+                );
+            }
         }
 
         // Since the process's reference count has already reached to zero (that's

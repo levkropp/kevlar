@@ -268,6 +268,15 @@ impl ArchTask {
         })
     }
 
+    /// Stub: ARM64 stacks are freed when ArchTask drops (OwnedPages auto-frees).
+    /// This is a no-op placeholder for interface parity with x86_64.
+    ///
+    /// SAFETY: same contract as x64 — caller guarantees task is off all CPUs.
+    #[allow(unsafe_code)]
+    pub unsafe fn release_stacks(&self) {
+        // OwnedPages frees itself on drop; no Option<> wrapper needed.
+    }
+
     /// Returns the current TLS base (TPIDR_EL0) value.
     pub fn fsbase(&self) -> u64 {
         self.tpidr_el0.load()

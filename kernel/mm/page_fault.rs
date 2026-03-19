@@ -106,7 +106,7 @@ fn emit_crash_and_exit(signal: Signal, fault_addr: usize, ip: usize) -> ! {
         }
     }
 
-    let fsbase = current.arch().fsbase.load() as usize;
+    let fsbase = current.arch().fsbase() as usize;
 
     // Read stashed registers from the interrupt handler.
     let cpu = kevlar_platform::arch::cpu_id() as usize;
@@ -219,7 +219,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 vma_end: None,
                 vma_type: None,
             });
-            let fsbase = current_process().arch().fsbase.load();
+            let fsbase = current_process().arch().fsbase();
             warn!(
                 "SIGSEGV: null pointer access (pid={}, ip={:#x}, fsbase={:#x})",
                 pid, ip, fsbase
