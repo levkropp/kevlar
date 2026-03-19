@@ -126,7 +126,8 @@ pub fn dump_syscall_profile(syscall_name_fn: fn(usize) -> &'static str) {
 
     // Use the kernel's print infrastructure directly — this is a one-shot
     // dump, not a hot-path event.
-    println!("DBG {{\"type\":\"syscall_profile\",\"tsc_freq_hz\":{},\"entries\":[", freq);
+    // Emit entire JSON on one line for kwab JSONL import compatibility.
+    print!("DBG {{\"type\":\"syscall_profile\",\"tsc_freq_hz\":{},\"entries\":[", freq);
 
     let mut first = true;
     for nr in 0..MAX_NR {
@@ -140,7 +141,6 @@ pub fn dump_syscall_profile(syscall_name_fn: fn(usize) -> &'static str) {
         let max = STATS[nr].max_cycles.load(Ordering::Relaxed);
         let avg = total / count;
 
-        // Convert cycles to nanoseconds: ns = cycles * 1_000_000_000 / freq
         let avg_ns = cycles_to_ns(avg, freq);
         let min_ns = cycles_to_ns(min, freq);
         let max_ns = cycles_to_ns(max, freq);
@@ -153,12 +153,27 @@ pub fn dump_syscall_profile(syscall_name_fn: fn(usize) -> &'static str) {
         }
         first = false;
 
-        println!(
+        print!(
             "{{\"nr\":{},\"name\":\"{}\",\"calls\":{},\"total_ns\":{},\"avg_ns\":{},\"min_ns\":{},\"max_ns\":{}}}",
             nr, name, count, total_ns, avg_ns, min_ns, max_ns
         );
     }
     println!("]}}");
+
+    // Append page fault stats.
+    let pf_count = crate::mm::page_fault::PAGE_FAULT_COUNT.load(Ordering::Relaxed);
+    let pf_cycles = crate::mm::page_fault::PAGE_FAULT_CYCLES.load(Ordering::Relaxed);
+    let pf_avg_ns = if pf_count > 0 {
+        cycles_to_ns(pf_cycles / pf_count, freq)
+    } else {
+        0
+    };
+    println!(
+        "DBG {{\"type\":\"page_faults\",\"count\":{},\"total_ns\":{},\"avg_ns\":{}}}",
+        pf_count,
+        cycles_to_ns(pf_cycles, freq),
+        pf_avg_ns
+    );
 }
 
 #[inline(always)]

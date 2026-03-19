@@ -3,7 +3,7 @@ use core::fmt;
 
 use crate::{
     fs::{
-        inode::{FileLike, INodeNo},
+        inode::{FileLike, INodeNo, PollStatus},
         opened_file::OpenOptions,
         stat::{FileMode, Stat, S_IFCHR},
     },
@@ -47,5 +47,10 @@ impl FileLike for NullFile {
 
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
         Ok(buf.len())
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        // /dev/null is always ready for writing and reading (returns EOF).
+        Ok(PollStatus::POLLOUT | PollStatus::POLLIN)
     }
 }

@@ -17,7 +17,7 @@ use hashbrown::HashMap;
 use kevlar_platform::{
     address::{PAddr, UserVAddr},
     arch::{PageFaultReason, PAGE_SIZE, HUGE_PAGE_SIZE},
-    page_allocator::{alloc_page, alloc_page_batch, alloc_huge_page, AllocPageFlags},
+    page_allocator::{alloc_page, alloc_page_batch, alloc_huge_page, alloc_huge_page_prezeroed, AllocPageFlags},
     page_ops::{zero_page, zero_huge_page},
     spinlock::SpinLock,
 };
@@ -210,7 +210,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: null pointer access (pid={}, ip={:#x}, fsbase={:#x})",
                 pid, ip, fsbase
             );
-            emit_crash_and_exit(signal::SIGSEGV, 0, ip);
+            current_process().send_signal(SIGSEGV);
+            return;
         }
     };
 
@@ -223,13 +224,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
                 unaligned_vaddr.value(), current_process().pid().as_i32(), ip
             );
-            emit_crash_and_exit(SIGSEGV, unaligned_vaddr.value(), ip);
+            current_process().send_signal(SIGSEGV);
+            return;
         }
     };
 
-    // Allocate and zero the page BEFORE acquiring the VM lock.
+    // Allocate a zeroed page BEFORE acquiring the VM lock.
     // This keeps the lock hold time minimal (just VMA lookup + PTE write).
-    let mut paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+    // alloc_page without DIRTY_OK serves pre-zeroed pages from the pool
+    // (~5ns) or falls back to alloc+memset (~1-2µs).
+    let mut paddr = match alloc_page(AllocPageFlags::USER) {
         Ok(p) => p,
         Err(_) => {
             debug_warn!(
@@ -239,7 +243,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             Process::exit_by_signal(SIGKILL);
         }
     };
-    zero_page(paddr);
 
     // Look for the associated vma area.
     let vm_ref = current.vm();
@@ -272,11 +275,14 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: no VMA for address {:#x} (pid={}, ip={:#x}, reason={:?})",
                 unaligned_vaddr.value(), pid, ip, _reason
             );
-            // Free the page we allocated since we're killing the process.
+            // Free the page we allocated since we won't map it.
             kevlar_platform::page_allocator::free_pages(paddr, 1);
             drop(vm);
             drop(vm_ref);
-            emit_crash_and_exit(SIGSEGV, unaligned_vaddr.value(), ip);
+            // Deliver SIGSEGV via signal path so userspace handlers can catch it.
+            // If no handler is installed, the default action terminates the process.
+            current.send_signal(SIGSEGV);
+            return;
         }
     };
 
@@ -455,8 +461,11 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         if huge_base >= vma_start_value && huge_end <= vma_end_value {
             let huge_vaddr = UserVAddr::new_nonnull(huge_base).unwrap();
             if vm.page_table().is_pde_empty(huge_vaddr) {
-                if let Ok(huge_paddr) = alloc_huge_page() {
-                    zero_huge_page(huge_paddr);
+                // Fast path: try pre-zeroed pool (zero-cost zeroing).
+                let huge_opt = alloc_huge_page_prezeroed().or_else(|| {
+                    alloc_huge_page().ok().map(|p| { zero_huge_page(p); p })
+                });
+                if let Some(huge_paddr) = huge_opt {
                     kevlar_platform::page_refcount::page_ref_init_huge(huge_paddr);
                     vm.page_table_mut().map_huge_user_page(
                         huge_vaddr,
@@ -546,6 +555,15 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             }
         }
 
+        // Permission violation: write fault on a page the VMA doesn't allow writing.
+        // This happens after mprotect(PROT_READ) on a previously writable page.
+        if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0) {
+            drop(vm);
+            drop(vm_ref);
+            current.send_signal(SIGSEGV);
+            return;
+        }
+
         // Not a CoW fault (or sole owner): just update the PTE flags.
         vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
         vm.page_table().flush_tlb_local(aligned_vaddr);
@@ -594,11 +612,31 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
 
         if num_prefault > 0 {
             let mut pages = [PAddr::new(0); FAULT_AROUND_PAGES];
-            let allocated = alloc_page_batch(&mut pages, num_prefault);
+            // Allocate zeroed pages: drains prezeroed pool first, then
+            // falls back to dirty batch + memset for the remainder.
+            let mut allocated = 0;
+            // Drain prezeroed pool.
+            if kevlar_platform::page_allocator::prezeroed_4k_count() > 0 {
+                while allocated < num_prefault {
+                    if let Some(p) = kevlar_platform::page_allocator::alloc_page_prezeroed() {
+                        pages[allocated] = p;
+                        allocated += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // Remaining from dirty batch + zero.
+            if allocated < num_prefault {
+                let batch = alloc_page_batch(&mut pages[allocated..], num_prefault - allocated);
+                for i in allocated..(allocated + batch) {
+                    zero_page(pages[i]);
+                }
+                allocated += batch;
+            }
 
-            // Zero all pages and initialize refcounts.
+            // Initialize refcounts.
             for i in 0..allocated {
-                zero_page(pages[i]);
                 kevlar_platform::page_refcount::page_ref_init(pages[i]);
             }
 

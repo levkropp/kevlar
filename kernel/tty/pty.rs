@@ -116,13 +116,15 @@ impl FileLike for PtyMaster {
         const TCSETS: usize = 0x5402;
         const TCSETSW: usize = 0x5403;
         const TCSETSF: usize = 0x5404;
+        const TCGETS2: usize = 0x802c542a;
+        const TCSETS2: usize = 0x402c542b;
         const TIOCGWINSZ: usize = 0x5413;
         const TIOCSWINSZ: usize = 0x5414;
         const TIOCSPTLCK: usize = 0x40045431;
         const TIOCGPTN: usize = 0x80045430;
 
         match cmd {
-            TCGETS => {
+            TCGETS | TCGETS2 => {
                 let termios = self.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("pty_master:TCGETS");
@@ -131,7 +133,7 @@ impl FileLike for PtyMaster {
                 r?;
                 Ok(0)
             }
-            TCSETS | TCSETSW | TCSETSF => {
+            TCSETS | TCSETSW | TCSETSF | TCSETS2 => {
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("pty_master:TCSETS");
                 let termios = arg.read::<Termios>();
@@ -271,6 +273,8 @@ impl FileLike for PtySlave {
         const TCSETS: usize = 0x5402;
         const TCSETSW: usize = 0x5403;
         const TCSETSF: usize = 0x5404;
+        const TCGETS2: usize = 0x802c542a;
+        const TCSETS2: usize = 0x402c542b;
         const TIOCGPGRP: usize = 0x540f;
         const TIOCSPGRP: usize = 0x5410;
         const TIOCGWINSZ: usize = 0x5413;
@@ -278,7 +282,7 @@ impl FileLike for PtySlave {
         const TIOCSPTLCK: usize = 0x40045431;
 
         match cmd {
-            TCGETS => {
+            TCGETS | TCGETS2 => {
                 let termios = self.master.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("pty_slave:TCGETS");
@@ -287,7 +291,7 @@ impl FileLike for PtySlave {
                 r?;
                 Ok(0)
             }
-            TCSETS | TCSETSW | TCSETSF => {
+            TCSETS | TCSETSW | TCSETSF | TCSETS2 => {
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("pty_slave:TCSETS");
                 let termios = arg.read::<Termios>();

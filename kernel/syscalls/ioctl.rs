@@ -11,6 +11,14 @@ impl<'a> SyscallHandler<'a> {
             return self.sys_net_ioctl(cmd, arg);
         }
 
+        // FIOCLEX/FIONCLEX — set/clear FD_CLOEXEC (equivalent to fcntl F_SETFD).
+        const FIONCLEX: usize = 0x5450;
+        const FIOCLEX: usize = 0x5451;
+        if cmd == FIOCLEX || cmd == FIONCLEX {
+            current_process().opened_files_no_irq().set_cloexec(fd, cmd == FIOCLEX)?;
+            return Ok(0);
+        }
+
         let opened_file = current_process().get_opened_file_by_fd(fd)?;
 
         // FIONBIO — some networking code uses this instead of fcntl(F_SETFL, O_NONBLOCK).

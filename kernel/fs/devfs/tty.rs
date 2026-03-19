@@ -68,6 +68,8 @@ const TCGETS: usize = 0x5401;
 const TCSETS: usize = 0x5402;
 const TCSETSW: usize = 0x5403;
 const TCSETSF: usize = 0x5404;
+const TCGETS2: usize = 0x802c542a;  // _IOR('T', 0x2A, struct termios2)
+const TCSETS2: usize = 0x402c542b;  // _IOW('T', 0x2B, struct termios2)
 const TCSBRK: usize = 0x5409;
 const TCFLSH: usize = 0x540b;
 const TIOCSCTTY: usize = 0x540e;
@@ -91,7 +93,7 @@ impl fmt::Debug for Tty {
 impl FileLike for Tty {
     fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
         match cmd {
-            TCGETS => {
+            TCGETS | TCGETS2 => {
                 let termios = self.discipline.termios();
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("ioctl:TCGETS");
@@ -107,7 +109,7 @@ impl FileLike for Tty {
                 // tcflush: discard pending input/output. Accept silently.
                 // arg encodes TCIFLUSH(0)/TCOFLUSH(1)/TCIOFLUSH(2).
             }
-            TCSETS | TCSETSW | TCSETSF => {
+            TCSETS | TCSETSW | TCSETSF | TCSETS2 => {
                 let arg = UserVAddr::new_nonnull(arg)?;
                 debug::usercopy::set_context("ioctl:TCSETS");
                 let termios = arg.read::<Termios>();

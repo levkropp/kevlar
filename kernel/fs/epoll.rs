@@ -8,6 +8,7 @@
 //! check readiness.  This is O(n) per wakeup where n = number of interests,
 //! but correct and sufficient for systemd's ~10-fd event loop.
 use core::fmt;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -31,6 +32,8 @@ const EPOLLIN: u32  = 0x001;
 const EPOLLOUT: u32 = 0x004;
 const EPOLLERR: u32 = 0x008;
 const EPOLLHUP: u32 = 0x010;
+const EPOLLET: u32  = 1 << 31;
+const EPOLLONESHOT: u32 = 1 << 30;
 
 // ── epoll_event (matches Linux struct epoll_event) ──────────────────
 
@@ -47,10 +50,18 @@ pub struct EpollEvent {
 struct Interest {
     /// The file description being watched (keep alive via Arc).
     file: Arc<dyn FileLike>,
-    /// Events mask requested by the user (EPOLLIN, EPOLLOUT, etc.).
-    events: u32,
+    /// Events mask requested by the user (EPOLLIN, EPOLLOUT, EPOLLET, etc.).
+    /// Atomic so EPOLLONESHOT can disable via shared reference.
+    events: AtomicU32,
     /// Opaque user data returned in epoll_wait results.
     data: u64,
+    /// For EPOLLET: the file's poll_gen() at the time we last reported this fd.
+    /// 0 means "never reported" (will fire on first ready poll).
+    last_gen: AtomicU64,
+    /// Cached poll_gen from the last file.poll() call. 0 = no cache.
+    cached_poll_gen: AtomicU64,
+    /// Cached PollStatus::bits() from the last file.poll() call.
+    cached_poll_bits: AtomicU64,
 }
 
 // ── EpollInstance ───────────────────────────────────────────────────
@@ -68,35 +79,75 @@ impl EpollInstance {
 
     /// `epoll_ctl(EPOLL_CTL_ADD)` — register a new fd.
     pub fn add(&self, fd: Fd, file: Arc<dyn FileLike>, event: &EpollEvent) -> Result<()> {
-        let mut interests = self.interests.lock();
+        let mut interests = self.interests.lock_no_irq();
         if interests.contains_key(&fd.as_int()) {
             return Err(Errno::EEXIST.into());
         }
+        if event.events & EPOLLET != 0 {
+            file.notify_epoll_et(true);
+        }
         interests.insert(fd.as_int(), Interest {
             file,
-            events: event.events,
+            events: AtomicU32::new(event.events),
             data: event.data,
+            last_gen: AtomicU64::new(0),
+            cached_poll_gen: AtomicU64::new(0),
+            cached_poll_bits: AtomicU64::new(0),
         });
         Ok(())
     }
 
     /// `epoll_ctl(EPOLL_CTL_MOD)` — modify an existing registration.
     pub fn modify(&self, fd: Fd, event: &EpollEvent) -> Result<()> {
-        let mut interests = self.interests.lock();
+        let mut interests = self.interests.lock_no_irq();
         let entry = interests.get_mut(&fd.as_int())
             .ok_or(Error::new(Errno::ENOENT))?;
-        entry.events = event.events;
+        let old_et = entry.events.load(Ordering::Relaxed) & EPOLLET != 0;
+        let new_et = event.events & EPOLLET != 0;
+        if old_et != new_et {
+            entry.file.notify_epoll_et(new_et);
+        }
+        entry.events.store(event.events, Ordering::Relaxed);
         entry.data = event.data;
+        // Invalidate poll cache on modify.
+        entry.cached_poll_gen.store(0, Ordering::Relaxed);
         Ok(())
     }
 
     /// `epoll_ctl(EPOLL_CTL_DEL)` — remove a registration.
     pub fn delete(&self, fd: Fd) -> Result<()> {
-        let mut interests = self.interests.lock();
-        if interests.remove(&fd.as_int()).is_none() {
+        let mut interests = self.interests.lock_no_irq();
+        if let Some(removed) = interests.remove(&fd.as_int()) {
+            if removed.events.load(Ordering::Relaxed) & EPOLLET != 0 {
+                removed.file.notify_epoll_et(false);
+            }
+        } else {
             return Err(Errno::ENOENT.into());
         }
         Ok(())
+    }
+
+    /// For EPOLLET: check if this interest should fire.  Returns true if the
+    /// interest is level-triggered or if the file's generation changed since
+    /// the last report (edge detected).  Updates `last_gen` atomically.
+    fn check_interest(interest: &Interest) -> bool {
+        let ev = interest.events.load(Ordering::Relaxed);
+        if ev == 0 {
+            return false; // Disabled by EPOLLONESHOT — needs EPOLL_CTL_MOD to re-arm.
+        }
+        if ev & EPOLLET == 0 {
+            return true; // Level-triggered: always report when ready.
+        }
+        let cur_gen = interest.file.poll_gen();
+        if cur_gen == 0 {
+            return true; // File doesn't track generations — fall back to LT.
+        }
+        let prev = interest.last_gen.load(Ordering::Relaxed);
+        if cur_gen == prev {
+            return false; // Same generation — suppress edge.
+        }
+        interest.last_gen.store(cur_gen, Ordering::Relaxed);
+        true
     }
 
     /// Poll all interested fds and return ready events.
@@ -105,20 +156,17 @@ impl EpollInstance {
         let interests = self.interests.lock_no_irq();
         let mut count = 0;
         for interest in interests.values() {
-            if count >= max {
-                break;
-            }
-            let status = match interest.file.poll() {
-                Ok(s) => s,
-                Err(_) => PollStatus::POLLERR,
-            };
-            let ready = poll_status_to_epoll(status) & (interest.events | EPOLLERR | EPOLLHUP);
+            if count >= max { break; }
+            if !Self::check_interest(interest) { continue; }
+            let ev = interest.events.load(Ordering::Relaxed);
+            let status = Self::poll_cached(interest);
+            let ready = poll_status_to_epoll(status) & (ev | EPOLLERR | EPOLLHUP);
             if ready != 0 {
-                out.push(EpollEvent {
-                    events: ready,
-                    data: interest.data,
-                });
+                out.push(EpollEvent { events: ready, data: interest.data });
                 count += 1;
+                if ev & EPOLLONESHOT != 0 {
+                    interest.events.store(0, Ordering::Relaxed);
+                }
             }
         }
         count
@@ -132,24 +180,69 @@ impl EpollInstance {
         max: usize,
     ) -> crate::result::Result<usize> {
         let interests = self.interests.lock_no_irq();
+        Self::collect_ready_inner(&interests, events_ptr, max)
+    }
+
+    /// Lock-free variant — caller guarantees no concurrent access to interests.
+    ///
+    /// # Safety
+    /// The EpollInstance's Arc must have strong_count == 1 (only in fd table).
+    #[cfg(not(feature = "profile-fortress"))]
+    #[allow(unsafe_code)]
+    pub unsafe fn collect_ready_to_user_lockfree(
+        &self,
+        events_ptr: kevlar_platform::address::UserVAddr,
+        max: usize,
+    ) -> crate::result::Result<usize> {
+        let interests = self.interests.get_unchecked();
+        Self::collect_ready_inner(interests, events_ptr, max)
+    }
+
+    /// Poll an interest, using the per-interest cache when the file's
+    /// generation hasn't changed since the last poll.
+    #[inline(always)]
+    fn poll_cached(interest: &Interest) -> PollStatus {
+        let cur_gen = interest.file.poll_gen();
+        if cur_gen != 0 && cur_gen == interest.cached_poll_gen.load(Ordering::Relaxed) {
+            // Generation unchanged — reuse cached poll result.
+            return PollStatus::from_bits_truncate(
+                interest.cached_poll_bits.load(Ordering::Relaxed) as i16,
+            );
+        }
+        let status = match interest.file.poll() {
+            Ok(s) => s,
+            Err(_) => PollStatus::POLLERR,
+        };
+        if cur_gen != 0 {
+            interest.cached_poll_gen.store(cur_gen, Ordering::Relaxed);
+            interest.cached_poll_bits.store(status.bits() as u64, Ordering::Relaxed);
+        }
+        status
+    }
+
+    fn collect_ready_inner(
+        interests: &BTreeMap<i32, Interest>,
+        events_ptr: kevlar_platform::address::UserVAddr,
+        max: usize,
+    ) -> crate::result::Result<usize> {
         let mut count = 0;
         for interest in interests.values() {
-            if count >= max {
-                break;
-            }
-            let status = match interest.file.poll() {
-                Ok(s) => s,
-                Err(_) => PollStatus::POLLERR,
-            };
-            let ready = poll_status_to_epoll(status) & (interest.events | EPOLLERR | EPOLLHUP);
+            if count >= max { break; }
+            if !Self::check_interest(interest) { continue; }
+            let ev = interest.events.load(Ordering::Relaxed);
+            let status = Self::poll_cached(interest);
+            let ready = poll_status_to_epoll(status) & (ev | EPOLLERR | EPOLLHUP);
             if ready != 0 {
                 let event = EpollEvent { events: ready, data: interest.data };
-                let dest = events_ptr.add(count * 12); // EPOLL_EVENT_SIZE = 12
+                let dest = events_ptr.add(count * 12);
                 let mut buf = [0u8; 12];
                 buf[0..4].copy_from_slice(&event.events.to_ne_bytes());
                 buf[4..12].copy_from_slice(&event.data.to_ne_bytes());
                 dest.write_bytes(&buf)?;
                 count += 1;
+                if ev & EPOLLONESHOT != 0 {
+                    interest.events.store(0, Ordering::Relaxed);
+                }
             }
         }
         Ok(count)

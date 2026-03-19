@@ -7,7 +7,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::address::{AccessError, UserVAddr, VAddr};
-use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
+use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::arch::PAGE_SIZE;
 use crate::arch::x64_specific::{cpu_local_head, TSS, USER_CS64, USER_DS, USER_RPL};
 use crate::arch::PtRegs;
@@ -54,10 +54,39 @@ pub struct ArchTask {
     syscall_stack: Option<OwnedPages>,
 }
 
+impl ArchTask {
+    /// Eagerly release kernel stacks back to the allocator.
+    ///
+    /// Called from `switch()` after context-switching away from an exiting task.
+    /// At that point the task's stacks are no longer in use on any CPU, so it is
+    /// safe to free them immediately — matching Linux's `finish_task_switch()` →
+    /// `put_task_stack()` pattern.  Without this, zombie processes hold 32 KB of
+    /// kernel stacks until wait4() + gc_exited_processes(), causing OOM under
+    /// heavy fork/exit workloads (e.g. `apk update`).
+    ///
+    /// SAFETY: caller must guarantee this task is no longer executing on any CPU.
+    #[allow(unsafe_code)]
+    pub unsafe fn release_stacks(&self) {
+        let this = self as *const Self as *mut Self;
+        unsafe {
+            if let Some(stack) = (*this).kernel_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, KERNEL_STACK_SIZE / PAGE_SIZE);
+            }
+            if let Some(stack) = (*this).interrupt_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, 2);
+            }
+            if let Some(stack) = (*this).syscall_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, 2);
+            }
+        }
+    }
+}
+
 impl Drop for ArchTask {
     fn drop(&mut self) {
         // Return stacks to the per-CPU cache instead of freeing via buddy.
         // Cached stacks stay warm in L1/L2, making the next fork faster.
+        // Stacks may already be None if release_stacks() was called earlier.
         if let Some(stack) = self.kernel_stack.take() {
             crate::stack_cache::free_kernel_stack(stack, KERNEL_STACK_SIZE / PAGE_SIZE);
         }
@@ -109,9 +138,9 @@ unsafe fn push_stack(mut rsp: *mut u64, value: u64) -> *mut u64 {
 impl ArchTask {
     #[allow(unused)]
     pub fn new_kthread(ip: VAddr, sp: VAddr) -> ArchTask {
-        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE);
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2).expect("kthread IST stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2).expect("kthread syscall stack");
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE).expect("kthread kernel stack");
 
         let rsp = unsafe {
             let mut rsp: *mut u64 = sp.as_mut_ptr();
@@ -144,11 +173,11 @@ impl ArchTask {
     }
 
     pub fn new_user_thread(ip: UserVAddr, sp: UserVAddr) -> ArchTask {
-        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE);
-        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2);
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE).expect("user thread kernel stack");
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2).expect("user thread IST stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2).expect("user thread syscall stack");
         let xsave_area =
-            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("user thread xsave area");
         init_xsave_area(&xsave_area);
 
         let rsp = unsafe {
@@ -187,9 +216,9 @@ impl ArchTask {
     }
 
     pub fn new_idle_thread() -> ArchTask {
-        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE);
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2).expect("idle thread IST stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2).expect("idle thread syscall stack");
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE).expect("idle thread kernel stack");
 
         ArchTask {
             rsp: UnsafeCell::new(0),
@@ -202,9 +231,8 @@ impl ArchTask {
         }
     }
 
-    pub fn fork(&self, frame: &PtRegs) -> ArchTask {
-        let xsave_area =
-            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+    pub fn fork(&self, frame: &PtRegs) -> Result<ArchTask, PageAllocError> {
+        let xsave_area = alloc_pages_owned(1, AllocPageFlags::KERNEL)?;
         // Copy the parent's FPU/SSE state to the child.
         if let Some(parent_xsave) = self.xsave_area.as_ref() {
             unsafe {
@@ -217,7 +245,7 @@ impl ArchTask {
         } else {
             init_xsave_area(&xsave_area);
         }
-        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE);
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)?;
         let rsp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
             let mut rsp: *mut u64 = kernel_sp.as_mut_ptr();
@@ -255,10 +283,10 @@ impl ArchTask {
         // Interrupt and syscall stacks only need enough space for the initial
         // register save before switching to the main kernel stack. 2 pages (8KB)
         // is sufficient (matches Linux's IST stack size).
-        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2);
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2)?;
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2)?;
 
-        ArchTask {
+        Ok(ArchTask {
             rsp: UnsafeCell::new(rsp as u64),
             fsbase: AtomicCell::new(self.fsbase.load()),
             xsave_area: Some(xsave_area),
@@ -266,7 +294,7 @@ impl ArchTask {
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
-        }
+        })
     }
 
     /// Returns the current FS base register value (TLS base for x86_64).
@@ -278,13 +306,12 @@ impl ArchTask {
     /// - Uses `child_stack` as the user-space RSP.
     /// - Uses `fs_base` for the FS segment (TLS).
     /// - RAX = 0 in the child (clone returns 0 in child thread).
-    pub fn new_thread(frame: &PtRegs, child_stack: u64, fs_base: u64) -> ArchTask {
-        let xsave_area =
-            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("failed to allocate xsave area");
+    pub fn new_thread(frame: &PtRegs, child_stack: u64, fs_base: u64) -> Result<ArchTask, PageAllocError> {
+        let xsave_area = alloc_pages_owned(1, AllocPageFlags::KERNEL)?;
         init_xsave_area(&xsave_area);
-        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE);
-        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2);
-        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2);
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)?;
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2)?;
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(2)?;
 
         let rsp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -319,7 +346,7 @@ impl ArchTask {
             rsp
         };
 
-        ArchTask {
+        Ok(ArchTask {
             rsp: UnsafeCell::new(rsp as u64),
             fsbase: AtomicCell::new(fs_base),
             xsave_area: Some(xsave_area),
@@ -327,7 +354,7 @@ impl ArchTask {
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
-        }
+        })
     }
 
     pub fn setup_execve_stack(

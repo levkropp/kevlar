@@ -31,9 +31,12 @@ impl<'a> SyscallHandler<'a> {
                 let revents = if fd.as_int() < 0 || events.is_empty() {
                     0
                 } else {
-                    let status = current_process().opened_files().lock().get(fd)?.poll()?;
+                    let status = current_process().opened_files_no_irq().get(fd)?.poll()?;
 
-                    let revents = events & status;
+                    // POLLHUP, POLLERR, POLLNVAL are always reported
+                    // regardless of requested events (POSIX).
+                    let always = status & (PollStatus::POLLHUP | PollStatus::POLLERR);
+                    let revents = (events & status) | always;
                     if !revents.is_empty() {
                         ready_fds += 1;
                     }

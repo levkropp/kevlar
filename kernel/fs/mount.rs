@@ -152,7 +152,7 @@ pub struct MountPoint {
 pub struct RootFs {
     root_path: Arc<PathComponent>,
     cwd_path: Arc<PathComponent>,
-    mount_points: HashMap<MountKey, MountPoint>,
+    mount_points: Arc<SpinLock<HashMap<MountKey, MountPoint>>>,
     symlink_follow_limit: usize,
 }
 
@@ -165,7 +165,7 @@ impl RootFs {
         });
 
         Ok(RootFs {
-            mount_points: HashMap::new(),
+            mount_points: Arc::new(SpinLock::new(HashMap::new())),
             root_path: root_path.clone(),
             cwd_path: root_path,
             symlink_follow_limit: DEFAULT_SYMLINK_FOLLOW_MAX,
@@ -174,6 +174,7 @@ impl RootFs {
 
     pub fn mount(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
         self.mount_points
+            .lock_no_irq()
             .insert(dir.mount_key()?, MountPoint { fs });
         Ok(())
     }
@@ -299,9 +300,9 @@ impl RootFs {
         Ok(current)
     }
 
-    fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<&MountPoint>> {
+    fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<MountPoint>> {
         let key = dir.mount_key()?;
-        Ok(self.mount_points.get(&key))
+        Ok(self.mount_points.lock_no_irq().get(&key).cloned())
     }
 
     /// Resolves a path into `PathComponent`. If `follow_symlink` is `true`,

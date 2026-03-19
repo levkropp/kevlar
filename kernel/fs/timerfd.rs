@@ -79,6 +79,19 @@ impl TimerFd {
         inner.expirations = 0;
     }
 
+    /// Returns (remaining_ns, interval_ns) for timerfd_gettime.
+    pub fn gettime(&self) -> (u64, u64) {
+        let mut inner = self.inner.lock();
+        Self::check_expiry(&mut inner);
+        let remaining = if inner.next_fire_ns == 0 {
+            0
+        } else {
+            let now = timer::read_monotonic_clock().nanosecs() as u64;
+            inner.next_fire_ns.saturating_sub(now)
+        };
+        (remaining, inner.interval_ns)
+    }
+
     /// Check if the timer has expired and update expirations count.
     fn check_expiry(inner: &mut TimerFdInner) {
         if inner.next_fire_ns == 0 {

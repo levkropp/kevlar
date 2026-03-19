@@ -117,18 +117,23 @@ impl<'a> SyscallHandler<'a> {
         let opened_file = current_process().get_opened_file_by_fd(fd)?;
         let file = opened_file.as_file()?;
 
-        // Get the inner UnixStream. In practice, fds are always UnixSocket wrappers.
-        let inner_stream: Option<Arc<UnixStream>> =
+        // Get the inner UnixStream. socketpair() stores bare UnixStream objects,
+        // while socket()+connect() wraps them in UnixSocket (mirrors sendmsg.rs).
+        let owned_stream: Option<Arc<UnixStream>> =
             if let Some(sock) = (**file).as_any().downcast_ref::<UnixSocket>() {
                 sock.connected_stream()
             } else {
                 None
             };
 
-        let stream = match inner_stream {
-            Some(ref s) => s,
-            None => return Ok(0),
-        };
+        let stream: &UnixStream =
+            if let Some(s) = (**file).as_any().downcast_ref::<UnixStream>() {
+                s
+            } else if let Some(ref s) = owned_stream {
+                s
+            } else {
+                return Ok(0);
+            };
 
         let mut offset = 0;
 

@@ -5,7 +5,7 @@
 //! going through the buddy allocator. Reused stacks are warm in L1/L2
 //! cache, eliminating the cache-cold penalty that dominates fork latency.
 
-use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages};
+use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::spinlock::SpinLock;
 
 /// Number of cached stacks per size class.
@@ -49,7 +49,7 @@ static CACHE_2PAGE: SpinLock<SizeCache> = SpinLock::new(SizeCache::new());
 
 /// Allocate a kernel stack, preferring the cache over the buddy allocator.
 /// Cached stacks are warm in L1/L2 cache from recent use.
-pub fn alloc_kernel_stack(num_pages: usize) -> OwnedPages {
+pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError> {
     let cache = match num_pages {
         4 => Some(&CACHE_4PAGE),
         2 => Some(&CACHE_2PAGE),
@@ -58,13 +58,12 @@ pub fn alloc_kernel_stack(num_pages: usize) -> OwnedPages {
 
     if let Some(cache) = cache {
         if let Some(stack) = cache.lock_no_irq().pop() {
-            return stack;
+            return Ok(stack);
         }
     }
 
     // Cache miss: allocate from buddy.
     alloc_pages_owned(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)
-        .expect("failed to allocate kernel stack")
 }
 
 /// Return a kernel stack to the cache. If the cache is full, the stack

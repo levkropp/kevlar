@@ -160,6 +160,7 @@ static int test_signal_group(void) {
 
 /* ─── 10. tgkill sends signal to specific thread ─────────────────────────── */
 static volatile sig_atomic_t g_sig10_tid = 0;
+static atomic_int g_sig10_sent = 0;
 static void sig10_handler(int s) {
     (void)s; g_sig10_tid = (sig_atomic_t)syscall(SYS_gettid);
 }
@@ -167,12 +168,13 @@ struct t10_ctx { pid_t *tid_out; };
 static void *t10_fn(void *arg) {
     struct t10_ctx *ctx = arg;
     *ctx->tid_out = (pid_t)syscall(SYS_gettid);
-    // Spin briefly so the main thread has time to tgkill us.
-    for (volatile int i = 0; i < 10000000; i++);
+    // Wait until the main thread has sent the signal before exiting.
+    while (!atomic_load(&g_sig10_sent)) sched_yield();
     return NULL;
 }
 static int test_tgkill(void) {
     signal(SIGUSR2, sig10_handler);
+    atomic_store(&g_sig10_sent, 0);
     pid_t target_tid = 0;
     struct t10_ctx ctx = { &target_tid };
     pthread_t t;
@@ -180,6 +182,7 @@ static int test_tgkill(void) {
     // Wait until the thread has stored its tid.
     while (target_tid == 0) sched_yield();
     syscall(SYS_tgkill, getpid(), target_tid, SIGUSR2);
+    atomic_store(&g_sig10_sent, 1);
     pthread_join(t, NULL);
     signal(SIGUSR2, SIG_DFL);
     return g_sig10_tid == (sig_atomic_t)target_tid && target_tid != 0;

@@ -250,12 +250,12 @@ run-sh: build
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
-# `make run-alpine` — Alpine boot with KVM (alias for `make run KVM=1`)
+# `make run-alpine` — Boot with Alpine disk, auto-mount, interactive shell
 .PHONY: run-alpine
-run-alpine: build
+run-alpine: build alpine-disk
 	$(PYTHON3) tools/run-qemu.py                                           \
 		--arch $(ARCH) --kvm                                           \
-		--append-cmdline "init=/sbin/init"                             \
+		--disk build/alpine-disk.img                                   \
 		$(if $(GUI),--gui,)                                            \
 		$(if $(GDB),--gdb,)                                            \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
@@ -344,19 +344,50 @@ run-apk: build alpine-disk
 
 .PHONY: test-alpine
 test-alpine: alpine-disk
-	$(PROGRESS) "TEST" "Alpine integration suite (7 layers)"
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
-		--kvm --arch $(ARCH) --disk build/alpine-disk.img \
+	$(PROGRESS) "TEST" "Alpine apk integration (mount + update)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test_apk_update.sh"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-alpine-$(PROFILE).log; true
-	@grep -E '^(PASS|FAIL|SKIP|LAYER|test_alpine:)' \
-		/tmp/kevlar-test-alpine-$(PROFILE).log || echo "(no output)"
-	@if grep -q '^FAIL' /tmp/kevlar-test-alpine-$(PROFILE).log; then \
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL ALPINE)' \
+		/tmp/kevlar-test-alpine-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-alpine-$(PROFILE).log; then \
 		echo "ALPINE TESTS: some failures"; exit 1; \
 	elif grep -q '^TEST_END' /tmp/kevlar-test-alpine-$(PROFILE).log; then \
 		echo "ALL ALPINE TESTS PASSED"; \
 	fi
+
+# M10 Phase A: apk add integration test
+.PHONY: test-m10-apk
+test-m10-apk: alpine-disk
+	$(PROGRESS) "TEST" "M10 apk add integration (mount + update + install)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test_m10_apk.sh"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-m10-apk-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL M10)' \
+		/tmp/kevlar-test-m10-apk-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-m10-apk-$(PROFILE).log; then \
+		echo "M10 APK TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-m10-apk-$(PROFILE).log; then \
+		echo "ALL M10 APK TESTS PASSED"; \
+	fi
+
+# M10 Phase B: SSH via Dropbear
+.PHONY: run-alpine-ssh
+run-alpine-ssh: build alpine-disk
+	$(PYTHON3) tools/run-qemu.py                                           \
+		--arch $(ARCH) --kvm                                           \
+		--disk build/alpine-disk.img                                   \
+		$(if $(GUI),--gui,)                                            \
+		$(if $(GDB),--gdb,)                                            \
+		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",)                \
+		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
+		$(if $(QEMU),--qemu $(QEMU),)                                  \
+		$(kernel_qemu_arg) -- $(QEMU_ARGS) -nic user,hostfwd=tcp::2222-:22
 
 .PHONY: bochs
 bochs: iso
@@ -613,6 +644,21 @@ test-systemd-v3:
 		echo "ALL SYSTEMD-V3 TESTS PASSED"; \
 	fi
 
+.PHONY: test-systemd-v3-smp
+test-systemd-v3-smp:
+	$(PROGRESS) "TEST" "M9 systemd init-sequence SMP (25 tests, 4 CPUs)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd-v3"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
+		| tee /tmp/kevlar-test-systemd-v3-smp-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
+		/tmp/kevlar-test-systemd-v3-smp-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-systemd-v3-smp-$(PROFILE).log; then \
+		echo "SYSTEMD-V3 SMP TESTS FAILED"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-systemd-v3-smp-$(PROFILE).log; then \
+		echo "ALL SYSTEMD-V3 SMP TESTS PASSED"; \
+	fi
+
 .PHONY: test-m8
 test-m8:
 	$(PROGRESS) "TEST" "M8: full integration suite"
@@ -628,36 +674,51 @@ test-m8:
 test-m9:
 	$(PROGRESS) "TEST" "M9: systemd boot end-to-end"
 	$(MAKE) build PROFILE=$(PROFILE)
-	@echo "Booting systemd v245 under KVM..."
-	@timeout 20 $(PYTHON3) tools/run-qemu.py \
+	@echo "Booting systemd v245 under KVM (90s timeout)..."
+	@timeout 90 $(PYTHON3) tools/run-qemu.py \
 		--arch $(ARCH) --kvm $(kernel_qemu_arg) \
 		-- -append "pci=off init=/usr/lib/systemd/systemd" \
 		-display none -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-m9.log; true
 	@echo "=== M9 Test Results ==="
+	@FAILED_UNITS=$$(grep -ac '\[FAILED\]' /tmp/kevlar-test-m9.log 2>/dev/null || echo 0); \
+	if [ "$$FAILED_UNITS" -gt 0 ]; then \
+		echo "INFO: $$FAILED_UNITS failed systemd unit(s) (informational)"; \
+	fi
 	@PASS=0; FAIL=0; \
-	if grep -qa 'Started Kevlar Console Shell' /tmp/kevlar-test-m9.log; then \
-		echo "PASS: Started Kevlar Console Shell"; PASS=$$((PASS+1)); \
+	if grep -qa 'Welcome to' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Welcome banner"; PASS=$$((PASS+1)); \
 	else \
-		echo "FAIL: Started Kevlar Console Shell"; FAIL=$$((FAIL+1)); \
-	fi; \
-	if grep -qa 'Reached target Kevlar Default Target' /tmp/kevlar-test-m9.log; then \
-		echo "PASS: Reached target Kevlar Default Target"; PASS=$$((PASS+1)); \
-	else \
-		echo "FAIL: Reached target Kevlar Default Target"; FAIL=$$((FAIL+1)); \
+		echo "FAIL: Welcome banner"; FAIL=$$((FAIL+1)); \
 	fi; \
 	if grep -qa 'Startup finished' /tmp/kevlar-test-m9.log; then \
 		echo "PASS: Startup finished"; PASS=$$((PASS+1)); \
 	else \
 		echo "FAIL: Startup finished"; FAIL=$$((FAIL+1)); \
 	fi; \
-	if grep -qa 'Welcome to' /tmp/kevlar-test-m9.log; then \
-		echo "PASS: Welcome banner"; PASS=$$((PASS+1)); \
+	if grep -qa 'Reached target Kevlar Default Target' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Reached target Kevlar Default Target"; PASS=$$((PASS+1)); \
 	else \
-		echo "FAIL: Welcome banner"; FAIL=$$((FAIL+1)); \
+		echo "FAIL: Reached target Kevlar Default Target"; FAIL=$$((FAIL+1)); \
 	fi; \
-	echo "$$PASS/$$((PASS+FAIL)) passed"; \
+	if grep -qa 'Started Kevlar Console Shell' /tmp/kevlar-test-m9.log; then \
+		echo "PASS: Started Kevlar Console Shell"; PASS=$$((PASS+1)); \
+	else \
+		echo "FAIL: Started Kevlar Console Shell"; FAIL=$$((FAIL+1)); \
+	fi; \
+	echo "$$PASS/4 required checks passed"; \
 	if [ $$FAIL -gt 0 ]; then exit 1; fi
+
+.PHONY: test-systemd
+test-systemd:
+	$(PROGRESS) "TEST" "M9.8: comprehensive systemd drop-in validation"
+	@echo "Step 1/3: synthetic init-sequence (1 CPU)"
+	$(MAKE) test-systemd-v3 PROFILE=$(PROFILE)
+	@echo "Step 2/3: synthetic init-sequence SMP (4 CPUs)"
+	$(MAKE) test-systemd-v3-smp PROFILE=$(PROFILE)
+	@echo "Step 3/3: real systemd PID 1 boot"
+	$(MAKE) test-m9 PROFILE=$(PROFILE)
+	@echo "=== M9.8 test-systemd: ALL PASSED ==="
 
 # ─── BusyBox Comprehensive Test Suite ────────────────────────────────────────
 

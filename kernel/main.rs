@@ -231,11 +231,20 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     interrupt::init();
     profiler.lap_time("global interrupt init");
 
+    // Pre-fill zeroed page pools so first faults don't pay memset cost.
+    kevlar_platform::page_allocator::prefill_huge_page_pool();
+    kevlar_platform::page_allocator::prefill_prezeroed_pages();
+    profiler.lap_time("prezeroed pool warmup");
+
     #[cfg(test)]
     {
         crate::test_main();
         end_tests();
     }
+
+    // Initialize wall clock from CMOS RTC.
+    crate::timer::init_wall_clock();
+    profiler.lap_time("wall clock init");
 
     // Initialize kernel subsystems.
     pipe::init();
@@ -447,6 +456,9 @@ pub fn ap_kernel_entry() -> ! {
 
 pub fn interval_work() {
     process::gc_exited_processes();
+    // Refill the 4KB prezeroed page pool so page faults get instant
+    // zeroed pages without inline memset.
+    kevlar_platform::page_allocator::refill_prezeroed_pages();
 }
 
 fn idle_thread() -> ! {

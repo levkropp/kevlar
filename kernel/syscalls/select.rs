@@ -30,7 +30,7 @@ where
         for bit_i in 0..8 {
             let fd = Fd::new((byte_i * 8 + bit_i) as c_int);
             if *byte & (1 << bit_i) != 0 && fd.as_int() <= max_fd {
-                let status = current_process().opened_files().lock().get(fd)?.poll()?;
+                let status = current_process().opened_files_no_irq().get(fd)?.poll()?;
 
                 if is_ready(status) {
                     ready_fds += 1;
@@ -63,13 +63,6 @@ impl<'a> SyscallHandler<'a> {
         let started_at = read_monotonic_clock();
         let timeout_ms = timeout.map(|timeval| timeval.as_msecs());
         POLL_WAIT_QUEUE.sleep_signalable_until(|| {
-            match timeout_ms {
-                Some(timeout_ms) if started_at.elapsed_msecs() >= timeout_ms => {
-                    return Ok(Some(0));
-                }
-                _ => {}
-            }
-
             // Check the statuses of all specified files one by one.
             let mut ready_fds = 0;
             if let Some(fds) = readfds {
@@ -89,8 +82,16 @@ impl<'a> SyscallHandler<'a> {
             if ready_fds > 0 {
                 Ok(Some(ready_fds))
             } else {
-                // Sleep until any changes in files or sockets occur...
-                Ok(None)
+                // Timeout expired — return 0 (no ready fds).
+                match timeout_ms {
+                    Some(timeout_ms) if started_at.elapsed_msecs() >= timeout_ms => {
+                        Ok(Some(0))
+                    }
+                    _ => {
+                        // Sleep until any changes in files or sockets occur...
+                        Ok(None)
+                    }
+                }
             }
         })
     }

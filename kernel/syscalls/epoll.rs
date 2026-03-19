@@ -46,7 +46,7 @@ impl<'a> SyscallHandler<'a> {
         let options = OpenOptions::new(false, cloexec);
 
         let epoll = EpollInstance::new();
-        let fd = current_process().opened_files().lock().open(
+        let fd = current_process().opened_files_no_irq().open(
             PathComponent::new_anonymous(INode::FileLike(epoll as Arc<dyn FileLike>)),
             options,
         )?;
@@ -59,17 +59,18 @@ impl<'a> SyscallHandler<'a> {
         epfd: Fd,
         op: c_int,
         fd: Fd,
-        event_ptr: UserVAddr,
+        event_ptr: Option<UserVAddr>,
     ) -> Result<isize> {
-        // Read the epoll_event from userspace.
+        // Read the epoll_event from userspace (NULL is valid for EPOLL_CTL_DEL).
         let event = if op != EPOLL_CTL_DEL {
-            let bytes = event_ptr.read::<[u8; EPOLL_EVENT_SIZE]>()?;
+            let ptr = event_ptr.ok_or(Error::new(Errno::EFAULT))?;
+            let bytes = ptr.read::<[u8; EPOLL_EVENT_SIZE]>()?;
             Some(EpollEvent::from_bytes(&bytes))
         } else {
             None
         };
 
-        let table = current_process().opened_files().lock();
+        let table = current_process().opened_files_no_irq();
 
         // Get the epoll instance from the epoll fd.
         let epoll_file = table.get(epfd)?.as_file()?;
@@ -112,10 +113,42 @@ impl<'a> SyscallHandler<'a> {
         // Fast path: timeout=0 means non-blocking — avoid Arc clone overhead.
         // Safe: poll() on interest files never locks the fd table.
         if timeout == 0 {
-            let table = current_process().opened_files_no_irq();
+            let proc = current_process();
+
+            // Exp 1+3: Lock-free fd table + interests when both are unshared.
+            #[cfg(not(feature = "profile-fortress"))]
+            if Arc::strong_count(proc.opened_files()) == 1 {
+                // SAFETY: strong_count == 1 guarantees no concurrent access.
+                #[allow(unsafe_code)]
+                let table = unsafe { proc.opened_files().get_unchecked() };
+                let epoll_file = table.get(epfd)?.as_file()?;
+                let epoll = (**epoll_file).as_any().downcast_ref::<EpollInstance>()
+                    .ok_or(Error::new(Errno::EINVAL))?;
+                // Exp 3: skip interests lock if epoll instance is unshared.
+                if Arc::strong_count(epoll_file) == 1 {
+                    #[allow(unsafe_code)]
+                    let count = unsafe {
+                        epoll.collect_ready_to_user_lockfree(events_ptr, maxevents)?
+                    };
+                    return Ok(count as isize);
+                }
+                let count = epoll.collect_ready_to_user(events_ptr, maxevents)?;
+                return Ok(count as isize);
+            }
+
+            let table = proc.opened_files_no_irq();
             let epoll_file = table.get(epfd)?.as_file()?;
             let epoll = (**epoll_file).as_any().downcast_ref::<EpollInstance>()
                 .ok_or(Error::new(Errno::EINVAL))?;
+            // Exp 3: also check on the locked fd table path.
+            #[cfg(not(feature = "profile-fortress"))]
+            if Arc::strong_count(epoll_file) == 1 {
+                #[allow(unsafe_code)]
+                let count = unsafe {
+                    epoll.collect_ready_to_user_lockfree(events_ptr, maxevents)?
+                };
+                return Ok(count as isize);
+            }
             let count = epoll.collect_ready_to_user(events_ptr, maxevents)?;
             return Ok(count as isize);
         }

@@ -62,9 +62,15 @@ fn traverse(
     pml4: PAddr,
     vaddr: UserVAddr,
     allocate: bool,
-    attrs: PageAttrs,
+    _attrs: PageAttrs,
 ) -> Option<NonNull<PageTableEntry>> {
     debug_assert!(is_aligned(vaddr.value(), PAGE_SIZE));
+    // Intermediate page table entries (PML4E, PDPTE, PDE) must use permissive
+    // flags so that restrictive leaf PTE attrs (e.g. read-only, NX) don't
+    // propagate upward and block access to sibling entries in the same table.
+    // On x86_64, effective permissions are the intersection of all levels, so
+    // intermediates need WRITABLE and no NO_EXECUTE to avoid over-restricting.
+    let intermediate_attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE;
     let mut table = pml4.as_mut_ptr::<PageTableEntry>();
     for level in (2..=4).rev() {
         let index = nth_level_table_index(vaddr, level);
@@ -79,7 +85,7 @@ fn traverse(
             let new_table =
                 alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
             unsafe {
-                *entry = new_table.value() as u64 | attrs.bits()
+                *entry = new_table.value() as u64 | intermediate_attrs.bits()
             };
             table = new_table.as_mut_ptr::<PageTableEntry>();
         } else {
@@ -88,8 +94,10 @@ fn traverse(
             if level == 2 && (entry_val & PageAttrs::HUGE_PAGE.bits()) != 0 {
                 return None;
             }
-            // Only write if value changed to avoid unnecessary cache line dirtying.
-            let expected = table_paddr.value() as u64 | attrs.bits();
+            // Ensure intermediate entries have permissive flags.  A previous
+            // mapping with restrictive attrs might have cleared WRITABLE or
+            // set NO_EXECUTE, which would over-restrict all sibling PTEs.
+            let expected = table_paddr.value() as u64 | intermediate_attrs.bits();
             if entry_val != expected {
                 unsafe { *entry = expected; }
             }
@@ -112,8 +120,9 @@ fn traverse_to_pt(
     pml4: PAddr,
     vaddr: UserVAddr,
     allocate: bool,
-    attrs: PageAttrs,
+    _attrs: PageAttrs,
 ) -> Option<*mut PageTableEntry> {
+    let intermediate_attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE;
     let mut table = pml4.as_mut_ptr::<PageTableEntry>();
     for level in (2..=4).rev() {
         let index = nth_level_table_index(vaddr, level);
@@ -126,10 +135,10 @@ fn traverse_to_pt(
             }
             let new_table =
                 alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
-            unsafe { *entry = new_table.value() as u64 | attrs.bits() };
+            unsafe { *entry = new_table.value() as u64 | intermediate_attrs.bits() };
             table = new_table.as_mut_ptr::<PageTableEntry>();
         } else {
-            let expected = table_paddr.value() as u64 | attrs.bits();
+            let expected = table_paddr.value() as u64 | intermediate_attrs.bits();
             if entry_val != expected {
                 unsafe { *entry = expected; }
             }
@@ -152,8 +161,9 @@ fn traverse_to_pd(
     pml4: PAddr,
     vaddr: UserVAddr,
     allocate: bool,
-    attrs: PageAttrs,
+    _attrs: PageAttrs,
 ) -> Option<*mut PageTableEntry> {
+    let intermediate_attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE;
     let mut table = pml4.as_mut_ptr::<PageTableEntry>();
     // Walk levels 4 (PML4) and 3 (PDPT) to reach level 2 (PD).
     for level in (3..=4).rev() {
@@ -167,10 +177,10 @@ fn traverse_to_pd(
             }
             let new_table =
                 alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
-            unsafe { *entry = new_table.value() as u64 | attrs.bits() };
+            unsafe { *entry = new_table.value() as u64 | intermediate_attrs.bits() };
             table = new_table.as_mut_ptr::<PageTableEntry>();
         } else {
-            let expected = table_paddr.value() as u64 | attrs.bits();
+            let expected = table_paddr.value() as u64 | intermediate_attrs.bits();
             if entry_val != expected {
                 unsafe { *entry = expected; }
             }
@@ -236,18 +246,13 @@ fn duplicate_table_cow(pml4: PAddr, level: usize) -> Result<PAddr, PageAllocErro
     duplicate_table(pml4, level)
 }
 
-fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
-    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
-    let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
+/// Recursively walk a page table, decrementing refcounts on user pages
+/// and freeing intermediate page table pages. Called from `teardown_user_pages`.
+fn teardown_table(table_paddr: PAddr, level: usize) {
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
 
-    // Zero the new table — skipped entries must be 0 (not present),
-    // not garbage from a previous page allocation.
-    unsafe { new_table.write_bytes(0, ENTRIES_PER_TABLE as usize); }
-
-    debug_assert!(level > 0);
     for i in 0..ENTRIES_PER_TABLE {
-        let entry = unsafe { *orig_table.offset(i) };
+        let entry = unsafe { *table.offset(i) };
         let paddr = entry_paddr(entry);
 
         if paddr.is_null() {
@@ -255,67 +260,128 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
         }
 
         if level == 1 {
-            // Leaf page table (PTE level): implement Copy-on-Write.
+            // Leaf PTE: decrement refcount, free if last reference.
             let flags = entry_flags(entry);
-            let is_user = flags & PageAttrs::USER.bits() != 0;
-            let is_writable = flags & PageAttrs::WRITABLE.bits() != 0;
-
-            if !is_user {
-                // Kernel page: copy PTE as-is (shared kernel mappings).
-                unsafe { *new_table.offset(i) = entry; }
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue; // Skip kernel mappings.
+            }
+            if crate::page_refcount::page_ref_dec(paddr) {
+                crate::page_allocator::free_pages(paddr, 1);
+            }
+        } else if level == 2 && is_huge_page_pde(entry) {
+            // 2MB huge page: decrement refcount on ALL 512 sub-PFNs,
+            // free each individually when its refcount reaches 0.
+            // After split+CoW, sub-pages may have divergent refcounts,
+            // so we must handle each independently. The buddy allocator
+            // coalesces freed pages back into larger blocks.
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
                 continue;
+            }
+            for sub_i in 0..512usize {
+                let sub = PAddr::new(paddr.value() + sub_i * PAGE_SIZE);
+                if crate::page_refcount::page_ref_dec(sub) {
+                    crate::page_allocator::free_pages(sub, 1);
+                }
+            }
+        } else {
+            // Intermediate table: recurse, then free the table page.
+            if level == 4 && i >= 0x80 {
+                continue; // Skip kernel page table entries.
+            }
+            teardown_table(paddr, level - 1);
+            crate::page_allocator::free_pages(paddr, 1);
+        }
+    }
+}
+
+fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
+    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
+    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    // Bulk-copy the entire 4KB page table in one shot instead of zeroing
+    // first and then copying entries one-by-one. Null entries are copied
+    // as zeros, so skipped slots are already 0 (not present).
+    unsafe {
+        ptr::copy_nonoverlapping(orig_table, new_table, ENTRIES_PER_TABLE as usize);
+    }
+
+    debug_assert!(level > 0);
+
+    if level == 1 {
+        // Leaf page table (PTE level): fix up CoW entries.
+        // The bulk copy already placed all entries. We only need to:
+        // 1) Increment refcounts on user pages
+        // 2) Clear WRITABLE on writable user pages (in BOTH parent and child)
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+
+            if paddr.is_null() {
+                continue;
+            }
+
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue; // Kernel page: already copied correctly.
             }
 
             // Share the physical page between parent and child.
-            // Increment the page's reference count.
             crate::page_refcount::page_ref_inc(paddr);
 
-            if is_writable {
+            if flags & PageAttrs::WRITABLE.bits() != 0 {
                 // CoW: clear WRITABLE in BOTH parent and child PTEs.
-                let cow_flags = flags & !PageAttrs::WRITABLE.bits();
+                let cow_entry = paddr.value() as u64 | (flags & !PageAttrs::WRITABLE.bits());
                 unsafe {
-                    *orig_table.offset(i) = paddr.value() as u64 | cow_flags;
-                    *new_table.offset(i) = paddr.value() as u64 | cow_flags;
+                    *orig_table.offset(i) = cow_entry;
+                    *new_table.offset(i) = cow_entry;
                 }
-            } else {
-                // Already read-only (code, rodata): share directly.
-                unsafe { *new_table.offset(i) = entry; }
             }
-        } else if level == 2 && is_huge_page_pde(entry) {
-            // 2MB huge page PDE: treat as a leaf for CoW purposes.
-            let flags = entry_flags(entry);
-            let is_user = flags & PageAttrs::USER.bits() != 0;
-
-            if !is_user {
-                unsafe { *new_table.offset(i) = entry; }
+            // Read-only entries: already correct from bulk copy.
+        }
+    } else {
+        // Intermediate page table (PML4, PDPT, PD): fix up entries that
+        // need recursion or CoW treatment (huge pages).
+        for i in 0..ENTRIES_PER_TABLE {
+            if level == 4 && i >= 0x80 {
+                // Kernel entries: already correct from bulk copy (shared).
                 continue;
             }
 
-            // Share the 2MB page: increment refcount on the base PFN.
-            crate::page_refcount::page_ref_inc(paddr);
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
 
-            let is_writable = flags & PageAttrs::WRITABLE.bits() != 0;
-            if is_writable {
-                // CoW: clear WRITABLE in both parent and child PDEs.
-                let cow_flags = flags & !PageAttrs::WRITABLE.bits();
-                unsafe {
-                    *orig_table.offset(i) = paddr.value() as u64 | cow_flags;
-                    *new_table.offset(i) = paddr.value() as u64 | cow_flags;
-                }
-            } else {
-                unsafe { *new_table.offset(i) = entry; }
+            if paddr.is_null() {
+                continue;
             }
-            // Do NOT recurse — there is no level-1 PT under a huge page.
-        } else {
-            // Intermediate page table (PML4, PDPT, PD): recurse.
-            let new_paddr = if level == 4 && i >= 0x80 {
-                // Kernel page table entries are immutable.
-                entry_paddr(entry)
+
+            if level == 2 && is_huge_page_pde(entry) {
+                // 2MB huge page PDE: treat as a leaf for CoW purposes.
+                let flags = entry_flags(entry);
+                if flags & PageAttrs::USER.bits() == 0 {
+                    continue; // Already correct from bulk copy.
+                }
+
+                // Share the 2MB page: increment refcount on ALL 512 sub-PFNs.
+                crate::page_refcount::page_ref_inc_huge(paddr);
+
+                if flags & PageAttrs::WRITABLE.bits() != 0 {
+                    // CoW: clear WRITABLE in both parent and child PDEs.
+                    let cow_entry = paddr.value() as u64 | (flags & !PageAttrs::WRITABLE.bits());
+                    unsafe {
+                        *orig_table.offset(i) = cow_entry;
+                        *new_table.offset(i) = cow_entry;
+                    }
+                }
+                // Read-only huge pages: already correct from bulk copy.
             } else {
-                duplicate_table(paddr, level - 1)?
-            };
-            unsafe {
-                *new_table.offset(i) = new_paddr.value() as u64 | entry_flags(entry);
+                // Intermediate entry: recurse to duplicate the child table.
+                let new_child_paddr = duplicate_table(paddr, level - 1)?;
+                // Replace the child table paddr, preserving flags from bulk copy.
+                unsafe {
+                    *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
+                }
             }
         }
     }
@@ -375,6 +441,11 @@ impl PageTable {
     pub fn new() -> Result<PageTable, PageAllocError> {
         let pml4 = allocate_pml4()?;
         Ok(PageTable { pml4, pcid: alloc_pcid() })
+    }
+
+    /// Returns the physical address of the PML4 (top-level page table).
+    pub fn pml4(&self) -> PAddr {
+        self.pml4
     }
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
@@ -620,6 +691,18 @@ impl PageTable {
         None
     }
 
+    /// Look up the raw PTE value for a mapped user page.
+    /// Returns the full u64 PTE entry including flags.
+    /// Used by audit-vm to check permission bits.
+    pub fn lookup_pte_entry(&self, vaddr: UserVAddr) -> Option<u64> {
+        if let Some(entry_ptr) = traverse(self.pml4, vaddr, false,
+            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            let entry = unsafe { *entry_ptr.as_ptr() };
+            if entry != 0 { return Some(entry); }
+        }
+        None
+    }
+
     pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
         let entry_ptr = match traverse(self.pml4, vaddr, false,
             PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
@@ -640,6 +723,13 @@ impl PageTable {
         Some(paddr)
     }
 
+    /// Walk all user page table entries, decrement refcounts, free pages whose
+    /// refcount reaches zero, and free intermediate page table pages.
+    /// Called when a process's address space is destroyed (exec or exit).
+    pub fn teardown_user_pages(&mut self) {
+        teardown_table(self.pml4, 4);
+    }
+
     /// Try to map a page. Returns `true` if mapped, `false` if already mapped.
     /// Allocates intermediate page tables as needed.
     #[inline(always)]
@@ -656,7 +746,12 @@ impl PageTable {
         if prot_flags & 4 == 0 {
             attrs |= PageAttrs::NO_EXECUTE;
         }
-        let mut entry = traverse(self.pml4, vaddr, true, attrs).unwrap();
+        // traverse returns None when a 2MB huge PDE covers this address.
+        // Cannot map a 4KB PTE inside a huge page — return false (not mapped).
+        let mut entry = match traverse(self.pml4, vaddr, true, attrs) {
+            Some(e) => e,
+            None => return false,
+        };
         unsafe {
             if *entry.as_ptr() != 0 {
                 return false; // already mapped

@@ -110,6 +110,7 @@ mod sysinfo;
 
 // M1 Phase 6: Memory management
 mod mprotect;
+mod mremap;
 mod munmap;
 
 // M2: Dynamic linking
@@ -196,6 +197,12 @@ mod name_to_handle_at;
 mod pidfd_open;
 mod waitid;
 
+// M9.8: rt_sigtimedwait real implementation
+mod rt_sigtimedwait;
+
+// M10 Phase D: Multi-user security
+mod setresuid;
+
 pub enum CwdOrFd {
     /// `AT_FDCWD`
     AtCwd,
@@ -254,6 +261,7 @@ mod syscall_numbers {
     pub const SYS_PIPE: usize = 22;
     pub const SYS_SELECT: usize = 23;
     pub const SYS_SCHED_YIELD: usize = 24;
+    pub const SYS_MREMAP: usize = 25;
     pub const SYS_DUP: usize = 32;
     pub const SYS_DUP2: usize = 33;
     pub const SYS_NANOSLEEP: usize = 35;
@@ -418,6 +426,24 @@ mod syscall_numbers {
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
     pub const SYS_FACCESSAT2: usize = 439;
+    // M10 Phase D: Multi-user security
+    pub const SYS_SETRESUID: usize = 117;
+    pub const SYS_GETRESUID: usize = 118;
+    pub const SYS_SETRESGID: usize = 119;
+    pub const SYS_GETRESGID: usize = 120;
+    // M9.8: missing syscalls for systemd
+    pub const SYS_CLOCK_GETRES: usize = 229;
+    pub const SYS_CLOCK_NANOSLEEP: usize = 230;
+    pub const SYS_TIMERFD_GETTIME: usize = 287;
+    pub const SYS_SETNS: usize = 308;
+    pub const SYS_EPOLL_PWAIT2: usize = 441;
+    // New mount API (systemd v259 probes these, falls back to mount(2))
+    pub const SYS_OPEN_TREE: usize = 428;
+    pub const SYS_MOVE_MOUNT: usize = 429;
+    pub const SYS_FSOPEN: usize = 430;
+    pub const SYS_FSCONFIG: usize = 431;
+    pub const SYS_FSMOUNT: usize = 432;
+    pub const SYS_FSPICK: usize = 433;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -468,6 +494,7 @@ mod syscall_numbers {
     pub const SYS_MMAP: usize = 222;
     pub const SYS_MPROTECT: usize = 226;
     pub const SYS_MUNMAP: usize = 215;
+    pub const SYS_MREMAP: usize = 216;
     pub const SYS_BRK: usize = 214;
     pub const SYS_SCHED_GETAFFINITY: usize = 123;
     pub const SYS_SCHED_YIELD: usize = 124;
@@ -614,6 +641,25 @@ mod syscall_numbers {
     pub const SYS_PIDFD_OPEN: usize = 434;
     pub const SYS_CLOSE_RANGE: usize = 436;
     pub const SYS_FACCESSAT2: usize = 439;
+    // M10 Phase D: Multi-user security
+    pub const SYS_SETRESUID: usize = 147;
+    pub const SYS_GETRESUID: usize = 148;
+    pub const SYS_SETRESGID: usize = 149;
+    pub const SYS_GETRESGID: usize = 150;
+    // M9.8: missing syscalls for systemd
+    pub const SYS_CLOCK_GETRES: usize = 114;
+    pub const SYS_CLOCK_NANOSLEEP: usize = 115;
+    pub const SYS_TIMERFD_GETTIME: usize = 87;
+    pub const SYS_SETNS: usize = 268;
+    pub const SYS_EPOLL_PWAIT2: usize = 441;
+    pub const SYS_RT_SIGTIMEDWAIT: usize = 137;
+    // New mount API (same numbers on ARM64)
+    pub const SYS_OPEN_TREE: usize = 428;
+    pub const SYS_MOVE_MOUNT: usize = 429;
+    pub const SYS_FSOPEN: usize = 430;
+    pub const SYS_FSCONFIG: usize = 431;
+    pub const SYS_FSMOUNT: usize = 432;
+    pub const SYS_FSPICK: usize = 433;
 }
 
 use syscall_numbers::*;
@@ -760,6 +806,9 @@ impl<'a> SyscallHandler<'a> {
         // Per-syscall cycle profiler: record TSC at entry.
         let prof_start = debug::profiler::syscall_enter();
 
+        // Hierarchical tracer: record syscall entry with syscall number.
+        let _htrace_guard = debug::htrace::enter_guard(
+            debug::htrace::id::SYSCALL, n as u32);
 
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if dbg_syscall {
@@ -842,6 +891,19 @@ impl<'a> SyscallHandler<'a> {
                     });
                 }
             }
+        }
+
+        // Write the syscall result to frame.rax BEFORE signal delivery.
+        // try_delivering_signal saves the frame to signaled_frame; if we
+        // don't update rax first, sigreturn will restore the stale value
+        // (the syscall number) instead of the actual result.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let rax_val = match &ret {
+                Ok(v) => *v as u64,
+                Err(e) => (-(e.errno() as isize)) as u64,
+            };
+            self.frame.rax = rax_val;
         }
 
         if let Err(err) = Process::try_delivering_signal(self.frame) {
@@ -944,6 +1006,18 @@ impl<'a> SyscallHandler<'a> {
                 current_process().set_egid(a1 as u32);
                 Ok(0)
             }
+            SYS_SETRESUID => self.sys_setresuid(a1 as u32, a2 as u32, a3 as u32),
+            SYS_GETRESUID => self.sys_getresuid(
+                UserVAddr::new_nonnull(a1)?,
+                UserVAddr::new_nonnull(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+            ),
+            SYS_SETRESGID => self.sys_setresgid(a1 as u32, a2 as u32, a3 as u32),
+            SYS_GETRESGID => self.sys_getresgid(
+                UserVAddr::new_nonnull(a1)?,
+                UserVAddr::new_nonnull(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+            ),
             SYS_SETGROUPS => Ok(0), // TODO:
             SYS_SETPGID => self.sys_setpgid(PId::new(a1 as i32), PgId::new(a2 as i32)),
             SYS_GETPPID => self.sys_getppid(),
@@ -1074,6 +1148,12 @@ impl<'a> SyscallHandler<'a> {
                 bitflags_from_user!(MMapProt, a3 as c_int)?,
             ),
             SYS_MUNMAP => self.sys_munmap(UserVAddr::new_nonnull(a1)?, a2),
+            SYS_MREMAP => self.sys_mremap(
+                UserVAddr::new_nonnull(a1)?,
+                a2,
+                a3,
+                a4 as c_int,
+            ),
             // M1 Phase 4: Filesystem mutations
             SYS_UNLINK => self.sys_unlink(&resolve_path(a1)?),
             SYS_RMDIR => self.sys_rmdir(&resolve_path(a1)?),
@@ -1153,13 +1233,12 @@ impl<'a> SyscallHandler<'a> {
             // M3 Phase 5: Job control + additional stubs
             SYS_TKILL => self.sys_tkill(a1 as c_int, a2 as c_int),
             SYS_TGKILL => self.sys_tgkill(a1 as c_int, a2 as c_int, a3 as c_int),
-            SYS_RT_SIGTIMEDWAIT => {
-                // Stub: yield CPU then return EAGAIN (no signal ready).
-                // BusyBox init calls this in a tight loop; without yielding,
-                // it monopolizes the CPU and child processes (getty) never run.
-                crate::process::switch();
-                Err(Errno::EAGAIN.into())
-            }
+            SYS_RT_SIGTIMEDWAIT => self.sys_rt_sigtimedwait(
+                UserVAddr::new_nonnull(a1)?,
+                UserVAddr::new(a2),
+                UserVAddr::new(a3),
+                a4,
+            ),
             SYS_VHANGUP => {
                 // Stub: BusyBox init calls vhangup() before spawning getty.
                 // Revokes access to the controlling terminal. Accept silently.
@@ -1195,7 +1274,7 @@ impl<'a> SyscallHandler<'a> {
                 Fd::new(a1 as i32),
                 a2 as c_int,
                 Fd::new(a3 as i32),
-                UserVAddr::new_nonnull(a4)?,
+                UserVAddr::new(a4),
             ),
             SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => self.sys_epoll_wait(
                 Fd::new(a1 as i32),
@@ -1382,6 +1461,20 @@ impl<'a> SyscallHandler<'a> {
             ),
             SYS_PIDFD_OPEN => self.sys_pidfd_open(a1 as i32, a2 as u32),
             SYS_CLOSE_RANGE => self.sys_close_range(a1 as u32, a2 as u32, a3 as u32),
+            // M9.8: missing syscalls for systemd
+            SYS_CLOCK_NANOSLEEP => self.sys_clock_nanosleep(
+                a1 as c_clockid,
+                a2 as c_int,
+                UserVAddr::new_nonnull(a3)?,
+                UserVAddr::new(a4),
+            ),
+            SYS_CLOCK_GETRES => self.sys_clock_getres(a1 as c_clockid, UserVAddr::new(a2)),
+            SYS_TIMERFD_GETTIME => self.sys_timerfd_gettime(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?),
+            SYS_SETNS => Err(Error::new(Errno::ENOSYS)),
+            SYS_EPOLL_PWAIT2 => Err(Error::new(Errno::ENOSYS)),
+            // New mount API stubs — systemd v259 probes these and falls back to mount(2).
+            SYS_OPEN_TREE | SYS_MOVE_MOUNT | SYS_FSOPEN | SYS_FSCONFIG |
+            SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1415,6 +1508,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_MMAP => "mmap",
         SYS_MPROTECT => "mprotect",
         SYS_MUNMAP => "munmap",
+        SYS_MREMAP => "mremap",
         SYS_BRK => "brk",
         SYS_RT_SIGACTION => "rt_sigaction",
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",
@@ -1475,6 +1569,10 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_SETPGID => "setpgid",
         SYS_GETPPID => "getppid",
         SYS_GETPGRP => "getpgrp",
+        SYS_SETRESUID => "setresuid",
+        SYS_GETRESUID => "getresuid",
+        SYS_SETRESGID => "setresgid",
+        SYS_GETRESGID => "getresgid",
         SYS_SETGROUPS => "setgroups",
         SYS_GETPGID => "getpgid",
         SYS_ARCH_PRCTL => "arch_prctl",
@@ -1583,6 +1681,17 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_NAME_TO_HANDLE_AT => "name_to_handle_at",
         SYS_PIDFD_OPEN => "pidfd_open",
         SYS_CLOSE_RANGE => "close_range",
+        SYS_CLOCK_GETRES => "clock_getres",
+        SYS_CLOCK_NANOSLEEP => "clock_nanosleep",
+        SYS_TIMERFD_GETTIME => "timerfd_gettime",
+        SYS_SETNS => "setns",
+        SYS_EPOLL_PWAIT2 => "epoll_pwait2",
+        SYS_OPEN_TREE => "open_tree",
+        SYS_MOVE_MOUNT => "move_mount",
+        SYS_FSOPEN => "fsopen",
+        SYS_FSCONFIG => "fsconfig",
+        SYS_FSMOUNT => "fsmount",
+        SYS_FSPICK => "fspick",
         _ => "(unknown)",
     }
 }

@@ -57,6 +57,46 @@ impl PageCache {
 static PAGE_CACHE: SpinLock<PageCache> = SpinLock::new(PageCache::new());
 static PAGE_CACHE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Pool of pre-zeroed 4KB pages. Served by `alloc_page()` when zeroed pages
+/// are requested (!DIRTY_OK), avoiding the ~1-2µs inline memset.
+/// Refilled at boot and in the idle thread.
+const PREZEROED_4K_POOL_SIZE: usize = 128;
+
+struct Prezeroed4kPool {
+    pages: [usize; PREZEROED_4K_POOL_SIZE],
+    count: usize,
+}
+
+impl Prezeroed4kPool {
+    const fn new() -> Self {
+        Prezeroed4kPool { pages: [0; PREZEROED_4K_POOL_SIZE], count: 0 }
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<PAddr> {
+        if self.count > 0 {
+            self.count -= 1;
+            Some(PAddr::new(self.pages[self.count]))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, paddr: PAddr) -> bool {
+        if self.count < PREZEROED_4K_POOL_SIZE {
+            self.pages[self.count] = paddr.value();
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+static PREZEROED_4K_POOL: SpinLock<Prezeroed4kPool> = SpinLock::new(Prezeroed4kPool::new());
+static PREZEROED_4K_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 #[inline(always)]
 fn num_pages_to_order(num_pages: usize) -> usize {
     if num_pages <= 1 {
@@ -150,6 +190,16 @@ fn refill_page_cache() -> usize {
 /// Allocate a single physical page.
 #[inline(always)]
 pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
+    // Fastest path: pre-zeroed page — no memset needed.
+    if !flags.contains(AllocPageFlags::DIRTY_OK) {
+        if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
+            if let Some(paddr) = PREZEROED_4K_POOL.lock_no_irq().pop() {
+                PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
+                return Ok(paddr);
+            }
+        }
+    }
+
     // Fast path: pop from global page cache (lock_no_irq, ~5ns uncontended).
     if PAGE_CACHE_COUNT.load(Ordering::Relaxed) > 0 {
         let cached = PAGE_CACHE.lock_no_irq().pop();
@@ -176,6 +226,26 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     }
 
     Err(PageAllocError)
+}
+
+/// Pop a single pre-zeroed 4KB page from the pool, or None if empty.
+#[inline(always)]
+pub fn alloc_page_prezeroed() -> Option<PAddr> {
+    if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
+        let result = PREZEROED_4K_POOL.lock_no_irq().pop();
+        if result.is_some() {
+            PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
+        }
+        result
+    } else {
+        None
+    }
+}
+
+/// Current count of pre-zeroed 4KB pages available.
+#[inline(always)]
+pub fn prezeroed_4k_count() -> usize {
+    PREZEROED_4K_COUNT.load(Ordering::Relaxed)
 }
 
 /// Batch-allocate up to `max` dirty pages into `out`. Returns number allocated.
@@ -247,6 +317,136 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
 /// Returns DIRTY memory — caller must zero if needed.
 pub fn alloc_huge_page() -> Result<PAddr, PageAllocError> {
     alloc_pages(512, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)
+}
+
+/// Pool of pre-zeroed 2MB huge pages.  Zeroing happens at free time
+/// (munmap), so the next fault gets a pre-zeroed page at zero cost.
+const PREZEROED_HUGE_POOL_SIZE: usize = 8;
+
+struct HugePagePool {
+    pages: [usize; PREZEROED_HUGE_POOL_SIZE],
+    count: usize,
+}
+
+impl HugePagePool {
+    const fn new() -> Self {
+        HugePagePool {
+            pages: [0; PREZEROED_HUGE_POOL_SIZE],
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<PAddr> {
+        if self.count > 0 {
+            self.count -= 1;
+            Some(PAddr::new(self.pages[self.count]))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, paddr: PAddr) -> bool {
+        if self.count < PREZEROED_HUGE_POOL_SIZE {
+            self.pages[self.count] = paddr.value();
+            self.count += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+static PREZEROED_HUGE_POOL: SpinLock<HugePagePool> = SpinLock::new(HugePagePool::new());
+
+/// Try to allocate a pre-zeroed 2MB huge page from the pool.
+/// Returns `None` if the pool is empty — caller should fall back to
+/// `alloc_huge_page()` + `zero_huge_page()`.
+#[inline]
+pub fn alloc_huge_page_prezeroed() -> Option<PAddr> {
+    PREZEROED_HUGE_POOL.lock_no_irq().pop()
+}
+
+/// Zero a 2MB huge page and add it to the pre-zeroed pool.
+/// If the pool is full, the page is freed back to the buddy allocator.
+/// Called from munmap when a sole-owner huge page is unmapped.
+pub fn free_huge_page_and_zero(paddr: PAddr) {
+    use crate::page_ops::zero_huge_page;
+    zero_huge_page(paddr);
+    if !PREZEROED_HUGE_POOL.lock_no_irq().push(paddr) {
+        // Pool full — return to buddy allocator.
+        free_pages(paddr, 512);
+    } else {
+        NUM_FREE_PAGES.fetch_add(512, Ordering::Relaxed);
+    }
+}
+
+/// Pre-fill the prezeroed huge page pool at boot time so the first
+/// userspace 2MB faults get instant pre-zeroed pages without paying
+/// the alloc+zero cost on the hot path.
+pub fn prefill_huge_page_pool() {
+    for _ in 0..PREZEROED_HUGE_POOL_SIZE {
+        match alloc_huge_page() {
+            Ok(paddr) => free_huge_page_and_zero(paddr),
+            Err(_) => break,
+        }
+    }
+}
+
+/// Pre-fill the 4KB prezeroed page pool at boot. Pages are allocated
+/// from the buddy allocator, zeroed, and placed in the pool so the
+/// first page faults get instant zeroed pages without inline memset.
+pub fn prefill_prezeroed_pages() {
+    use crate::page_ops::zero_page;
+    let target = PREZEROED_4K_POOL_SIZE;
+    for _ in 0..target {
+        match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
+            Ok(paddr) => {
+                zero_page(paddr);
+                let mut pool = PREZEROED_4K_POOL.lock_no_irq();
+                if !pool.push(paddr) {
+                    drop(pool);
+                    free_pages(paddr, 1);
+                    break;
+                }
+                PREZEROED_4K_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Refill the 4KB prezeroed pool from the buddy allocator.
+/// Called from the idle thread to keep the pool warm between bursts.
+/// Returns the number of pages added.
+pub fn refill_prezeroed_pages() -> usize {
+    use crate::page_ops::zero_page;
+    let current = PREZEROED_4K_COUNT.load(Ordering::Relaxed);
+    if current >= PREZEROED_4K_POOL_SIZE / 2 {
+        return 0; // Pool is at least half full, don't refill.
+    }
+
+    let target = PREZEROED_4K_POOL_SIZE - current;
+    let mut filled = 0;
+    for _ in 0..target {
+        match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
+            Ok(paddr) => {
+                zero_page(paddr);
+                let mut pool = PREZEROED_4K_POOL.lock_no_irq();
+                if pool.push(paddr) {
+                    PREZEROED_4K_COUNT.fetch_add(1, Ordering::Relaxed);
+                    filled += 1;
+                } else {
+                    drop(pool);
+                    free_pages(paddr, 1);
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    filled
 }
 
 pub fn alloc_pages_owned(

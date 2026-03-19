@@ -35,6 +35,7 @@ impl<'a> SyscallHandler<'a> {
         options: WaitOptions,
         _rusage: Option<UserVAddr>,
     ) -> Result<isize> {
+        let _wait_span = debug::tracer::span_guard(debug::tracer::span::WAIT_TOTAL);
         let (got_pid, encoded_status) = JOIN_WAIT_QUEUE.sleep_signalable_until(|| {
             let current = current_process();
             let children = current.children();
@@ -75,22 +76,19 @@ impl<'a> SyscallHandler<'a> {
             Ok(None)
         })?;
 
-        // Evict the child from our children list if it exited.
+        // Evict the child from our children list if it exited (single pass).
         if got_pid.as_i32() > 0 {
             let current = current_process();
-            let should_evict = current
-                .children()
-                .iter()
-                .any(|p| p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_)));
-            if should_evict {
-                current.children().retain(|p| p.pid() != got_pid);
+            let mut children = current.children();
+            if let Some(pos) = children.iter().position(|p| {
+                p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_))
+            }) {
+                let reaped = children.swap_remove(pos);
+                // Move reaped process to EXITED_PROCESSES for deferred kernel
+                // stack cleanup (gc'd from idle thread).
+                crate::process::EXITED_PROCESSES.lock().push(reaped);
             }
         }
-
-        // Eagerly free exited process resources (kernel stacks).
-        // Without this, EXITED_PROCESSES accumulates indefinitely on
-        // single-CPU systems where the idle thread never runs.
-        crate::process::EXITED_PROCESSES.lock().clear();
 
         if let Some(status) = status {
             debug::usercopy::set_context("sys_wait4:status");

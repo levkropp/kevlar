@@ -76,14 +76,14 @@ impl<T, const CAP: usize> RingBuffer<T, CAP> {
     }
 
     pub fn pop_slice(&mut self, len: usize) -> Option<&[T]> {
-        if !self.is_readable() {
+        if !self.is_readable() || len == 0 {
             return None;
         }
 
         let range = if self.rp < self.wp {
             self.rp..min(self.rp + len, self.wp)
         } else {
-            self.wp..min(self.wp + len, CAP)
+            self.rp..min(self.rp + len, CAP)
         };
 
         self.rp = (self.rp + range.len()) % CAP;

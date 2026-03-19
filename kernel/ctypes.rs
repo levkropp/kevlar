@@ -25,10 +25,15 @@ pub type c_off = c_uint64;
 
 pub const CLOCK_REALTIME: c_clockid = 0;
 pub const CLOCK_MONOTONIC: c_clockid = 1;
-pub const CLOCK_BOOTTIME: c_clockid = 7;
+pub const CLOCK_PROCESS_CPUTIME_ID: c_clockid = 2;
+pub const CLOCK_THREAD_CPUTIME_ID: c_clockid = 3;
 pub const CLOCK_MONOTONIC_RAW: c_clockid = 4;
 pub const CLOCK_REALTIME_COARSE: c_clockid = 5;
 pub const CLOCK_MONOTONIC_COARSE: c_clockid = 6;
+pub const CLOCK_BOOTTIME: c_clockid = 7;
+pub const CLOCK_REALTIME_ALARM: c_clockid = 8;
+pub const CLOCK_BOOTTIME_ALARM: c_clockid = 9;
+pub const CLOCK_TAI: c_clockid = 11;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +47,7 @@ bitflags! {
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MMapFlags: c_int {
+        const MAP_SHARED     = 0x00001;
         const MAP_PRIVATE    = 0x00002;
         const MAP_FIXED      = 0x00010;
         const MAP_ANONYMOUS  = 0x00020;

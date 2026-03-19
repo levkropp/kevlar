@@ -173,6 +173,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // in the moments before the crash.  Other CPUs are halted by this point.
     kevlar_platform::flight_recorder::dump();
 
+    // Dump the hierarchical tracer if enabled — shows nested call chains.
+    crate::debug::htrace::dump_all_cpus();
+
     unsafe {
         warn!("preparing a crash dump...");
         KERNEL_LOG_BUF.force_unlock();

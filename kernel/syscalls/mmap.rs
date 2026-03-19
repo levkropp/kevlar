@@ -99,7 +99,8 @@ impl<'a> SyscallHandler<'a> {
             }
         };
 
-        vm.add_vm_area_with_prot(mapped_uaddr, len, area_type, prot)?;
+        let shared = flags.contains(MMapFlags::MAP_SHARED);
+        vm.add_vm_area_with_prot(mapped_uaddr, len, area_type, prot, shared)?;
         Ok(mapped_uaddr.value() as isize)
     }
 }

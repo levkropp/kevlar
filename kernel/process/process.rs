@@ -125,9 +125,11 @@ static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
 // Flip these to measure each optimization independently.
 // When false, the experiment's code path is bypassed and the original behavior is used.
 /// Experiment 1: Ghost-fork (share VM on fork, block parent until child exec/exit).
-/// Currently disabled — SIGCHLD delivery races with the ghost-fork wake
-/// predicate, causing fork() to return EINTR. Needs a non-signalable wait
-/// or signal masking around the sleep. Keeping the infrastructure for future work.
+/// DISABLED: libc's fork() wrapper modifies TLS and global state in the child
+/// (self->tid, libc.need_locks, etc.), corrupting the parent when they share the
+/// same address space. Only vfork() is safe (callers follow the vfork contract:
+/// only _exit or exec, and musl's vfork wrapper doesn't modify shared state).
+/// The signal masking fix in fork.rs/vfork.rs is correct and protects the vfork path.
 pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
 pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -230,11 +232,13 @@ pub struct Process {
     signaled_frame: AtomicCell<Option<PtRegs>>,
     sigset: AtomicU64,
     umask: AtomicCell<u32>,
-    // UID/GID tracking (Phase 5).
+    // UID/GID tracking (Phase 5) + saved IDs (M10.4).
     uid: AtomicU32,
     euid: AtomicU32,
+    suid: AtomicU32,
     gid: AtomicU32,
     egid: AtomicU32,
+    sgid: AtomicU32,
     /// Nice value (-20 to +19). Used by getpriority/setpriority.
     nice: AtomicI32,
     /// Whether this process is a child subreaper (PR_SET_CHILD_SUBREAPER).
@@ -301,8 +305,10 @@ impl Process {
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
             euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
             nice: AtomicI32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
@@ -391,8 +397,10 @@ impl Process {
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
             euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
             nice: AtomicI32::new(0),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
@@ -576,12 +584,16 @@ impl Process {
     // ── UID/GID accessors ────────────────────────────────────────────
     pub fn uid(&self) -> u32 { self.uid.load(Ordering::Relaxed) }
     pub fn euid(&self) -> u32 { self.euid.load(Ordering::Relaxed) }
+    pub fn suid(&self) -> u32 { self.suid.load(Ordering::Relaxed) }
     pub fn gid(&self) -> u32 { self.gid.load(Ordering::Relaxed) }
     pub fn egid(&self) -> u32 { self.egid.load(Ordering::Relaxed) }
+    pub fn sgid(&self) -> u32 { self.sgid.load(Ordering::Relaxed) }
     pub fn set_uid(&self, uid: u32) { self.uid.store(uid, Ordering::Relaxed); }
     pub fn set_euid(&self, euid: u32) { self.euid.store(euid, Ordering::Relaxed); }
+    pub fn set_suid(&self, suid: u32) { self.suid.store(suid, Ordering::Relaxed); }
     pub fn set_gid(&self, gid: u32) { self.gid.store(gid, Ordering::Relaxed); }
     pub fn set_egid(&self, egid: u32) { self.egid.store(egid, Ordering::Relaxed); }
+    pub fn set_sgid(&self, sgid: u32) { self.sgid.store(sgid, Ordering::Relaxed); }
     pub fn nice(&self) -> i32 { self.nice.load(Ordering::Relaxed) }
     pub fn set_nice(&self, n: i32) { self.nice.store(n, Ordering::Relaxed); }
 
@@ -1066,7 +1078,7 @@ impl Process {
             self.continue_process();
         }
 
-        let mut sigs = self.signals.lock();
+        let mut sigs = self.signals.lock_no_irq();
         let action = sigs.get_action(signal);
 
         // Signals with Ignore disposition (default SIGCHLD, SIGURG, SIGWINCH)
@@ -1135,7 +1147,7 @@ impl Process {
             return Ok(());
         }
         let popped = {
-            let mut sigs = current.signals.lock();
+            let mut sigs = current.signals.lock_no_irq();
             let sigset = current.sigset_load();
             let result = sigs.pop_pending_unblocked(sigset);
             // Sync the atomic mirror with the actual pending state.
@@ -1325,7 +1337,7 @@ impl Process {
         // function pointers from the old address space are no longer valid).
         {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SIGNAL_RESET);
-            current.signals.lock().reset_on_exec();
+            current.signals.lock_no_irq().reset_on_exec();
             current.signaled_frame.store(None);
         }
 
@@ -1354,7 +1366,8 @@ impl Process {
         let parent_weak = Arc::downgrade(parent);
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
-        let arch = parent.arch.fork(parent_frame);
+        let arch = parent.arch.fork(parent_frame)
+            .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?;
         // Ghost-fork: share parent's VM instead of duplicating the page table.
         // Since fork+exec immediately replaces the address space, the duplicated
         // page table is 100% wasted work (~14µs). The parent is blocked in
@@ -1392,15 +1405,17 @@ impl Process {
                 Arc::new(SpinLock::new(cloned))
             }),
             arch,
-            signals: Arc::new(SpinLock::new(parent.signals.lock().fork_clone())),
+            signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
             euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            suid: AtomicU32::new(parent.suid.load(Ordering::Relaxed)),
             gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
             nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
@@ -1460,7 +1475,8 @@ impl Process {
         let parent_weak = Arc::downgrade(parent);
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
-        let arch = parent.arch.fork(parent_frame);
+        let arch = parent.arch.fork(parent_frame)
+            .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?;
         // Share the parent's VM — no page table copy!
         let vm = parent.vm().clone();
         let opened_files = parent.opened_files().lock().clone();
@@ -1484,15 +1500,17 @@ impl Process {
                 Arc::new(SpinLock::new(cloned))
             }),
             arch,
-            signals: Arc::new(SpinLock::new(parent.signals.lock().fork_clone())),
+            signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame: AtomicCell::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
             euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            suid: AtomicU32::new(parent.suid.load(Ordering::Relaxed)),
             gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
             nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
@@ -1559,7 +1577,8 @@ impl Process {
         let pid = alloc_pid(&mut process_table)?;
 
         let fs_base = if newtls != 0 { newtls } else { parent.arch.fsbase() };
-        let arch = arch::Process::new_thread(frame, child_stack, fs_base);
+        let arch = arch::Process::new_thread(frame, child_stack, fs_base)
+            .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?;
 
         let child = Arc::new(Process {
             is_idle: false,
@@ -1581,8 +1600,10 @@ impl Process {
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
             euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            suid: AtomicU32::new(parent.suid.load(Ordering::Relaxed)),
             gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
             egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
             nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
@@ -1704,6 +1725,17 @@ fn do_script_binfmt(
         Path::new(core::str::from_utf8(argv[0]).map_err(|_| Error::new(Errno::EINVAL))?),
         true,
     )?;
+
+    // Update exe_path to the interpreter (e.g. /bin/sh), not the script.
+    // Linux /proc/self/exe always points to the loaded ELF binary.
+    // BusyBox relies on this to re-exec itself as an applet via /proc/self/exe.
+    {
+        let resolved = shebang_path.resolve_absolute_path();
+        let current = crate::process::current_process();
+        let mut ep = current.exe_path.lock_no_irq();
+        ep.clear();
+        let _ = ep.try_push_str(resolved.as_str());
+    }
 
     do_setup_userspace(shebang_path, &argv, envp, root_fs, false)
 }

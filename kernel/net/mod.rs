@@ -22,7 +22,7 @@ pub mod socket;
 mod icmp_socket;
 mod tcp_socket;
 mod udp_socket;
-mod unix_socket;
+pub(crate) mod unix_socket;
 
 pub use icmp_socket::*;
 pub use socket::*;
