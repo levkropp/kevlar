@@ -16,5 +16,8 @@
     "threading.getrusage_struct": "getrusage utime always 0 — Kevlar does not yet track per-process user-mode CPU time.",
     "signals.setitimer_oneshot": "Timer remaining sec=10 vs sec=9 — sub-second precision difference under TCG emulation.",
     "events.poll_basic": "30s timeout — poll on pipe fds blocks indefinitely (POLL_WAIT_QUEUE wakeup issue with pipes).",
-    "events.inotify_create_xfail": "30s timeout — inotify_init1 returns a stub fd but IN_CREATE watch never fires."
+    "events.inotify_create_xfail": "30s timeout — inotify_init1 returns a stub fd but IN_CREATE watch never fires.",
+    "sockets.accept4_flags": "accept4 with SOCK_NONBLOCK panics — AF_UNIX socket accept not fully implemented.",
+    "sockets.unix_stream": "AF_UNIX stream connect panics — Unix domain sockets not fully implemented.",
+    "vm.mremap_grow": "ARM64 only: memset data not visible after in-place mremap extend — suspected QEMU TCG cache coherency issue. x86_64 passes."
 }

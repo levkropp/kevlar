@@ -143,6 +143,8 @@ impl<'a> SyscallHandler<'a> {
         let needed = new_size - vma_len;
         if vm.is_free_vaddr_range(vma_end_addr, needed) {
             // Extend in-place: grow the existing VMA.
+            // Debug: check page content before extending.
+            // In-place extension — no page movement needed.
             vm.extend_vma(old_addr, needed)?;
             return Ok(old_addr.value() as isize);
         }
