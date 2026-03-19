@@ -679,6 +679,14 @@ impl Process {
         *self.cached_utsname.lock_no_irq()
     }
 
+    /// Rebuild the cached utsname from the current UTS namespace.
+    /// Called after sethostname/setdomainname to ensure uname(2) returns
+    /// the updated values.
+    pub fn rebuild_cached_utsname(&self) {
+        let ns = self.namespaces();
+        *self.cached_utsname.lock_no_irq() = build_cached_utsname(&ns.uts);
+    }
+
     /// Returns the physical address of this process's vDSO data page (0 if none).
     #[cfg(target_arch = "x86_64")]
     pub fn vdso_data_paddr(&self) -> u64 {

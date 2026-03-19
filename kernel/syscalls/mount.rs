@@ -29,6 +29,7 @@ impl<'a> SyscallHandler<'a> {
         _data: usize,
     ) -> Result<isize> {
         const PATH_MAX: usize = 256;
+        const MS_RDONLY: c_int = 1;
         #[allow(dead_code)]
         const MS_NOSUID: c_int = 2;
         #[allow(dead_code)]
@@ -125,10 +126,15 @@ impl<'a> SyscallHandler<'a> {
             }
         };
 
-        root_fs.mount(dir, fs.clone())?;
+        let is_rdonly = flags & MS_RDONLY != 0;
+        if is_rdonly {
+            root_fs.mount_readonly(dir, fs.clone())?;
+        } else {
+            root_fs.mount(dir, fs.clone())?;
+        }
 
         // Record in mount table for /proc/mounts.
-        MountTable::add(fstype, target_path.as_str());
+        MountTable::add_with_flags(fstype, target_path.as_str(), is_rdonly);
 
         Ok(0)
     }

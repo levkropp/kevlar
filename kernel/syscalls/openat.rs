@@ -38,6 +38,15 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let current = current_process();
 
+        // Reject writes to read-only mounts (MS_RDONLY).
+        let access = mode.access_mode();
+        if (flags.contains(OpenFlags::O_CREAT) || access == O_WRONLY || access == O_RDWR)
+            && path.is_absolute()
+            && crate::fs::mount::MountTable::is_readonly(path.as_str())
+        {
+            return Err(Error::new(Errno::EROFS));
+        }
+
         if flags.contains(OpenFlags::O_CREAT) {
             match create_file_at(&dirfd, path, flags, mode) {
                 Ok(_) => {}
