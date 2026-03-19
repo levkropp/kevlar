@@ -137,6 +137,10 @@ pub struct Timeval {
 }
 
 impl Timeval {
+    pub fn new(tv_sec: c_time, tv_usec: c_suseconds) -> Self {
+        Timeval { tv_sec, tv_usec }
+    }
+
     pub fn as_msecs(&self) -> usize {
         (self.tv_sec as usize) * 1000 + (self.tv_usec as usize) / 1000
     }

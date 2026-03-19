@@ -345,6 +345,7 @@ mod syscall_numbers {
     pub const SYS_CLONE: usize = 56;
     pub const SYS_FACCESSAT: usize = 269;
     pub const SYS_PPOLL: usize = 271;
+    pub const SYS_PSELECT6: usize = 270;
     pub const SYS_PRLIMIT64: usize = 302;
     pub const SYS_FCHMODAT: usize = 268;
     pub const SYS_FCHOWNAT: usize = 260;
@@ -560,9 +561,10 @@ mod syscall_numbers {
     pub const SYS_CLONE: usize = 220;
     pub const SYS_FACCESSAT: usize = 48;
     pub const SYS_PPOLL: usize = 73;
+    pub const SYS_PSELECT6: usize = 72;
     pub const SYS_PRLIMIT64: usize = 261;
     pub const SYS_FCHMODAT: usize = 53;
-    pub const SYS_FCHOWNAT: usize = 55;
+    pub const SYS_FCHOWNAT: usize = 54;
     pub const SYS_PREAD64: usize = 67;
     pub const SYS_MADVISE: usize = 233;
     pub const SYS_FUTEX: usize = 98;
@@ -572,9 +574,8 @@ mod syscall_numbers {
     pub const SYS_TKILL: usize = 130; // ARM64 tkill
     pub const SYS_TGKILL: usize = 131;
     pub const SYS_RT_SIGSUSPEND: usize = 133;
-    // ARM64 only has fchmodat(53)/fchownat(55), not fchmod/fchown.
-    pub const SYS_FCHMOD: usize = 0xF010;
-    pub const SYS_FCHOWN: usize = 0xF011;
+    pub const SYS_FCHMOD: usize = 52;
+    pub const SYS_FCHOWN: usize = 55;
     // ARM64 doesn't have pause/alarm natively.
     pub const SYS_PAUSE: usize = 0xF012;
     pub const SYS_SETITIMER: usize = 103;
@@ -618,7 +619,7 @@ mod syscall_numbers {
     pub const SYS_COPY_FILE_RANGE: usize = 285;
     // M7 Phase 6: glibc syscall stubs
     pub const SYS_SCHED_SETSCHEDULER: usize = 119;
-    pub const SYS_SCHED_GETSCHEDULER: usize = 121;
+    pub const SYS_SCHED_GETSCHEDULER: usize = 120;
     pub const SYS_SCHED_SETAFFINITY: usize = 122;
     pub const SYS_RSEQ: usize = 293;
     pub const SYS_CLONE3: usize = 435;
@@ -633,6 +634,7 @@ mod syscall_numbers {
     pub const SYS_FLOCK: usize = 32;
     pub const SYS_WAITID: usize = 95;
     pub const SYS_MEMFD_CREATE: usize = 279;
+    pub const SYS_VHANGUP: usize = 58;
     pub const SYS_MKNOD: usize = 0xF016; // ARM64 has no old mknod, only mknodat
     pub const SYS_MKNODAT: usize = 33;
     pub const SYS_SETTIMEOFDAY: usize = 170;
@@ -1040,6 +1042,15 @@ impl<'a> SyscallHandler<'a> {
                     .map(|uaddr| uaddr.read::<Timeval>())
                     .transpose()?,
             ),
+            // pselect6: like select but with struct timespec + optional sigmask.
+            // Read the timespec (a5) and convert nsec→usec to get Timeval; ignore sigmask (a6).
+            SYS_PSELECT6 => {
+                let timeout = UserVAddr::new(a5)
+                    .map(|p| p.read::<[i64; 2]>())
+                    .transpose()?
+                    .map(|ts| Timeval::new(ts[0], ts[1] / 1000));
+                self.sys_select(a1 as c_int, UserVAddr::new(a2), UserVAddr::new(a3), UserVAddr::new(a4), timeout)
+            }
             SYS_DUP2 => self.sys_dup2(Fd::new(a1 as c_int), Fd::new(a2 as c_int)),
             SYS_GETCWD => self.sys_getcwd(UserVAddr::new_nonnull(a1)?, a2 as c_size),
             SYS_CHDIR => self.sys_chdir(&resolve_path(a1)?),
@@ -1651,6 +1662,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FACCESSAT => "faccessat",
         SYS_FACCESSAT2 => "faccessat2",
         SYS_PPOLL => "ppoll",
+        SYS_PSELECT6 => "pselect6",
         SYS_PRLIMIT64 => "prlimit64",
         SYS_PREAD64 => "pread64",
         SYS_MADVISE => "madvise",

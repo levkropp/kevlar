@@ -372,9 +372,42 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         .expect("failed to open /dev/console");
 
     // Open the init's executable.
-    // Priority: cmdline `init=` > compile-time INIT_SCRIPT > /sbin/init
+    // Priority: patchable slot > cmdline `init=` > compile-time INIT_SCRIPT > /sbin/init
+    //
+    // KEVLAR_INIT_SLOT: a 128-byte NUL-padded buffer that compare-contracts.py
+    // can find (via the "KEVLAR_INIT:" magic prefix) and overwrite with a
+    // per-test init path, without rebuilding the kernel.  This is the primary
+    // mechanism for ARM64 contract tests (where DTB cmdline is unavailable).
+    #[used]
+    #[unsafe(link_section = ".rodata")]
+    static INIT_SLOT: [u8; 128] = {
+        let mut buf = [0u8; 128];
+        // Magic prefix "KEVLAR_INIT:" (12 bytes) — compare-contracts.py searches for this.
+        buf[0] = b'K'; buf[1] = b'E'; buf[2] = b'V'; buf[3] = b'L';
+        buf[4] = b'A'; buf[5] = b'R'; buf[6] = b'_'; buf[7] = b'I';
+        buf[8] = b'N'; buf[9] = b'I'; buf[10] = b'T'; buf[11] = b':';
+        buf
+    };
+
+    // Read the init slot using volatile reads to prevent the compiler from
+    // constant-folding the all-zero initial value — compare-contracts.py
+    // patches the ELF bytes after compilation.
+    let mut init_slot_buf = [0u8; 116];
+    let init_slot_len = {
+        for i in 0..116 {
+            init_slot_buf[i] = unsafe { core::ptr::read_volatile(&INIT_SLOT[12 + i]) };
+        }
+        init_slot_buf.iter().position(|&b| b == 0).unwrap_or(116)
+    };
+    let init_slot_path = if init_slot_len > 0 {
+        core::str::from_utf8(&init_slot_buf[..init_slot_len]).ok()
+    } else {
+        None
+    };
     let init_path_cmdline = bootinfo.init_path.as_deref().map(str::as_bytes);
-    let argv0 = if let Some(path) = init_path_cmdline {
+    let argv0 = if let Some(path) = init_slot_path {
+        path
+    } else if let Some(path) = init_path_cmdline {
         core::str::from_utf8(path).unwrap_or("/sbin/init")
     } else if option_env!("INIT_SCRIPT").is_some() {
         "/bin/sh"
@@ -396,7 +429,17 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("process init");
 
     // Create the init process.
-    if let Some(path) = bootinfo.init_path.as_deref() {
+    if let Some(path) = init_slot_path {
+        // Init slot (patched by compare-contracts.py): run binary directly as PID 1.
+        info!("running init slot: {:?}", path);
+        Process::new_init_process(
+            INITIAL_ROOT_FS.clone(),
+            executable_path,
+            console,
+            &[path.as_bytes()],
+        )
+        .expect("failed to execute init slot binary");
+    } else if let Some(path) = bootinfo.init_path.as_deref() {
         // `init=` on kernel cmdline: run binary directly as PID 1 (no sh -c wrapper).
         info!("running cmdline init: {:?}", path);
         Process::new_init_process(

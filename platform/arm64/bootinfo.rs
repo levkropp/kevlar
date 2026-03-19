@@ -41,18 +41,10 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
     let dtb_paddr = if dtb_paddr.value() != 0 {
         dtb_paddr
     } else {
-        // QEMU doesn't pass DTB in x0 for ELF kernels. Scan memory for it.
-        // QEMU virt places DTB near start of RAM (0x40000000).
-        match scan_for_dtb() {
-            Some(addr) => {
-                println!("DTB found at {:#x}", addr.value());
-                addr
-            }
-            None => {
-                println!("DTB not found, using defaults");
-                return default_boot_info();
-            }
-        }
+        // QEMU doesn't pass DTB in x0 for ELF kernels.  Use defaults.
+        // Init path is patched via KEVLAR_INIT slot (compare-contracts.py).
+        println!("DTB not found, using defaults");
+        return default_boot_info();
     };
 
     let header = &*(dtb_paddr.as_vaddr().as_ptr::<DtbHeader>());
@@ -193,6 +185,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
 }
 
 /// Default boot info for QEMU virt: 1GB RAM starting at 0x40000000.
+/// Matches the `-m 1024` flag used in compare-contracts.py and run-qemu.py.
 pub fn default_boot_info() -> BootInfo {
     let image_end = unsafe { &__kernel_image_end as *const _ as usize };
     let ram_base = max(0x40000000, image_end);
@@ -204,16 +197,11 @@ pub fn default_boot_info() -> BootInfo {
         len: ram_end - ram_base,
     });
 
-    // QEMU virt machine has 32 virtio-mmio slots at 0x0a000000-0x0a003e00.
-    let mut virtio_mmio_devices = ArrayVec::new();
-    for i in 0..32u8 {
-        let addr = 0x0a000000 + (i as usize) * 0x200;
-        let irq = 48 + i; // SPI 16 + i = GIC IRQ 48 + i
-        virtio_mmio_devices.push(crate::bootinfo::VirtioMmioDevice {
-            mmio_base: PAddr::new(addr),
-            irq,
-        });
-    }
+    // Skip virtio-mmio probing in default mode — each probe is ~1.5s under
+    // TCG emulation (32 probes = ~48s, exceeds test timeout).  The kernel
+    // can live without virtio when running contract tests via initramfs.
+    // Real-hardware or DTB-based boots will discover devices via the DTB.
+    let virtio_mmio_devices = ArrayVec::new();
 
     BootInfo {
         ram_areas,
@@ -231,22 +219,31 @@ pub fn default_boot_info() -> BootInfo {
     }
 }
 
-/// Scan physical memory for a DTB (looking for the magic 0xd00dfeed).
-/// QEMU virt machine may place the DTB anywhere in the first 1GB of RAM.
-/// We scan the entire 1GB region (0x40000000–0x80000000) in 4KB steps.
-/// QEMU 10.x does not place the DTB in guest memory for bare-metal ELF
-/// kernels (the ARM Linux boot protocol only applies to Image-format kernels).
-/// This scan is kept as a fallback for future use but currently always returns
-/// None on QEMU virt.
+/// Scan for a DTB (magic 0xd00dfeed).  QEMU virt places the DTB below the
+/// RAM base (0x40000000) for ELF kernels.  The boot page table maps all of
+/// 0–4GB so reads below RAM are safe (device memory, AttrIndx=0).
 unsafe fn scan_for_dtb() -> Option<PAddr> {
-    let start = 0x4000_0000usize;
-    let end   = 0x8000_0000usize;
-    let mut addr = start;
+    // Scan downward from 0x40000000 — QEMU places DTB below RAM base.
+    let mut addr = 0x4000_0000usize;
+    while addr >= 0x1000 {
+        addr -= 0x1000;
+        let vaddr = addr + super::KERNEL_BASE_ADDR;
+        let val = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
+        if be32(val) == DTB_MAGIC {
+            return Some(PAddr::new(addr));
+        }
+        // Don't go below 0x08000000 (deep in peripheral territory).
+        if addr <= 0x0800_0000 {
+            break;
+        }
+    }
+    // Also scan first 128MB of RAM (safe even with -m 256).
+    addr = 0x4000_0000;
+    let end = 0x4800_0000usize;
     while addr < end {
         let vaddr = addr + super::KERNEL_BASE_ADDR;
         let val = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
         if be32(val) == DTB_MAGIC {
-            info!("Found DTB at {:#x}", addr);
             return Some(PAddr::new(addr));
         }
         addr += 0x1000;

@@ -8,7 +8,7 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_fstat(&mut self, fd: Fd, buf: UserVAddr) -> Result<isize> {
         current_process().with_file(fd, |opened_file| {
             let stat = opened_file.path().inode.stat()?;
-            buf.write(&stat)?;
+            buf.write(&stat.to_abi_bytes())?;
             Ok(0)
         })
     }

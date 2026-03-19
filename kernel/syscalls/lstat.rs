@@ -11,7 +11,7 @@ impl<'a> SyscallHandler<'a> {
             .lock_no_irq()
             .lookup_no_symlink_follow(path)?
             .stat()?;
-        buf.write(&stat)?;
+        buf.write(&stat.to_abi_bytes())?;
         Ok(0)
     }
 }

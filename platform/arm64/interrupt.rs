@@ -130,6 +130,19 @@ extern "C" fn arm64_handle_irq(_irq_type: u64, _frame: *mut PtRegs) {
     gic::end_interrupt(irq);
 }
 
+/// Called from trap.S after returning from a lower-EL exception or IRQ,
+/// before RESTORE_REGS + eret.  Delivers any pending signal to the current
+/// process by redirecting ELR_EL1 to the signal trampoline.
+///
+/// Mirrors x86_64's `x64_check_signal_on_irq_return`.
+#[unsafe(no_mangle)]
+extern "C" fn arm64_check_signal_on_return(frame: *mut super::syscall::PtRegs) {
+    if handler().current_process_signal_pending() == 0 {
+        return;
+    }
+    handler().handle_interrupt_return(frame as *mut _);
+}
+
 /// Called for unhandled exceptions (FIQ, SError, AArch32, SP_EL0).
 #[unsafe(no_mangle)]
 extern "C" fn arm64_unhandled_exception(esr: u64, elr: u64, far: u64) {
