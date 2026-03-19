@@ -320,12 +320,13 @@ impl FileLike for ProcCpuinfoFile {
             for i in 0..ncpus {
                 let _ = write!(s, "processor\t: {}\n", i);
                 let _ = write!(s, "BogoMIPS\t: 100.00\n");
-                let _ = write!(s, "Features\t: fp asimd evtstrm\n");
+                let _ = write!(s, "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 cpuid\n");
                 let _ = write!(s, "CPU implementer\t: 0x41\n");
                 let _ = write!(s, "CPU architecture: 8\n");
                 let _ = write!(s, "CPU variant\t: 0x0\n");
                 let _ = write!(s, "CPU part\t: 0xd08\n");
                 let _ = write!(s, "CPU revision\t: 3\n");
+                let _ = write!(s, "cpu MHz\t\t: 0.000\n");
                 let _ = write!(s, "\n");
             }
         }
