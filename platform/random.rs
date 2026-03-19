@@ -7,3 +7,9 @@
 pub fn rdrand_fill(slice: &mut [u8]) -> bool {
     unsafe { x86::random::rdrand_slice(slice) }
 }
+
+/// Stub for non-x86_64 targets: no hardware RNG available; returns false.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn rdrand_fill(_slice: &mut [u8]) -> bool {
+    false
+}

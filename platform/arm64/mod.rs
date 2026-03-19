@@ -75,6 +75,7 @@ pub fn read_rtc_epoch_secs() -> u64 {
 }
 
 pub const PAGE_SIZE: usize = 4096;
+pub const HUGE_PAGE_SIZE: usize = 512 * PAGE_SIZE; // 2MB with 4KB granule (stub)
 pub const TICK_HZ: usize = 50;
 
 /// Returns true if hardware interrupts are currently enabled (DAIF.I = 0).

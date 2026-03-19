@@ -11,8 +11,11 @@ impl<'a> SyscallHandler<'a> {
         // that the handler has run.
         current.sigsuspend_restore_mask();
 
-        // Return the RAX value from the restored frame so the original
-        // syscall's return value is preserved (not overwritten with -EINTR).
-        Ok(self.frame.rax as isize)
+        // Return the syscall return register from the restored frame so the
+        // original syscall's return value is preserved (not overwritten with -EINTR).
+        #[cfg(target_arch = "x86_64")]
+        { Ok(self.frame.rax as isize) }
+        #[cfg(target_arch = "aarch64")]
+        { Ok(self.frame.regs[0] as isize) }
     }
 }

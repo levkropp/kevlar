@@ -153,6 +153,9 @@ impl FileLike for UdpSocket {
         // Spin briefly (up to 1ms) with interrupts enabled so the ARP reply can
         // arrive via virtio-net IRQ, then re-drive the stack to flush the pending
         // packet before we return.
+        //
+        // TSC is x86_64-only; on ARM64 the ARP reply arrives asynchronously.
+        #[cfg(target_arch = "x86_64")]
         if super::ARP_SENT.load(core::sync::atomic::Ordering::Relaxed) {
             let start = kevlar_platform::arch::tsc::nanoseconds_since_boot();
             loop {

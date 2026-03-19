@@ -381,4 +381,68 @@ impl PageTable {
             *entry.as_mut() = paddr.value() as u64 | attrs;
         }
     }
+
+    // ── Lookup helpers ────────────────────────────────────────────────────────
+
+    /// Look up the physical address for a mapped user page.
+    pub fn lookup_paddr(&self, vaddr: UserVAddr) -> Option<PAddr> {
+        let entry_ptr = traverse(self.pgd, vaddr, false)?;
+        let entry = unsafe { *entry_ptr.as_ptr() };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() { None } else { Some(paddr) }
+    }
+
+    /// Look up the raw PTE value for a mapped user page (flags + physical address).
+    pub fn lookup_pte_entry(&self, vaddr: UserVAddr) -> Option<u64> {
+        let entry_ptr = traverse(self.pgd, vaddr, false)?;
+        let entry = unsafe { *entry_ptr.as_ptr() };
+        if entry != 0 { Some(entry) } else { None }
+    }
+
+    // ── Huge page stubs (ARM64 uses 4KB pages only; no 2MB TLB optimization) ──
+
+    /// Stub: map 512 individual 4KB pages covering the 2MB region at `vaddr`.
+    pub fn map_huge_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        for i in 0..512 {
+            let pv = UserVAddr::new_nonnull(vaddr.value() + i * PAGE_SIZE).unwrap();
+            let pp = PAddr::new(paddr.value() + i * PAGE_SIZE);
+            self.map_user_page_with_prot(pv, pp, prot_flags);
+        }
+    }
+
+    /// Stub: unmap 512 individual 4KB pages; returns the base physical address.
+    pub fn unmap_huge_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
+        let base = self.unmap_user_page(vaddr);
+        for i in 1..512 {
+            let pv = UserVAddr::new_nonnull(vaddr.value() + i * PAGE_SIZE).unwrap();
+            self.unmap_user_page(pv);
+        }
+        base
+    }
+
+    /// Stub: ARM64 never uses 2MB huge-page descriptors — always returns `None`.
+    #[inline(always)]
+    pub fn is_huge_mapped(&self, _vaddr: UserVAddr) -> Option<u64> {
+        None
+    }
+
+    /// Stub: returns `true` if the first 4KB PTE in the 2MB region is absent.
+    pub fn is_pde_empty(&self, vaddr: UserVAddr) -> bool {
+        match traverse(self.pgd, vaddr, false) {
+            Some(ptr) => unsafe { *ptr.as_ptr() == 0 },
+            None => true,
+        }
+    }
+
+    /// Stub: no huge pages to split — returns `None`.
+    #[inline(always)]
+    pub fn split_huge_page(&mut self, _vaddr: UserVAddr) -> Option<PAddr> {
+        None
+    }
+
+    /// Stub: no huge-page PDE to update — returns `false`.
+    #[inline(always)]
+    pub fn update_huge_page_flags(&mut self, _vaddr: UserVAddr, _prot_flags: i32) -> bool {
+        false
+    }
 }
