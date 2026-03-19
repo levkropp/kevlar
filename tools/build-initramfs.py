@@ -8,9 +8,14 @@ caching.  Subsequent builds only recompile changed .c files.
 Usage:
     python3 tools/build-initramfs.py build/testing.initramfs
     python3 tools/build-initramfs.py --clean build/testing.initramfs
+    python3 tools/build-initramfs.py --arch arm64 build/testing.arm64.initramfs
+
+    When ARCH=arm64 is set in the environment (by `make ARCH=arm64`), arm64
+    mode is selected automatically.
 
 Prerequisites (Arch):   pacman -S musl gcc e2fsprogs
 Prerequisites (Ubuntu): apt install musl-tools build-essential linux-libc-dev e2fsprogs
+ARM64 mode: no cross-compiler needed; downloads pre-built Alpine aarch64 binaries.
 """
 import argparse
 import io
@@ -26,10 +31,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "build" / "native-cache"
-LOCAL_BIN = CACHE / "local-bin"   # Compiled test binaries
-LOCAL_LIB = CACHE / "local-lib"   # Compiled shared libs
-EXT_BIN = CACHE / "ext-bin"       # External package binaries
+LOCAL_BIN = CACHE / "local-bin"   # Compiled test binaries (x86_64)
+LOCAL_LIB = CACHE / "local-lib"   # Compiled shared libs (x86_64)
+EXT_BIN = CACHE / "ext-bin"       # External package binaries (x86_64)
+EXT_BIN_ARM64 = CACHE / "ext-bin-arm64"  # External package binaries (aarch64)
 ROOTFS = ROOT / "build" / "initramfs-rootfs"
+
+ALPINE_MIRROR_ARM64 = "https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64"
 
 # ─── Utilities ────────────────────────────────────────────────────────────
 
@@ -922,6 +930,163 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
 
 
+# ─── ARM64 Builders ───────────────────────────────────────────────────────
+
+def fetch_arm64_alpine_pkg(pkg_name):
+    """Download an Alpine aarch64 APK and cache it. Returns extracted dir."""
+    cached_dir = CACHE / "alpine-pkgs-arm64" / pkg_name
+    if cached_dir.exists():
+        return cached_dir
+
+    # Fetch APKINDEX to resolve the current version.
+    index_path = download(
+        f"{ALPINE_MIRROR_ARM64}/APKINDEX.tar.gz",
+        CACHE / "src" / "APKINDEX.arm64.tar.gz")
+    version = None
+    with tarfile.open(index_path, "r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name == "APKINDEX":
+                content = tar.extractfile(member).read().decode()
+                cur = {}
+                for line in content.split("\n"):
+                    if not line:
+                        if cur.get("P") == pkg_name:
+                            version = cur.get("V")
+                            break
+                        cur = {}
+                    elif ":" in line:
+                        k, _, v = line.partition(":")
+                        cur[k] = v
+                break
+
+    if not version:
+        log("WARN", f"ARM64 Alpine package {pkg_name} not found in index")
+        return None
+
+    filename = f"{pkg_name}-{version}.apk"
+    apk_path = download(f"{ALPINE_MIRROR_ARM64}/{filename}",
+                        CACHE / "src" / f"arm64-{filename}")
+    cached_dir.mkdir(parents=True, exist_ok=True)
+    run(["tar", "xzf", str(apk_path), "-C", str(cached_dir),
+         "--exclude=.PKGINFO", "--exclude=.SIGN.*",
+         "--exclude=.pre-install", "--exclude=.post-install",
+         "--exclude=.trigger"],
+        capture_output=True)
+    log("ARM64", f"cached {pkg_name} {version}")
+    return cached_dir
+
+
+def build_arm64_packages():
+    """Download pre-built aarch64 Alpine packages for the ARM64 initramfs."""
+    EXT_BIN_ARM64.mkdir(parents=True, exist_ok=True)
+    results = {}
+
+    # busybox-static: provides a fully static /bin/busybox
+    pkg = fetch_arm64_alpine_pkg("busybox-static")
+    if pkg:
+        src = pkg / "bin" / "busybox.static"
+        if src.exists():
+            dst = EXT_BIN_ARM64 / "busybox"
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            results["busybox"] = dst
+
+    # apk-tools-static: needed for `apk update` / Alpine tests
+    pkg = fetch_arm64_alpine_pkg("apk-tools-static")
+    if pkg:
+        src = pkg / "sbin" / "apk.static"
+        if src.exists():
+            dst = EXT_BIN_ARM64 / "apk.static"
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            results["apk.static"] = dst
+
+    return results
+
+
+def assemble_rootfs_arm64(arm64_bins):
+    """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
+    log("ROOTFS", "assembling (arm64)")
+
+    if ROOTFS.exists():
+        shutil.rmtree(ROOTFS)
+
+    for d in ["bin", "sbin", "usr/bin", "usr/sbin",
+              "etc", "etc/network", "dev", "proc", "sys", "tmp", "mnt",
+              "var/www/html", "run", "lib"]:
+        (ROOTFS / d).mkdir(parents=True, exist_ok=True)
+
+    os.symlink("/run", str(ROOTFS / "var" / "run"))
+
+    # BusyBox binary
+    bb_src = arm64_bins.get("busybox")
+    if bb_src and bb_src.exists():
+        dst = ROOTFS / "bin" / "busybox"
+        shutil.copy2(bb_src, dst)
+        os.chmod(dst, 0o755)
+        # BusyBox applet symlinks — run the arm64 binary under qemu-user if
+        # not on arm64 host; on build machines we just list a known-good set.
+        try:
+            r = subprocess.run([str(dst), "--list-full"],
+                               capture_output=True, text=True, timeout=5)
+            applets = r.stdout.strip().split("\n") if r.returncode == 0 else []
+        except Exception:
+            applets = []
+        if not applets:
+            # Fallback: hardcode the most important applets
+            applets = [
+                "bin/sh", "bin/ash", "bin/cat", "bin/echo", "bin/ls",
+                "bin/mkdir", "bin/mount", "bin/umount", "bin/ps",
+                "bin/kill", "bin/sleep", "bin/test", "bin/true",
+                "bin/false", "bin/grep", "bin/sed", "bin/awk",
+                "bin/head", "bin/tail", "bin/wc", "bin/cut",
+                "sbin/init", "sbin/halt", "sbin/reboot",
+                "usr/bin/env", "usr/bin/id",
+            ]
+        for applet in applets:
+            applet = applet.strip()
+            if not applet:
+                continue
+            dest = ROOTFS / applet
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                os.symlink("/bin/busybox", str(dest))
+    else:
+        log("WARN", "ARM64 BusyBox not found — initramfs will have no shell")
+
+    # apk.static
+    apk_src = arm64_bins.get("apk.static")
+    if apk_src and apk_src.exists():
+        dst = ROOTFS / "bin" / "apk.static"
+        shutil.copy2(apk_src, dst)
+        os.chmod(dst, 0o755)
+
+    # Config files from testing/etc/
+    for name in ["resolv.conf", "group", "passwd", "shadow",
+                 "profile", "inittab", "hostname", "issue", "banner"]:
+        src = ROOT / "testing" / "etc" / name
+        if src.exists():
+            shutil.copy2(src, ROOTFS / "etc" / name)
+
+    src_net = ROOT / "testing" / "etc" / "network" / "interfaces"
+    if src_net.exists():
+        shutil.copy2(src_net, ROOTFS / "etc" / "network" / "interfaces")
+
+    # Always use QEMU's user-mode DNS forwarder
+    (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
+    (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
+
+    # Minimal /init that launches /bin/sh (BusyBox ash)
+    init_script = ROOTFS / "init"
+    init_script.write_text(
+        "#!/bin/sh\n"
+        "mount -t proc proc /proc\n"
+        "mount -t sysfs sysfs /sys\n"
+        "exec /bin/sh\n"
+    )
+    os.chmod(str(init_script), 0o755)
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -934,7 +1099,12 @@ def main():
                         help="Clean only local test binaries (fast rebuild)")
     parser.add_argument("--skip-externals", action="store_true",
                         help="Skip building external packages (use cache only)")
+    parser.add_argument("--arch", default=None,
+                        help="Target architecture: x64 or arm64 "
+                             "(default: $ARCH env var, fallback x64)")
     args = parser.parse_args()
+
+    arch = args.arch or os.environ.get("ARCH", "x64")
 
     if args.clean:
         if CACHE.exists():
@@ -946,6 +1116,20 @@ def main():
             shutil.rmtree(LOCAL_BIN)
         if LOCAL_LIB.exists():
             shutil.rmtree(LOCAL_LIB)
+
+    # ── ARM64 path ────────────────────────────────────────────────────────
+    if arch == "arm64":
+        log("ARCH", "arm64 — downloading pre-built Alpine aarch64 binaries")
+        arm64_bins = build_arm64_packages()
+        assemble_rootfs_arm64(arm64_bins)
+        log("CPIO", args.outfile)
+        sys.path.insert(0, str(ROOT / "tools"))
+        from docker2initramfs import create_cpio_archive
+        create_cpio_archive(ROOTFS, args.outfile)
+        log("DONE", args.outfile)
+        return
+
+    # ── x86_64 path ───────────────────────────────────────────────────────
 
     # Check prerequisites
     for tool in ["musl-gcc", "gcc"]:
