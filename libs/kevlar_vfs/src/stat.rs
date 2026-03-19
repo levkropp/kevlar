@@ -191,18 +191,29 @@ impl Stat {
         buf
     }
 
-    /// x86_64: write the struct as-is (it already matches the x86_64 ABI).
+    /// x86_64: serialize to the x86_64 `struct stat` layout (144 bytes).
     #[cfg(target_arch = "x86_64")]
     pub fn to_abi_bytes(&self) -> [u8; 144] {
         let mut buf = [0u8; 144];
-        // The Stat struct is already in x86_64 layout, just transmute.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self as *const Stat as *const u8,
-                buf.as_mut_ptr(),
-                144,
-            );
-        }
+        let b = &mut buf;
+        put_u64(b, 0, self.dev.0 as u64);        // st_dev
+        put_u64(b, 8, self.inode_no.as_u64());    // st_ino
+        put_u64(b, 16, self.nlink.0 as u64);      // st_nlink (u64 on x86_64)
+        put_u32(b, 24, self.mode.0);              // st_mode
+        put_u32(b, 28, self.uid.0);               // st_uid
+        put_u32(b, 32, self.gid.0);               // st_gid
+        // 36: pad0 (4 bytes, zero)
+        put_u64(b, 40, self.rdev.0 as u64);       // st_rdev
+        put_u64(b, 48, self.size.0 as u64);       // st_size (i64)
+        put_u64(b, 56, self.blksize.0 as u64);    // st_blksize (i64 on x86_64)
+        put_u64(b, 64, self.blocks.0 as u64);     // st_blocks (i64)
+        put_u64(b, 72, self.atime.0 as u64);      // st_atime
+        put_u64(b, 80, self.atime_nsec.0 as u64); // st_atime_nsec
+        put_u64(b, 88, self.mtime.0 as u64);      // st_mtime
+        put_u64(b, 96, self.mtime_nsec.0 as u64); // st_mtime_nsec
+        put_u64(b, 104, self.ctime.0 as u64);     // st_ctime
+        put_u64(b, 112, self.ctime_nsec.0 as u64);// st_ctime_nsec
+        // 120..144: __unused[3] (24 bytes, zero)
         buf
     }
 }

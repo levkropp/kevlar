@@ -789,6 +789,9 @@ impl<'a> SyscallHandler<'a> {
             }
 
             // Write result to frame before signal delivery.
+            // On x86_64, write to rax; on ARM64, write to regs[0].
+            // Both must happen BEFORE try_delivering_signal so that sigreturn
+            // restores the correct syscall return value, not the stale one.
             #[cfg(target_arch = "x86_64")]
             {
                 let rax_val = match &ret {
@@ -796,6 +799,14 @@ impl<'a> SyscallHandler<'a> {
                     Err(e) => (-(e.errno() as isize)) as u64,
                 };
                 self.frame.rax = rax_val;
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                let x0_val = match &ret {
+                    Ok(v) => *v as u64,
+                    Err(e) => (-(e.errno() as isize)) as u64,
+                };
+                self.frame.regs[0] = x0_val;
             }
             if let Err(err) = Process::try_delivering_signal(self.frame) {
                 debug_warn!("failed to setup the signal stack: {:?}", err);
@@ -952,10 +963,10 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        // Write the syscall result to frame.rax BEFORE signal delivery.
+        // Write the syscall result to frame BEFORE signal delivery.
         // try_delivering_signal saves the frame to signaled_frame; if we
-        // don't update rax first, sigreturn will restore the stale value
-        // (the syscall number) instead of the actual result.
+        // don't update the return register first, sigreturn will restore
+        // the stale value (the syscall number) instead of the actual result.
         #[cfg(target_arch = "x86_64")]
         {
             let rax_val = match &ret {
@@ -963,6 +974,14 @@ impl<'a> SyscallHandler<'a> {
                 Err(e) => (-(e.errno() as isize)) as u64,
             };
             self.frame.rax = rax_val;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let x0_val = match &ret {
+                Ok(v) => *v as u64,
+                Err(e) => (-(e.errno() as isize)) as u64,
+            };
+            self.frame.regs[0] = x0_val;
         }
 
         if let Err(err) = Process::try_delivering_signal(self.frame) {
@@ -1236,7 +1255,15 @@ impl<'a> SyscallHandler<'a> {
                 let p = StackPathBuf::from_user(a2)?;
                 self.sys_access(p.as_path())
             }
-            SYS_PPOLL => self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int),
+            SYS_PPOLL => {
+                // ppoll(fds, nfds, timeout, sigmask) — musl's pause() calls
+                // ppoll(NULL, 0, NULL, NULL) on ARM64 (no __NR_pause).
+                if a1 == 0 && a2 == 0 {
+                    self.sys_pause()
+                } else {
+                    self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int)
+                }
+            }
             SYS_PRLIMIT64 => {
                 // prlimit64(pid, resource, new_rlim, old_rlim)
                 // a3 = new_rlim (set), a4 = old_rlim (get) — either can be NULL.
