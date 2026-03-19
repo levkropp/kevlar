@@ -118,6 +118,10 @@ pub fn switch() -> bool {
         0,
     );
 
+    #[cfg(feature = "ktrace-sched")]
+    crate::debug::ktrace::trace(crate::debug::ktrace::event::CTX_SWITCH,
+        prev_pid.as_i32() as u32, next.pid().as_i32() as u32, 0, 0, 0);
+
     CURRENT.as_mut().set(next.clone());
     arch::switch_thread(prev.arch(), next.arch());
 

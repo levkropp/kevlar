@@ -31,6 +31,7 @@ profile-fortress = []
 profile-balanced = []
 profile-performance = []
 profile-ludicrous = []
+ktrace = []
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 x86 = "0.52"

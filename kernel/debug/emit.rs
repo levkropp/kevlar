@@ -100,6 +100,8 @@ pub fn parse_cmdline_filter(value: &str) -> DebugFilter {
             "kwab-verify" | "kwab_verify" | "verify" => filter |= DebugFilter::KWAB_VERIFY,
             "kwab-audit" | "kwab_audit" | "audit" => filter |= DebugFilter::KWAB_AUDIT,
             "htrace" => filter |= DebugFilter::HTRACE,
+            "ktrace" => filter |= DebugFilter::KTRACE,
+            "ktrace-dump" => filter |= DebugFilter::KTRACE,
             _ => {} // ignore unknown tokens
         }
     }

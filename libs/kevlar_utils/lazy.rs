@@ -17,6 +17,11 @@ impl<T> Lazy<T> {
         self.value.as_ref().expect("not yet initialized")
     }
 
+    /// Returns a reference to the inner value, or `None` if not yet initialized.
+    pub fn try_get(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+
     pub fn get_mut(&mut self) -> &mut T {
         self.value.as_mut().expect("not yet initialized")
     }

@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use arrayvec::ArrayString;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use core::sync::atomic::AtomicUsize;
 use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
@@ -209,6 +209,28 @@ pub enum ProcessState {
     ExitedWith(c_int),
 }
 
+/// Build a pre-computed `struct utsname` (390 bytes) from a UTS namespace.
+/// Used to cache the result so sys_uname becomes a single memcpy.
+fn build_cached_utsname(uts: &crate::namespace::UtsNamespace) -> [u8; 390] {
+    let mut buf = [0u8; 390];
+    #[inline(always)]
+    fn write_field(buf: &mut [u8; 390], idx: usize, value: &[u8]) {
+        let offset = idx * 65;
+        let len = value.len().min(64);
+        buf[offset..offset + len].copy_from_slice(&value[..len]);
+    }
+    write_field(&mut buf, 0, b"Linux");    // sysname
+    write_field(&mut buf, 2, b"6.19.8");   // release
+    write_field(&mut buf, 3, b"Kevlar");   // version
+    #[cfg(target_arch = "x86_64")]
+    write_field(&mut buf, 4, b"x86_64");   // machine
+    #[cfg(target_arch = "aarch64")]
+    write_field(&mut buf, 4, b"aarch64");
+    uts.write_hostname_into(&mut buf, 1);
+    uts.write_domainname_into(&mut buf, 5);
+    buf
+}
+
 /// The process control block.
 pub struct Process {
     arch: arch::Process,
@@ -276,6 +298,26 @@ pub struct Process {
     sigsuspend_saved_mask: AtomicU64,
     /// True when `sigsuspend_saved_mask` contains a valid mask to restore.
     sigsuspend_has_mask: AtomicBool,
+    /// O3: Cached epoll fd number for hot-path bypass (-1 = invalid).
+    #[cfg(not(feature = "profile-fortress"))]
+    epoll_hot_fd: AtomicI32,
+    /// O3: Raw pointer to EpollInstance for the cached fd (null = invalid).
+    #[cfg(not(feature = "profile-fortress"))]
+    epoll_hot_ptr: AtomicPtr<u8>,
+    /// Cached fd number for with_file hot-path bypass (-1 = invalid).
+    /// Caches the last fd→OpenedFile mapping to skip fd table lookup.
+    #[cfg(not(feature = "profile-fortress"))]
+    file_hot_fd: AtomicI32,
+    /// Raw pointer to OpenedFile for the cached fd (null = invalid).
+    #[cfg(not(feature = "profile-fortress"))]
+    file_hot_ptr: AtomicPtr<u8>,
+    /// Pre-built `struct utsname` (390 bytes) for fast sys_uname response.
+    /// Built at init/fork from UTS namespace data. TODO: rebuild on sethostname/setdomainname.
+    cached_utsname: SpinLock<[u8; 390]>,
+    /// Physical address of this process's personal vDSO data page.
+    /// 0 = not yet allocated (before vdso::init() runs).
+    #[cfg(target_arch = "x86_64")]
+    vdso_data_paddr: AtomicU64,
 }
 
 impl Process {
@@ -325,6 +367,17 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            cached_utsname: SpinLock::new([0u8; 390]),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new(0),
         });
 
         process_group.lock().add(Arc::downgrade(&proc));
@@ -374,7 +427,20 @@ impl Process {
             let _ = s.try_push_str(p.as_str());
             s
         };
-        let entry = setup_userspace(executable_path, argv, &[], &root_fs)?;
+        let init_utsname = build_cached_utsname(&*crate::namespace::ROOT_UTS);
+        #[cfg(target_arch = "x86_64")]
+        let init_vdso_paddr = kevlar_platform::arch::vdso::alloc_process_page(
+            1, 1, 0, 0, &init_utsname,
+        ).map(|p| p.value() as u64).unwrap_or(0);
+        let mut entry = setup_userspace(executable_path, argv, &[], &root_fs)?;
+        // Remap vDSO with per-process page for PID 1.
+        #[cfg(target_arch = "x86_64")]
+        if init_vdso_paddr != 0 {
+            let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
+            entry.vm.page_table_mut().map_user_page_with_prot(
+                vdso_uaddr, kevlar_platform::address::PAddr::new(init_vdso_paddr as usize), 5,
+            );
+        }
         let pid = PId::new(1);
         let process_group = ProcessGroup::new(PgId::new(1));
         let process = Arc::new(Process {
@@ -417,6 +483,17 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            cached_utsname: SpinLock::new(init_utsname),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new(init_vdso_paddr),
         });
 
         process_group.lock().add(Arc::downgrade(&process));
@@ -597,6 +674,17 @@ impl Process {
     pub fn nice(&self) -> i32 { self.nice.load(Ordering::Relaxed) }
     pub fn set_nice(&self, n: i32) { self.nice.store(n, Ordering::Relaxed); }
 
+    /// Returns a copy of the pre-built utsname buffer (390 bytes).
+    pub fn utsname_copy(&self) -> [u8; 390] {
+        *self.cached_utsname.lock_no_irq()
+    }
+
+    /// Returns the physical address of this process's vDSO data page (0 if none).
+    #[cfg(target_arch = "x86_64")]
+    pub fn vdso_data_paddr(&self) -> u64 {
+        self.vdso_data_paddr.load(Ordering::Relaxed)
+    }
+
     // ── Subreaper ────────────────────────────────────────────────────
     pub fn is_child_subreaper(&self) -> bool {
         self.is_child_subreaper.load(Ordering::Relaxed)
@@ -649,6 +737,44 @@ impl Process {
     /// Safe because the fd table is never accessed from interrupt context.
     pub fn opened_files_no_irq(&self) -> SpinLockGuardNoIrq<'_, OpenedFileTable> {
         self.opened_files.lock_no_irq()
+    }
+
+    /// O3: Read the cached epoll fd number (-1 = no cache).
+    #[cfg(not(feature = "profile-fortress"))]
+    pub fn epoll_hot_fd(&self) -> i32 {
+        self.epoll_hot_fd.load(Ordering::Relaxed)
+    }
+
+    /// O3: Read the cached epoll instance pointer (null = no cache).
+    #[cfg(not(feature = "profile-fortress"))]
+    pub fn epoll_hot_ptr(&self) -> *mut u8 {
+        self.epoll_hot_ptr.load(Ordering::Relaxed)
+    }
+
+    /// O3: Populate the hot-fd cache.
+    #[cfg(not(feature = "profile-fortress"))]
+    pub fn set_epoll_hot(&self, fd: i32, ptr: *mut u8) {
+        self.epoll_hot_fd.store(fd, Ordering::Relaxed);
+        self.epoll_hot_ptr.store(ptr, Ordering::Relaxed);
+    }
+
+    /// Read the cached file fd number (-1 = no cache).
+    #[cfg(not(feature = "profile-fortress"))]
+    pub fn file_hot_fd(&self) -> i32 {
+        self.file_hot_fd.load(Ordering::Relaxed)
+    }
+
+    /// Invalidate all hot-fd caches (epoll + file) if `fd` matches.
+    #[cfg(not(feature = "profile-fortress"))]
+    pub fn invalidate_hot_fd(&self, fd: i32) {
+        if self.epoll_hot_fd.load(Ordering::Relaxed) == fd {
+            self.epoll_hot_fd.store(-1, Ordering::Relaxed);
+            self.epoll_hot_ptr.store(core::ptr::null_mut(), Ordering::Relaxed);
+        }
+        if self.file_hot_fd.load(Ordering::Relaxed) == fd {
+            self.file_hot_fd.store(-1, Ordering::Relaxed);
+            self.file_hot_ptr.store(core::ptr::null_mut(), Ordering::Relaxed);
+        }
     }
 
     /// The virtual memory space. It's `None` if the process is a kernel thread.
@@ -848,9 +974,27 @@ impl Process {
     {
         #[cfg(not(feature = "profile-fortress"))]
         if Arc::strong_count(&self.opened_files) == 1 {
+            // Hot-fd cache: skip fd table lookup on repeat calls to the same fd.
+            // Safety: strong_count == 1 proves single-owner fd table access.
+            // The cached pointer is into an Arc<OpenedFile> held by the fd table.
+            // Invalidated by close/dup2/dup3/close_range before the Arc is dropped.
+            let fd_int = fd.as_int();
+            if fd_int == self.file_hot_fd.load(Ordering::Relaxed) {
+                let ptr = self.file_hot_ptr.load(Ordering::Relaxed);
+                if !ptr.is_null() {
+                    #[allow(unsafe_code)]
+                    let opened_file = unsafe { &*(ptr as *const OpenedFile) };
+                    return f(opened_file);
+                }
+            }
             #[allow(unsafe_code)]
             let table = unsafe { self.opened_files.get_unchecked() };
-            return f(table.get(fd)?);
+            let opened_file = table.get(fd)?;
+            // Populate cache: store raw pointer into the Arc<OpenedFile>.
+            let ptr: *const OpenedFile = &**opened_file;
+            self.file_hot_fd.store(fd_int, Ordering::Relaxed);
+            self.file_hot_ptr.store(ptr as *mut u8, Ordering::Relaxed);
+            return f(opened_file);
         }
         let file = self.opened_files.lock_no_irq().get(fd)?.clone();
         f(&file)
@@ -876,6 +1020,12 @@ impl Process {
             // Always dump htrace on non-zero exit — helps diagnose test failures.
             if status != 0 && !debug::htrace::is_enabled() {
                 debug::htrace::dump_all_cpus();
+            }
+            // ktrace: dump binary trace via debugcon on PID 1 exit.
+            #[cfg(feature = "ktrace")]
+            if debug::ktrace::is_enabled() {
+                debug::ktrace::dump_summary();
+                debug::ktrace::dump();
             }
             // Dump PID 1 syscall trace for debugging.
             warn!("PID 1 exiting with status {}", status);
@@ -1283,6 +1433,15 @@ impl Process {
         let current = current_process();
         {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_CLOSE_CLOEXEC);
+            // Invalidate hot-fd cache before closing CLOEXEC files —
+            // the cached pointer may point to a file about to be dropped.
+            #[cfg(not(feature = "profile-fortress"))]
+            {
+                current.epoll_hot_fd.store(-1, Ordering::Relaxed);
+                current.epoll_hot_ptr.store(core::ptr::null_mut(), Ordering::Relaxed);
+                current.file_hot_fd.store(-1, Ordering::Relaxed);
+                current.file_hot_ptr.store(core::ptr::null_mut(), Ordering::Relaxed);
+            }
             current.opened_files.lock().close_cloexec_files();
         }
         current.cmdline.borrow_mut().set_by_argv(argv);
@@ -1296,10 +1455,23 @@ impl Process {
         }
 
         let root_fs = current.root_fs();
-        let entry = {
+        let mut entry = {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SETUP_USERSPACE);
             setup_userspace(executable_path, argv, envp, &root_fs)?
         };
+        // Remap vDSO with this process's per-process page.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let vdso_paddr_val = current.vdso_data_paddr.load(Ordering::Relaxed);
+            if vdso_paddr_val != 0 {
+                let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
+                entry.vm.page_table_mut().map_user_page_with_prot(
+                    vdso_uaddr,
+                    kevlar_platform::address::PAddr::new(vdso_paddr_val as usize),
+                    5,
+                );
+            }
+        }
 
         // de_thread: per POSIX, execve terminates all other threads in the
         // thread group.  Kill siblings NOW — after setup_userspace succeeds
@@ -1385,6 +1557,14 @@ impl Process {
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
         let parent_umask = parent.umask.load();
+        let child_utsname = *parent.cached_utsname.lock_no_irq();
+        #[cfg(target_arch = "x86_64")]
+        let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
+            pid.as_i32(), pid.as_i32(),
+            parent.uid.load(Ordering::Relaxed),
+            parent.nice.load(Ordering::Relaxed),
+            &child_utsname,
+        ).map(|p| p.value() as u64).unwrap_or(0);
 
         let child = Arc::new(Process {
             is_idle: false,
@@ -1432,6 +1612,17 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            cached_utsname: SpinLock::new(child_utsname),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new(child_vdso),
         });
 
         // Inherit parent's cgroup and register child.
@@ -1482,6 +1673,14 @@ impl Process {
         let opened_files = parent.opened_files().lock().clone();
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
+        let child_utsname = *parent.cached_utsname.lock_no_irq();
+        #[cfg(target_arch = "x86_64")]
+        let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
+            pid.as_i32(), pid.as_i32(),
+            parent.uid.load(Ordering::Relaxed),
+            parent.nice.load(Ordering::Relaxed),
+            &child_utsname,
+        ).map(|p| p.value() as u64).unwrap_or(0);
 
         let child = Arc::new(Process {
             is_idle: false,
@@ -1527,6 +1726,17 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            cached_utsname: SpinLock::new(child_utsname),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new(child_vdso),
         });
 
         let parent_cg = parent.cgroup();
@@ -1620,6 +1830,27 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            cached_utsname: SpinLock::new(*parent.cached_utsname.lock_no_irq()),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new({
+                // Threads share the parent's vDSO page. Set tid=0 so
+                // __vdso_gettid falls back to syscall in multi-threaded processes.
+                let p = parent.vdso_data_paddr.load(Ordering::Relaxed);
+                if p != 0 {
+                    kevlar_platform::arch::vdso::update_tid(
+                        kevlar_platform::address::PAddr::new(p as usize), 0,
+                    );
+                }
+                p
+            }),
             arch,
         });
 
@@ -1656,6 +1887,15 @@ impl Drop for Process {
             self.pid(),
             self.cmdline().as_str()
         );
+
+        // Free the per-process vDSO data page (allocated in fork/vfork).
+        let vdso_paddr = self.vdso_data_paddr.load(core::sync::atomic::Ordering::Relaxed);
+        if vdso_paddr != 0 {
+            kevlar_platform::page_allocator::free_pages(
+                kevlar_platform::address::PAddr::new(vdso_paddr as usize),
+                1,
+            );
+        }
 
         // Since the process's reference count has already reached to zero (that's
         // why the process is being dropped), ProcessGroup::remove_dropped_processes
@@ -3025,9 +3265,16 @@ fn do_setup_userspace(
 }
 
 pub fn gc_exited_processes() {
-    if current_process().is_idle() {
-        // If we're in an idle thread, it's safe to free kernel stacks allocated
-        // for other exited processes.
+    // Free resources (kernel stacks, vDSO pages) of exited-and-reaped
+    // processes. Safe to run from any context: the exited process has
+    // already switched away from its kernel stack via switch(), so
+    // the stack is not on any CPU.
+    //
+    // Previously restricted to idle thread — this starved GC when the
+    // CPU was 100% busy (e.g. busybox test suite running 100 fork+exec
+    // cycles back-to-back), causing vDSO page and kernel stack leaks
+    // that exhausted the page allocator after ~130 forks.
+    if !EXITED_PROCESSES.lock().is_empty() {
         EXITED_PROCESSES.lock().clear();
     }
 }

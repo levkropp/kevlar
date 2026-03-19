@@ -222,6 +222,9 @@ impl Cmdline {
                         gateway_ip4 = Some(s);
                     }
                     (Some("debug"), Some(value)) => {
+                        if !debug_filter.is_empty() {
+                            let _ = debug_filter.try_push(',');
+                        }
                         let _ = debug_filter.try_push_str(value);
                     }
                     (Some("init"), Some(value)) => {

@@ -898,7 +898,7 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
             os.symlink("/etc/systemd/system/kevlar-getty.service", str(link))
 
     # ── Other testing files ──
-    for name in ["debug_init.sh", "test_apk_update.sh", "test_m10_apk.sh"]:
+    for name in ["debug_init.sh", "test_apk_update.sh", "test_m10_apk.sh", "test_ktrace_apk.sh"]:
         src = ROOT / "testing" / name
         if src.exists():
             shutil.copy2(src, ROOTFS / name)

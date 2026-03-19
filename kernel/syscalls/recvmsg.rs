@@ -63,6 +63,7 @@ impl<'a> SyscallHandler<'a> {
         let file = opened_file.as_file()?;
 
         let mut total = 0usize;
+        let mut src_addr = None;
         for i in 0..msghdr.msg_iovlen {
             let iov_ptr = UserVAddr::new_nonnull(
                 msghdr.msg_iov + i * core::mem::size_of::<super::IoVec>(),
@@ -72,10 +73,28 @@ impl<'a> SyscallHandler<'a> {
                 continue;
             }
             let buf = UserBufferMut::from_uaddr(iov.base, iov.len);
-            let read_len = file.read(0, buf, &options)?;
+            let (read_len, addr) = file.recvfrom(
+                buf,
+                crate::net::RecvFromFlags::empty(),
+                &options,
+            )?;
+            if src_addr.is_none() {
+                src_addr = Some(addr);
+            }
             total += read_len;
             if read_len < iov.len {
                 break; // short read
+            }
+        }
+
+        // Write the source address to msg_name (required by recvfrom-via-recvmsg
+        // and musl's DNS resolver which checks the source port).
+        if msghdr.msg_name != 0 && msghdr.msg_namelen > 0 {
+            if let Some(ref addr) = src_addr {
+                let name_ptr = UserVAddr::new_nonnull(msghdr.msg_name)?;
+                // msg_namelen is at offset 8 in MsgHdr (after msg_name: usize).
+                let namelen_ptr = UserVAddr::new_nonnull(msg_ptr.value() + 8)?;
+                crate::net::socket::write_sockaddr(addr, Some(name_ptr), Some(namelen_ptr))?;
             }
         }
 

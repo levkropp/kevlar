@@ -15,6 +15,9 @@ impl<'a> SyscallHandler<'a> {
         let options = OpenOptions::new(false, cloexec);
 
         let current = current_process();
+        // dup3 replaces `new` fd — invalidate if it was cached.
+        #[cfg(not(feature = "profile-fortress"))]
+        current.invalidate_hot_fd(new.as_int());
         let mut opened_files = current.opened_files().lock();
         opened_files.dup2(old, new, options)?;
         Ok(new.as_int() as isize)

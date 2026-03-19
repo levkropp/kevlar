@@ -15,6 +15,14 @@ profile-fortress = ["kevlar_platform/profile-fortress", "unwinding"]
 profile-balanced = ["kevlar_platform/profile-balanced", "unwinding"]
 profile-performance = ["kevlar_platform/profile-performance", "unwinding"]
 profile-ludicrous = ["kevlar_platform/profile-ludicrous", "unwinding"]
+# ktrace: high-bandwidth binary tracing via per-CPU ring buffers + debugcon dump.
+ktrace = ["kevlar_platform/ktrace"]
+ktrace-syscall = ["ktrace"]
+ktrace-sched = ["ktrace"]
+ktrace-vfs = ["ktrace"]
+ktrace-net = ["ktrace"]
+ktrace-mm = ["ktrace"]
+ktrace-all = ["ktrace-syscall", "ktrace-sched", "ktrace-vfs", "ktrace-net", "ktrace-mm"]
 
 [dependencies]
 log = "0.4"

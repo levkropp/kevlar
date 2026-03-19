@@ -98,6 +98,9 @@ pub struct Vm {
     vm_areas: Vec<VmArea>,
     valloc_next: UserVAddr,
     last_fault_vma_idx: Option<usize>,
+    /// Heap tracking: independent of VMA indices (which shift on munmap/mmap).
+    heap_bottom: UserVAddr,
+    heap_end: UserVAddr,
 }
 
 impl Vm {
@@ -123,11 +126,11 @@ impl Vm {
 
         Ok(Vm {
             page_table: PageTable::new()?,
-            // The order of elements must be unchanged because `stack_vma_mut()`
-            // and `heap_vma_mut` depends on it.
             vm_areas: vec![stack_vma, heap_vma],
             valloc_next: USER_VALLOC_BASE,
             last_fault_vma_idx: None,
+            heap_bottom: heap_bottom,
+            heap_end: heap_bottom,
         })
     }
 
@@ -170,18 +173,15 @@ impl Vm {
         &self.vm_areas[0]
     }
 
-    fn heap_vma(&self) -> &VmArea {
-        &self.vm_areas[1]
-    }
-
-    fn heap_vma_mut(&mut self) -> &mut VmArea {
-        &mut self.vm_areas[1]
-    }
-
     /// Update the heap base address (used after loading PIE images).
     pub fn set_heap_bottom(&mut self, new_bottom: UserVAddr) {
-        let heap = self.heap_vma_mut();
-        heap.start = new_bottom;
+        self.heap_bottom = new_bottom;
+        self.heap_end = new_bottom;
+        // Also update the VMA if it still exists at index 1.
+        if self.vm_areas.len() > 1 {
+            self.vm_areas[1].start = new_bottom;
+            self.vm_areas[1].len = 0;
+        }
     }
 
     pub fn add_vm_area(
@@ -225,22 +225,18 @@ impl Vm {
     }
 
     pub fn heap_end(&self) -> UserVAddr {
-        self.heap_vma().end()
+        self.heap_end
     }
 
     pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<()> {
-        let heap_start = self.heap_vma().start();
-        let current_heap_end = self.heap_vma().end();
-
-        if new_heap_end < heap_start {
-            // Cannot shrink below the heap base.
+        if new_heap_end < self.heap_bottom {
             return Err(Errno::EINVAL.into());
         }
 
-        if new_heap_end < current_heap_end {
-            // Shrink: unmap pages in the freed region and reduce VMA length.
+        if new_heap_end < self.heap_end {
+            // Shrink: unmap pages in the freed region.
             let free_start = new_heap_end.value();
-            let free_end = current_heap_end.value();
+            let free_end = self.heap_end.value();
             let start_aligned = kevlar_utils::alignment::align_up(free_start, PAGE_SIZE);
 
             for addr in (start_aligned..free_end).step_by(PAGE_SIZE) {
@@ -254,25 +250,37 @@ impl Vm {
                 }
             }
 
-            self.heap_vma_mut().len = new_heap_end.value() - heap_start.value();
+            self.heap_end = new_heap_end;
+            // Shrink or remove the heap VMA covering [new_heap_end, old_end).
+            self.remove_vma_range(new_heap_end, free_end - free_start)?;
             return Ok(());
         }
 
-        self.expand_heap_by(new_heap_end.value() - current_heap_end.value())
+        // Expand: ensure the new region has a VMA for page fault handling.
+        let old_end = self.heap_end;
+        let aligned_new = UserVAddr::new_nonnull(align_up(new_heap_end.value(), PAGE_SIZE))?;
+        let aligned_old = align_up(old_end.value(), PAGE_SIZE);
+
+        if aligned_new.value() > aligned_old {
+            let grow = aligned_new.value() - aligned_old;
+            let stack_bottom = self.stack_vma().start();
+            if aligned_new >= stack_bottom {
+                return Err(Errno::ENOMEM.into());
+            }
+            // Add an anonymous VMA for the new heap pages (if the range is free).
+            let start = UserVAddr::new_nonnull(aligned_old)?;
+            if self.is_free_vaddr_range(start, grow) {
+                self.add_vm_area(start, grow, VmAreaType::Anonymous)?;
+            }
+        }
+        self.heap_end = new_heap_end;
+        Ok(())
     }
 
     pub fn expand_heap_by(&mut self, increment: usize) -> Result<()> {
-        let stack_bottom = self.stack_vma().start();
         let increment = align_up(increment, PAGE_SIZE);
-        let heap_vma = self.heap_vma_mut();
-        let new_heap_top = heap_vma.end().add(increment);
-
-        if new_heap_top >= stack_bottom {
-            return Err(Errno::ENOMEM.into());
-        }
-
-        heap_vma.len += increment;
-        Ok(())
+        let new_end = self.heap_end.add(increment);
+        self.expand_heap_to(new_end)
     }
 
     pub fn fork(&self) -> Result<Vm> {
@@ -281,6 +289,8 @@ impl Vm {
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
             last_fault_vma_idx: self.last_fault_vma_idx,
+            heap_bottom: self.heap_bottom,
+            heap_end: self.heap_end,
         })
     }
 
@@ -459,6 +469,9 @@ impl Vm {
 // teardown_user_pages frees pages from the page cache and shared CoW
 // mappings, causing use-after-free when the same pages are still mapped
 // in other processes or referenced by the page cache.
+// Vm::Drop disabled: teardown_user_pages hangs on large page tables.
+// Root cause under investigation (blog 089). vDSO page leak fixed in
+// Process::drop. Page table intermediate pages leak ~20-40 KB/process.
 // impl Drop for Vm {
 //     fn drop(&mut self) {
 //         self.page_table.teardown_user_pages();

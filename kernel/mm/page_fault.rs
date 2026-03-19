@@ -141,6 +141,20 @@ fn emit_crash_and_exit(signal: Signal, fault_addr: usize, ip: usize) -> ! {
 }
 
 pub fn handle_page_fault(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reason: PageFaultReason) {
+    // ktrace: record page fault event with address and IP.
+    #[cfg(feature = "ktrace-mm")]
+    {
+        let addr = unaligned_vaddr.map_or(0usize, |v| v.value());
+        crate::debug::ktrace::trace(
+            crate::debug::ktrace::event::PAGE_FAULT,
+            addr as u32,
+            (addr >> 32) as u32,
+            ip as u32,
+            (ip >> 32) as u32,
+            _reason.bits() as u32,
+        );
+    }
+
     // Hierarchical tracer: record page fault with faulting address.
     let _htrace_guard = crate::debug::htrace::enter_guard(
         crate::debug::htrace::id::PAGE_FAULT,
@@ -567,6 +581,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         // Not a CoW fault (or sole owner): just update the PTE flags.
         vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
         vm.page_table().flush_tlb_local(aligned_vaddr);
+
         return;
     }
 

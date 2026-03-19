@@ -199,7 +199,7 @@ static void bench_gettid(void) {
     int iters = ITERS(1000000, 10000);
     long long start = now_ns();
     for (int i = 0; i < iters; i++) {
-        syscall(SYS_gettid);
+        gettid();
     }
     report("gettid", iters, now_ns() - start);
 }

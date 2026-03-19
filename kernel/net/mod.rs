@@ -7,6 +7,7 @@ use crate::{
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use atomic_refcell::AtomicRefCell;
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use crossbeam::queue::ArrayQueue;
 use kevlar_api::driver::net::EthernetDriver;
 use kevlar_platform::bootinfo::BootInfo;
@@ -34,6 +35,10 @@ static PACKET_PROCESS_JOB: DeferredJob = DeferredJob::new("net_packet_process");
 static RX_PACKET_QUEUE: Once<SpinLock<ArrayQueue<Vec<u8>>>> = Once::new();
 
 pub fn receive_ethernet_frame(frame: &[u8]) {
+    #[cfg(feature = "ktrace-net")]
+    crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_RX_PACKET,
+        frame.len() as u32, 0, 0, 0, 0);
+
     if RX_PACKET_QUEUE.lock().push(frame.to_vec()).is_err() {
         warn!("the rx packet queue is full; dropping an incoming packet");
     }
@@ -111,6 +116,12 @@ impl RxToken for OurRxToken {
 
 struct OurTxToken {}
 
+/// Set to `true` by OurTxToken::consume when an ARP request is transmitted.
+/// Cleared before process_packets() by callers that need to detect whether
+/// ARP was triggered (e.g. UDP sendto, to wait for the reply before the next
+/// sendto can overwrite smoltcp's single-slot ARP pending cache).
+pub(crate) static ARP_SENT: AtomicBool = AtomicBool::new(false);
+
 impl TxToken for OurTxToken {
     fn consume<R, F>(self, len: usize, f: F) -> R
     where
@@ -119,6 +130,16 @@ impl TxToken for OurTxToken {
         let mut buffer = vec![0; len];
         let return_value = f(&mut buffer);
         if EthernetFrame::new_checked(&mut buffer).is_ok() {
+            #[cfg(feature = "ktrace-net")]
+            crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_TX_PACKET,
+                buffer.len() as u32, 0, 0, 0, 0);
+
+            // Detect ARP frames (EtherType 0x0806) so callers can wait for
+            // the reply before sending another packet to the same destination.
+            if buffer.len() >= 14 && buffer[12] == 0x08 && buffer[13] == 0x06 {
+                ARP_SENT.store(true, AtomicOrdering::Relaxed);
+            }
+
             use_ethernet_driver(|driver| driver.transmit(&buffer));
         }
 

@@ -96,7 +96,42 @@ impl FileLike for UdpSocket {
             None => self.peer.lock_no_irq()
                 .ok_or_else(|| Error::new(Errno::EINVAL))?,
         };
+
+        // Flush pending network events (especially DHCP Ack) so that the
+        // interface IP is up-to-date before we check it for source-address
+        // rebinding.  Without this, the first sendto after boot may see
+        // 0.0.0.0 and skip the rebind, causing replies to be dropped.
+        process_packets();
+
         let mut sockets = SOCKETS.lock();
+
+        // If the socket is bound to INADDR_ANY (0.0.0.0), rebind to the
+        // interface's actual IP.  smoltcp uses the socket's bound address as
+        // the IP source; 0.0.0.0 goes out on the wire verbatim, causing the
+        // reply to be addressed to 0.0.0.0 which the interface then drops.
+        {
+            let socket = sockets.get_mut::<udp::Socket>(self.handle);
+            if let Some(ep) = socket.endpoint().addr {
+                if ep.is_unspecified() {
+                    let iface = super::INTERFACE.lock();
+                    if let Some(cidr) = iface.ip_addrs().first() {
+                        let real_ip = match cidr {
+                            smoltcp::wire::IpCidr::Ipv4(c) => {
+                                smoltcp::wire::IpAddress::Ipv4(c.address())
+                            }
+                            #[allow(unreachable_patterns)]
+                            _ => ep,
+                        };
+                        if !real_ip.is_unspecified() {
+                            let port = socket.endpoint().port;
+                            socket.close();
+                            let _ = socket.bind(IpEndpoint::new(real_ip, port));
+                        }
+                    }
+                }
+            }
+        }
+
         let socket = sockets.get_mut::<udp::Socket>(self.handle);
         let mut reader = UserBufReader::from(buf);
         let dst = socket
@@ -105,7 +140,34 @@ impl FileLike for UdpSocket {
         let copied_len = reader.read_bytes(dst)?;
 
         drop(sockets);
+
+        // Clear the ARP-sent flag before driving the stack.  If process_packets()
+        // triggers an ARP request (cold neighbor cache), ARP_SENT will be set.
+        super::ARP_SENT.store(false, core::sync::atomic::Ordering::Relaxed);
         process_packets();
+
+        // If an ARP request was just sent, the UDP packet is sitting in smoltcp's
+        // single-slot ARP pending cache.  A second sendto() before the ARP reply
+        // arrives would replace it, silently dropping this packet.
+        //
+        // Spin briefly (up to 1ms) with interrupts enabled so the ARP reply can
+        // arrive via virtio-net IRQ, then re-drive the stack to flush the pending
+        // packet before we return.
+        if super::ARP_SENT.load(core::sync::atomic::Ordering::Relaxed) {
+            let start = kevlar_platform::arch::tsc::nanoseconds_since_boot();
+            loop {
+                if !super::RX_PACKET_QUEUE.lock().is_empty() {
+                    process_packets();
+                    break;
+                }
+                if kevlar_platform::arch::tsc::nanoseconds_since_boot() - start > 1_000_000 {
+                    // Timeout — give up; poll timeout + DNS retry will recover.
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+
         Ok(copied_len)
     }
 

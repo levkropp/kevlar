@@ -46,6 +46,18 @@ pub fn current_process() -> &'static Arc<Process> {
     CURRENT.get()
 }
 
+/// Returns the current PID if the process subsystem is initialized, else 0.
+/// Used by ktrace to safely record events during early boot before any
+/// process exists.
+pub fn try_current_pid() -> i32 {
+    // CURRENT is a cpu_local Lazy<Arc<Process>>. `.get()` returns
+    // `&Lazy<Arc<Process>>`, then `.try_get()` checks if the Lazy is set.
+    match CURRENT.get().try_get() {
+        Some(p) => p.pid().as_i32(),
+        None => 0,
+    }
+}
+
 pub fn init() {
     JOIN_WAIT_QUEUE.init(WaitQueue::new);
     VFORK_WAIT_QUEUE.init(WaitQueue::new);

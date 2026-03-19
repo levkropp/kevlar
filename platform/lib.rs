@@ -41,6 +41,15 @@ pub mod profile;
 pub mod spinlock;
 pub mod usercopy_trace;
 
+/// ktrace debugcon output (x86_64 only).
+#[cfg(all(feature = "ktrace", target_arch = "x86_64"))]
+pub mod debugcon {
+    /// Write bytes to the ISA debugcon port (QEMU port 0xe9).
+    pub fn write_bytes(data: &[u8]) {
+        crate::x64::debugcon::write_bytes(data);
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 mod x64;
 #[cfg(target_arch = "aarch64")]
