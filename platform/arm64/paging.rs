@@ -134,32 +134,54 @@ fn leaf_pt_index(vaddr_value: usize) -> usize {
 }
 
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
-    let orig_table = original_table_paddr.as_ptr::<PageTableEntry>();
+    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
+    // Zero the new table first (entries will be filled in below).
+    unsafe { new_table.cast::<u8>().write_bytes(0, PAGE_SIZE); }
+
     debug_assert!(level > 0);
-    for i in 0..ENTRIES_PER_TABLE {
-        let entry = unsafe { *orig_table.offset(i) };
-        let paddr = entry_paddr(entry);
 
-        if paddr.is_null() {
-            continue;
-        }
-
-        let new_paddr = if level == 1 {
-            // Copy a physical page.
-            let new_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
-            unsafe {
-                ptr::copy_nonoverlapping::<u8>(paddr.as_ptr(), new_paddr.as_mut_ptr(), PAGE_SIZE);
+    if level == 1 {
+        // Leaf page table (PTE level): implement CoW sharing.
+        // Share physical pages between parent and child: increment refcount
+        // and make writable pages read-only in both PTEs.  The page fault
+        // handler will copy-on-write for private mappings (refcount > 1)
+        // or restore write permission for MAP_SHARED mappings.
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
             }
-            new_paddr
-        } else {
-            duplicate_table(paddr, level - 1)?
-        };
 
-        unsafe {
-            *new_table.offset(i) = new_paddr.value() as u64 | entry_flags(entry);
+            // Share the physical page (bump refcount parent→2).
+            crate::page_refcount::page_ref_inc(paddr);
+
+            let flags = entry_flags(entry);
+            let new_flags = if flags & ATTR_AP_USER != 0 && flags & ATTR_AP_RO == 0 {
+                // User-writable: make read-only in both parent and child for CoW.
+                let ro_flags = flags | ATTR_AP_RO;
+                unsafe { *orig_table.offset(i) = paddr.value() as u64 | ro_flags; }
+                ro_flags
+            } else {
+                flags
+            };
+            unsafe { *new_table.offset(i) = paddr.value() as u64 | new_flags; }
+        }
+    } else {
+        // Intermediate table (PGD/PUD/PMD): recurse into sub-tables.
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            let sub_table = duplicate_table(paddr, level - 1)?;
+            unsafe {
+                *new_table.offset(i) = sub_table.value() as u64 | entry_flags(entry);
+            }
         }
     }
 
@@ -231,11 +253,13 @@ impl PageTable {
         // Default: RW, no exec.
         let attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH
             | ATTR_AF | ATTR_AP_USER | ATTR_PXN | ATTR_UXN;
+        crate::page_refcount::page_ref_init(paddr);
         self.map_page(vaddr, paddr, attrs);
     }
 
     pub fn map_user_page_with_prot(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
         let attrs = prot_to_attrs(prot_flags);
+        crate::page_refcount::page_ref_init(paddr);
         self.map_page(vaddr, paddr, attrs);
     }
 
@@ -338,9 +362,13 @@ impl PageTable {
             return None;
         }
 
+        // Clear the PTE.  The caller is responsible for refcount management
+        // and freeing the page — mremap, for instance, remaps the page at a
+        // new address without freeing it.
         unsafe {
             *entry_ptr.as_ptr() = 0;
         }
+
         Some(paddr)
     }
 
