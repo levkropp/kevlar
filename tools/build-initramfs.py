@@ -930,6 +930,93 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
 
 
+# ─── ARM64 Toolchain ──────────────────────────────────────────────────────
+
+MUSL_CC_ARM64_URL = "https://musl.cc/aarch64-linux-musl-cross.tgz"
+TOOLCHAIN_ARM64 = CACHE / "toolchain-aarch64"
+
+
+def fetch_musl_cc_toolchain():
+    """Download and cache the musl.cc aarch64 cross-compiler.
+
+    Returns path to aarch64-linux-musl-gcc, or None if unavailable.
+    First checks if a system cross-compiler is already installed.
+    """
+    # Prefer system-installed compiler (faster, no 108 MB download)
+    for candidate in ["aarch64-linux-musl-gcc", "aarch64-linux-gnu-gcc"]:
+        if shutil.which(candidate):
+            log("CC", f"using system cross-compiler: {candidate}")
+            return candidate
+
+    gcc = TOOLCHAIN_ARM64 / "bin" / "aarch64-linux-musl-gcc"
+    if gcc.exists():
+        return str(gcc)
+
+    log("DL", "musl.cc aarch64 cross-compiler (~108 MB, one-time download)")
+    tarball = download(MUSL_CC_ARM64_URL, CACHE / "src" / "aarch64-linux-musl-cross.tgz")
+
+    if TOOLCHAIN_ARM64.exists():
+        shutil.rmtree(TOOLCHAIN_ARM64)
+    TOOLCHAIN_ARM64.mkdir(parents=True)
+    log("BUILD", "extracting aarch64 cross-compiler")
+    run(["tar", "xzf", str(tarball), "--strip-components=1", "-C", str(TOOLCHAIN_ARM64)],
+        capture_output=True)
+
+    if not gcc.exists():
+        log("WARN", "musl.cc toolchain extracted but aarch64-linux-musl-gcc not found")
+        return None
+    return str(gcc)
+
+
+def compile_all_local_arm64(cc):
+    """Cross-compile test binaries for aarch64. Returns list of output paths."""
+    log("CC", f"arm64 test binaries ({cc})")
+    local_arm64 = CACHE / "local-bin-arm64"
+    local_arm64.mkdir(parents=True, exist_ok=True)
+
+    # Binaries to cross-compile: (src_rel, output_name, extra_flags)
+    jobs = [
+        ("tests/test.c",               "test",              []),
+        ("benchmarks/bench.c",         "bench",             []),
+        ("testing/busybox_suite.c",    "busybox-suite",     []),
+        ("testing/mini_storage.c",     "mini-storage",      []),
+        ("testing/mini_threads.c",     "mini-threads",      ["-pthread"]),
+        ("testing/fork_exec_stress.c", "fork-exec-stress",  []),
+        ("testing/dd_diag.c",          "dd-diag",           []),
+        ("testing/test_net.c",         "test-net",          []),
+    ]
+    # Contract tests
+    for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
+        jobs.append((str(src.relative_to(ROOT)), "contract-" + src.stem, []))
+
+    # -no-pie: aarch64-linux-musl-gcc defaults to static-pie (ET_DYN), but
+    # Kevlar's ARM64 ELF loader handles ET_EXEC (plain static) correctly.
+    base_flags = ["-static", "-no-pie", "-O2", "-Wall", "-Wno-unused-result"]
+
+    failed = []
+    built = []
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        futures = {}
+        for src_rel, name, extra in jobs:
+            src = ROOT / src_rel if not src_rel.startswith("/") else Path(src_rel)
+            out = local_arm64 / name
+            f = pool.submit(compile_one, cc, src, out, base_flags + extra)
+            futures[f] = (src, name)
+        for f in as_completed(futures):
+            out_path, ok, err = f.result()
+            src, name = futures[f]
+            if ok:
+                built.append(Path(out_path))
+            else:
+                log("WARN", f"arm64 {name}: {(err or '').strip()[:120]}")
+                failed.append(name)
+
+    if failed:
+        log("WARN", f"{len(failed)} arm64 binary(s) failed to compile")
+    log("CC", f"arm64: {len(built)} binaries compiled")
+    return built
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1004,7 +1091,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1072,6 +1159,17 @@ def assemble_rootfs_arm64(arm64_bins):
     if src_net.exists():
         shutil.copy2(src_net, ROOTFS / "etc" / "network" / "interfaces")
 
+    # ── Cross-compiled arm64 test binaries ──
+    if local_arm64_bins:
+        for f in local_arm64_bins:
+            if f.is_file():
+                dest = ROOTFS / "bin" / f.name
+                # dest may be a BusyBox symlink; unlink before copying
+                if dest.exists() or dest.is_symlink():
+                    dest.unlink()
+                shutil.copy2(f, dest)
+                os.chmod(dest, 0o755)
+
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
@@ -1121,7 +1219,14 @@ def main():
     if arch == "arm64":
         log("ARCH", "arm64 — downloading pre-built Alpine aarch64 binaries")
         arm64_bins = build_arm64_packages()
-        assemble_rootfs_arm64(arm64_bins)
+        local_arm64_bins = []
+        if not args.skip_externals:
+            cc = fetch_musl_cc_toolchain()
+            if cc:
+                local_arm64_bins = compile_all_local_arm64(cc)
+            else:
+                log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive

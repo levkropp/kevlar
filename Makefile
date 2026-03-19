@@ -54,6 +54,9 @@ endif
 topdir      := $(PWD)
 build_mode  := $(if $(RELEASE),release,debug)
 
+# KVM acceleration: available on x64 (native), not on arm64 (TCG-only on x86 host).
+ACCEL       := $(if $(filter arm64,$(ARCH)),,--kvm)
+
 # All profiles use panic=unwind on x64 — LLVM generates faster code with
 # unwind tables (better register allocation and code layout).  Performance
 # and Ludicrous still skip runtime safety (catch_unwind, capabilities)
@@ -967,10 +970,10 @@ debug: build
 # Builds with all ktrace features enabled and boots with debugcon output.
 .PHONY: run-ktrace
 run-ktrace:
-	$(PROGRESS) "KTRACE" "profile-$(PROFILE)"
+	$(PROGRESS) "KTRACE" "profile-$(PROFILE) arch-$(ARCH)"
 	$(MAKE) build PROFILE=$(PROFILE) FEATURES=ktrace-all
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH) --kvm                                           \
+		--arch $(ARCH) $(ACCEL)                                        \
 		--ktrace ktrace.bin                                            \
 		--save-dump kevlar.dump                                        \
 		$(if $(GUI),--gui,)                                            \

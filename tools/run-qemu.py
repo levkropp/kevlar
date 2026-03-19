@@ -236,15 +236,26 @@ def main():
         else:
             argv += ["-drive", f"file={disk_path},format=raw,if=virtio"]
     if args.ktrace:
-        # ISA debugcon device — writes to host file at ~5 MB/s on KVM.
         ktrace_path = args.ktrace
-        argv += [
-            "-chardev", f"file,id=ktrace,path={ktrace_path}",
-            "-device", "isa-debugcon,chardev=ktrace,iobase=0xe9",
-        ]
+        if args.arch == "arm64":
+            # ARM64: semihosting SYS_WRITE trap → chardev file.
+            # One HLT #0xF000 per ring-buffer dump (single trap for the full
+            # 256 KB slice — equivalent throughput to ISA debugcon on x86_64).
+            argv += [
+                "-chardev", f"file,id=ktrace,path={ktrace_path}",
+                "-semihosting-config", "enable=on,target=native,chardev=ktrace",
+            ]
+            print(f"\x1b[36mktrace: ARM64 semihosting → {ktrace_path}\x1b[0m",
+                  file=sys.stderr)
+        else:
+            # x86_64: ISA debugcon device — writes to host file at ~5 MB/s on KVM.
+            argv += [
+                "-chardev", f"file,id=ktrace,path={ktrace_path}",
+                "-device", "isa-debugcon,chardev=ktrace,iobase=0xe9",
+            ]
+            print(f"\x1b[36mktrace: ISA debugcon → {ktrace_path}\x1b[0m",
+                  file=sys.stderr)
         cmdline.append("debug=ktrace")
-        print(f"\x1b[36mktrace: binary trace will be written to {ktrace_path}\x1b[0m",
-              file=sys.stderr)
     if args.append_cmdline:
         cmdline += args.append_cmdline
     if args.log_serial:

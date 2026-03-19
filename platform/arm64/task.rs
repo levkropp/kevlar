@@ -209,6 +209,18 @@ impl ArchTask {
     }
 
     pub fn fork(&self, frame: &PtRegs) -> Result<ArchTask, PageAllocError> {
+        // Read the live hardware TPIDR_EL0.  The user process may have written
+        // it directly via `msr tpidr_el0` (musl's __init_tp does this) without
+        // going through any syscall, so ArchTask.tpidr_el0 may be stale (0).
+        // We are in EL1 handling the fork SVC; the hardware register still
+        // holds whatever EL0 last wrote.
+        let current_tpidr: u64;
+        unsafe {
+            core::arch::asm!("mrs {}, tpidr_el0", out(reg) current_tpidr);
+        }
+        // Also update the stored field so switch_task restores it correctly.
+        self.tpidr_el0.store(current_tpidr);
+
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
@@ -260,7 +272,7 @@ impl ArchTask {
 
         Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
-            tpidr_el0: AtomicCell::new(self.tpidr_el0.load()),
+            tpidr_el0: AtomicCell::new(current_tpidr),
             interrupt_stack,
             syscall_stack,
             context_saved: AtomicBool::new(true),
@@ -350,6 +362,24 @@ impl ArchTask {
     ) {
         frame.pc = ip.as_isize() as u64;
         frame.sp = user_sp.as_isize() as u64;
+
+        // Reset tpidr_el0 to 0 for the new process.
+        //
+        // SAVE_REGS/RESTORE_REGS in trap.S do not save or restore tpidr_el0,
+        // so the hardware register persists across syscalls.  After fork, the
+        // child inherits the parent's TLS base (written by switch_task before
+        // the first scheduling).  execve replaces the address space, so the
+        // parent's TLS pointer is now stale — musl's __init_tp will set the
+        // correct value via `msr tpidr_el0` before any TLS access.
+        //
+        // We zero both the hardware register (visible when eret returns to the
+        // new process entry point) and the stored ArchTask field (so the first
+        // context switch restores 0 instead of the parent's stale value).
+        #[allow(unsafe_code)]
+        unsafe {
+            core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack));
+        }
+        self.tpidr_el0.store(0);
     }
 
     pub fn setup_signal_stack(
@@ -405,8 +435,17 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     // Set kernel stack for next thread's exception entry.
     head.sp_el1 = (next.syscall_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64;
 
+    // Save the current (prev) task's TPIDR_EL0 before switching away.
+    // User processes can write TPIDR_EL0 directly via `msr tpidr_el0`
+    // without going through a syscall, so the ArchTask field may be stale.
+    // Reading the hardware register here keeps the field in sync so that
+    // fork() copies the correct TLS base.
+    //
     // Restore next thread's TPIDR_EL0 (user TLS base).
     unsafe {
+        let prev_tpidr: u64;
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) prev_tpidr);
+        prev.tpidr_el0.store(prev_tpidr);
         core::arch::asm!("msr tpidr_el0, {}", in(reg) next.tpidr_el0.load());
         // Signal that prev's SP is about to be overwritten.  The assembly
         // sets this back to true after the save, allowing resume() to enqueue
