@@ -31,12 +31,6 @@ bitflags! {
         const PROFILE  = 0x100;
         /// Span tracer for exec/fork/page-fault phase profiling.
         const TRACE    = 0x200;
-        /// Per-exec prefault decision tracing (which pages, from cache/file/zero).
-        const KWAB_EXEC  = 0x400;
-        /// Post-exec page content verification against backing files.
-        const KWAB_VERIFY = 0x800;
-        /// VM audit: check PTE state matches VMA protection after exec.
-        const KWAB_AUDIT  = 0x1000;
         /// Hierarchical call tracer (per-CPU ring of enter/exit events with depth).
         const HTRACE = 0x2000;
         /// ktrace: high-bandwidth binary tracing (per-CPU ring + debugcon dump).

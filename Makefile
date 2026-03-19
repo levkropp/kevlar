@@ -762,17 +762,10 @@ test-busybox-smp:
 	fi
 
 # Huge page assembly stress test: 300 fork+exec iterations under KVM.
-# Use VERIFY=1 (default) to enable kwab-verify content checking.
-VERIFY ?= 1
 .PHONY: test-huge-page
 test-huge-page:
-ifeq ($(VERIFY),1)
-	$(PROGRESS) "TEST" "huge page stress test (KVM, verify)"
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/fork-exec-stress 300" KEVLAR_DEBUG=kwab-verify
-else
 	$(PROGRESS) "TEST" "huge page stress test (KVM)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/fork-exec-stress 300"
-endif
 	timeout 300 $(PYTHON3) tools/run-qemu.py \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-huge-page-$(PROFILE).log; true
@@ -1010,43 +1003,6 @@ analyze-log:
 	$(PYTHON3) tools/crash-analyzer/analyzer.py                            \
 		--symbols $(kernel_symbols)                                    \
 		log /tmp/kevlar-bench-$(PROFILE).log | $(PYTHON3) -m json.tool
-
-# --- kwab crash dump integration ---
-KWAB ?= $(HOME)/kwab/target/release/kwab
-KWAB_DIR ?= build/crashes
-
-# Build the kwab CLI tool.
-.PHONY: kwab-build
-kwab-build:
-	cd $(HOME)/kwab && cargo build --release
-
-# Import a serial log into .kwab format. Picks up DBG events automatically.
-# Usage: make kwab-import LOG=/tmp/kevlar-bench-balanced.log
-.PHONY: kwab-import
-kwab-import:
-	@mkdir -p $(KWAB_DIR)
-	$(KWAB) import $(or $(LOG),/tmp/kevlar-bench-kvm-$(PROFILE).log) \
-		-o $(KWAB_DIR)/$$(date +%Y%m%d-%H%M%S).kwab
-	@echo "Imported to $(KWAB_DIR)/"
-
-# Inspect the most recent .kwab dump.
-.PHONY: kwab-inspect
-kwab-inspect:
-	@latest=$$(ls -t $(KWAB_DIR)/*.kwab 2>/dev/null | head -1); \
-	 if [ -n "$$latest" ]; then $(KWAB) inspect "$$latest"; \
-	 else echo "No .kwab files in $(KWAB_DIR)/"; fi
-
-# Browse all crash dumps in the TUI.
-.PHONY: kwab-tui
-kwab-tui:
-	@mkdir -p $(KWAB_DIR)
-	$(KWAB) tui $(KWAB_DIR)
-
-# List all crash dumps.
-.PHONY: kwab-list
-kwab-list:
-	@mkdir -p $(KWAB_DIR)
-	$(KWAB) list $(KWAB_DIR)
 
 .PHONY: print-stack-sizes
 print-stack-sizes: build
