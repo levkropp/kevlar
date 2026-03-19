@@ -8,7 +8,7 @@ impl<'a> SyscallHandler<'a> {
     pub fn sys_stat(&mut self, path: &Path, buf: UserVAddr) -> Result<isize> {
         let root_fs = current_process().root_fs();
         let stat = root_fs.lock_no_irq().lookup(path)?.stat()?;
-        buf.write(&stat)?;
+        buf.write(&stat.to_abi_bytes())?;
         Ok(0)
     }
 }

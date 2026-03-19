@@ -160,4 +160,57 @@ impl Stat {
             _unused: [0; 3],
         }
     }
+
+    /// Convert to the architecture-specific ABI binary layout for userspace.
+    ///
+    /// ARM64 (asm-generic/stat.h): mode(u32)|nlink(u32) at offset 16, blksize=i32.
+    /// x86_64: nlink(u64)|mode(u32) at offset 16, blksize=i64.
+    #[cfg(target_arch = "aarch64")]
+    pub fn to_abi_bytes(&self) -> [u8; 128] {
+        let mut buf = [0u8; 128];
+        let b = &mut buf;
+        put_u64(b, 0, self.dev.0 as u64);
+        put_u64(b, 8, self.inode_no.as_u64());
+        put_u32(b, 16, self.mode.0);              // mode BEFORE nlink
+        put_u32(b, 20, self.nlink.0 as u32);      // nlink is u32
+        put_u32(b, 24, self.uid.0);
+        put_u32(b, 28, self.gid.0);
+        put_u64(b, 32, self.rdev.0 as u64);
+        put_u64(b, 40, 0);                        // __pad1
+        put_u64(b, 48, self.size.0 as u64);
+        put_u32(b, 56, self.blksize.0 as u32);    // blksize is i32
+        put_u32(b, 60, 0);                        // __pad2
+        put_u64(b, 64, self.blocks.0 as u64);
+        put_u64(b, 72, self.atime.0 as u64);
+        put_u64(b, 80, self.atime_nsec.0 as u64);
+        put_u64(b, 88, self.mtime.0 as u64);
+        put_u64(b, 96, self.mtime_nsec.0 as u64);
+        put_u64(b, 104, self.ctime.0 as u64);
+        put_u64(b, 112, self.ctime_nsec.0 as u64);
+        // __unused4, __unused5 at 120..128 left as zero
+        buf
+    }
+
+    /// x86_64: write the struct as-is (it already matches the x86_64 ABI).
+    #[cfg(target_arch = "x86_64")]
+    pub fn to_abi_bytes(&self) -> [u8; 144] {
+        let mut buf = [0u8; 144];
+        // The Stat struct is already in x86_64 layout, just transmute.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self as *const Stat as *const u8,
+                buf.as_mut_ptr(),
+                144,
+            );
+        }
+        buf
+    }
+}
+
+fn put_u64(buf: &mut [u8], off: usize, val: u64) {
+    buf[off..off + 8].copy_from_slice(&val.to_ne_bytes());
+}
+
+fn put_u32(buf: &mut [u8], off: usize, val: u32) {
+    buf[off..off + 4].copy_from_slice(&val.to_ne_bytes());
 }

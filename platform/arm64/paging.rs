@@ -178,10 +178,15 @@ fn allocate_pgd() -> Result<PAddr, PageAllocError> {
 
 /// Translate Linux mmap prot flags to ARM64 PTE attributes for a user page.
 fn prot_to_attrs(prot_flags: i32) -> u64 {
-    let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF | ATTR_AP_USER;
+    let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF;
 
+    if prot_flags & 3 != 0 {
+        // PROT_READ or PROT_WRITE → user-space accessible (AP[1]=1).
+        // PROT_NONE leaves AP[1]=0 so EL0 access causes a permission fault.
+        attrs |= ATTR_AP_USER;
+    }
     if prot_flags & 2 == 0 {
-        // No PROT_WRITE → read-only
+        // No PROT_WRITE → read-only (AP[2]=1).
         attrs |= ATTR_AP_RO;
     }
     if prot_flags & 4 == 0 {

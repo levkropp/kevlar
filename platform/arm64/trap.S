@@ -153,6 +153,11 @@ handle_lower_a64_sync:
     mov     x0, #1          // from_user = true
     mov     x1, sp           // frame pointer
     bl      arm64_handle_exception
+    // Deliver any pending signal before returning to user (mirrors x86_64
+    // x64_check_signal_on_irq_return).  This handles SIGSEGV from page
+    // faults and other signals raised inside the exception handler.
+    mov     x0, sp
+    bl      arm64_check_signal_on_return
     RESTORE_REGS
     eret
 
@@ -161,6 +166,9 @@ handle_lower_a64_irq:
     mov     x0, #3          // type = IRQ, from user
     mov     x1, sp
     bl      arm64_handle_irq
+    // Deliver any signal pending after the IRQ (e.g. SIGALRM from timer).
+    mov     x0, sp
+    bl      arm64_check_signal_on_return
     RESTORE_REGS
     eret
 

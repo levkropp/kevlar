@@ -88,19 +88,24 @@ def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tupl
     The binary must already be present in the kernel's embedded initramfs.
     Returns (serial_output, timed_out)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Patch kernel ELF for x64: e_machine must be EM_386 for QEMU multiboot
-        kernel_path = str(kernel_elf)
-        if arch == "x64":
-            elf_data = bytearray(kernel_elf.read_bytes())
-            elf_data[18] = 0x03  # EM_386 low byte
-            elf_data[19] = 0x00  # EM_386 high byte
-            tmp_elf = Path(tmpdir) / "kernel-patched.elf"
-            tmp_elf.write_bytes(bytes(elf_data))
-            kernel_path = str(tmp_elf)
-
-        # Use init= cmdline to override the compiled-in INIT_SCRIPT.
         # The contract binary is in Kevlar's embedded initramfs at /bin/<init_bin>.
         init_path = f"/bin/{init_bin}"
+
+        # Patch kernel ELF: KEVLAR_INIT slot (for ARM64 where DTB cmdline
+        # is unavailable) + e_machine fix (for x64 multiboot).
+        elf_data = bytearray(kernel_elf.read_bytes())
+        magic = b"KEVLAR_INIT:"
+        slot_offset = elf_data.find(magic)
+        if slot_offset >= 0:
+            path_bytes = init_path.encode("utf-8")
+            payload = path_bytes[:116] + b"\x00" * (116 - min(len(path_bytes), 116))
+            elf_data[slot_offset + 12 : slot_offset + 128] = payload
+        if arch == "x64":
+            elf_data[18] = 0x03  # EM_386 low byte
+            elf_data[19] = 0x00  # EM_386 high byte
+        tmp_elf = Path(tmpdir) / "kernel-patched.elf"
+        tmp_elf.write_bytes(bytes(elf_data))
+        kernel_path = str(tmp_elf)
 
         if arch == "x64":
             qemu_bin = "qemu-system-x86_64"
@@ -122,12 +127,13 @@ def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tupl
             qemu_args = [
                 "-machine", "virt",
                 "-cpu", "cortex-a72",
-                "-m", "256",
+                "-m", "1024",
                 "-nographic",
                 "-no-reboot",
                 "-serial", "mon:stdio",
                 "-monitor", "none",
-                "-d", "guest_errors",
+                "-d", "guest_errors,unimp",
+                "-global", "virtio-mmio.force-legacy=false",
                 "-kernel", kernel_path,
                 "-append", f"init={init_path}",
             ]
@@ -161,6 +167,14 @@ _NOISE_PREFIXES = (
     "QEMU",
     "qemu",
     "[    ",     # Linux kernel dmesg style
+    "Kevlar ARM64 booting",
+    "DTB ",
+    "bootinfo ",
+    "ram0:",
+    "page_allocator ",
+    "RAM:",
+    "running init",
+    "running cmdline",
 )
 
 def extract_contract_lines(output: str) -> list[str]:

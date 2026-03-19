@@ -39,7 +39,7 @@ impl<'a> SyscallHandler<'a> {
             path_comp.inode.stat()?
         };
 
-        buf.write(&stat)?;
+        buf.write(&stat.to_abi_bytes())?;
         Ok(0)
     }
 }
