@@ -41,12 +41,23 @@ pub mod profile;
 pub mod spinlock;
 pub mod usercopy_trace;
 
-/// ktrace debugcon output (x86_64 only).
-#[cfg(all(feature = "ktrace", target_arch = "x86_64"))]
+/// ktrace trace-device output — ISA debugcon on x86_64, semihosting on ARM64.
+///
+/// Both transports accept a QEMU chardev that writes to `ktrace.bin`:
+/// - x86_64: `-chardev file,id=ktrace,path=ktrace.bin -device isa-debugcon,chardev=ktrace,iobase=0xe9`
+/// - arm64:  `-chardev file,id=ktrace,path=ktrace.bin -semihosting-config enable=on,target=native,chardev=ktrace`
+#[cfg(feature = "ktrace")]
 pub mod debugcon {
-    /// Write bytes to the ISA debugcon port (QEMU port 0xe9).
+    /// Write bytes to the architecture trace device.
+    ///
+    /// One call per ring-buffer dump; implementations batch as much as
+    /// possible — a loop of `outb` on x86_64, a single `SYS_WRITE` trap
+    /// on ARM64.
     pub fn write_bytes(data: &[u8]) {
+        #[cfg(target_arch = "x86_64")]
         crate::x64::debugcon::write_bytes(data);
+        #[cfg(target_arch = "aarch64")]
+        crate::arm64::debugcon::write_bytes(data);
     }
 }
 

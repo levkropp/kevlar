@@ -12,6 +12,8 @@ mod cpu_local;
 mod backtrace;
 mod boot;
 mod bootinfo;
+#[cfg(feature = "ktrace")]
+pub mod debugcon;
 mod gic;
 mod idle;
 mod interrupt;
