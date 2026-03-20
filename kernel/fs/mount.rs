@@ -171,7 +171,10 @@ pub struct MountPoint {
 pub struct RootFs {
     root_path: Arc<PathComponent>,
     cwd_path: Arc<PathComponent>,
-    mount_points: Arc<SpinLock<HashMap<MountKey, MountPoint>>>,
+    /// Mount point table. Stored as a plain Vec (not behind a lock) because
+    /// path resolution already holds the outer RootFs SpinLock. Searched
+    /// linearly — typically 3-5 entries, so no HashMap overhead needed.
+    mount_points: Vec<(MountKey, MountPoint)>,
     symlink_follow_limit: usize,
 }
 
@@ -184,7 +187,7 @@ impl RootFs {
         });
 
         Ok(RootFs {
-            mount_points: Arc::new(SpinLock::new(HashMap::new())),
+            mount_points: Vec::new(),
             root_path: root_path.clone(),
             cwd_path: root_path,
             symlink_follow_limit: DEFAULT_SYMLINK_FOLLOW_MAX,
@@ -192,16 +195,23 @@ impl RootFs {
     }
 
     pub fn mount(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
-        self.mount_points
-            .lock_no_irq()
-            .insert(dir.mount_key()?, MountPoint { fs, readonly: false });
+        let key = dir.mount_key()?;
+        // Replace existing entry or add new one.
+        if let Some(entry) = self.mount_points.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = MountPoint { fs, readonly: false };
+        } else {
+            self.mount_points.push((key, MountPoint { fs, readonly: false }));
+        }
         Ok(())
     }
 
     pub fn mount_readonly(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
-        self.mount_points
-            .lock_no_irq()
-            .insert(dir.mount_key()?, MountPoint { fs, readonly: true });
+        let key = dir.mount_key()?;
+        if let Some(entry) = self.mount_points.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = MountPoint { fs, readonly: true };
+        } else {
+            self.mount_points.push((key, MountPoint { fs, readonly: true }));
+        }
         Ok(())
     }
 
@@ -326,9 +336,12 @@ impl RootFs {
         Ok(current)
     }
 
+    #[inline(always)]
     fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<MountPoint>> {
         let key = dir.mount_key()?;
-        Ok(self.mount_points.lock_no_irq().get(&key).cloned())
+        Ok(self.mount_points.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, mp)| mp.clone()))
     }
 
     /// Resolves a path into `PathComponent`. If `follow_symlink` is `true`,
