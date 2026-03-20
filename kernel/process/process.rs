@@ -130,10 +130,11 @@ static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
 /// SEPARATE page table with CoW marking. musl's writes trigger CoW faults
 /// and copy to private pages — the parent's data is never corrupted.
 /// Saves ~8µs per fork by eliminating ~200+ atomic refcount increments.
-/// NOTE: Currently disabled. The restore_writable walk at exit/exec time
-/// costs ~20µs (10K PTE checks), which offsets the ~6µs refcount savings.
-/// Needs a writable-page bitmap or dirty-PTE tracking to make the restore
-/// walk O(writable_pages) instead of O(all_pages).
+/// Ghost-fork with targeted restore: page table duplication skips all
+/// refcount operations. A bitmap of CoW-marked addresses enables O(N)
+/// restore (N=writable pages, ~200) instead of O(all PTEs, ~10K).
+/// Currently disabled: the spin-wait hangs on 1-vCPU boot configurations.
+/// Needs SMP-aware spin-yield or sleep-based wait with lower overhead.
 pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
 pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -1086,19 +1087,20 @@ impl Process {
             EXITED_PROCESSES.lock().push(current.clone());
         }
 
-        // Ghost-fork: restore parent's writable PTEs before waking it.
+        // Ghost-fork: restore parent's writable PTEs using the child's
+        // address list (O(writable_pages) instead of O(all_PTEs)).
         if current.vfork_parent.is_some() {
             if let Some(parent) = current.parent.upgrade() {
                 if let Some(vm_ref) = parent.vm().as_ref() {
-                    vm_ref.lock().restore_writable_after_ghost();
+                    let cow_addrs: Vec<usize> = current.vm().as_ref()
+                        .map(|v| v.lock().ghost_cow_addrs.clone())
+                        .unwrap_or_default();
+                    vm_ref.lock().restore_writable_with_list(&cow_addrs);
                 }
             }
         }
 
         // Ghost-fork / vfork: set done flag BEFORE sending SIGCHLD.
-        // SIGCHLD can wake the parent from sleep_signalable_until; if
-        // ghost_fork_done is still false at that point, the parent gets
-        // EINTR instead of the child PID — breaking fork().
         current.ghost_fork_done.store(true, Ordering::Release);
         current.wake_vfork_parent();
 
@@ -1568,14 +1570,29 @@ impl Process {
             current.signaled_frame.store(None);
         }
 
+        // Ghost-fork: extract cow_addrs from the OLD VM before replacing it.
+        let ghost_cow_addrs: Option<Vec<usize>> = if current.vfork_parent.is_some() {
+            let vm_ref = current.vm();
+            vm_ref.as_ref().and_then(|arc| {
+                let vm = arc.lock();
+                if vm.is_ghost_forked {
+                    Some(vm.ghost_cow_addrs.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
         entry.vm.page_table().switch();
         *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
 
-        // Ghost-fork: restore parent's writable PTEs before waking it.
-        if current.vfork_parent.is_some() {
+        // Ghost-fork: restore parent's writable PTEs using the saved list.
+        if let Some(addrs) = ghost_cow_addrs {
             if let Some(parent) = current.parent.upgrade() {
                 if let Some(vm_ref) = parent.vm().as_ref() {
-                    vm_ref.lock().restore_writable_after_ghost();
+                    vm_ref.lock().restore_writable_with_list(&addrs);
                 }
             }
         }

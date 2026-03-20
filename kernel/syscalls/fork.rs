@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::{
-    process::{current_process, GHOST_FORK_ENABLED, Process},
+    process::{current_process, signal::SigSet, GHOST_FORK_ENABLED, Process},
     result::Result,
     syscalls::SyscallHandler,
 };
@@ -22,6 +22,12 @@ impl<'a> SyscallHandler<'a> {
         // where a pending signal (e.g. SIGALRM) causes sleep_signalable_until
         // to return EINTR on every iteration without ever actually sleeping.
         if GHOST_FORK_ENABLED.load(Ordering::Relaxed) {
+            let current = current_process();
+            // Block all signals during ghost-fork wait. Signals remain queued
+            // and are delivered when fork() returns (via try_delivering_signal).
+            let saved_mask = current.sigset_load();
+            current.sigset_store(SigSet::ALL);
+
             // Spin-wait for ghost child to exec/exit. On SMP (4 CPUs), the
             // child runs on another CPU so spinning doesn't block it.
             // Yield periodically for single-CPU fallback safety.
@@ -36,8 +42,9 @@ impl<'a> SyscallHandler<'a> {
                     crate::process::switch();
                 }
             }
+
+            current.sigset_store(saved_mask);
             // Flush TLB to pick up restored writable PTEs from the ghost child.
-            let current = current_process();
             if let Some(vm_ref) = current.vm().as_ref() {
                 vm_ref.lock().page_table().flush_tlb_all();
             }
