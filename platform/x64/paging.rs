@@ -795,11 +795,14 @@ impl PageTable {
     /// avoiding unnecessary full CoW copies (refcount > 1 → must copy).
     /// The PML4 page itself is also freed.
     pub fn teardown_forked_pages(&mut self) {
+        if self.pml4.is_null() {
+            return;
+        }
         teardown_table_dec_only(self.pml4, 4);
-        // Free the PML4 page itself.
-        crate::page_allocator::free_pages(self.pml4, 1);
-        // Prevent double-free if drop runs again.
+        // Free the PML4 page itself and prevent double-free.
+        let pml4 = self.pml4;
         self.pml4 = PAddr::new(0);
+        crate::page_allocator::free_pages(pml4, 1);
     }
 
     /// Try to map a page. Returns `true` if mapped, `false` if already mapped.

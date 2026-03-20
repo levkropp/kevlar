@@ -101,6 +101,9 @@ pub struct Vm {
     /// Heap tracking: independent of VMA indices (which shift on munmap/mmap).
     heap_bottom: UserVAddr,
     heap_end: UserVAddr,
+    /// True if this VM was created by fork (duplicate_table). Vm::Drop
+    /// only runs teardown on forked VMs to fix CoW refcount inflation.
+    is_forked: bool,
 }
 
 impl Vm {
@@ -131,6 +134,7 @@ impl Vm {
             last_fault_vma_idx: None,
             heap_bottom: heap_bottom,
             heap_end: heap_bottom,
+            is_forked: false,
         })
     }
 
@@ -291,6 +295,7 @@ impl Vm {
             last_fault_vma_idx: self.last_fault_vma_idx,
             heap_bottom: self.heap_bottom,
             heap_end: self.heap_end,
+            is_forked: true,
         })
     }
 
@@ -464,13 +469,16 @@ impl Vm {
     }
 }
 
-// Vm::Drop decrements CoW refcounts and frees intermediate page table pages.
-// Uses teardown_forked_pages (safe: never frees data pages, only decrements
-// refcounts) to avoid use-after-free with page cache entries. Critical for
-// fork+exec performance: without it, the parent's page refcounts stay
-// elevated, forcing full page copies on every subsequent CoW fault.
+// Vm::Drop decrements CoW refcounts and frees intermediate page table pages
+// for forked VMs. Only forked VMs are torn down — exec'd VMs' page table
+// pages are leaked (~20-40KB/process, same as before this fix).
+// Critical for fork+exec performance: without it, the parent's page
+// refcounts stay elevated after the forked page table is discarded by exec,
+// forcing full page copies on every subsequent CoW fault.
 impl Drop for Vm {
     fn drop(&mut self) {
-        self.page_table.teardown_forked_pages();
+        if self.is_forked {
+            self.page_table.teardown_forked_pages();
+        }
     }
 }
