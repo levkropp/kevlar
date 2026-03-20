@@ -81,13 +81,20 @@ def bar_chart(label, value, max_val, width=40, char='█'):
     return f'{label:<20} {bar} {format_ns(value):>8}'
 
 def ratio_color(ratio):
-    """ANSI color for ratio."""
-    if ratio <= 0.8:
+    """ANSI color for ratio.
+
+    Thresholds (Kevlar/Linux):
+      ≤0.90  green   faster — meaningfully beating Linux
+      ≤1.00  default OK     — at parity
+      ≤1.10  yellow  marginal — small gap, investigate
+      >1.10  red     REGRESSION — unacceptable, must fix
+    """
+    if ratio <= 0.9:
         return '\033[32m'  # green (faster)
+    elif ratio <= 1.0:
+        return '\033[0m'   # default (ok / parity)
     elif ratio <= 1.1:
-        return '\033[0m'   # default (ok)
-    elif ratio <= 2.0:
-        return '\033[33m'  # yellow (slower)
+        return '\033[33m'  # yellow (marginal)
     else:
         return '\033[31m'  # red (regression)
 
@@ -131,9 +138,9 @@ def print_comparison(data, format='terminal'):
         entry = (name, l, k, ratio)
         if ratio <= 0.9:
             faster.append(entry)
-        elif ratio <= 1.1:
+        elif ratio <= 1.0:
             ok.append(entry)
-        elif ratio <= 2.0:
+        elif ratio <= 1.1:
             slower.append(entry)
         else:
             regression.append(entry)
@@ -146,12 +153,12 @@ def print_comparison(data, format='terminal'):
             l, k = linux[name], kevlar[name]
             ratio = k / l
             if ratio <= 0.9: status = 'Faster'
-            elif ratio <= 1.1: status = 'OK'
-            elif ratio <= 2.0: status = 'Slower'
-            else: status = 'Regression'
+            elif ratio <= 1.0: status = 'OK'
+            elif ratio <= 1.1: status = 'Marginal'
+            else: status = 'REGRESSION'
             print(f'| {name} | {format_ns(l)} | {format_ns(k)} | {ratio:.2f}x | {status} |')
         print(f'\n**Summary:** {len(faster)} faster, {len(ok)} OK, '
-              f'{len(slower)} marginal, {len(regression)} regression')
+              f'{len(slower)} marginal, {len(regression)} REGRESSION')
         return
 
     # Terminal output with colors and charts
@@ -169,8 +176,8 @@ def print_comparison(data, format='terminal'):
         ratio = k / l
         color = ratio_color(ratio)
         if ratio <= 0.9: status = '✓ faster'
-        elif ratio <= 1.1: status = '= ok'
-        elif ratio <= 2.0: status = '▽ slower'
+        elif ratio <= 1.0: status = '= ok'
+        elif ratio <= 1.1: status = '▽ marginal'
         else: status = '✗ REGRESS'
         print(f'{color}{name:<20} {format_ns(l):>8} {format_ns(k):>8} {ratio:>6.2f}x  {status}{RESET}')
 
@@ -185,7 +192,7 @@ def print_comparison(data, format='terminal'):
           f'\033[32m{len(faster)} faster\033[0m, '
           f'{len(ok)} OK, '
           f'\033[33m{len(slower)} marginal\033[0m, '
-          f'\033[31m{len(regression)} regression\033[0m')
+          f'\033[31m{len(regression)} REGRESSION\033[0m')
 
 def print_profile_comparison(data):
     """Compare all Kevlar profiles against each other."""
