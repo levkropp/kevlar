@@ -182,4 +182,8 @@ impl FileLike for EventFd {
     fn poll_gen(&self) -> u64 {
         self.state_gen.load(Ordering::Relaxed)
     }
+
+    fn poll_gen_atomic(&self) -> Option<&core::sync::atomic::AtomicU64> {
+        Some(&self.state_gen)
+    }
 }
