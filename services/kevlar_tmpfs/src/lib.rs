@@ -78,6 +78,26 @@ enum TmpFsINode {
 
 struct DirInner {
     files: HashMap<String, TmpFsINode>,
+    /// Ordered list of entry names for O(1) positional readdir access.
+    /// Kept in sync with `files` by insert/remove operations.
+    order: Vec<String>,
+}
+
+impl DirInner {
+    fn insert(&mut self, name: String, inode: TmpFsINode) {
+        if !self.files.contains_key(&name) {
+            self.order.push(name.clone());
+        }
+        self.files.insert(name, inode);
+    }
+
+    fn remove(&mut self, name: &str) -> Option<TmpFsINode> {
+        let result = self.files.remove(name);
+        if result.is_some() {
+            self.order.retain(|n| n != name);
+        }
+        result
+    }
 }
 
 pub struct Dir {
@@ -102,24 +122,19 @@ impl Dir {
             mode: SpinLock::new(mode),
             inner: SpinLock::new(DirInner {
                 files: HashMap::new(),
+                order: Vec::new(),
             }),
         }
     }
 
     pub fn add_dir(&self, name: &str) -> Arc<Dir> {
         let dir = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
-        self.inner
-            .lock_no_irq()
-            .files
-            .insert(name.into(), TmpFsINode::Directory(dir.clone()));
+        self.inner.lock_no_irq().insert(name.into(), TmpFsINode::Directory(dir.clone()));
         dir
     }
 
     pub fn add_file(&self, name: &str, file: Arc<dyn FileLike>) {
-        self.inner
-            .lock_no_irq()
-            .files
-            .insert(name.into(), TmpFsINode::File(file));
+        self.inner.lock_no_irq().insert(name.into(), TmpFsINode::File(file));
     }
 }
 
@@ -155,11 +170,13 @@ impl Directory for Dir {
         }
 
         let dir_lock = self.inner.lock_no_irq();
-        let (name, inode) = match dir_lock.files.iter().nth(index - 2) {
-            Some(entry) => entry,
-            None => {
-                return Ok(None);
-            }
+        let name = match dir_lock.order.get(index - 2) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let inode = match dir_lock.files.get(name) {
+            Some(i) => i,
+            None => return Ok(None),
         };
 
         let entry = match inode {
@@ -227,7 +244,7 @@ impl Directory for Dir {
             }
         };
 
-        self.inner.lock_no_irq().files.insert(name.into(), tmpfs_inode);
+        self.inner.lock_no_irq().insert(name.into(), tmpfs_inode);
         Ok(())
     }
 
@@ -238,9 +255,7 @@ impl Directory for Dir {
         }
 
         let inode = Arc::new(File::new(alloc_inode_no()));
-        dir_lock
-            .files
-            .insert(name.into(), TmpFsINode::File(inode.clone()));
+        dir_lock.insert(name.into(), TmpFsINode::File(inode.clone()));
 
         Ok((inode as Arc<dyn FileLike>).into())
     }
@@ -259,9 +274,7 @@ impl Directory for Dir {
                 ..Stat::zeroed()
             },
         });
-        dir_lock
-            .files
-            .insert(name.into(), TmpFsINode::Symlink(inode.clone()));
+        dir_lock.insert(name.into(), TmpFsINode::Symlink(inode.clone()));
         Ok((inode as Arc<dyn SymlinkTrait>).into())
     }
 
@@ -271,7 +284,7 @@ impl Directory for Dir {
             return Err(Errno::EEXIST.into());
         }
         let inode = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
-        dir_lock.files.insert(name.into(), TmpFsINode::Directory(inode.clone()));
+        dir_lock.insert(name.into(), TmpFsINode::Directory(inode.clone()));
         Ok((inode as Arc<dyn Directory>).into())
     }
 
@@ -288,7 +301,7 @@ impl Directory for Dir {
                 file.nlink.fetch_sub(1, Ordering::Relaxed);
             }
         }
-        dir_lock.files.remove(name);
+        dir_lock.remove(name);
         Ok(())
     }
 
@@ -305,7 +318,7 @@ impl Directory for Dir {
             }
             None => return Err(Errno::ENOENT.into()),
         }
-        dir_lock.files.remove(name);
+        dir_lock.remove(name);
         Ok(())
     }
 
@@ -319,11 +332,9 @@ impl Directory for Dir {
         // Handle same-directory rename without deadlock.
         if self_ptr == new_ptr {
             let mut dir_lock = self.inner.lock_no_irq();
-            let entry = dir_lock
-                .files
-                .remove(old_name)
+            let entry = dir_lock.remove(old_name)
                 .ok_or_else(|| Error::new(Errno::ENOENT))?;
-            dir_lock.files.insert(new_name.into(), entry);
+            dir_lock.insert(new_name.into(), entry);
             return Ok(());
         }
 
@@ -331,19 +342,15 @@ impl Directory for Dir {
         if self_ptr < new_ptr {
             let mut old_lock = self.inner.lock_no_irq();
             let mut new_lock = new_dir.inner.lock_no_irq();
-            let entry = old_lock
-                .files
-                .remove(old_name)
+            let entry = old_lock.remove(old_name)
                 .ok_or_else(|| Error::new(Errno::ENOENT))?;
-            new_lock.files.insert(new_name.into(), entry);
+            new_lock.insert(new_name.into(), entry);
         } else {
             let mut new_lock = new_dir.inner.lock_no_irq();
             let mut old_lock = self.inner.lock_no_irq();
-            let entry = old_lock
-                .files
-                .remove(old_name)
+            let entry = old_lock.remove(old_name)
                 .ok_or_else(|| Error::new(Errno::ENOENT))?;
-            new_lock.files.insert(new_name.into(), entry);
+            new_lock.insert(new_name.into(), entry);
         }
         Ok(())
     }
