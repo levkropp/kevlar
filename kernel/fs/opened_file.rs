@@ -95,7 +95,7 @@ impl PathComponent {
 
     /// Resolves into the absolute path.
     pub fn resolve_absolute_path(&self) -> PathBuf {
-        let path = if self.parent_dir.is_some() {
+        if self.parent_dir.is_some() {
             let mut path = String::from(&self.name);
             let mut parent_dir = &self.parent_dir;
             // Visit its ancestor directories...
@@ -107,13 +107,14 @@ impl PathComponent {
             // The last parent_dir is the root directory and its name is empty. Thus,
             // the computed path must be an absolute path.
             debug_assert!(path.starts_with('/'));
-            path
+            PathBuf::from(path)
+        } else if self.name.starts_with('/') {
+            // Flat path — name contains the full absolute path.
+            PathBuf::from(self.name.clone())
         } else {
-            // `self` points to the root directory.
-            "/".to_owned()
-        };
-
-        PathBuf::from(path)
+            // Root directory or anonymous.
+            PathBuf::from("/")
+        }
     }
 }
 

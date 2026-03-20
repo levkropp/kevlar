@@ -15,10 +15,10 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
 
-        let (parent_path, name) = root_fs.lookup_parent_path_at(
+        let (parent_inode, name) = root_fs.lookup_parent_inode_at(
             &opened_files, &dirfd, path, true,
         )?;
-        let parent_dir = parent_path.inode.as_dir()?;
+        let parent_dir = parent_inode.as_dir()?;
 
         if flags & AT_REMOVEDIR != 0 {
             parent_dir.rmdir(name)?;

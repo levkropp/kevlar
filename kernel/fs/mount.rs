@@ -171,6 +171,9 @@ pub struct MountPoint {
 pub struct RootFs {
     root_path: Arc<PathComponent>,
     cwd_path: Arc<PathComponent>,
+    /// Cached absolute path of cwd — avoids walking the parent chain when
+    /// building flat PathComponents for relative paths.
+    cwd_abs: String,
     /// Mount point table. Stored as a plain Vec (not behind a lock) because
     /// path resolution already holds the outer RootFs SpinLock. Searched
     /// linearly — typically 3-5 entries, so no HashMap overhead needed.
@@ -190,6 +193,7 @@ impl RootFs {
             mount_points: Vec::new(),
             root_path: root_path.clone(),
             cwd_path: root_path,
+            cwd_abs: String::from("/"),
             symlink_follow_limit: DEFAULT_SYMLINK_FOLLOW_MAX,
         })
     }
@@ -250,6 +254,7 @@ impl RootFs {
     /// Changes the current working directory.
     pub fn chdir(&mut self, path: &Path) -> Result<()> {
         self.cwd_path = self.lookup_path(path, true)?;
+        self.cwd_abs = self.cwd_path.resolve_absolute_path().as_str().to_owned();
         Ok(())
     }
 
@@ -258,7 +263,30 @@ impl RootFs {
         let new_root = self.lookup_path(path, true)?;
         self.root_path = new_root.clone();
         self.cwd_path = new_root;
+        self.cwd_abs = String::from("/");
         Ok(())
+    }
+
+    /// Build a flat PathComponent (no parent chain) from a resolved inode.
+    /// Uses cached cwd absolute path for relative paths.
+    pub fn make_flat_path_component(&self, path: &Path, inode: INode) -> Arc<PathComponent> {
+        let abs_path = if path.is_absolute() {
+            path.as_str().to_owned()
+        } else {
+            let ps = path.as_str();
+            let mut buf = String::with_capacity(self.cwd_abs.len() + 1 + ps.len());
+            buf.push_str(&self.cwd_abs);
+            if !self.cwd_abs.ends_with('/') {
+                buf.push('/');
+            }
+            buf.push_str(ps);
+            buf
+        };
+        Arc::new(PathComponent {
+            parent_dir: None,
+            name: abs_path,
+            inode,
+        })
     }
 
     pub fn cwd_path(&self) -> &PathComponent {
@@ -391,6 +419,61 @@ impl RootFs {
             .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
         let path = self.lookup_path_at(opened_files, cwd_or_fd, parent_dir, follow_symlink)?;
         Ok((path, name))
+    }
+
+    /// Like `lookup_parent_inode_at` but for absolute or CWD-relative paths.
+    /// Does not require the opened files table — avoids the lock.
+    pub fn lookup_parent_inode<'a>(
+        &self,
+        path: &'a Path,
+        follow_symlink: bool,
+    ) -> Result<(INode, &'a str)> {
+        let (parent_path, name) = path
+            .parent_and_basename()
+            .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
+
+        let parent_inode = if !path.is_absolute() && parent_path.as_str() == "." {
+            self.cwd_path.inode.clone()
+        } else {
+            self.lookup_inode(parent_path, follow_symlink)?
+        };
+        Ok((parent_inode, name))
+    }
+
+    /// Like `lookup_parent_path_at` but returns `(INode, &str)` instead of
+    /// `(Arc<PathComponent>, &str)`. Avoids Arc/String heap allocations by
+    /// using the fast `lookup_inode` path for parent resolution.
+    pub fn lookup_parent_inode_at<'a>(
+        &self,
+        opened_files: &OpenedFileTable,
+        cwd_or_fd: &CwdOrFd,
+        path: &'a Path,
+        follow_symlink: bool,
+    ) -> Result<(INode, &'a str)> {
+        let (parent_path, name) = path
+            .parent_and_basename()
+            .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
+
+        // Fast path: basename-only (no slashes) — parent is cwd or dirfd.
+        if !path.is_absolute() && parent_path.as_str() == "." {
+            let parent_inode = match cwd_or_fd {
+                CwdOrFd::AtCwd => self.cwd_path.inode.clone(),
+                CwdOrFd::Fd(fd) => opened_files.get(*fd)?.inode().clone(),
+            };
+            return Ok((parent_inode, name));
+        }
+
+        // Absolute or cwd-relative with directory components: use lookup_inode.
+        if path.is_absolute() || matches!(cwd_or_fd, CwdOrFd::AtCwd) {
+            let parent_inode = self.lookup_inode(parent_path, follow_symlink)?;
+            return Ok((parent_inode, name));
+        }
+
+        // Fd-relative with directory components: fall back to allocating lookup.
+        let (parent_pc, name) = self.lookup_parent_path_at(
+            opened_files, cwd_or_fd, path, follow_symlink,
+        )?;
+        Ok((parent_pc.inode.clone(), name))
     }
 
     fn resolve_cwd_or_fd(

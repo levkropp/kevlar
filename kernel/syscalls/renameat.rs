@@ -19,15 +19,15 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
 
-        let (old_parent, old_name) = root_fs.lookup_parent_path_at(
+        let (old_parent_inode, old_name) = root_fs.lookup_parent_inode_at(
             &opened_files, &olddirfd, oldpath, true,
         )?;
-        let (new_parent, new_name) = root_fs.lookup_parent_path_at(
+        let (new_parent_inode, new_name) = root_fs.lookup_parent_inode_at(
             &opened_files, &newdirfd, newpath, true,
         )?;
 
-        let old_dir = old_parent.inode.as_dir()?;
-        let new_dir = new_parent.inode.as_dir()?;
+        let old_dir = old_parent_inode.as_dir()?;
+        let new_dir = new_parent_inode.as_dir()?;
         old_dir.rename(old_name, new_dir, new_name)?;
         Ok(0)
     }

@@ -19,10 +19,10 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
 
-        let (parent_path, name) = root_fs.lookup_parent_path_at(
+        let (parent_inode, name) = root_fs.lookup_parent_inode_at(
             &opened_files, &newdirfd, linkpath, true,
         )?;
-        parent_path.inode.as_dir()?.create_symlink(name, target.as_str())?;
+        parent_inode.as_dir()?.create_symlink(name, target.as_str())?;
         Ok(0)
     }
 

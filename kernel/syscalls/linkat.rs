@@ -25,9 +25,9 @@ impl<'a> SyscallHandler<'a> {
             src_path,
             flags.contains(AtFlags::AT_SYMLINK_FOLLOW),
         )?;
-        let (parent_dir, dst_name) =
-            root_fs.lookup_parent_path_at(&opened_files, &dst_dir, dst_path, true)?;
-        parent_dir.inode.as_dir()?.link(dst_name, &src.inode)?;
+        let (parent_inode, dst_name) =
+            root_fs.lookup_parent_inode_at(&opened_files, &dst_dir, dst_path, true)?;
+        parent_inode.as_dir()?.link(dst_name, &src.inode)?;
         Ok(0)
     }
 }

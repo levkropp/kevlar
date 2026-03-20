@@ -13,10 +13,10 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
 
-        let (parent_path, name) = root_fs.lookup_parent_path_at(
+        let (parent_inode, name) = root_fs.lookup_parent_inode_at(
             &opened_files, &dirfd, path, true,
         )?;
-        parent_path.inode.as_dir()?.create_dir(name, mode)?;
+        parent_inode.as_dir()?.create_dir(name, mode)?;
         Ok(0)
     }
 }
