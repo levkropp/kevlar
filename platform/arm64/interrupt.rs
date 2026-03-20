@@ -39,9 +39,12 @@ extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
     match ec {
         EC_SVC_A64 => {
             // Syscall from user space.
-            let ret = super::syscall::arm64_handle_syscall(frame);
-            // Store return value in x0.
-            unsafe { (*frame).regs[0] = ret as u64; }
+            // The dispatch code writes the return value directly to
+            // frame.regs[0] AND handles signal delivery (which may
+            // overwrite regs[0] with the signal number).  Do NOT
+            // overwrite regs[0] here — it would clobber the signal
+            // number set by try_delivering_signal().
+            super::syscall::arm64_handle_syscall(frame);
         }
         EC_DATA_ABORT_LOWER | EC_INST_ABORT_LOWER => {
             // User-space page fault.

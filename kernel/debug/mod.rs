@@ -97,7 +97,9 @@ pub fn init(debug_cmdline: Option<&str>) {
 
     // Enable ktrace binary tracing.
     #[cfg(feature = "ktrace")]
-    if filter.contains(DebugFilter::KTRACE) {
+    if filter.contains(DebugFilter::KTRACE)
+        || cfg!(target_arch = "aarch64")  // ARM64: always enable when compiled in (no cmdline)
+    {
         ktrace::enable();
         // Write an initial dump immediately so the debugcon file has valid
         // data even if QEMU is killed before PID 1 exits.  The PID 1 exit

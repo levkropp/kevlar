@@ -1032,6 +1032,7 @@ impl Process {
             // ktrace: dump binary trace via debugcon on PID 1 exit.
             #[cfg(feature = "ktrace")]
             if debug::ktrace::is_enabled() {
+                debug::ktrace::dump_mm_events();
                 debug::ktrace::dump_summary();
                 debug::ktrace::dump();
             }
@@ -1251,6 +1252,18 @@ impl Process {
         drop(sigs);
 
         self.signal_pending.fetch_or(1 << (signal - 1), Ordering::Release);
+
+        #[cfg(feature = "ktrace-mm")]
+        {
+            let pending_after = self.signal_pending.load(Ordering::Relaxed);
+            let self_addr = self as *const _ as usize;
+            crate::debug::ktrace::trace(
+                crate::debug::ktrace::event::SIGNAL_SEND,
+                self.pid().as_i32() as u32, signal as u32,
+                pending_after, self_addr as u32, (self_addr >> 32) as u32,
+            );
+        }
+
         self.resume();
 
         // Wake poll/epoll waiters so signalfd can detect the new signal.
@@ -1385,6 +1398,27 @@ impl Process {
                         debug::usercopy::set_context("signal_stack_setup");
                         let result = current.arch.setup_signal_stack(frame, signal, handler, restorer);
                         debug::usercopy::clear_context();
+
+                        // ktrace: log frame state after signal setup.
+                        #[cfg(feature = "ktrace-mm")]
+                        {
+                            let deliver_pc = {
+                                #[cfg(target_arch = "aarch64")] { frame.pc as u32 }
+                                #[cfg(target_arch = "x86_64")] { 0u32 }
+                            };
+                            let deliver_lr = {
+                                #[cfg(target_arch = "aarch64")] { frame.regs[30] as u32 }
+                                #[cfg(target_arch = "x86_64")] { 0u32 }
+                            };
+                            crate::debug::ktrace::trace(
+                                crate::debug::ktrace::event::SIGNAL_DELIVER,
+                                signal as u32,
+                                frame.regs[0] as u32,
+                                deliver_pc,
+                                deliver_lr,
+                                handler.value() as u32,
+                            );
+                        }
 
                         // Emit detailed signal stack write trace.
                         if debug::is_enabled(DebugFilter::USERCOPY) || debug::is_enabled(DebugFilter::SIGNAL) {

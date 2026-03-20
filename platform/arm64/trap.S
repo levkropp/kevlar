@@ -62,6 +62,68 @@
     add     sp, sp, #(34 * 8)
 .endm
 
+// FP/NEON register save/restore for user-mode exceptions.
+//
+// User code (musl memset, etc.) uses NEON registers v0-v31.  The kernel is
+// compiled with -neon,-fp-armv8 so it never touches them, but we save/restore
+// here for correctness during context switches (preemption while in user mode)
+// and as defense-in-depth.
+//
+// Frame layout (528 bytes, 16-byte aligned):
+//   [sp+0]   .. [sp+511]  : v0-v31  (32 × 16 bytes)
+//   [sp+512] .. [sp+519]  : FPCR
+//   [sp+520] .. [sp+527]  : FPSR
+
+.equ FP_FRAME_SZ, 528
+
+.macro SAVE_FP_REGS
+    sub     sp, sp, #FP_FRAME_SZ
+    stp     q0,  q1,  [sp, #(0  * 32)]
+    stp     q2,  q3,  [sp, #(1  * 32)]
+    stp     q4,  q5,  [sp, #(2  * 32)]
+    stp     q6,  q7,  [sp, #(3  * 32)]
+    stp     q8,  q9,  [sp, #(4  * 32)]
+    stp     q10, q11, [sp, #(5  * 32)]
+    stp     q12, q13, [sp, #(6  * 32)]
+    stp     q14, q15, [sp, #(7  * 32)]
+    stp     q16, q17, [sp, #(8  * 32)]
+    stp     q18, q19, [sp, #(9  * 32)]
+    stp     q20, q21, [sp, #(10 * 32)]
+    stp     q22, q23, [sp, #(11 * 32)]
+    stp     q24, q25, [sp, #(12 * 32)]
+    stp     q26, q27, [sp, #(13 * 32)]
+    stp     q28, q29, [sp, #(14 * 32)]
+    stp     q30, q31, [sp, #(15 * 32)]
+    mrs     x0, fpcr
+    mrs     x1, fpsr
+    str     x0,        [sp, #512]
+    str     x1,        [sp, #520]
+.endm
+
+.macro RESTORE_FP_REGS
+    ldr     x0,        [sp, #512]
+    ldr     x1,        [sp, #520]
+    msr     fpcr, x0
+    msr     fpsr, x1
+    ldp     q0,  q1,  [sp, #(0  * 32)]
+    ldp     q2,  q3,  [sp, #(1  * 32)]
+    ldp     q4,  q5,  [sp, #(2  * 32)]
+    ldp     q6,  q7,  [sp, #(3  * 32)]
+    ldp     q8,  q9,  [sp, #(4  * 32)]
+    ldp     q10, q11, [sp, #(5  * 32)]
+    ldp     q12, q13, [sp, #(6  * 32)]
+    ldp     q14, q15, [sp, #(7  * 32)]
+    ldp     q16, q17, [sp, #(8  * 32)]
+    ldp     q18, q19, [sp, #(9  * 32)]
+    ldp     q20, q21, [sp, #(10 * 32)]
+    ldp     q22, q23, [sp, #(11 * 32)]
+    ldp     q24, q25, [sp, #(12 * 32)]
+    ldp     q26, q27, [sp, #(13 * 32)]
+    ldp     q28, q29, [sp, #(14 * 32)]
+    ldp     q30, q31, [sp, #(15 * 32)]
+    add     sp, sp, #FP_FRAME_SZ
+.endm
+
 // Each vector entry is 128 bytes = 32 instructions max.
 // We only use a branch instruction in each entry.
 .macro VECTOR_ENTRY label
@@ -132,6 +194,7 @@ exception_vectors:
 // Out-of-line exception handlers
 // ---------------------------------------------------------------
 
+// Kernel-mode exceptions: no FP save needed (kernel compiled with -neon).
 handle_curr_spx_sync:
     SAVE_REGS
     mov     x0, #0          // from_user = false
@@ -148,27 +211,31 @@ handle_curr_spx_irq:
     RESTORE_REGS
     eret
 
+// User-mode exceptions: save/restore FP/NEON so user SIMD state survives
+// the exception handler (page faults, syscalls) and preemptive scheduling.
 handle_lower_a64_sync:
     SAVE_REGS
+    SAVE_FP_REGS
     mov     x0, #1          // from_user = true
-    mov     x1, sp           // frame pointer
+    add     x1, sp, #FP_FRAME_SZ   // PtRegs is above FP frame
     bl      arm64_handle_exception
-    // Deliver any pending signal before returning to user (mirrors x86_64
-    // x64_check_signal_on_irq_return).  This handles SIGSEGV from page
-    // faults and other signals raised inside the exception handler.
-    mov     x0, sp
+    // Deliver any pending signal before returning to user.
+    add     x0, sp, #FP_FRAME_SZ
     bl      arm64_check_signal_on_return
+    RESTORE_FP_REGS
     RESTORE_REGS
     eret
 
 handle_lower_a64_irq:
     SAVE_REGS
+    SAVE_FP_REGS
     mov     x0, #3          // type = IRQ, from user
-    mov     x1, sp
+    add     x1, sp, #FP_FRAME_SZ
     bl      arm64_handle_irq
     // Deliver any signal pending after the IRQ (e.g. SIGALRM from timer).
-    mov     x0, sp
+    add     x0, sp, #FP_FRAME_SZ
     bl      arm64_check_signal_on_return
+    RESTORE_FP_REGS
     RESTORE_REGS
     eret
 

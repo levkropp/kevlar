@@ -81,7 +81,10 @@ impl<'a> SyscallHandler<'a> {
                 Ok(0)
             }
             (SOL_SOCKET, SO_RCVBUF) => {
-                write_int_opt(optval, optlen, 87380)?;
+                // Linux doubles the value set via setsockopt when returning
+                // it via getsockopt (to account for kernel bookkeeping).
+                // The default rmem_default is 212992.
+                write_int_opt(optval, optlen, 212992)?;
                 Ok(0)
             }
             (SOL_SOCKET, SO_SNDBUF) => {

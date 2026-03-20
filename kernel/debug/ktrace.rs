@@ -98,6 +98,14 @@ pub mod event {
 
     // Memory management (10-19)
     pub const PAGE_FAULT: u16 = 10;
+    pub const PTE_MAP: u16 = 11;         // PTE write: d0=vaddr_lo d1=vaddr_hi d2=paddr_lo d3=paddr_hi d4=prot
+    pub const PTE_MAP_EXISTING: u16 = 12; // try_map found existing: d0=vaddr_lo d1=vaddr_hi d2=reason d3=existing_pa_lo d4=existing_pa_hi
+    pub const PAGE_CONTENT: u16 = 13;    // page content sample: d0=paddr_lo d1=paddr_hi d2=byte0123 d3=context d4=0
+
+    // Signals (20-29)
+    pub const SIGNAL_SEND: u16 = 20;     // d0=target_pid d1=signal d2=action(0=ign,1=term,2=stop,3=cont,4=handler) d3=handler_lo d4=handler_hi
+    pub const SIGNAL_CHECK: u16 = 21;    // d0=pending_bits d1=x8(syscall_nr) d2=frame_pc_lo d3=frame_pc_hi d4=frame_x0_lo
+    pub const SIGNAL_DELIVER: u16 = 22;  // d0=signal d1=handler_lo d2=handler_hi d3=frame_sp_lo d4=frame_x30_lo
 
     // Network (193-210)
     pub const NET_CONNECT: u16 = 193;
@@ -118,6 +126,12 @@ pub mod event {
             WAITQ_SLEEP => "WAITQ_SLEEP",
             WAITQ_WAKE => "WAITQ_WAKE",
             PAGE_FAULT => "PAGE_FAULT",
+            PTE_MAP => "PTE_MAP",
+            PTE_MAP_EXISTING => "PTE_MAP_EXISTING",
+            PAGE_CONTENT => "PAGE_CONTENT",
+            SIGNAL_SEND => "SIGNAL_SEND",
+            SIGNAL_CHECK => "SIGNAL_CHECK",
+            SIGNAL_DELIVER => "SIGNAL_DELIVER",
             NET_CONNECT => "NET_CONNECT",
             NET_SEND => "NET_SEND",
             NET_RECV => "NET_RECV",
@@ -264,10 +278,49 @@ pub fn dump() {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
 pub fn dump() {
-    // ARM64: fall back to serial dump (future: MMIO debugcon).
-    warn!("ktrace: dump not implemented for this architecture");
+    // ARM64: dump via semihosting debugcon (same binary format as x86_64).
+    let ncpus = kevlar_platform::arch::num_online_cpus().min(MAX_CPUS as u32) as usize;
+
+    // ARM64 uses a generic counter, not TSC.  Report frequency as 1 GHz
+    // (timestamps are raw counter values; decoder can scale).
+    let tsc_freq: u64 = {
+        let freq: u64;
+        unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq) };
+        freq
+    };
+
+    let header = DumpHeader {
+        magic: *b"KTRX",
+        version: 1,
+        tsc_freq_hz: tsc_freq,
+        num_cpus: ncpus as u32,
+        ring_size: RING_SIZE as u32,
+        entry_size: 32,
+        flags: 0,
+        _reserved: [0; 32],
+    };
+
+    let header_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &header as *const DumpHeader as *const u8,
+            core::mem::size_of::<DumpHeader>(),
+        )
+    };
+    kevlar_platform::debugcon::write_bytes(header_bytes);
+
+    for cpu in 0..ncpus {
+        let ring = unsafe { &CPU_RINGS[cpu] };
+        let ring_bytes = unsafe {
+            core::slice::from_raw_parts(
+                ring.ring.as_ptr() as *const u8,
+                RING_SIZE * 32,
+            )
+        };
+        kevlar_platform::debugcon::write_bytes(ring_bytes);
+    }
 }
 
 /// Dump a text summary to serial (for quick inspection without host tools).
@@ -316,6 +369,37 @@ pub fn dump_summary() {
     }
 
     info!("ktrace: {} total events across {} CPUs", total_events, ncpus);
+}
+
+/// Dump all memory-management events as text to serial.
+/// Useful for ARM64 where the binary dump path may not be connected.
+pub fn dump_mm_events() {
+    let ncpus = kevlar_platform::arch::num_online_cpus().min(MAX_CPUS as u32) as usize;
+    for cpu in 0..ncpus {
+        #[allow(unsafe_code)]
+        let ring = unsafe { &CPU_RINGS[cpu] };
+        let write_idx = ring.write_idx.load(Ordering::Relaxed);
+        let start = if write_idx >= RING_SIZE { write_idx - RING_SIZE } else { 0 };
+        for i in start..write_idx {
+            let e = ring.ring[i % RING_SIZE];
+            if e.tsc == 0 { continue; }
+            let ty = e.event_type();
+            match ty {
+                event::PAGE_FAULT | event::PTE_MAP | event::PTE_MAP_EXISTING | event::PAGE_CONTENT
+                | event::SIGNAL_SEND | event::SIGNAL_CHECK | event::SIGNAL_DELIVER
+                | event::SYSCALL_ENTER | event::SYSCALL_EXIT => {
+                    let d = e.data;
+                    // Use println (not info!) so compare-contracts.py doesn't
+                    // strip the line as kernel noise (it strips ANSI-prefixed lines).
+                    kevlar_platform::println!(
+                        "KTRC t={} {}({}) d=[{:#x},{:#x},{:#x},{:#x},{:#x}]",
+                        e.tsc, event::name(ty), ty, d[0], d[1], d[2], d[3], d[4]
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ── Convenience inline ──────────────────────────────────────────────────

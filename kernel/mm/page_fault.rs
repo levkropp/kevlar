@@ -509,6 +509,19 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     if !vm.page_table_mut()
         .try_map_user_page_with_prot(aligned_vaddr, paddr, prot_flags)
     {
+        // ktrace: record that try_map found an existing PTE.
+        #[cfg(feature = "ktrace-mm")]
+        {
+            let va = aligned_vaddr.value();
+            let existing_pa = vm.page_table().lookup_paddr(aligned_vaddr)
+                .map(|p| p.value()).unwrap_or(0);
+            crate::debug::ktrace::trace(
+                crate::debug::ktrace::event::PTE_MAP_EXISTING,
+                va as u32, (va >> 32) as u32,
+                _reason.bits() as u32,
+                existing_pa as u32, (existing_pa >> 32) as u32,
+            );
+        }
         // Page already mapped — we won't use paddr for a new mapping.
         // Page already mapped. Free the fresh page we allocated.
         kevlar_platform::page_allocator::free_pages(paddr, 1);
@@ -583,6 +596,44 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         vm.page_table().flush_tlb_local(aligned_vaddr);
 
         return;
+    }
+
+    // Flush TLB after writing a new PTE.
+    //
+    // On real ARM64 hardware a new demand-paged mapping (no prior TLB entry)
+    // does not require TLBI — the hardware page-table walker sees the PTE
+    // after DSB.  But QEMU TCG caches a "fault" TLB entry when the initial
+    // access misses (before the PTE is written), and that stale entry persists
+    // through ERET unless explicitly invalidated.
+    //
+    // `tlbi vale1` (flush_tlb_local) was tried but proved insufficient:
+    // QEMU TCG's tlb_flush_page() does not reliably clear fault-type entries.
+    // `tlbi vmalle1` (flush_tlb_all) flushes the entire softmmu TLB and
+    // reliably clears all stale entries including fault/not-present ones.
+    //
+    // Linux always calls flush_tlb_page() / update_mmu_cache() after writing
+    // a demand-paged PTE; we must do the same for QEMU correctness.
+    vm.page_table().flush_tlb_all();
+
+    // ktrace: record successful PTE mapping + page content sample.
+    #[cfg(feature = "ktrace-mm")]
+    {
+        let va = aligned_vaddr.value();
+        let pa = paddr.value();
+        crate::debug::ktrace::trace(
+            crate::debug::ktrace::event::PTE_MAP,
+            va as u32, (va >> 32) as u32,
+            pa as u32, (pa >> 32) as u32,
+            prot_flags as u32,
+        );
+        // Sample page content right after PTE install.
+        let b = kevlar_platform::page_ops::page_as_slice(paddr);
+        let word = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        crate::debug::ktrace::trace(
+            crate::debug::ktrace::event::PAGE_CONTENT,
+            pa as u32, (pa >> 32) as u32,
+            word, 0 /* context: 0=after_map */, 0,
+        );
     }
 
     // Initialize the page's reference count to 1 (sole owner).

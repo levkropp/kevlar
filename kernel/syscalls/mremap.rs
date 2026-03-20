@@ -52,6 +52,35 @@ impl<'a> SyscallHandler<'a> {
         let vm_ref = current.vm();
         let mut vm = vm_ref.as_ref().unwrap().lock_preempt();
 
+        // ktrace: sample page content at mremap entry.
+        // Phase 3 Method B diagnostic: read user VA via copy_from_user AND
+        // read the physical page directly.  If user_byte == 0xAB but pa_byte
+        // == 0x00, the user write happened but the kernel sees stale PA
+        // (cache coherency bug).  If both are 0x00, the user write never
+        // executed (QEMU TCG instruction replay bug).
+        #[cfg(feature = "ktrace-mm")]
+        if let Some(pa) = vm.page_table().lookup_paddr(old_addr) {
+            let b = kevlar_platform::page_ops::page_as_slice(pa);
+            let pa_word = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            // Read through user VA (goes through the MMU/TLB path).
+            let mut user_buf = [0u8; 4];
+            let _ = old_addr.read_bytes(&mut user_buf);
+            let user_word = u32::from_le_bytes(user_buf);
+            crate::debug::ktrace::trace(
+                crate::debug::ktrace::event::PAGE_CONTENT,
+                pa.value() as u32, (pa.value() >> 32) as u32,
+                pa_word, 1 /* context: 1=mremap_entry */, user_word,
+            );
+            // If the two differ, it's a cache coherency issue.
+            // If both are zero, the user memset never executed.
+            if pa_word != user_word {
+                warn!(
+                    "mremap diag: PA byte={:#x} vs user VA byte={:#x} (coherency mismatch!)",
+                    pa_word, user_word
+                );
+            }
+        }
+
         // Find the VMA containing old_addr.
         let (_vma_idx, _vma_start, vma_len, vma_prot, vma_shared) = {
             let mut found = None;

@@ -288,7 +288,6 @@ impl FileLike for UnixStream {
         if self.peer_closed.load(Ordering::Acquire) {
             return Err(Errno::EPIPE.into());
         }
-
         let mut reader = UserBufReader::from(buf);
         let is_dgram = self.sock_type == 2; // SOCK_DGRAM
 
