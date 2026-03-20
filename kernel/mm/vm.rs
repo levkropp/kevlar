@@ -464,16 +464,13 @@ impl Vm {
     }
 }
 
-// TODO: Add Drop for Vm that calls teardown_user_pages once page table
-// teardown is fully debugged. Currently disabled — see Experiment 4 notes:
-// teardown_user_pages frees pages from the page cache and shared CoW
-// mappings, causing use-after-free when the same pages are still mapped
-// in other processes or referenced by the page cache.
-// Vm::Drop disabled: teardown_user_pages hangs on large page tables.
-// Root cause under investigation (blog 089). vDSO page leak fixed in
-// Process::drop. Page table intermediate pages leak ~20-40 KB/process.
-// impl Drop for Vm {
-//     fn drop(&mut self) {
-//         self.page_table.teardown_user_pages();
-//     }
-// }
+// Vm::Drop decrements CoW refcounts and frees intermediate page table pages.
+// Uses teardown_forked_pages (safe: never frees data pages, only decrements
+// refcounts) to avoid use-after-free with page cache entries. Critical for
+// fork+exec performance: without it, the parent's page refcounts stay
+// elevated, forcing full page copies on every subsequent CoW fault.
+impl Drop for Vm {
+    fn drop(&mut self) {
+        self.page_table.teardown_forked_pages();
+    }
+}
