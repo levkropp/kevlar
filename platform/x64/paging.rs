@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::PAGE_SIZE;
+use alloc::vec::Vec;
 use crate::address::{PAddr, UserVAddr};
 use crate::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
 use bitflags::bitflags;
@@ -253,9 +254,15 @@ const PTE_WAS_WRITABLE: u64 = 1 << 10;
 
 /// Like `duplicate_table` but skips all `page_ref_inc` calls.
 /// Safe only when the parent is blocked (ghost-fork / vfork semantics).
-/// Also sets PTE_WAS_WRITABLE on CoW-marked PTEs so the parent's WRITABLE
-/// bits can be restored when the ghost child exits/execs.
-fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
+/// Collects virtual addresses of CoW-marked PTEs into `cow_addrs` for
+/// fast targeted restore (avoids O(all_PTEs) scan at exit/exec time).
+/// `base_vaddr` tracks the virtual address prefix from ancestor levels.
+fn duplicate_table_ghost(
+    original_table_paddr: PAddr,
+    level: usize,
+    base_vaddr: usize,
+    cow_addrs: &mut Vec<usize>,
+) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
@@ -279,7 +286,6 @@ fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PA
             if flags & PageAttrs::USER.bits() == 0 {
                 continue;
             }
-            // NO page_ref_inc — parent is blocked, refcount stays at current value.
             if flags & PageAttrs::WRITABLE.bits() != 0 {
                 let cow_entry = paddr.value() as u64
                     | (flags & !PageAttrs::WRITABLE.bits())
@@ -288,6 +294,7 @@ fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PA
                     *orig_table.offset(i) = cow_entry;
                     *new_table.offset(i) = cow_entry;
                 }
+                cow_addrs.push(base_vaddr | ((i as usize) << 12));
             }
         }
     } else {
@@ -300,12 +307,13 @@ fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PA
             if paddr.is_null() {
                 continue;
             }
+            let shift = (level - 1) * 9 + 12;
+            let child_base = base_vaddr | ((i as usize) << shift);
             if level == 2 && is_huge_page_pde(entry) {
                 let flags = entry_flags(entry);
                 if flags & PageAttrs::USER.bits() == 0 {
                     continue;
                 }
-                // NO page_ref_inc_huge — parent is blocked.
                 if flags & PageAttrs::WRITABLE.bits() != 0 {
                     let cow_entry = paddr.value() as u64
                         | (flags & !PageAttrs::WRITABLE.bits())
@@ -314,9 +322,12 @@ fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PA
                         *orig_table.offset(i) = cow_entry;
                         *new_table.offset(i) = cow_entry;
                     }
+                    // Huge pages: store with bit 0 set as marker (addrs are
+                    // always page-aligned so bit 0 is normally 0).
+                    cow_addrs.push(child_base | 1);
                 }
             } else {
-                let new_child_paddr = duplicate_table_ghost(paddr, level - 1)?;
+                let new_child_paddr = duplicate_table_ghost(paddr, level - 1, child_base, cow_addrs)?;
                 unsafe {
                     *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
                 }
@@ -376,35 +387,38 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
     }
 }
 
-/// Walk all user PTEs and restore WRITABLE on entries marked with
-/// PTE_WAS_WRITABLE (set during ghost fork). Clears the marker bit.
-fn restore_writable_table(table_paddr: PAddr, level: usize) {
-    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+/// Targeted restore: set WRITABLE back on specific PTEs listed in `addrs`.
+/// Each address was collected during `duplicate_table_ghost`. Entries with
+/// bit 0 set are 2MB huge page addresses (clear bit 0 to get real addr).
+/// O(cow_pages) instead of O(all_PTEs) — typically ~200 vs ~10,000.
+fn restore_writable_from_list(pml4: PAddr, addrs: &[usize]) {
+    for &raw_addr in addrs {
+        let is_huge = raw_addr & 1 != 0;
+        let vaddr = raw_addr & !1usize;
 
-    for i in 0..ENTRIES_PER_TABLE {
-        let entry = unsafe { *table.offset(i) };
-        let paddr = entry_paddr(entry);
-        if paddr.is_null() {
-            continue;
-        }
-
-        if level == 1 {
-            if entry & PTE_WAS_WRITABLE != 0 {
-                unsafe {
-                    *table.offset(i) = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
-                }
-            }
-        } else if level == 2 && is_huge_page_pde(entry) {
-            if entry & PTE_WAS_WRITABLE != 0 {
-                unsafe {
-                    *table.offset(i) = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
+        let uva = unsafe { UserVAddr::new_unchecked(vaddr) };
+        if is_huge {
+            // 2MB huge page: traverse to PD base, then index into it.
+            if let Some(pde_ptr) = traverse_to_pd(pml4, uva, false, PageAttrs::empty()) {
+                let entry = unsafe { *pde_ptr };
+                if entry & PTE_WAS_WRITABLE != 0 {
+                    unsafe {
+                        *pde_ptr = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
+                    }
                 }
             }
         } else {
-            if level == 4 && i >= 0x80 {
-                continue;
+            // 4KB page: traverse to PTE (level 1) and restore WRITABLE.
+            if let Some(mut pte) = unsafe {
+                traverse(pml4, uva, false, PageAttrs::empty())
+            } {
+                let entry = unsafe { *pte.as_ptr() };
+                if entry & PTE_WAS_WRITABLE != 0 {
+                    unsafe {
+                        *pte.as_mut() = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
+                    }
+                }
             }
-            restore_writable_table(paddr, level - 1);
         }
     }
 }
@@ -680,16 +694,17 @@ impl PageTable {
     }
 
     /// Ghost-fork: duplicate page table structure but skip all refcount
-    /// operations. Sets PTE_WAS_WRITABLE on CoW-marked PTEs for later
-    /// restoration. Parent must be blocked until child exec's/exits.
-    pub fn duplicate_from_ghost(original: &PageTable) -> Result<PageTable, PageAllocError> {
-        let new_pml4 = duplicate_table_ghost(original.pml4, 4)?;
+    /// operations. Returns (new PageTable, Vec of CoW-marked addresses).
+    /// Parent must be blocked until child exec's/exits.
+    pub fn duplicate_from_ghost(original: &PageTable) -> Result<(PageTable, Vec<usize>), PageAllocError> {
+        let mut cow_addrs = Vec::new();
+        let new_pml4 = duplicate_table_ghost(original.pml4, 4, 0, &mut cow_addrs)?;
         // Flush parent's TLB so read-only PTEs take effect.
         unsafe {
             let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
             x86::controlregs::cr3_write(cr3_val);
         }
-        Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
+        Ok((PageTable { pml4: new_pml4, pcid: alloc_pcid() }, cow_addrs))
     }
 
     pub fn switch(&self) {
@@ -993,10 +1008,10 @@ impl PageTable {
         crate::page_allocator::free_pages(pml4, 1);
     }
 
-    /// Restore WRITABLE on all PTEs that were marked read-only during ghost
-    /// fork (identified by the PTE_WAS_WRITABLE software bit).
-    pub fn restore_writable_all(&mut self) {
-        restore_writable_table(self.pml4, 4);
+    /// Restore WRITABLE on PTEs listed in `addrs` (collected during ghost fork).
+    /// O(N) where N = number of writable pages (~200), not O(all_PTEs) (~10K).
+    pub fn restore_writable_from(&mut self, addrs: &[usize]) {
+        restore_writable_from_list(self.pml4, addrs);
     }
 
     /// Try to map a page. Returns `true` if mapped, `false` if already mapped.

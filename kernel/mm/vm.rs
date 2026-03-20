@@ -107,6 +107,10 @@ pub struct Vm {
     /// True if this VM was created by ghost_fork (no refcount increments).
     /// Vm::Drop uses a different teardown that doesn't decrement refcounts.
     pub is_ghost_forked: bool,
+    /// Virtual addresses of pages made read-only during ghost fork.
+    /// Used to restore WRITABLE on the parent's PTEs when the ghost
+    /// child exec's/exits. Only populated for ghost-forked VMs.
+    pub ghost_cow_addrs: Vec<usize>,
 }
 
 impl Vm {
@@ -139,6 +143,7 @@ impl Vm {
             heap_end: heap_bottom,
             is_forked: false,
             is_ghost_forked: false,
+            ghost_cow_addrs: Vec::new(),
         })
     }
 
@@ -301,29 +306,32 @@ impl Vm {
             heap_end: self.heap_end,
             is_forked: true,
             is_ghost_forked: false,
+            ghost_cow_addrs: Vec::new(),
         })
     }
 
     /// Ghost-fork: duplicate page table structure but skip refcount
     /// operations. The parent must be blocked until the child exec's/exits.
-    /// Saves ~8µs per fork by eliminating ~200 atomic refcount increments.
+    /// Collects addresses of CoW-marked pages for fast targeted restore.
     pub fn ghost_fork(&self) -> Result<Vm> {
+        let (page_table, cow_addrs) = PageTable::duplicate_from_ghost(&self.page_table)?;
         Ok(Vm {
-            page_table: PageTable::duplicate_from_ghost(&self.page_table)?,
+            page_table,
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
             last_fault_vma_idx: self.last_fault_vma_idx,
             heap_bottom: self.heap_bottom,
             heap_end: self.heap_end,
-            is_forked: false, // Don't use normal forked teardown
+            is_forked: false,
             is_ghost_forked: true,
+            ghost_cow_addrs: cow_addrs,
         })
     }
 
-    /// Restore WRITABLE on all PTEs that were marked read-only during ghost
-    /// fork. Called on the PARENT's VM when the ghost child exec's/exits.
-    pub fn restore_writable_after_ghost(&mut self) {
-        self.page_table.restore_writable_all();
+    /// Restore WRITABLE on the PARENT's PTEs using the address list from
+    /// the ghost child's Vm. O(writable_pages) instead of O(all_PTEs).
+    pub fn restore_writable_with_list(&mut self, addrs: &[usize]) {
+        self.page_table.restore_writable_from(addrs);
     }
 
     /// Remove a VMA region [start, start+len). Splits VMAs at boundaries if needed.
