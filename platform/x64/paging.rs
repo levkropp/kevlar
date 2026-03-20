@@ -246,6 +246,169 @@ fn duplicate_table_cow(pml4: PAddr, level: usize) -> Result<PAddr, PageAllocErro
     duplicate_table(pml4, level)
 }
 
+/// Software-defined PTE bit: "was writable before ghost-fork CoW".
+/// Used to restore the parent's WRITABLE bits after the ghost child exits/execs.
+/// x86_64 bits 9-11 are ignored by hardware and available for OS use.
+const PTE_WAS_WRITABLE: u64 = 1 << 10;
+
+/// Like `duplicate_table` but skips all `page_ref_inc` calls.
+/// Safe only when the parent is blocked (ghost-fork / vfork semantics).
+/// Also sets PTE_WAS_WRITABLE on CoW-marked PTEs so the parent's WRITABLE
+/// bits can be restored when the ghost child exits/execs.
+fn duplicate_table_ghost(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
+    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
+    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    // Bulk-copy the entire 4KB page table.
+    unsafe {
+        ptr::copy_nonoverlapping(orig_table, new_table, ENTRIES_PER_TABLE as usize);
+    }
+
+    debug_assert!(level > 0);
+
+    if level == 1 {
+        // Leaf PTEs: clear WRITABLE (CoW) but DON'T increment refcounts.
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue;
+            }
+            // NO page_ref_inc — parent is blocked, refcount stays at current value.
+            if flags & PageAttrs::WRITABLE.bits() != 0 {
+                let cow_entry = paddr.value() as u64
+                    | (flags & !PageAttrs::WRITABLE.bits())
+                    | PTE_WAS_WRITABLE;
+                unsafe {
+                    *orig_table.offset(i) = cow_entry;
+                    *new_table.offset(i) = cow_entry;
+                }
+            }
+        }
+    } else {
+        for i in 0..ENTRIES_PER_TABLE {
+            if level == 4 && i >= 0x80 {
+                continue;
+            }
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            if level == 2 && is_huge_page_pde(entry) {
+                let flags = entry_flags(entry);
+                if flags & PageAttrs::USER.bits() == 0 {
+                    continue;
+                }
+                // NO page_ref_inc_huge — parent is blocked.
+                if flags & PageAttrs::WRITABLE.bits() != 0 {
+                    let cow_entry = paddr.value() as u64
+                        | (flags & !PageAttrs::WRITABLE.bits())
+                        | PTE_WAS_WRITABLE;
+                    unsafe {
+                        *orig_table.offset(i) = cow_entry;
+                        *new_table.offset(i) = cow_entry;
+                    }
+                }
+            } else {
+                let new_child_paddr = duplicate_table_ghost(paddr, level - 1)?;
+                unsafe {
+                    *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
+                }
+            }
+        }
+    }
+
+    Ok(new_table_paddr)
+}
+
+/// Free page table pages from a ghost-forked page table without touching
+/// data page refcounts. The data pages are owned by the parent (which is
+/// blocked) and were never refcount-incremented during the ghost fork.
+fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
+    if table_paddr.is_null() {
+        return;
+    }
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    for i in 0..ENTRIES_PER_TABLE {
+        let entry = unsafe { *table.offset(i) };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() {
+            continue;
+        }
+
+        if level == 1 {
+            // Leaf PTE: the data page belongs to the parent.
+            // Pages that were CoW-copied by the ghost child were already
+            // remapped to new pages (with refcount 1) and need freeing.
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue;
+            }
+            // If this PTE was modified by a CoW fault (WRITABLE set, no
+            // PTE_WAS_WRITABLE), it points to a child-owned copy → free it.
+            if flags & PageAttrs::WRITABLE.bits() != 0
+                && entry & PTE_WAS_WRITABLE == 0
+            {
+                // This is a CoW-copied page owned by the child.
+                let rc = crate::page_refcount::page_ref_count(paddr);
+                if rc == 1 {
+                    crate::page_refcount::page_ref_dec(paddr);
+                    crate::page_allocator::free_pages(paddr, 1);
+                }
+            }
+            // Parent-owned pages (PTE_WAS_WRITABLE set or read-only): don't touch.
+        } else if level == 2 && is_huge_page_pde(entry) {
+            // Huge pages from ghost fork: parent-owned, don't touch.
+        } else {
+            if level == 4 && i >= 0x80 {
+                continue;
+            }
+            teardown_table_ghost(paddr, level - 1);
+            crate::page_allocator::free_pages(paddr, 1);
+        }
+    }
+}
+
+/// Walk all user PTEs and restore WRITABLE on entries marked with
+/// PTE_WAS_WRITABLE (set during ghost fork). Clears the marker bit.
+fn restore_writable_table(table_paddr: PAddr, level: usize) {
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    for i in 0..ENTRIES_PER_TABLE {
+        let entry = unsafe { *table.offset(i) };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() {
+            continue;
+        }
+
+        if level == 1 {
+            if entry & PTE_WAS_WRITABLE != 0 {
+                unsafe {
+                    *table.offset(i) = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
+                }
+            }
+        } else if level == 2 && is_huge_page_pde(entry) {
+            if entry & PTE_WAS_WRITABLE != 0 {
+                unsafe {
+                    *table.offset(i) = (entry | PageAttrs::WRITABLE.bits()) & !PTE_WAS_WRITABLE;
+                }
+            }
+        } else {
+            if level == 4 && i >= 0x80 {
+                continue;
+            }
+            restore_writable_table(paddr, level - 1);
+        }
+    }
+}
+
 /// Recursively walk a page table, decrementing refcounts on user pages
 /// and freeing intermediate page table pages. Called from `teardown_user_pages`.
 fn teardown_table(table_paddr: PAddr, level: usize) {
@@ -509,6 +672,19 @@ impl PageTable {
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
         // Flush user TLB entries for parent's PCID (CoW correctness).
+        unsafe {
+            let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
+            x86::controlregs::cr3_write(cr3_val);
+        }
+        Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
+    }
+
+    /// Ghost-fork: duplicate page table structure but skip all refcount
+    /// operations. Sets PTE_WAS_WRITABLE on CoW-marked PTEs for later
+    /// restoration. Parent must be blocked until child exec's/exits.
+    pub fn duplicate_from_ghost(original: &PageTable) -> Result<PageTable, PageAllocError> {
+        let new_pml4 = duplicate_table_ghost(original.pml4, 4)?;
+        // Flush parent's TLB so read-only PTEs take effect.
         unsafe {
             let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
             x86::controlregs::cr3_write(cr3_val);
@@ -803,6 +979,24 @@ impl PageTable {
         let pml4 = self.pml4;
         self.pml4 = PAddr::new(0);
         crate::page_allocator::free_pages(pml4, 1);
+    }
+
+    /// Teardown a ghost-forked page table: free page table pages and any
+    /// CoW-copied data pages, but don't touch parent-owned page refcounts.
+    pub fn teardown_ghost_pages(&mut self) {
+        if self.pml4.is_null() {
+            return;
+        }
+        teardown_table_ghost(self.pml4, 4);
+        let pml4 = self.pml4;
+        self.pml4 = PAddr::new(0);
+        crate::page_allocator::free_pages(pml4, 1);
+    }
+
+    /// Restore WRITABLE on all PTEs that were marked read-only during ghost
+    /// fork (identified by the PTE_WAS_WRITABLE software bit).
+    pub fn restore_writable_all(&mut self) {
+        restore_writable_table(self.pml4, 4);
     }
 
     /// Try to map a page. Returns `true` if mapped, `false` if already mapped.

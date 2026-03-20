@@ -104,6 +104,9 @@ pub struct Vm {
     /// True if this VM was created by fork (duplicate_table). Vm::Drop
     /// only runs teardown on forked VMs to fix CoW refcount inflation.
     is_forked: bool,
+    /// True if this VM was created by ghost_fork (no refcount increments).
+    /// Vm::Drop uses a different teardown that doesn't decrement refcounts.
+    pub is_ghost_forked: bool,
 }
 
 impl Vm {
@@ -135,6 +138,7 @@ impl Vm {
             heap_bottom: heap_bottom,
             heap_end: heap_bottom,
             is_forked: false,
+            is_ghost_forked: false,
         })
     }
 
@@ -296,7 +300,30 @@ impl Vm {
             heap_bottom: self.heap_bottom,
             heap_end: self.heap_end,
             is_forked: true,
+            is_ghost_forked: false,
         })
+    }
+
+    /// Ghost-fork: duplicate page table structure but skip refcount
+    /// operations. The parent must be blocked until the child exec's/exits.
+    /// Saves ~8µs per fork by eliminating ~200 atomic refcount increments.
+    pub fn ghost_fork(&self) -> Result<Vm> {
+        Ok(Vm {
+            page_table: PageTable::duplicate_from_ghost(&self.page_table)?,
+            vm_areas: self.vm_areas.clone(),
+            valloc_next: self.valloc_next,
+            last_fault_vma_idx: self.last_fault_vma_idx,
+            heap_bottom: self.heap_bottom,
+            heap_end: self.heap_end,
+            is_forked: false, // Don't use normal forked teardown
+            is_ghost_forked: true,
+        })
+    }
+
+    /// Restore WRITABLE on all PTEs that were marked read-only during ghost
+    /// fork. Called on the PARENT's VM when the ghost child exec's/exits.
+    pub fn restore_writable_after_ghost(&mut self) {
+        self.page_table.restore_writable_all();
     }
 
     /// Remove a VMA region [start, start+len). Splits VMAs at boundaries if needed.
@@ -477,7 +504,9 @@ impl Vm {
 // forcing full page copies on every subsequent CoW fault.
 impl Drop for Vm {
     fn drop(&mut self) {
-        if self.is_forked {
+        if self.is_ghost_forked {
+            self.page_table.teardown_ghost_pages();
+        } else if self.is_forked {
             self.page_table.teardown_forked_pages();
         }
     }

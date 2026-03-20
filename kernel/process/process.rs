@@ -124,12 +124,16 @@ static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
 // --- Experiment toggles ---
 // Flip these to measure each optimization independently.
 // When false, the experiment's code path is bypassed and the original behavior is used.
-/// Experiment 1: Ghost-fork (share VM on fork, block parent until child exec/exit).
-/// DISABLED: libc's fork() wrapper modifies TLS and global state in the child
-/// (self->tid, libc.need_locks, etc.), corrupting the parent when they share the
-/// same address space. Only vfork() is safe (callers follow the vfork contract:
-/// only _exit or exec, and musl's vfork wrapper doesn't modify shared state).
-/// The signal masking fix in fork.rs/vfork.rs is correct and protects the vfork path.
+/// Ghost-fork: duplicate page tables but skip refcount operations, block
+/// parent until child exec/exit. Unlike the original ghost-fork (which shared
+/// the VM and was incompatible with musl's _Fork() wrapper), this creates a
+/// SEPARATE page table with CoW marking. musl's writes trigger CoW faults
+/// and copy to private pages — the parent's data is never corrupted.
+/// Saves ~8µs per fork by eliminating ~200+ atomic refcount increments.
+/// NOTE: Currently disabled. The restore_writable walk at exit/exec time
+/// costs ~20µs (10K PTE checks), which offsets the ~6µs refcount savings.
+/// Needs a writable-page bitmap or dirty-PTE tracking to make the restore
+/// walk O(writable_pages) instead of O(all_pages).
 pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
 pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -1082,6 +1086,15 @@ impl Process {
             EXITED_PROCESSES.lock().push(current.clone());
         }
 
+        // Ghost-fork: restore parent's writable PTEs before waking it.
+        if current.vfork_parent.is_some() {
+            if let Some(parent) = current.parent.upgrade() {
+                if let Some(vm_ref) = parent.vm().as_ref() {
+                    vm_ref.lock().restore_writable_after_ghost();
+                }
+            }
+        }
+
         // Ghost-fork / vfork: set done flag BEFORE sending SIGCHLD.
         // SIGCHLD can wake the parent from sleep_signalable_until; if
         // ghost_fork_done is still false at that point, the parent gets
@@ -1558,6 +1571,15 @@ impl Process {
         entry.vm.page_table().switch();
         *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
 
+        // Ghost-fork: restore parent's writable PTEs before waking it.
+        if current.vfork_parent.is_some() {
+            if let Some(parent) = current.parent.upgrade() {
+                if let Some(vm_ref) = parent.vm().as_ref() {
+                    vm_ref.lock().restore_writable_after_ghost();
+                }
+            }
+        }
+
         // Ghost-fork / vfork: wake blocked parent now that exec has replaced
         // the address space. The parent's VM is no longer shared.
         current.ghost_fork_done.store(true, Ordering::Release);
@@ -1582,14 +1604,15 @@ impl Process {
         let pid = alloc_pid(&mut process_table)?;
         let arch = parent.arch.fork(parent_frame)
             .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?;
-        // Ghost-fork: share parent's VM instead of duplicating the page table.
-        // Since fork+exec immediately replaces the address space, the duplicated
-        // page table is 100% wasted work (~14µs). The parent is blocked in
-        // sys_fork() until the child exec's or exits (vfork semantics).
+        // Ghost-fork: duplicate page tables but skip refcount operations.
+        // The parent is blocked until the child exec's or exits.
+        // CoW faults in the child copy pages on demand (typically 2-3 pages
+        // for musl's _Fork() wrapper). Saves ~8µs per fork.
         let ghost = GHOST_FORK_ENABLED.load(Ordering::Relaxed);
         let vm = if ghost {
             let _g = debug::tracer::span_guard(debug::tracer::span::FORK_GHOST);
-            parent.vm().clone()
+            let forked = parent.vm().as_ref().unwrap().lock().ghost_fork()?;
+            Some(Arc::new(SpinLock::new(forked)))
         } else {
             let _g = debug::tracer::span_guard(debug::tracer::span::FORK_PAGE_TABLE);
             let forked = parent.vm().as_ref().unwrap().lock().fork()?;
