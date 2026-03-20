@@ -115,6 +115,22 @@ impl<'a> SyscallHandler<'a> {
         if timeout == 0 {
             let proc = current_process();
 
+            // Hot-fd cache: skip fd table lookup + downcast when the same
+            // epoll fd is polled repeatedly (the common event loop pattern).
+            #[cfg(not(feature = "profile-fortress"))]
+            if proc.epoll_hot_fd() == epfd.as_int() {
+                let ptr = proc.epoll_hot_ptr();
+                if !ptr.is_null() {
+                    #[allow(unsafe_code)]
+                    let epoll = unsafe { &*(ptr as *const EpollInstance) };
+                    #[allow(unsafe_code)]
+                    let count = unsafe {
+                        epoll.collect_ready_to_user_lockfree(events_ptr, maxevents)?
+                    };
+                    return Ok(count as isize);
+                }
+            }
+
             // Exp 1+3: Lock-free fd table + interests when both are unshared.
             #[cfg(not(feature = "profile-fortress"))]
             if Arc::strong_count(proc.opened_files()) == 1 {
@@ -124,6 +140,8 @@ impl<'a> SyscallHandler<'a> {
                 let epoll_file = table.get(epfd)?.as_file()?;
                 let epoll = (**epoll_file).as_any().downcast_ref::<EpollInstance>()
                     .ok_or(Error::new(Errno::EINVAL))?;
+                // Cache for next call.
+                proc.set_epoll_hot(epfd.as_int(), epoll as *const EpollInstance as *mut u8);
                 // Exp 3: skip interests lock if epoll instance is unshared.
                 if Arc::strong_count(epoll_file) == 1 {
                     #[allow(unsafe_code)]

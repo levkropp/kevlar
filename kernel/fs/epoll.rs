@@ -62,7 +62,20 @@ struct Interest {
     cached_poll_gen: AtomicU64,
     /// Cached PollStatus::bits() from the last file.poll() call.
     cached_poll_bits: AtomicU64,
+    /// Direct pointer to file's poll_gen AtomicU64, avoiding vtable dispatch.
+    /// Null if the file doesn't implement poll_gen_atomic (falls back to vtable).
+    /// Valid as long as `file` Arc is alive (same struct lifetime).
+    poll_gen_ptr: *const AtomicU64,
 }
+
+// SAFETY: poll_gen_ptr points into the Arc<dyn FileLike>'s allocation which
+// is kept alive by the Interest's `file` field. The AtomicU64 it points to
+// is Sync. Interest is only accessed under the EpollInstance lock or the
+// lock-free path (which guarantees single-threaded access).
+#[allow(unsafe_code)]
+unsafe impl Send for Interest {}
+#[allow(unsafe_code)]
+unsafe impl Sync for Interest {}
 
 // ── EpollInstance ───────────────────────────────────────────────────
 
@@ -86,6 +99,8 @@ impl EpollInstance {
         if event.events & EPOLLET != 0 {
             file.notify_epoll_et(true);
         }
+        let poll_gen_ptr = file.poll_gen_atomic()
+            .map_or(core::ptr::null(), |a| a as *const AtomicU64);
         interests.insert(fd.as_int(), Interest {
             file,
             events: AtomicU32::new(event.events),
@@ -93,6 +108,7 @@ impl EpollInstance {
             last_gen: AtomicU64::new(0),
             cached_poll_gen: AtomicU64::new(0),
             cached_poll_bits: AtomicU64::new(0),
+            poll_gen_ptr,
         });
         Ok(())
     }
@@ -127,27 +143,28 @@ impl EpollInstance {
         Ok(())
     }
 
-    /// For EPOLLET: check if this interest should fire.  Returns true if the
-    /// interest is level-triggered or if the file's generation changed since
-    /// the last report (edge detected).  Updates `last_gen` atomically.
-    fn check_interest(interest: &Interest) -> bool {
+    /// Check if this interest should fire and return the events mask.
+    /// Returns None if suppressed (EPOLLONESHOT disabled, or edge-triggered
+    /// with no state change). Returns Some(ev) with the events mask otherwise.
+    #[inline(always)]
+    fn check_interest(interest: &Interest) -> Option<u32> {
         let ev = interest.events.load(Ordering::Relaxed);
         if ev == 0 {
-            return false; // Disabled by EPOLLONESHOT — needs EPOLL_CTL_MOD to re-arm.
+            return None; // Disabled by EPOLLONESHOT — needs EPOLL_CTL_MOD to re-arm.
         }
         if ev & EPOLLET == 0 {
-            return true; // Level-triggered: always report when ready.
+            return Some(ev); // Level-triggered: always report when ready.
         }
         let cur_gen = interest.file.poll_gen();
         if cur_gen == 0 {
-            return true; // File doesn't track generations — fall back to LT.
+            return Some(ev); // File doesn't track generations — fall back to LT.
         }
         let prev = interest.last_gen.load(Ordering::Relaxed);
         if cur_gen == prev {
-            return false; // Same generation — suppress edge.
+            return None; // Same generation — suppress edge.
         }
         interest.last_gen.store(cur_gen, Ordering::Relaxed);
-        true
+        Some(ev)
     }
 
     /// Poll all interested fds and return ready events.
@@ -157,8 +174,10 @@ impl EpollInstance {
         let mut count = 0;
         for interest in interests.values() {
             if count >= max { break; }
-            if !Self::check_interest(interest) { continue; }
-            let ev = interest.events.load(Ordering::Relaxed);
+            let ev = match Self::check_interest(interest) {
+                Some(ev) => ev,
+                None => continue,
+            };
             let status = Self::poll_cached(interest);
             let ready = poll_status_to_epoll(status) & (ev | EPOLLERR | EPOLLHUP);
             if ready != 0 {
@@ -202,7 +221,13 @@ impl EpollInstance {
     /// generation hasn't changed since the last poll.
     #[inline(always)]
     fn poll_cached(interest: &Interest) -> PollStatus {
-        let cur_gen = interest.file.poll_gen();
+        // Fast path: use poll_gen_ptr to avoid vtable dispatch when available.
+        #[allow(unsafe_code)]
+        let cur_gen = if !interest.poll_gen_ptr.is_null() {
+            unsafe { (*interest.poll_gen_ptr).load(Ordering::Relaxed) }
+        } else {
+            interest.file.poll_gen()
+        };
         if cur_gen != 0 && cur_gen == interest.cached_poll_gen.load(Ordering::Relaxed) {
             // Generation unchanged — reuse cached poll result.
             return PollStatus::from_bits_truncate(
@@ -228,8 +253,10 @@ impl EpollInstance {
         let mut count = 0;
         for interest in interests.values() {
             if count >= max { break; }
-            if !Self::check_interest(interest) { continue; }
-            let ev = interest.events.load(Ordering::Relaxed);
+            let ev = match Self::check_interest(interest) {
+                Some(ev) => ev,
+                None => continue,
+            };
             let status = Self::poll_cached(interest);
             let ready = poll_status_to_epoll(status) & (ev | EPOLLERR | EPOLLHUP);
             if ready != 0 {

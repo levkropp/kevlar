@@ -153,6 +153,12 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         0
     }
 
+    /// Direct pointer to the poll_gen atomic, avoiding vtable dispatch in
+    /// epoll's hot path. Returns None if poll_gen is not implemented.
+    fn poll_gen_atomic(&self) -> Option<&core::sync::atomic::AtomicU64> {
+        None
+    }
+
     /// Notify the file that an EPOLLET watcher was added or removed.
     /// Used to skip expensive state_gen atomic RMW on the fast path
     /// when no edge-triggered watchers exist.
