@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use super::*;
 use crate::process::PId;
-use crate::{
-    arch::{self},
-    process::process::PROCESSES,
-};
+use crate::process::process::PROCESSES;
+use crate::arch::{self};
 
 use alloc::sync::Arc;
 

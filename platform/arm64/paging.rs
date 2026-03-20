@@ -83,6 +83,12 @@ fn traverse(
             unsafe {
                 new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
                 *entry = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
+                // DSB ensures the table descriptor (and the zeroed table it
+                // points to) are visible to the hardware page-table walker
+                // before we descend into the next level.  Without this, the
+                // walker (or QEMU's emulated walker) may see a stale zero
+                // entry and fault instead of following the new descriptor.
+                core::arch::asm!("dsb ishst", options(nostack));
             }
             table_paddr = new_table;
         }
@@ -119,6 +125,7 @@ fn traverse_to_pt(
             unsafe {
                 new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
                 *entry = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
+                core::arch::asm!("dsb ishst", options(nostack));
             }
             table_paddr = new_table;
         }
@@ -281,6 +288,7 @@ impl PageTable {
                 return false; // already mapped
             }
             *entry_ptr.as_ptr() = paddr.value() as u64 | attrs;
+            core::arch::asm!("dsb ish", "isb", options(nostack));
             true
         }
     }
@@ -328,6 +336,9 @@ impl PageTable {
             }
         }
 
+        if mapped != 0 {
+            unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)); }
+        }
         mapped
     }
 
@@ -346,6 +357,7 @@ impl PageTable {
         let attrs = prot_to_attrs(prot_flags);
         unsafe {
             *entry_ptr.as_ptr() = paddr_bits | attrs;
+            core::arch::asm!("dsb ish", "isb", options(nostack));
         }
         true
     }
@@ -412,6 +424,10 @@ impl PageTable {
         let mut entry = traverse(self.pgd, vaddr, true).unwrap();
         unsafe {
             *entry.as_mut() = paddr.value() as u64 | attrs;
+            // ARM ARM B2.9: DSB ensures the PTE store is visible to the page
+            // table walker before any subsequent access through the new mapping.
+            // ISB ensures the CPU fetches new translations.
+            core::arch::asm!("dsb ish", "isb", options(nostack));
         }
     }
 

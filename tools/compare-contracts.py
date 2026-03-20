@@ -134,8 +134,10 @@ def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tupl
                 "-monitor", "none",
                 "-d", "guest_errors,unimp",
                 "-global", "virtio-mmio.force-legacy=false",
+                "-chardev", "file,id=ktrace,path=/tmp/ktrace-arm64.bin",
+                "-semihosting-config", "enable=on,target=native,chardev=ktrace",
                 "-kernel", kernel_path,
-                "-append", f"init={init_path}",
+                "-append", f"init={init_path} debug=ktrace",
             ]
 
         try:

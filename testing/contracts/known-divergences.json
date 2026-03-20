@@ -1,23 +1,9 @@
 {
     "_comment": "Tests listed here are known to diverge from Linux. They still run and are reported as XFAIL, but do not fail the suite. Remove entries as implementations are completed.",
-    "subsystems.ns_uts": "unshare(CLONE_NEWUTS) requires CAP_SYS_ADMIN on Linux but Kevlar does not enforce capability checks yet. The contract runner is unprivileged.",
-    "vm.mremap_xfail": "Old test prints address which differs due to ASLR; replaced by vm.mremap_grow.",
-    "events.epoll_oneshot_xfail": "EPOLLONESHOT implemented but test times out in QEMU (pre-existing epoll_wait blocking issue with pipes). Investigate POLL_WAIT_QUEUE wakeup path.",
-    "signals.sigaltstack_xfail": "sigaltstack is a stub returning Ok(0); SA_ONSTACK has no effect. Tracked for M9.",
-    "process.setuid_roundtrip": "Kevlar runs as root (uid=0/gid=0) vs Linux contract runner as user (uid=1000/gid=1001); test passes on both (test artifact).",
-    "process.execve_argv_envp": "Serial captures parent printf before execve; not present in Linux captured output (test artifact).",
-    "process.setsid_session": "Child _exit() skips stdio flush on Linux; Kevlar serial captures all writes (test artifact).",
     "process.wait4_wnohang": "Child PID=2 on Kevlar vs high PID on Linux; PID values are non-deterministic (test artifact).",
-    "threading.tgkill_self": "TID=1 on Kevlar vs high TID on Linux; TID values are non-deterministic (test artifact).",
     "time.clock_realtime": "Wall-clock tv_sec differs by 1s due to sequential test execution timing (test artifact).",
-    "vm.map_anon_large": "mmap address differs (Kevlar starts user VA at 0xa00000000 vs Linux ASLR); both correctly 2MB-aligned.",
-    "vm.mmap_fixed": "mmap address differs (Kevlar user VA base vs Linux ASLR); MAP_FIXED behavior is correct.",
-    "sockets.setsockopt_readback": "SO_RCVBUF getsockopt returns smoltcp default (87380) vs Linux doubled value (212992); both pass.",
-    "threading.getrusage_struct": "getrusage utime always 0 — Kevlar does not yet track per-process user-mode CPU time.",
-    "signals.setitimer_oneshot": "Timer remaining sec=10 vs sec=9 — sub-second precision difference under TCG emulation.",
     "events.poll_basic": "30s timeout — poll on pipe fds blocks indefinitely (POLL_WAIT_QUEUE wakeup issue with pipes).",
     "events.inotify_create_xfail": "30s timeout — inotify_init1 returns a stub fd but IN_CREATE watch never fires.",
-    "sockets.accept4_flags": "accept4 with SOCK_NONBLOCK panics — AF_UNIX socket accept not fully implemented.",
-    "sockets.unix_stream": "AF_UNIX stream connect panics — Unix domain sockets not fully implemented.",
-    "vm.mremap_grow": "ARM64 only: memset data not visible after in-place mremap extend — suspected QEMU TCG cache coherency issue. x86_64 passes."
+    "sockets.accept4_flags": "x86_64 only: accept4 with SOCK_NONBLOCK panics — AF_UNIX socket accept not fully implemented.",
+    "sockets.unix_stream": "x86_64 only: AF_UNIX stream connect panics — Unix domain sockets not fully implemented."
 }
