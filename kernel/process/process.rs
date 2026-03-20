@@ -37,7 +37,7 @@ use crossbeam::atomic::AtomicCell;
 use goblin::elf64::program_header::PT_LOAD;
 use kevlar_platform::{
     arch::{PtRegs, PAGE_SIZE},
-    page_allocator::{alloc_pages, AllocPageFlags},
+    page_allocator::{alloc_pages, alloc_page_batch, AllocPageFlags},
     spinlock::{SpinLock, SpinLockGuard, SpinLockGuardNoIrq},
 };
 use kevlar_utils::alignment::align_up;
@@ -2626,7 +2626,7 @@ fn prefault_cached_pages(vm: &mut Vm) {
 
 /// Pre-map zero pages for small anonymous VMAs (gap padding) and BSS pages
 /// (file-backed VMAs past file_size) during exec. These are typically 1-8
-/// pages that would otherwise cause demand faults (~2µs each under KVM).
+/// pages that would otherwise cause demand faults (~1.5µs each under KVM).
 /// Skip large anonymous VMAs (stack, heap) to avoid wasting memory.
 fn prefault_small_anonymous(vm: &mut Vm) {
     use kevlar_platform::arch::PAGE_SIZE;
@@ -2666,22 +2666,40 @@ fn prefault_small_anonymous(vm: &mut Vm) {
             }
         };
 
+        let num_pages = (vma_end - prefault_start) / PAGE_SIZE;
+        if num_pages == 0 {
+            continue;
+        }
+
+        // Batch-allocate pages to amortize allocator lock overhead.
+        let mut pages = [kevlar_platform::address::PAddr::new(0); 64];
+        let allocated = alloc_page_batch(&mut pages, num_pages);
+
+        // Zero and init refcounts for the batch.
+        for i in 0..allocated {
+            kevlar_platform::page_ops::zero_page(pages[i]);
+            kevlar_platform::page_refcount::page_ref_init(pages[i]);
+        }
+
+        // Map each page into the VMA.
         let mut addr = prefault_start;
-        while addr + PAGE_SIZE <= vma_end {
+        for i in 0..allocated {
             let uaddr = match UserVAddr::new_nonnull(addr) {
                 Ok(v) => v,
-                Err(_) => break,
+                Err(_) => {
+                    // Free remaining pages.
+                    for j in i..allocated {
+                        if kevlar_platform::page_refcount::page_ref_dec(pages[j]) {
+                            kevlar_platform::page_allocator::free_pages(pages[j], 1);
+                        }
+                    }
+                    break;
+                }
             };
-            let paddr = match alloc_pages(1, AllocPageFlags::KERNEL) {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            kevlar_platform::page_ops::zero_page(paddr);
-            kevlar_platform::page_refcount::page_ref_init(paddr);
-            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, paddr, prot_flags) {
-                // Already mapped (e.g. within a huge PDE) — free the page.
-                if kevlar_platform::page_refcount::page_ref_dec(paddr) {
-                    kevlar_platform::page_allocator::free_pages(paddr, 1);
+            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, pages[i], prot_flags) {
+                // Already mapped — free the page.
+                if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
+                    kevlar_platform::page_allocator::free_pages(pages[i], 1);
                 }
             }
             addr += PAGE_SIZE;

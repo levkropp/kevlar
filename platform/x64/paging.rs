@@ -300,6 +300,59 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
     }
 }
 
+/// Like teardown_table but NEVER frees data pages — only decrements refcounts
+/// and frees intermediate page table pages. Safe for forked page tables where
+/// data pages may still be referenced by the parent or page cache.
+fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
+    if table_paddr.is_null() {
+        return;
+    }
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    for i in 0..ENTRIES_PER_TABLE {
+        let entry = unsafe { *table.offset(i) };
+        let paddr = entry_paddr(entry);
+
+        if paddr.is_null() {
+            continue;
+        }
+
+        if level == 1 {
+            // Leaf PTE: decrement refcount only, never free.
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue;
+            }
+            let rc = crate::page_refcount::page_ref_count(paddr);
+            if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                continue;
+            }
+            crate::page_refcount::page_ref_dec(paddr);
+        } else if level == 2 && is_huge_page_pde(entry) {
+            // 2MB huge page: decrement refcount on sub-PFNs, never free.
+            let flags = entry_flags(entry);
+            if flags & PageAttrs::USER.bits() == 0 {
+                continue;
+            }
+            for sub_i in 0..512usize {
+                let sub = PAddr::new(paddr.value() + sub_i * PAGE_SIZE);
+                let rc = crate::page_refcount::page_ref_count(sub);
+                if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                    continue;
+                }
+                crate::page_refcount::page_ref_dec(sub);
+            }
+        } else {
+            // Intermediate table: recurse, then free the table page.
+            if level == 4 && i >= 0x80 {
+                continue; // Skip kernel page table entries.
+            }
+            teardown_table_dec_only(paddr, level - 1);
+            crate::page_allocator::free_pages(paddr, 1);
+        }
+    }
+}
+
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
@@ -733,6 +786,20 @@ impl PageTable {
     /// Called when a process's address space is destroyed (exec or exit).
     pub fn teardown_user_pages(&mut self) {
         teardown_table(self.pml4, 4);
+    }
+
+    /// Decrement refcounts on all user pages and free intermediate page table
+    /// pages, but NEVER free data pages even if their refcount reaches zero.
+    /// This is safe for fork+exec: the forked page table's refcount increments
+    /// are reversed so the parent's pages return to their correct refcount,
+    /// avoiding unnecessary full CoW copies (refcount > 1 → must copy).
+    /// The PML4 page itself is also freed.
+    pub fn teardown_forked_pages(&mut self) {
+        teardown_table_dec_only(self.pml4, 4);
+        // Free the PML4 page itself.
+        crate::page_allocator::free_pages(self.pml4, 1);
+        // Prevent double-free if drop runs again.
+        self.pml4 = PAddr::new(0);
     }
 
     /// Try to map a page. Returns `true` if mapped, `false` if already mapped.

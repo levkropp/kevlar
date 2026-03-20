@@ -140,6 +140,37 @@ fn leaf_pt_index(vaddr_value: usize) -> usize {
     (vaddr_value >> 12) & 0x1FF
 }
 
+/// Decrement refcounts on all user pages and free intermediate page table
+/// pages, but never free data pages. Safe for forked page tables.
+fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
+    if table_paddr.is_null() {
+        return;
+    }
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    for i in 0..ENTRIES_PER_TABLE {
+        let entry = unsafe { *table.offset(i) };
+        let paddr = entry_paddr(entry);
+
+        if paddr.is_null() {
+            continue;
+        }
+
+        if level == 1 {
+            // Leaf PTE: decrement refcount only, never free.
+            let rc = crate::page_refcount::page_ref_count(paddr);
+            if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                continue;
+            }
+            crate::page_refcount::page_ref_dec(paddr);
+        } else {
+            // Intermediate table: recurse, then free the table page.
+            teardown_table_dec_only(paddr, level - 1);
+            crate::page_allocator::free_pages(paddr, 1);
+        }
+    }
+}
+
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
@@ -242,6 +273,14 @@ impl PageTable {
         Ok(PageTable {
             pgd: duplicate_table(original.pgd, 4)?,
         })
+    }
+
+    /// Decrement refcounts and free intermediate page table pages, but never
+    /// free data pages. Safe for forked page tables.
+    pub fn teardown_forked_pages(&mut self) {
+        teardown_table_dec_only(self.pgd, 4);
+        crate::page_allocator::free_pages(self.pgd, 1);
+        self.pgd = PAddr::new(0);
     }
 
     pub fn switch(&self) {
