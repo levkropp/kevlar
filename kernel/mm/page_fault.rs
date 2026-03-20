@@ -537,13 +537,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
                 if vma_is_shared {
                     // MAP_SHARED: restore writable without copying.
-                    // Both parent and child keep the same physical page.
                     vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
                     vm.page_table().flush_tlb_local(aligned_vaddr);
                     return;
                 }
+                let is_ghost = vm.is_ghost_forked;
                 let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
-                if refcount > 1 {
+                // Ghost-forked VMs always CoW-copy: refcounts weren't incremented
+                // during fork, so refcount=1 even though the page is shared with
+                // the blocked parent. Normal fork: copy only if refcount > 1.
+                if refcount > 1 || is_ghost {
                     // Shared page: allocate new page, copy content, map writable.
                     let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
                         Ok(p) => p,
@@ -560,25 +563,25 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     }
                     #[cfg(feature = "profile-fortress")]
                     {
-                        // Fortress: use PageFrame for safe access.
                         let mut tmp = [0u8; PAGE_SIZE];
                         let src_frame = kevlar_platform::page_ops::PageFrame::new(old_paddr);
                         src_frame.read(0, &mut tmp);
                         let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(new_paddr);
                         dst_frame.write(0, &tmp);
                     }
-                    // Initialize refcount for the new page.
                     kevlar_platform::page_refcount::page_ref_init(new_paddr);
-                    // Decrement old page's refcount.
-                    if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
-                        kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    if !is_ghost {
+                        // Normal fork: decrement old page's refcount.
+                        if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                            kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                        }
                     }
-                    // Map the new page with write permission.
+                    // Ghost fork: DON'T decrement — refcount was never incremented.
                     vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
                     vm.page_table().flush_tlb_local(aligned_vaddr);
                     return;
                 }
-                // refcount == 1: we're the sole owner, just make it writable.
+                // refcount == 1 and not ghost: sole owner, just make writable.
             }
         }
 
