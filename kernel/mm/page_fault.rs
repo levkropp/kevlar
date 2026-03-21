@@ -7,10 +7,27 @@ use crate::{
     fs::opened_file::OpenOptions,
     process::{
         current_process,
-        signal::{self, SIGKILL, SIGSEGV},
+        signal::{self, SigAction, SIGKILL, SIGSEGV},
         Process,
     },
 };
+
+/// Deliver SIGSEGV to the current process. If the default action is Terminate
+/// (no user handler installed), kill the process immediately instead of
+/// queuing the signal. This prevents infinite fault loops where the faulting
+/// instruction is retried after the page fault handler returns.
+/// Use for unrecoverable faults (invalid address, no VMA).
+fn deliver_sigsegv_fatal() {
+    let current = current_process();
+    let action = current.signals().lock_no_irq().get_action(SIGSEGV);
+    if matches!(action, SigAction::Terminate) {
+        // No user handler — kill immediately to avoid infinite re-fault loop.
+        Process::exit_by_signal(SIGSEGV);
+    } else {
+        // User has a SIGSEGV handler — queue the signal for delivery.
+        current.send_signal(SIGSEGV);
+    }
+}
 use core::cmp::min;
 use core::sync::atomic::{AtomicU64, Ordering};
 use hashbrown::HashMap;
@@ -230,7 +247,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: null pointer access (pid={}, ip={:#x}, fsbase={:#x})",
                 pid, ip, fsbase
             );
-            current_process().send_signal(SIGSEGV);
+            deliver_sigsegv_fatal();
             return;
         }
     };
@@ -253,7 +270,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         r.rdi, r.rsi, r.rbp, r.rsp);
                 }
             }
-            current_process().send_signal(SIGSEGV);
+            deliver_sigsegv_fatal();
             return;
         }
     };
@@ -331,7 +348,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             drop(vm_ref);
             // Deliver SIGSEGV via signal path so userspace handlers can catch it.
             // If no handler is installed, the default action terminates the process.
-            current.send_signal(SIGSEGV);
+            deliver_sigsegv_fatal();
             return;
         }
     };
@@ -474,6 +491,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             "SIGSEGV: PROT_NONE access at {:#x} (pid={}, ip={:#x})",
             unaligned_vaddr.value(), current.pid().as_i32(), ip
         );
+        // Use send_signal (not fatal) so user SIGSEGV handlers can catch
+        // PROT_NONE faults (e.g., guard pages, mprotect tests).
         current.send_signal(SIGSEGV);
         return;
     }
