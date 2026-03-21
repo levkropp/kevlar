@@ -29,7 +29,11 @@ bitflags! {
         const O_APPEND = 0o2000;
         const O_NONBLOCK = 0o4000;
         const O_DIRECTORY = 0o200000;
+        const O_NOFOLLOW = 0o400000;
         const O_CLOEXEC  = 0o2000000;
+        /// O_TMPFILE: create an unnamed temporary file. We treat it as O_CREAT
+        /// for simplicity — the file gets a name but apk's atomic rename works.
+        const O_TMPFILE = 0o20200000;
     }
 }
 
