@@ -10,7 +10,7 @@ use kevlar_vfs::{
     file_system::FileSystem,
     inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions},
     result::{Errno, Error, Result},
-    stat::{FileMode, Stat, S_IFDIR, S_IFREG},
+    stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFREG},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 
@@ -102,11 +102,11 @@ impl Directory for CgroupDir {
         Err(Error::new(Errno::ENOENT))
     }
 
-    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_file(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         Err(Error::new(Errno::EPERM))
     }
 
-    fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         let mut children = self.node.children.lock();
         if children.contains_key(name) {
             return Err(Error::new(Errno::EEXIST));

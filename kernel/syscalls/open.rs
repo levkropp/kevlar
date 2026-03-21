@@ -3,6 +3,7 @@ use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{inotify, opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
+use kevlar_vfs::stat::{GId, UId};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_open(&mut self, path: &Path, flags: OpenFlags, mode: FileMode) -> Result<isize> {
@@ -22,7 +23,7 @@ impl<'a> SyscallHandler<'a> {
 
             if flags.contains(OpenFlags::O_CREAT) && !flags.contains(OpenFlags::O_DIRECTORY) {
                 let (parent_inode, name) = root_fs.lookup_parent_inode(path, true)?;
-                match parent_inode.as_dir()?.create_file(name, mode) {
+                match parent_inode.as_dir()?.create_file(name, mode, UId::new(current.euid()), GId::new(current.egid())) {
                     Ok(inode) => {
                         if let Some((parent, fname)) = path.parent_and_basename() {
                             inotify::notify(parent.as_str(), fname, inotify::IN_CREATE);

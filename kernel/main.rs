@@ -326,7 +326,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         use crate::fs::file_system::FileSystem;
         let sys_root = SYS_FS.as_ref().root_dir().expect("sysfs root");
         let fs_dir = sys_root
-            .create_dir("fs", kevlar_vfs::stat::FileMode::new(0o755))
+            .create_dir("fs", kevlar_vfs::stat::FileMode::new(0o755), kevlar_vfs::stat::UId::new(0), kevlar_vfs::stat::GId::new(0))
             .or_else(|e| {
                 // If already exists, look it up instead.
                 if e.errno() == kevlar_vfs::result::Errno::EEXIST {
@@ -343,7 +343,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
             })
             .expect("failed to create /sys/fs");
         let cgroup_dir = fs_dir
-            .create_dir("cgroup", kevlar_vfs::stat::FileMode::new(0o755))
+            .create_dir("cgroup", kevlar_vfs::stat::FileMode::new(0o755), kevlar_vfs::stat::UId::new(0), kevlar_vfs::stat::GId::new(0))
             .or_else(|e| {
                 if e.errno() == kevlar_vfs::result::Errno::EEXIST {
                     match fs_dir.lookup("cgroup")? {

@@ -115,7 +115,7 @@ impl<'a> SyscallHandler<'a> {
                 // This mimics `mkdir -p` for the mount target.
                 if let Some((parent, name)) = target_path.parent_and_basename() {
                     let parent_dir = root_fs.lookup_dir(parent)?;
-                    let inode = parent_dir.create_dir(name, kevlar_vfs::stat::FileMode::new(0o755))?;
+                    let inode = parent_dir.create_dir(name, kevlar_vfs::stat::FileMode::new(0o755), kevlar_vfs::stat::UId::new(0), kevlar_vfs::stat::GId::new(0))?;
                     match inode {
                         kevlar_vfs::inode::INode::Directory(d) => d,
                         _ => return Err(Errno::ENOTDIR.into()),
