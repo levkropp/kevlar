@@ -1491,6 +1491,8 @@ impl Process {
     ) -> Result<()> {
         let _exec_span = debug::tracer::span_guard(debug::tracer::span::EXEC_TOTAL);
         let current = current_process();
+        info!("execve: pid={} path={}", current.pid().as_i32(),
+              executable_path.resolve_absolute_path().as_str());
         {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_CLOSE_CLOEXEC);
             // Invalidate hot-fd cache before closing CLOEXEC files —
@@ -2923,6 +2925,15 @@ fn do_elf_binfmt(
                interp_base_uaddr.value(), interp_lo, interp_hi, interp_base_offset);
 
         load_elf_segments(&mut vm, &interp_phdrs, interp_base_offset, &interp_file)?;
+
+        // Debug: log interpreter LOAD segment details for pipe crash investigation.
+        for phdr in &interp_phdrs {
+            if phdr.p_type == PT_LOAD {
+                info!("interp LOAD: vaddr={:#x} off={:#x} filesz={:#x} memsz={:#x} flags={:#x} → mapped at {:#x}",
+                    phdr.p_vaddr, phdr.p_offset, phdr.p_filesz, phdr.p_memsz, phdr.p_flags,
+                    phdr.p_vaddr as usize + interp_base_offset);
+            }
+        }
 
         // Entry point is the interpreter's entry, relocated.
         ip = UserVAddr::new_nonnull(interp_entry_offset + interp_base_offset)?;
