@@ -182,6 +182,10 @@ impl Vm {
         None
     }
 
+    pub fn last_fault_vma_idx(&self) -> Option<usize> {
+        self.last_fault_vma_idx
+    }
+
     fn stack_vma(&self) -> &VmArea {
         &self.vm_areas[0]
     }
@@ -296,9 +300,42 @@ impl Vm {
         self.expand_heap_to(new_end)
     }
 
+    #[allow(unsafe_code)]
     pub fn fork(&self) -> Result<Vm> {
+        // Debug: check the PTE for 0xa0015e000 before and after fork.
+        // This page contains musl's .rodata locale data that's zeroed in forked children.
+        let debug_vaddr = kevlar_platform::address::UserVAddr::new(0xa0015e000);
+        if let Some(va) = debug_vaddr {
+            if let Some(pa) = self.page_table.lookup_paddr(va) {
+                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
+                info!("FORK_DBG: pre-fork vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
+                    va.value(), pa.value(), byte0);
+            } else {
+                info!("FORK_DBG: pre-fork vaddr={:#x} NOT MAPPED", 0xa0015e000usize);
+            }
+        }
+
+        let new_pt = PageTable::duplicate_from(&self.page_table)?;
+
+        // Check the child's copy
+        if let Some(va) = debug_vaddr {
+            if let Some(pa) = new_pt.lookup_paddr(va) {
+                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
+                info!("FORK_DBG: post-fork child vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
+                    va.value(), pa.value(), byte0);
+            } else {
+                info!("FORK_DBG: post-fork child vaddr={:#x} NOT MAPPED", 0xa0015e000usize);
+            }
+            // Re-check parent
+            if let Some(pa) = self.page_table.lookup_paddr(va) {
+                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
+                info!("FORK_DBG: post-fork parent vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
+                    va.value(), pa.value(), byte0);
+            }
+        }
+
         Ok(Vm {
-            page_table: PageTable::duplicate_from(&self.page_table)?,
+            page_table: new_pt,
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
             last_fault_vma_idx: self.last_fault_vma_idx,

@@ -268,28 +268,45 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     let vm_ref = current.vm();
     let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
 
-    // Debug: log page faults for addresses in musl's .rodata range
-    // (0xa0013xxxx to 0xa0016xxxx) to diagnose Alpine pipe crash.
-    if aligned_vaddr.value() >= 0xa00130000 && aligned_vaddr.value() < 0xa00170000 {
+    // Debug: log the ACTUAL VMA returned by find_vma_cached for addresses
+    // in musl's data range (pid > 2 to skip early boot processes).
+    if aligned_vaddr.value() >= 0xa00168000 && aligned_vaddr.value() <= 0xa0016c000
+       && current.pid().as_i32() > 2 {
         let pid = current.pid().as_i32();
-        // Find which VMA this falls into
-        let mut vma_info = "none";
-        for vma in vm.vm_areas().iter() {
-            if vma.contains(unaligned_vaddr) {
-                vma_info = match vma.area_type() {
+        let mut found_vma = "scan_pending";
+        let mut fs = 0usize;
+        let mut fe = 0usize;
+        // Check what find_vma_cached will find (peek at cache)
+        if let Some(idx) = vm.last_fault_vma_idx() {
+            if idx < vm.vm_areas().len() {
+                let cached_vma = &vm.vm_areas()[idx];
+                let ct = match cached_vma.area_type() {
                     VmAreaType::Anonymous => "anon",
                     VmAreaType::File { .. } => "file",
                 };
-                break;
+                let hit = cached_vma.contains(unaligned_vaddr);
+                info!("PF_DBG2: pid={} vaddr={:#x} cache_idx={} cached={}[{:#x}-{:#x}] hit={}",
+                    pid, aligned_vaddr.value(), idx, ct, cached_vma.start().value(),
+                    cached_vma.end().value(), hit);
             }
         }
-        info!("PF_DBG: pid={} vaddr={:#x} ip={:#x} vma={}", pid, aligned_vaddr.value(), ip, vma_info);
     }
 
     let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
         None => {
             let pid = current.pid().as_i32();
+            // Debug: always dump VMAs on fault miss for Alpine investigation
+            if unaligned_vaddr.value() >= 0xa00130000 && unaligned_vaddr.value() < 0xa00170000 {
+                warn!("PAGE FAULT NO VMA: pid={} addr={:#x} ip={:#x}", pid, unaligned_vaddr.value(), ip);
+                for (i, vma) in vm.vm_areas().iter().enumerate() {
+                    let vt = match vma.area_type() {
+                        VmAreaType::Anonymous => "anon",
+                        VmAreaType::File { .. } => "file",
+                    };
+                    warn!("  VMA[{}]: [{:#x}-{:#x}] {}", i, vma.start().value(), vma.end().value(), vt);
+                }
+            }
             if pid == 1 {
                 warn!("PAGE FAULT NO VMA: addr={:#x} ip={:#x}", unaligned_vaddr.value(), ip);
                 for (i, vma) in vm.vm_areas().iter().enumerate() {
