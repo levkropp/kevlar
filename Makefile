@@ -279,7 +279,7 @@ build/alpine.img:
 	@mkdir -p build/alpine-root
 	@docker rm -f kevlar-alpine 2>/dev/null || true
 	docker run --name kevlar-alpine alpine:3.21 sh -c 'apk add --no-cache openrc'
-	docker export kevlar-alpine | tar -xf - -C build/alpine-root
+	fakeroot sh -c 'docker export kevlar-alpine | tar -xf - -C build/alpine-root && chown -R 0:0 build/alpine-root'
 	@docker rm kevlar-alpine
 	@sed -i 's/^root:\*:/root::/' build/alpine-root/etc/shadow
 	@echo "ttyS0" >> build/alpine-root/etc/securetty
@@ -296,7 +296,7 @@ ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n\
 ::ctrlaltdel:/sbin/reboot\n\
 ::shutdown:/sbin/openrc shutdown\n' > build/alpine-root/etc/inittab
 	dd if=/dev/zero of=build/alpine.img bs=1M count=256 2>/dev/null
-	mke2fs -t ext4 -q -d build/alpine-root build/alpine.img
+	fakeroot mke2fs -t ext4 -q -d build/alpine-root build/alpine.img
 	@rm -rf build/alpine-root
 
 .PHONY: run-systemd
