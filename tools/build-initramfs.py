@@ -106,6 +106,7 @@ def compile_all_local():
         ("testing/mini_cgroups_ns.c",    "mini-cgroups-ns",  []),
         ("testing/test_ext2_rw.c",       "test-ext2-rw",     []),
         ("testing/test_ext4_mknod.c",    "test-ext4-mknod",  []),
+        ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/busybox_suite.c",      "busybox-suite",    []),
         ("testing/dd_diag.c",            "dd-diag",          []),
         ("testing/test_net.c",           "test-net",         []),
