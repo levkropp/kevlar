@@ -1262,10 +1262,19 @@ impl<'a> SyscallHandler<'a> {
             SYS_PPOLL => {
                 // ppoll(fds, nfds, timeout, sigmask) — musl's pause() calls
                 // ppoll(NULL, 0, NULL, NULL) on ARM64 (no __NR_pause).
-                if a1 == 0 && a2 == 0 {
+                if a1 == 0 && a2 == 0 && a3 == 0 {
                     self.sys_pause()
                 } else {
-                    self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, -1 as c_int)
+                    // Read struct timespec from a3; NULL means infinite.
+                    let timeout_ms: c_int = if a3 == 0 {
+                        -1
+                    } else {
+                        let ts = UserVAddr::new_nonnull(a3)?.read::<[i64; 2]>()?;
+                        let ms = ts[0] * 1000 + ts[1] / 1_000_000;
+                        if ms > (c_int::MAX as i64) { c_int::MAX } else { ms as c_int }
+                    };
+                    // sigmask (a4) is ignored for now.
+                    self.sys_poll(UserVAddr::new_nonnull(a1)?, a2 as c_ulong, timeout_ms)
                 }
             }
             SYS_PRLIMIT64 => {
@@ -1347,13 +1356,13 @@ impl<'a> SyscallHandler<'a> {
             SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
             SYS_FCHOWN => self.sys_fchown(a1 as i32, a2 as u32, a3 as u32),
             SYS_FCHMODAT => self.sys_fchmodat(
-                a1 as i32,
+                CwdOrFd::parse(a1 as c_int),
                 &resolve_path(a2)?,
                 a3 as u32,
                 a4 as i32,
             ),
             SYS_FCHOWNAT => self.sys_fchownat(
-                a1 as i32,
+                CwdOrFd::parse(a1 as c_int),
                 &resolve_path(a2)?,
                 a3 as u32,
                 a4 as u32,

@@ -21,13 +21,12 @@ int main(int argc, char *argv[]) {
             printf("CONTRACT_FAIL child_env: got='%s'\n", env ? env : "(null)");
             return 1;
         }
-        printf("child_verify: ok argc=%d argv2='%s' env='%s'\n", argc, argv[2], env);
+        printf("child_verify: ok\n");
         printf("CONTRACT_PASS\n");
         return 0;
     }
 
     /* Parent mode: exec self with arguments */
-    printf("parent: execing self\n");
     char *new_argv[] = {argv[0], "--child", "hello", NULL};
     char *new_envp[] = {"CONTRACT_ENV=world", NULL};
     execve(argv[0], new_argv, new_envp);

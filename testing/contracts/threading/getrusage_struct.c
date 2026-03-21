@@ -13,17 +13,14 @@ int main(void) {
         return 1;
     }
     /* Stub writes zeros; verify no segfault and struct is accessible */
-    printf("rusage_self: ok utime=%ld.%06ld stime=%ld.%06ld\n",
-           (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
-           (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec);
+    printf("rusage_self: ok\n");
 
     memset(&ru, 0xFF, sizeof(ru));
     if (getrusage(RUSAGE_CHILDREN, &ru) != 0) {
         printf("CONTRACT_FAIL rusage_children: errno=%d\n", errno);
         return 1;
     }
-    printf("rusage_children: ok utime=%ld.%06ld\n",
-           (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec);
+    printf("rusage_children: ok\n");
 
     printf("CONTRACT_PASS\n");
     return 0;

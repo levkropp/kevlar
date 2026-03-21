@@ -32,7 +32,7 @@ int main(void) {
         printf("CONTRACT_FAIL handler_tid: got=%d expected=%d\n", handler_tid, tid);
         return 1;
     }
-    printf("tgkill_self: ok tid=%d handler_tid=%d\n", tid, handler_tid);
+    printf("tgkill_self: ok\n");
 
     printf("CONTRACT_PASS\n");
     return 0;

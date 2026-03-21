@@ -11,6 +11,10 @@ impl<'a> SyscallHandler<'a> {
         let path = {
             let opened_files = current.opened_files().lock();
             let opened_file = opened_files.get(fd)?;
+            // POSIX: fchdir must target a directory.
+            if !opened_file.inode().is_dir() {
+                return Err(Error::new(Errno::ENOTDIR));
+            }
             opened_file.path().resolve_absolute_path()
         };
         let root_fs = current.root_fs();

@@ -13,7 +13,7 @@ int main(void) {
         printf("CONTRACT_FAIL uid_changed: got=%d expected=%d\n", getuid(), uid);
         return 1;
     }
-    printf("setuid_roundtrip: ok uid=%d\n", uid);
+    printf("setuid_roundtrip: ok\n");
 
     gid_t gid = getgid();
     if (setgid(gid) != 0) {
@@ -24,7 +24,7 @@ int main(void) {
         printf("CONTRACT_FAIL gid_changed: got=%d expected=%d\n", getgid(), gid);
         return 1;
     }
-    printf("setgid_roundtrip: ok gid=%d\n", gid);
+    printf("setgid_roundtrip: ok\n");
 
     printf("CONTRACT_PASS\n");
     return 0;

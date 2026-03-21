@@ -1,4 +1,4 @@
-/* Contract: sigaltstack + SA_ONSTACK runs handler on alt stack (stub, no effect). */
+/* Contract: sigaltstack + SA_ONSTACK runs handler on alt stack. */
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -51,12 +51,12 @@ int main(void) {
     /* Raise signal */
     raise(SIGUSR1);
 
-    if (handler_on_altstack) {
-        printf("handler_altstack: ok (ran on alt stack)\n");
-    } else {
-        printf("handler_altstack: ran on normal stack (stub has no effect)\n");
+    if (!handler_on_altstack) {
+        printf("CONTRACT_FAIL handler_altstack: ran on normal stack\n");
+        free(alt_stack_base);
+        return 1;
     }
-    /* Pass either way — known-divergences.json handles XFAIL */
+    printf("handler_altstack: ok\n");
     printf("CONTRACT_PASS\n");
 
     free(alt_stack_base);

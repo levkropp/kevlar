@@ -17,14 +17,16 @@ int main(void) {
         pid_t mypid = getpid();
         if (sid != mypid) {
             printf("CONTRACT_FAIL setsid: sid=%d pid=%d errno=%d\n", sid, mypid, errno);
+            fflush(stdout);
             _exit(1);
         }
-        printf("setsid: ok sid=%d\n", sid);
+        printf("setsid: ok\n");
 
         /* getsid(0) should equal our pid */
         pid_t gs = getsid(0);
         if (gs != mypid) {
             printf("CONTRACT_FAIL getsid: gs=%d pid=%d\n", gs, mypid);
+            fflush(stdout);
             _exit(1);
         }
         printf("getsid: ok\n");
@@ -34,10 +36,12 @@ int main(void) {
         sid = setsid();
         if (sid != -1 || errno != EPERM) {
             printf("CONTRACT_FAIL setsid_eperm: sid=%d errno=%d\n", sid, errno);
+            fflush(stdout);
             _exit(1);
         }
         printf("setsid_eperm: ok\n");
 
+        fflush(stdout);
         _exit(0);
     }
 

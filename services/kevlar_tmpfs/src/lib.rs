@@ -260,13 +260,15 @@ impl Directory for Dir {
         Ok(())
     }
 
-    fn create_file(&self, name: &str, _mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
+    fn create_file(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
 
         let inode = Arc::new(File::new(alloc_inode_no()));
+        // Apply the requested permission bits (umask already applied by caller).
+        *inode.mode.lock_no_irq() = FileMode::new(S_IFREG | (mode.as_u32() & 0o7777));
         *inode.uid.lock_no_irq() = uid;
         *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::File(inode.clone()));
@@ -292,12 +294,14 @@ impl Directory for Dir {
         Ok((inode as Arc<dyn SymlinkTrait>).into())
     }
 
-    fn create_dir(&self, name: &str, _mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
+    fn create_dir(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
         let inode = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
+        // Apply requested permission bits (umask already applied by caller).
+        *inode.mode.lock_no_irq() = FileMode::new(S_IFDIR | (mode.as_u32() & 0o7777));
         *inode.uid.lock_no_irq() = uid;
         *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::Directory(inode.clone()));
