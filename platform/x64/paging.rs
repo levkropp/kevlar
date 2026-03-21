@@ -573,6 +573,13 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     debug_assert!(level > 0);
 
     if level == 1 {
+        // Debug: detect if this PT page contains the PTE for 0xa0015e000
+        // (the musl .rodata page with locale data that's zero in fork children).
+        // We don't know the virtual address here, so log any non-trivial page tables.
+        // The PTE at index (0x15e000 >> 12) & 0x1FF = 0x15E & 0x1FF = 0x15E.
+        // But we need the full virtual address context to check... skip for now
+        // and just verify the bulk copy worked.
+
         // Leaf page table (PTE level): fix up CoW entries.
         // The bulk copy already placed all entries. We only need to:
         // 1) Increment refcounts on user pages
@@ -949,9 +956,9 @@ impl PageTable {
     /// Look up the physical address for a mapped user page (read-only).
     /// For huge pages, returns base_paddr + offset within the 2MB page.
     pub fn lookup_paddr(&self, vaddr: UserVAddr) -> Option<PAddr> {
-        // First try normal 4KB lookup.
+        // First try normal 4KB lookup (read-only or writable).
         if let Some(entry_ptr) = traverse(self.pml4, vaddr, false,
-            PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::WRITABLE) {
+            PageAttrs::PRESENT | PageAttrs::USER) {
             let entry = unsafe { *entry_ptr.as_ptr() };
             let paddr = entry_paddr(entry);
             if !paddr.is_null() {
