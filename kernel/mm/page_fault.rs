@@ -245,6 +245,14 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
                 unaligned_vaddr.value(), pid, ip
             );
+            // Dump registers for crash investigation.
+            if pid > 2 {
+                let cpu = kevlar_platform::arch::cpu_id() as usize;
+                if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
+                    warn!("  RDI={:#x} RSI={:#x} RBP={:#x} RSP={:#x}",
+                        r.rdi, r.rsi, r.rbp, r.rsp);
+                }
+            }
             current_process().send_signal(SIGSEGV);
             return;
         }
@@ -309,6 +317,14 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: no VMA for address {:#x} (pid={}, ip={:#x}, reason={:?})",
                 unaligned_vaddr.value(), pid, ip, _reason
             );
+            // Dump registers for crash investigation.
+            if pid > 2 {
+                let cpu = kevlar_platform::arch::cpu_id() as usize;
+                if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
+                    warn!("  RDI={:#x} RSI={:#x} RBP={:#x} RSP={:#x} RAX={:#x}",
+                        r.rdi, r.rsi, r.rbp, r.rsp, r.rax);
+                }
+            }
             // Free the page we allocated since we won't map it.
             kevlar_platform::page_allocator::free_pages(paddr, 1);
             drop(vm);
