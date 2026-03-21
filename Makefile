@@ -292,7 +292,7 @@ build/alpine.img:
 ::sysinit:/sbin/openrc sysinit\n\
 ::sysinit:/sbin/openrc boot\n\
 ::wait:/sbin/openrc default\n\
-ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n\
+ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100\n\
 ::ctrlaltdel:/sbin/reboot\n\
 ::shutdown:/sbin/openrc shutdown\n' > build/alpine-root/etc/inittab
 	dd if=/dev/zero of=build/alpine.img bs=1M count=256 2>/dev/null
