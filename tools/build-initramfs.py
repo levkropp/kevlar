@@ -120,6 +120,7 @@ def compile_all_local():
         ("testing/test_ext4_dir.c",         "test-ext4-dir",    []),
         ("testing/test_apk_update.c",      "test-apk-update",  []),
         ("testing/test_apk_write.c",       "test-apk-write",   []),
+        ("testing/test_apk_trace.c",       "test-apk-trace",   []),
         ("testing/test_apk_interactive.c", "test-apk-inter",   []),
         ("testing/busybox_suite.c",      "busybox-suite",    []),
         ("testing/dd_diag.c",            "dd-diag",          []),
@@ -924,6 +925,7 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     # ── Other testing files ──
     for name in ["debug_init.sh", "test_apk_update.sh", "test_m10_apk.sh", "test_ktrace_apk.sh"]:
         ("testing/test_apk_write.c",       "test-apk-write",   []),
+        ("testing/test_apk_trace.c",       "test-apk-trace",   []),
         ("testing/test_apk_interactive.c", "test-apk-inter",   []),
         src = ROOT / "testing" / name
         if src.exists():
