@@ -302,35 +302,59 @@ impl Vm {
 
     #[allow(unsafe_code)]
     pub fn fork(&self) -> Result<Vm> {
-        // Debug: check the PTE for 0xa0015e000 before and after fork.
-        // This page contains musl's .rodata locale data that's zeroed in forked children.
-        let debug_vaddr = kevlar_platform::address::UserVAddr::new(0xa0015e000);
+        // Debug: check busybox .data at 0xa0000c6010 (shell linked-list head).
+        // Use raw page table walk since lookup_paddr might miss some cases.
+        // Read PML4 entry 1 directly (covers 0x8000000000..0x10000000000)
+        // 0xa000000000 >> 39 = 1, not 20!
+        let pml4_addr = self.page_table.pml4();
+        let pid = crate::process::current_process().pid().as_i32();
+        // Compute PML4 index for 0xa000c6000
+        // Dump ALL non-zero user PML4 entries (indices 0..127)
+        for i in 0..128usize {
+            let e = unsafe { *(pml4_addr.as_ptr::<u64>().add(i)) };
+            if e != 0 {
+                warn!("FORK_DBG: pid={} PML4E[{}]={:#x}", pid, i, e);
+            }
+        }
+
+        let debug_addr = 0xa000c6000usize;
+        warn!("FORK_DBG: pid={} checking addr {:#x}", pid, debug_addr);
+        let debug_vaddr = kevlar_platform::address::UserVAddr::new(debug_addr);
         if let Some(va) = debug_vaddr {
             if let Some(pa) = self.page_table.lookup_paddr(va) {
-                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
-                info!("FORK_DBG: pre-fork vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
-                    va.value(), pa.value(), byte0);
+                let qword = unsafe { *(pa.as_ptr::<u64>().add(2)) }; // offset 0x10
+                warn!("FORK_DBG: pre-fork vaddr={:#x} paddr={:#x} [+0x10]={:#x}",
+                    va.value(), pa.value(), qword);
             } else {
-                info!("FORK_DBG: pre-fork vaddr={:#x} NOT MAPPED", 0xa0015e000usize);
+                warn!("FORK_DBG: pre-fork vaddr={:#x} NOT MAPPED (lookup_paddr failed)",
+                    0xa000c6000usize);
             }
         }
 
         let new_pt = PageTable::duplicate_from(&self.page_table)?;
 
+        // Check child's PML4 entries
+        for i in 0..128usize {
+            let e = unsafe { *(new_pt.pml4().as_ptr::<u64>().add(i)) };
+            if e != 0 {
+                warn!("FORK_DBG: child PML4E[{}]={:#x}", i, e);
+            }
+        }
+
         // Check the child's copy
         if let Some(va) = debug_vaddr {
             if let Some(pa) = new_pt.lookup_paddr(va) {
-                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
-                info!("FORK_DBG: post-fork child vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
-                    va.value(), pa.value(), byte0);
+                let qword = unsafe { *(pa.as_ptr::<u64>().add(2)) };
+                warn!("FORK_DBG: post-fork child vaddr={:#x} paddr={:#x} [+0x10]={:#x}",
+                    va.value(), pa.value(), qword);
             } else {
-                info!("FORK_DBG: post-fork child vaddr={:#x} NOT MAPPED", 0xa0015e000usize);
+                warn!("FORK_DBG: post-fork child vaddr={:#x} NOT MAPPED", 0xa000c6000usize);
             }
             // Re-check parent
             if let Some(pa) = self.page_table.lookup_paddr(va) {
-                let byte0 = unsafe { *(pa.as_ptr::<u8>().add(0x341)) };
-                info!("FORK_DBG: post-fork parent vaddr={:#x} paddr={:#x} byte@0x341={:#x}",
-                    va.value(), pa.value(), byte0);
+                let qword = unsafe { *(pa.as_ptr::<u64>().add(2)) };
+                warn!("FORK_DBG: post-fork parent vaddr={:#x} paddr={:#x} [+0x10]={:#x}",
+                    va.value(), pa.value(), qword);
             }
         }
 
