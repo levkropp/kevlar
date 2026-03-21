@@ -31,6 +31,7 @@ pub struct UId(u32);
 
 impl UId {
     pub const fn new(v: u32) -> Self { Self(v) }
+    pub const fn as_u32(self) -> u32 { self.0 }
 }
 
 /// The Group ID.
@@ -40,6 +41,7 @@ pub struct GId(u32);
 
 impl GId {
     pub const fn new(v: u32) -> Self { Self(v) }
+    pub const fn as_u32(self) -> u32 { self.0 }
 }
 
 /// The size in bytes of a block file file system I/O operations.
@@ -69,12 +71,38 @@ impl Time {
     pub const fn new(v: isize) -> Self { Self(v) }
 }
 
+// File type bits
 pub const S_IFMT: u32 = 0o170000;
-pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFSOCK: u32 = 0o140000;
+pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFREG: u32 = 0o100000;
 pub const S_IFBLK: u32 = 0o060000;
 pub const S_IFDIR: u32 = 0o040000;
-pub const S_IFREG: u32 = 0o100000;
-pub const S_IFLNK: u32 = 0o120000;
+pub const S_IFCHR: u32 = 0o020000;
+pub const S_IFIFO: u32 = 0o010000;
+
+// Special mode bits
+pub const S_ISUID: u32 = 0o4000;
+pub const S_ISGID: u32 = 0o2000;
+pub const S_ISVTX: u32 = 0o1000;
+
+// Owner permission bits
+pub const S_IRWXU: u32 = 0o700;
+pub const S_IRUSR: u32 = 0o400;
+pub const S_IWUSR: u32 = 0o200;
+pub const S_IXUSR: u32 = 0o100;
+
+// Group permission bits
+pub const S_IRWXG: u32 = 0o070;
+pub const S_IRGRP: u32 = 0o040;
+pub const S_IWGRP: u32 = 0o020;
+pub const S_IXGRP: u32 = 0o010;
+
+// Other permission bits
+pub const S_IRWXO: u32 = 0o007;
+pub const S_IROTH: u32 = 0o004;
+pub const S_IWOTH: u32 = 0o002;
+pub const S_IXOTH: u32 = 0o001;
 
 pub const O_ACCMODE: u32 = 0o3;
 

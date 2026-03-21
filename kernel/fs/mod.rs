@@ -9,6 +9,7 @@ pub mod inotify;
 pub mod mount;
 pub mod opened_file;
 pub mod path;
+pub mod permission;
 pub mod procfs;
 pub mod signalfd;
 pub mod stat;

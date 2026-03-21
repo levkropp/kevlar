@@ -3,7 +3,5 @@
     "process.wait4_wnohang": "Child PID=2 on Kevlar vs high PID on Linux; PID values are non-deterministic (test artifact).",
     "time.clock_realtime": "Wall-clock tv_sec differs by 1s due to sequential test execution timing (test artifact).",
     "events.poll_basic": "30s timeout — poll on pipe fds blocks indefinitely (POLL_WAIT_QUEUE wakeup issue with pipes).",
-    "events.inotify_create_xfail": "30s timeout — inotify_init1 returns a stub fd but IN_CREATE watch never fires.",
-    "sockets.accept4_flags": "x86_64 only: accept4 with SOCK_NONBLOCK panics — AF_UNIX socket accept not fully implemented.",
-    "sockets.unix_stream": "x86_64 only: AF_UNIX stream connect panics — Unix domain sockets not fully implemented."
+    "events.inotify_create_xfail": "30s timeout — inotify_init1 returns a stub fd but IN_CREATE watch never fires."
 }

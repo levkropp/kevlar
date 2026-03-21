@@ -1,8 +1,8 @@
 # M10 Alpine Linux — Current Status
 
-**Last updated:** 2026-03-21 (post-blog-098)
-**Contract tests:** 116/118 PASS, 2 XFAIL, 0 FAIL
-**Benchmarks:** 32 faster, 12 OK, 0 regression vs Linux KVM (44 benchmarks)
+**Last updated:** 2026-03-21 (post-unix-socket-stack-overflow-fix)
+**Contract tests:** 118/118 PASS, 0 XFAIL, 0 FAIL
+**Benchmarks:** 24 faster, 8 OK, 12 marginal, 0 regression vs Linux KVM (44 benchmarks)
 
 ---
 
@@ -41,36 +41,15 @@ extents (the new block addressing format) are read-supported. Write is missing.
 
 ---
 
-### 2. Contract tests: 2 remaining XFAILs
+### 2. Contract tests: ALL PASSING (118/118)
 
-**`events.inotify_create_xfail`**
-
-`inotify_init1()` returns a valid fd but `IN_CREATE` events are never
-delivered. The watch is registered (no error) but the inotify fd never
-becomes readable.
-
-Root cause: `inotify_add_watch()` registers the watch, but our VFS
-create/unlink paths don't call into the inotify subsystem to fire events.
-
-Fix: hook `inotify_notify_create()` / `inotify_notify_delete()` into the
-relevant VFS operations (`create`, `unlink`, `mkdir`, `rmdir`, `rename`).
-
-Estimated effort: 1-2 days.
-
-**`events.poll_basic`**
-
-`poll()` on pipe fds blocks indefinitely (30s timeout). The test creates a
-pipe, writes to the write end, then polls the read end with `POLLIN`.
-
-Root cause: `POLL_WAIT_QUEUE` wakeup is not working correctly for pipes in
-the poll path. The pipe write calls `waitq.wake_all()` but the poll wakeup
-path may not be connected to the same wait queue.
-
-Fix: audit the pipe `PollStatus` → wait queue connection in the `poll()`
-syscall handler. Ensure `PipeShared.waitq` is the same queue that `poll()`
-sleeps on.
-
-Estimated effort: 1-2 days.
+All contract tests pass. The previous 2 XFAILs (`sockets.accept4_flags`
+and `sockets.unix_stream`) were caused by a **kernel stack overflow** in
+the Unix socket implementation: `StreamInner` contained a 16KB inline
+`RingBuffer<u8, 16384>` that was constructed on the 8KB syscall_stack,
+corrupting adjacent physical memory (PID 1's kernel stack). Fixed by
+allocating `StreamInner` directly on the heap via `alloc_zeroed` (same
+pattern as the pipe buffer fix in e5366c0).
 
 ---
 
@@ -141,14 +120,13 @@ Estimated effort: 3-4 weeks (dominated by ext4 write debugging).
 
 ## Recommended M10 completion order
 
-1. **Fix `events.poll_basic`** (1-2 days) — easy win, contracts → 117/118
-2. **Fix `events.inotify_create_xfail`** (1-2 days) — contracts → 118/118 PASS, 0 XFAIL
-3. **ext4 write** (2-3 weeks) — largest remaining gap, unblocks Phase 8
-4. **mknod + device dispatch** (1 week) — unblocks mdev, sysfs
-5. **File permissions + chown/chmod** (1 week) — multi-user prerequisite
-6. **Ubuntu Server boot** (3-4 weeks) — M10 completion milestone
+1. ~~**Fix 2 XFAIL contract tests**~~ — **DONE** (118/118 PASS)
+2. **ext4 write** (2-3 weeks) — largest remaining gap, unblocks Phase 8
+3. **mknod + device dispatch** (1 week) — unblocks mdev, sysfs
+4. **File permissions + chown/chmod** (1 week) — multi-user prerequisite
+5. **Ubuntu Server boot** (3-4 weeks) — M10 completion milestone
 
-**Total remaining: ~6-8 weeks to M10 complete.**
+**Total remaining: ~5-7 weeks to M10 complete.**
 
 ---
 
@@ -160,12 +138,13 @@ Estimated effort: 3-4 weeks (dominated by ext4 write debugging).
 
 ## Open known-divergences.json entries to clean up
 
-The following entries in `testing/contracts/known-divergences.json` are
-likely now passing (fixed in blogs 090-095) and should be removed after
-verification:
+The following entries remain in `testing/contracts/known-divergences.json`
+as permanent test artifacts (both pass reliably):
 
-- `sockets.accept4_flags` — panic fixed in blog 094
-- `sockets.unix_stream` — panic fixed in blog 094
-- `process.wait4_wnohang` — PID non-determinism (test artifact, may be
-  accepted as permanent XFAIL or test fixed)
+- `process.wait4_wnohang` — PID non-determinism (test artifact)
 - `time.clock_realtime` — 1s timing artifact (test artifact)
+- `events.poll_basic` — passes, kept as documentation
+- `events.inotify_create_xfail` — passes, kept as documentation
+
+Cleaned up: `sockets.accept4_flags` and `sockets.unix_stream` removed
+(stack overflow fix landed).
