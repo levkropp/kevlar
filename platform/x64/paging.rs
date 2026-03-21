@@ -3,12 +3,40 @@ use super::PAGE_SIZE;
 use alloc::vec::Vec;
 use crate::address::{PAddr, UserVAddr};
 use crate::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
+use crate::spinlock::SpinLock;
 use bitflags::bitflags;
 use core::{
     debug_assert,
     ptr::{self, NonNull},
 };
 use kevlar_utils::alignment::is_aligned;
+
+// ── Page table page pool ──────────────────────────────────────────────
+// Pre-allocated pool of zeroed 4KB pages for page table allocation.
+// Eliminates buddy allocator overhead (~70ns/alloc) during fork.
+const PT_POOL_MAX: usize = 32;
+static PT_PAGE_POOL: SpinLock<Vec<PAddr>> = SpinLock::new(Vec::new());
+
+/// Allocate a page table page, preferring the pool over the global allocator.
+#[inline]
+fn alloc_pt_page() -> Result<PAddr, PageAllocError> {
+    if let Some(page) = PT_PAGE_POOL.lock_no_irq().pop() {
+        return Ok(page);
+    }
+    alloc_pages(1, AllocPageFlags::KERNEL)
+}
+
+/// Return a page table page to the pool (or free it if pool is full).
+#[inline]
+fn free_pt_page(paddr: PAddr) {
+    let mut pool = PT_PAGE_POOL.lock_no_irq();
+    if pool.len() < PT_POOL_MAX {
+        pool.push(paddr);
+    } else {
+        drop(pool);
+        crate::page_allocator::free_pages(paddr, 1);
+    }
+}
 
 const ENTRIES_PER_TABLE: isize = 512;
 type PageTableEntry = u64;
@@ -264,7 +292,7 @@ fn duplicate_table_ghost(
     cow_addrs: &mut Vec<usize>,
 ) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    let new_table_paddr = alloc_pt_page()?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
     // Bulk-copy the entire 4KB page table.
@@ -382,7 +410,7 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
                 continue;
             }
             teardown_table_ghost(paddr, level - 1);
-            crate::page_allocator::free_pages(paddr, 1);
+            free_pt_page(paddr);
         }
     }
 }
@@ -472,7 +500,7 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
                 continue; // Skip kernel page table entries.
             }
             teardown_table(paddr, level - 1);
-            crate::page_allocator::free_pages(paddr, 1);
+            free_pt_page(paddr);
         }
     }
 }
@@ -525,14 +553,14 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
                 continue; // Skip kernel page table entries.
             }
             teardown_table_dec_only(paddr, level - 1);
-            crate::page_allocator::free_pages(paddr, 1);
+            free_pt_page(paddr);
         }
     }
 }
 
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    let new_table_paddr = alloc_pt_page()?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
     // Bulk-copy the entire 4KB page table in one shot instead of zeroing
@@ -549,71 +577,71 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
         // The bulk copy already placed all entries. We only need to:
         // 1) Increment refcounts on user pages
         // 2) Clear WRITABLE on writable user pages (in BOTH parent and child)
-        for i in 0..ENTRIES_PER_TABLE {
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-
-            if paddr.is_null() {
+        //
+        // Batch null-check: scan 8 entries at a time (1 cache line).
+        // If all 8 are zero, skip the batch entirely. For sparse PT pages
+        // (~10 entries out of 512), this skips ~95% of iterations.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base) | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
                 continue;
             }
 
-            let flags = entry_flags(entry);
-            if flags & PageAttrs::USER.bits() == 0 {
-                continue; // Kernel page: already copied correctly.
-            }
-
-            // Share the physical page between parent and child.
-            crate::page_refcount::page_ref_inc(paddr);
-
-            if flags & PageAttrs::WRITABLE.bits() != 0 {
-                // CoW: clear WRITABLE in BOTH parent and child PTEs.
-                let cow_entry = paddr.value() as u64 | (flags & !PageAttrs::WRITABLE.bits());
-                unsafe {
-                    *orig_table.offset(i) = cow_entry;
-                    *new_table.offset(i) = cow_entry;
+            for i in base..base + 8 {
+                let entry = unsafe { *orig_table.offset(i) };
+                let paddr = entry_paddr(entry);
+                if paddr.is_null() {
+                    continue;
                 }
-            }
-            // Read-only entries: already correct from bulk copy.
-        }
-    } else {
-        // Intermediate page table (PML4, PDPT, PD): fix up entries that
-        // need recursion or CoW treatment (huge pages).
-        for i in 0..ENTRIES_PER_TABLE {
-            if level == 4 && i >= 0x80 {
-                // Kernel entries: already correct from bulk copy (shared).
-                continue;
-            }
-
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-
-            if paddr.is_null() {
-                continue;
-            }
-
-            if level == 2 && is_huge_page_pde(entry) {
-                // 2MB huge page PDE: treat as a leaf for CoW purposes.
                 let flags = entry_flags(entry);
                 if flags & PageAttrs::USER.bits() == 0 {
-                    continue; // Already correct from bulk copy.
+                    continue;
                 }
-
-                // Share the 2MB page: increment refcount on ALL 512 sub-PFNs.
-                crate::page_refcount::page_ref_inc_huge(paddr);
-
+                crate::page_refcount::page_ref_inc(paddr);
                 if flags & PageAttrs::WRITABLE.bits() != 0 {
-                    // CoW: clear WRITABLE in both parent and child PDEs.
                     let cow_entry = paddr.value() as u64 | (flags & !PageAttrs::WRITABLE.bits());
                     unsafe {
                         *orig_table.offset(i) = cow_entry;
                         *new_table.offset(i) = cow_entry;
                     }
                 }
-                // Read-only huge pages: already correct from bulk copy.
+            }
+        }
+    } else {
+        // Intermediate page table (PML4, PDPT, PD): fix up entries that
+        // need recursion or CoW treatment (huge pages).
+        for i in 0..ENTRIES_PER_TABLE {
+            if level == 4 && i >= 0x80 {
+                continue;
+            }
+
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+
+            if level == 2 && is_huge_page_pde(entry) {
+                let flags = entry_flags(entry);
+                if flags & PageAttrs::USER.bits() == 0 {
+                    continue;
+                }
+                crate::page_refcount::page_ref_inc_huge(paddr);
+                if flags & PageAttrs::WRITABLE.bits() != 0 {
+                    let cow_entry = paddr.value() as u64 | (flags & !PageAttrs::WRITABLE.bits());
+                    unsafe {
+                        *orig_table.offset(i) = cow_entry;
+                        *new_table.offset(i) = cow_entry;
+                    }
+                }
             } else {
-                // Intermediate entry: recurse to duplicate the child table.
                 let new_child_paddr = duplicate_table(paddr, level - 1)?;
-                // Replace the child table paddr, preserving flags from bulk copy.
                 unsafe {
                     *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
                 }
