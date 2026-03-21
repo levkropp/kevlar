@@ -2171,14 +2171,18 @@ use kevlar_platform::address::PAddr;
 struct PrefaultTemplate {
     entries: Vec<(usize, PAddr, i32)>,
     huge_entries: Vec<(usize, PAddr, i32)>,
+    /// PAGE_CACHE generation when this template was built.
+    /// If PAGE_CACHE_GEN has advanced past this, the template is stale
+    /// and we must fall through to prefault_cached_pages.
+    cache_gen: u64,
 }
 
 static PREFAULT_TEMPLATE_CACHE: SpinLock<Option<hashbrown::HashMap<usize, PrefaultTemplate>>> =
     SpinLock::new(None);
 
-fn prefault_template_lookup(file_ptr: usize) -> Option<bool> {
+fn prefault_template_lookup(file_ptr: usize) -> Option<u64> {
     let cache = PREFAULT_TEMPLATE_CACHE.lock_no_irq();
-    cache.as_ref().and_then(|map| map.get(&file_ptr).map(|_| true))
+    cache.as_ref().and_then(|map| map.get(&file_ptr).map(|t| t.cache_gen))
 }
 
 fn apply_prefault_template(vm: &mut Vm, file_ptr: usize) {
@@ -2261,9 +2265,10 @@ fn build_and_save_prefault_template(vm: &Vm, file_ptr: usize) {
         return;
     }
 
+    let cache_gen = crate::mm::page_fault::PAGE_CACHE_GEN.load(core::sync::atomic::Ordering::Relaxed);
     let mut cache = PREFAULT_TEMPLATE_CACHE.lock_no_irq();
     let map = cache.get_or_insert_with(hashbrown::HashMap::new);
-    map.insert(file_ptr, PrefaultTemplate { entries, huge_entries });
+    map.insert(file_ptr, PrefaultTemplate { entries, huge_entries, cache_gen });
 }
 
 /// Load PT_LOAD segments from an ELF into the VM, then fill inter-segment
@@ -3001,9 +3006,22 @@ fn do_elf_binfmt(
         let _g = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_PREFAULT);
         let file_ptr_for_template = Arc::as_ptr(executable) as *const () as usize;
         let use_template = PREFAULT_TEMPLATE_ENABLED.load(Ordering::Relaxed);
-        if use_template && prefault_template_lookup(file_ptr_for_template).is_some() {
-            let _g2 = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_TEMPLATE);
-            apply_prefault_template(&mut vm, file_ptr_for_template);
+        let current_cache_gen = crate::mm::page_fault::PAGE_CACHE_GEN.load(Ordering::Relaxed);
+        let template_gen = if use_template {
+            prefault_template_lookup(file_ptr_for_template)
+        } else {
+            None
+        };
+        if let Some(tpl_gen) = template_gen {
+            if tpl_gen == current_cache_gen {
+                // Template is fresh — use it directly (skip HashMap lookups).
+                let _g2 = crate::debug::tracer::span_guard(crate::debug::tracer::span::EXEC_TEMPLATE);
+                apply_prefault_template(&mut vm, file_ptr_for_template);
+            } else {
+                // Template is stale (cache has new pages) — full prefault + rebuild.
+                prefault_cached_pages(&mut vm);
+                build_and_save_prefault_template(&vm, file_ptr_for_template);
+            }
         } else {
             prefault_cached_pages(&mut vm);
             if use_template {
@@ -3087,7 +3105,8 @@ pub fn gc_exited_processes() {
     // CPU was 100% busy (e.g. busybox test suite running 100 fork+exec
     // cycles back-to-back), causing vDSO page and kernel stack leaks
     // that exhausted the page allocator after ~130 forks.
-    if !EXITED_PROCESSES.lock().is_empty() {
-        EXITED_PROCESSES.lock().clear();
+    let mut exited = EXITED_PROCESSES.lock();
+    if !exited.is_empty() {
+        exited.clear();
     }
 }

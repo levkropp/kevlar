@@ -37,6 +37,11 @@ pub static PAGE_FAULT_CYCLES: AtomicU64 = AtomicU64::new(0);
 // Only used for immutable files (initramfs). Entries never need invalidation.
 pub static PAGE_CACHE: SpinLock<Option<HashMap<(usize, usize), PAddr>>> = SpinLock::new(None);
 
+/// Monotonically increasing generation counter for the page cache.
+/// Incremented on every page_cache_insert. Used by the prefault template
+/// to detect when the cache has grown and the template is stale.
+pub static PAGE_CACHE_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// Cache of 2MB huge pages assembled from PAGE_CACHE entries during exec prefaulting.
 /// Key: (file_data_ptr, huge_page_index) where index = huge_vaddr / HUGE_PAGE_SIZE.
 /// Value: (PAddr, [u64; 8] bitmap) — base physical address + which sub-pages have content.
@@ -53,6 +58,7 @@ fn page_cache_insert(file_ptr: usize, page_index: usize, paddr: PAddr) {
     let mut cache = PAGE_CACHE.lock_no_irq();
     let map = cache.get_or_insert_with(HashMap::new);
     map.insert((file_ptr, page_index), paddr);
+    PAGE_CACHE_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn huge_page_cache_lookup(file_ptr: usize, huge_index: usize) -> Option<(PAddr, [u64; 8])> {
