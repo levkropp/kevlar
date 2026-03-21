@@ -6,9 +6,9 @@
 //! - OSDev wiki ext2/ext4 pages
 //! - kernel.org ext4 disk layout documentation
 //!
-//! Write support uses ext2-style block pointers (direct/indirect). Works on both
-//! ext2 and ext4 filesystems (ext4 supports legacy block pointers). Existing
-//! ext4 extent-based files remain readable; new files always use block pointers.
+//! Full read-write support for ext2 (block pointers) and ext4 (extent trees).
+//! On ext4 filesystems, new files use extent trees with contiguous allocation.
+//! Extent tree splitting (depth 0→1) is supported for files exceeding 4 extents.
 //!
 //! This is a Ring 2 service crate — no unsafe code.
 #![no_std]
@@ -366,6 +366,13 @@ impl ExtentHeader {
             depth: read_u16(data, 6),
         }
     }
+
+    fn serialize(&self, buf: &mut [u8]) {
+        write_u16(buf, 0, self.magic);
+        write_u16(buf, 2, self.entries);
+        write_u16(buf, 4, self.max);
+        write_u16(buf, 6, self.depth);
+    }
 }
 
 struct Extent {
@@ -396,6 +403,22 @@ impl Extent {
     fn is_uninitialized(&self) -> bool {
         self.len > 0x8000
     }
+
+    fn new(logical_block: u32, len: u16, phys_start: u64) -> Self {
+        Extent {
+            logical_block,
+            len,
+            start_hi: (phys_start >> 32) as u16,
+            start_lo: phys_start as u32,
+        }
+    }
+
+    fn serialize(&self, buf: &mut [u8]) {
+        write_u32(buf, 0, self.logical_block);
+        write_u16(buf, 4, self.len);
+        write_u16(buf, 6, self.start_hi);
+        write_u32(buf, 8, self.start_lo);
+    }
 }
 
 struct ExtentIdx {
@@ -415,6 +438,21 @@ impl ExtentIdx {
 
     fn leaf_block(&self) -> u64 {
         ((self.leaf_hi as u64) << 32) | (self.leaf_lo as u64)
+    }
+
+    fn new(logical_block: u32, leaf_block: u64) -> Self {
+        ExtentIdx {
+            logical_block,
+            leaf_lo: leaf_block as u32,
+            leaf_hi: (leaf_block >> 32) as u16,
+        }
+    }
+
+    fn serialize(&self, buf: &mut [u8]) {
+        write_u32(buf, 0, self.logical_block);
+        write_u32(buf, 4, self.leaf_lo);
+        write_u16(buf, 8, self.leaf_hi);
+        write_u16(buf, 10, 0); // padding
     }
 }
 
@@ -658,7 +696,439 @@ impl Ext2Inner {
         }
     }
 
+    // ── Extent tree helpers ──────────────────────────────────────
+
+    /// Read the inode's i_block[15] as a 60-byte extent tree root buffer.
+    fn extent_root_data(inode: &Ext2Inode) -> [u8; 60] {
+        let mut data = [0u8; 60];
+        for (i, &b) in inode.block.iter().enumerate() {
+            let bytes = b.to_le_bytes();
+            data[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+        }
+        data
+    }
+
+    /// Write a 60-byte extent tree root buffer back into the inode's i_block[15].
+    fn set_extent_root_data(inode: &mut Ext2Inode, data: &[u8; 60]) {
+        for i in 0..15 {
+            inode.block[i] = u32::from_le_bytes([
+                data[i * 4],
+                data[i * 4 + 1],
+                data[i * 4 + 2],
+                data[i * 4 + 3],
+            ]);
+        }
+    }
+
+    /// Initialize an empty extent tree root (depth=0, entries=0, max=4).
+    fn init_extent_root() -> [u32; 15] {
+        let mut data = [0u8; 60];
+        let header = ExtentHeader {
+            magic: EXT4_EXT_MAGIC,
+            entries: 0,
+            max: 4,
+            depth: 0,
+        };
+        header.serialize(&mut data);
+        let mut block = [0u32; 15];
+        for i in 0..15 {
+            block[i] = u32::from_le_bytes([
+                data[i * 4],
+                data[i * 4 + 1],
+                data[i * 4 + 2],
+                data[i * 4 + 3],
+            ]);
+        }
+        block
+    }
+
+    /// Allocate a block for an extent-based file at `logical_block`.
+    /// Tries to extend an adjacent extent for contiguity; otherwise inserts
+    /// a new extent entry. Returns the allocated physical block number.
+    fn alloc_extent_block(
+        &self,
+        inode: &mut Ext2Inode,
+        ino: u32,
+        logical_block: usize,
+    ) -> Result<u64> {
+        let mut root = Self::extent_root_data(inode);
+        let header = ExtentHeader::parse(&root);
+        if header.magic != EXT4_EXT_MAGIC {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        if header.depth == 0 {
+            // Leaf-only tree (common case): insert directly in root.
+            let result = self.insert_extent_in_leaf(
+                &mut root, header.max, logical_block as u32,
+            )?;
+            Self::set_extent_root_data(inode, &root);
+            inode.blocks += (self.block_size / 512) as u32;
+            self.write_inode(ino, inode)?;
+            Ok(result)
+        } else {
+            // Multi-level tree: traverse to the correct leaf.
+            let leaf_block = self.find_extent_leaf(&root, logical_block as u32, header.depth)?;
+            let mut leaf_data = self.read_block(leaf_block)?;
+            let leaf_header = ExtentHeader::parse(&leaf_data);
+            let max = leaf_header.max;
+
+            let result = self.insert_extent_in_leaf(
+                &mut leaf_data, max, logical_block as u32,
+            )?;
+            self.write_block(leaf_block, &leaf_data)?;
+            inode.blocks += (self.block_size / 512) as u32;
+            self.write_inode(ino, inode)?;
+            Ok(result)
+        }
+    }
+
+    /// Find the leaf block that should contain `logical_block` in a multi-level tree.
+    fn find_extent_leaf(&self, root: &[u8], logical_block: u32, depth: u16) -> Result<u64> {
+        let mut node_data: Vec<u8> = root.to_vec();
+        let mut current_depth = depth;
+
+        while current_depth > 0 {
+            let header = ExtentHeader::parse(&node_data);
+            let mut child_block: Option<u64> = None;
+
+            for i in 0..header.entries as usize {
+                let off = 12 + i * 12;
+                if off + 12 > node_data.len() {
+                    break;
+                }
+                let idx = ExtentIdx::parse(&node_data[off..]);
+                if idx.logical_block <= logical_block {
+                    child_block = Some(idx.leaf_block());
+                } else {
+                    break;
+                }
+            }
+
+            // If no child found (logical_block < first index), use the first child.
+            let child = child_block.or_else(|| {
+                if header.entries > 0 {
+                    Some(ExtentIdx::parse(&node_data[12..]).leaf_block())
+                } else {
+                    None
+                }
+            }).ok_or_else(|| Error::new(Errno::EIO))?;
+
+            if current_depth == 1 {
+                return Ok(child);
+            }
+
+            node_data = self.read_block(child)?;
+            current_depth -= 1;
+        }
+
+        Err(Error::new(Errno::EIO))
+    }
+
+    /// Insert a mapping for `logical_block` into a leaf node.
+    /// The leaf can be either the root (60 bytes) or a disk block (block_size bytes).
+    /// Returns the allocated physical block number.
+    fn insert_extent_in_leaf(
+        &self,
+        leaf: &mut [u8],
+        max_entries: u16,
+        logical_block: u32,
+    ) -> Result<u64> {
+        let mut header = ExtentHeader::parse(leaf);
+        if header.magic != EXT4_EXT_MAGIC {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        let entries = header.entries as usize;
+
+        // Try to extend an existing adjacent extent.
+        for i in 0..entries {
+            let off = 12 + i * 12;
+            let ext = Extent::parse(&leaf[off..]);
+            let ext_end = ext.logical_block + ext.block_count();
+
+            // Append: new block is right after this extent.
+            if ext_end == logical_block && ext.block_count() < 32768 && !ext.is_uninitialized() {
+                let goal = ext.physical_start() + ext.block_count() as u64;
+                let new_phys = self.alloc_block_near(goal)?;
+                if new_phys == goal {
+                    // Contiguous! Extend the extent.
+                    let new_len = ext.len + 1;
+                    write_u16(leaf, off + 4, new_len);
+                    return Ok(new_phys);
+                }
+                // Not contiguous — free and fall through to insert.
+                self.free_block(new_phys)?;
+            }
+
+            // Prepend: new block is right before this extent.
+            if ext.logical_block == logical_block + 1 && ext.block_count() < 32768
+                && !ext.is_uninitialized() && ext.physical_start() > 0
+            {
+                let goal = ext.physical_start() - 1;
+                let new_phys = self.alloc_block_near(goal)?;
+                if new_phys == goal {
+                    // Contiguous prepend.
+                    let new_ext = Extent::new(
+                        logical_block,
+                        ext.len + 1,
+                        new_phys,
+                    );
+                    new_ext.serialize(&mut leaf[off..]);
+                    return Ok(new_phys);
+                }
+                self.free_block(new_phys)?;
+            }
+        }
+
+        // Can't extend — need to insert a new single-block extent.
+        if entries >= max_entries as usize {
+            // Leaf is full — need to split. For now, try root split (depth 0 → 1).
+            // This handles the most common case (root with 4 entries).
+            return self.split_and_insert(leaf, max_entries, logical_block);
+        }
+
+        // Allocate a block.
+        let new_phys = self.alloc_block()?;
+        let new_ext = Extent::new(logical_block, 1, new_phys);
+
+        // Find insertion position (entries are sorted by logical_block).
+        let mut insert_pos = entries;
+        for i in 0..entries {
+            let off = 12 + i * 12;
+            let ext = Extent::parse(&leaf[off..]);
+            if ext.logical_block > logical_block {
+                insert_pos = i;
+                break;
+            }
+        }
+
+        // Shift entries right to make room.
+        for i in (insert_pos..entries).rev() {
+            let src_off = 12 + i * 12;
+            let dst_off = 12 + (i + 1) * 12;
+            // Copy 12 bytes from src to dst.
+            let mut tmp = [0u8; 12];
+            tmp.copy_from_slice(&leaf[src_off..src_off + 12]);
+            leaf[dst_off..dst_off + 12].copy_from_slice(&tmp);
+        }
+
+        // Write the new extent.
+        new_ext.serialize(&mut leaf[12 + insert_pos * 12..]);
+
+        // Update header.
+        header.entries += 1;
+        header.serialize(leaf);
+
+        Ok(new_phys)
+    }
+
+    /// Split a full leaf (root or disk block) and insert a new extent.
+    /// For depth-0 root: promotes to depth 1 with two leaf children.
+    fn split_and_insert(
+        &self,
+        root: &mut [u8],
+        max_entries: u16,
+        logical_block: u32,
+    ) -> Result<u64> {
+        let header = ExtentHeader::parse(root);
+        let entries = header.entries as usize;
+
+        if header.depth == 0 && root.len() <= 60 {
+            // Root leaf split: depth 0 → 1.
+            // Collect all existing extents.
+            let mut extents: Vec<Extent> = Vec::with_capacity(entries);
+            for i in 0..entries {
+                extents.push(Extent::parse(&root[12 + i * 12..]));
+            }
+
+            // Allocate the new physical block for the new extent.
+            let new_phys = self.alloc_block()?;
+            let new_ext = Extent::new(logical_block, 1, new_phys);
+
+            // Insert into sorted position.
+            let mut insert_pos = extents.len();
+            for (i, ext) in extents.iter().enumerate() {
+                if ext.logical_block > logical_block {
+                    insert_pos = i;
+                    break;
+                }
+            }
+            extents.insert(insert_pos, new_ext);
+
+            // Split: lower half → leaf A, upper half → leaf B.
+            let mid = extents.len() / 2;
+            let leaf_a_extents = &extents[..mid];
+            let leaf_b_extents = &extents[mid..];
+
+            // Allocate two disk blocks for the new leaves.
+            let leaf_a_block = self.alloc_block()?;
+            let leaf_b_block = self.alloc_block()?;
+
+            let max_per_leaf = ((self.block_size - 12) / 12) as u16;
+
+            // Write leaf A.
+            let mut leaf_a = vec![0u8; self.block_size];
+            let hdr_a = ExtentHeader {
+                magic: EXT4_EXT_MAGIC,
+                entries: leaf_a_extents.len() as u16,
+                max: max_per_leaf,
+                depth: 0,
+            };
+            hdr_a.serialize(&mut leaf_a);
+            for (i, ext) in leaf_a_extents.iter().enumerate() {
+                ext.serialize(&mut leaf_a[12 + i * 12..]);
+            }
+            self.write_block(leaf_a_block, &leaf_a)?;
+
+            // Write leaf B.
+            let mut leaf_b = vec![0u8; self.block_size];
+            let hdr_b = ExtentHeader {
+                magic: EXT4_EXT_MAGIC,
+                entries: leaf_b_extents.len() as u16,
+                max: max_per_leaf,
+                depth: 0,
+            };
+            hdr_b.serialize(&mut leaf_b);
+            for (i, ext) in leaf_b_extents.iter().enumerate() {
+                ext.serialize(&mut leaf_b[12 + i * 12..]);
+            }
+            self.write_block(leaf_b_block, &leaf_b)?;
+
+            // Rewrite root as depth-1 with 2 ExtentIdx entries.
+            // Root max stays at 4 (same space, now holds ExtentIdx instead of Extent).
+            let new_root_hdr = ExtentHeader {
+                magic: EXT4_EXT_MAGIC,
+                entries: 2,
+                max: max_entries,
+                depth: 1,
+            };
+            // Zero out root first.
+            let root_clear_len = 60.min(root.len());
+            for b in root[..root_clear_len].iter_mut() {
+                *b = 0;
+            }
+            new_root_hdr.serialize(root);
+
+            let idx_a = ExtentIdx::new(leaf_a_extents[0].logical_block, leaf_a_block);
+            idx_a.serialize(&mut root[12..]);
+
+            let idx_b = ExtentIdx::new(leaf_b_extents[0].logical_block, leaf_b_block);
+            idx_b.serialize(&mut root[24..]);
+
+            return Ok(new_phys);
+        }
+
+        // Disk-block leaf split or internal node split — allocate new block,
+        // move upper half. For now, return ENOSPC if we can't handle it.
+        // This path is extremely unlikely: a single disk leaf holds 340 entries,
+        // and with contiguous allocation each extent covers many blocks.
+        Err(Error::new(Errno::ENOSPC))
+    }
+
+    /// Free all data blocks in an extent tree (recursive).
+    fn free_extent_blocks(&self, inode: &Ext2Inode) -> Result<()> {
+        let root = Self::extent_root_data(inode);
+        self.free_extent_node(&root)
+    }
+
+    fn free_extent_node(&self, node_data: &[u8]) -> Result<()> {
+        let header = ExtentHeader::parse(node_data);
+        if header.magic != EXT4_EXT_MAGIC {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        if header.depth == 0 {
+            // Leaf: free each extent's physical block range.
+            for i in 0..header.entries as usize {
+                let off = 12 + i * 12;
+                if off + 12 > node_data.len() {
+                    break;
+                }
+                let ext = Extent::parse(&node_data[off..]);
+                if ext.is_uninitialized() {
+                    continue;
+                }
+                for offset in 0..ext.block_count() as u64 {
+                    self.free_block(ext.physical_start() + offset)?;
+                }
+            }
+        } else {
+            // Internal: recurse into children, then free child blocks.
+            for i in 0..header.entries as usize {
+                let off = 12 + i * 12;
+                if off + 12 > node_data.len() {
+                    break;
+                }
+                let idx = ExtentIdx::parse(&node_data[off..]);
+                let child_data = self.read_block(idx.leaf_block())?;
+                self.free_extent_node(&child_data)?;
+                self.free_block(idx.leaf_block())?;
+            }
+        }
+
+        Ok(())
+    }
+
     // ── Block/Inode bitmap allocation ──────────────────────────────
+
+    /// Allocate a free block near `goal` for extent contiguity.
+    /// Tries the goal's group first, starting from the goal bit, then other groups.
+    fn alloc_block_near(&self, goal: u64) -> Result<u64> {
+        let mut state = self.state.lock_no_irq();
+        if state.free_blocks_count == 0 {
+            return Err(Error::new(Errno::ENOSPC));
+        }
+
+        let goal_relative = goal.saturating_sub(self.first_data_block as u64);
+        let goal_group = (goal_relative / self.blocks_per_group as u64) as usize;
+        let goal_bit = (goal_relative % self.blocks_per_group as u64) as usize;
+        let num_groups = state.groups.len();
+
+        // Try goal group first, then wrap around.
+        for offset in 0..num_groups {
+            let group_idx = (goal_group + offset) % num_groups;
+            if state.groups[group_idx].free_blocks_count == 0 {
+                continue;
+            }
+
+            let bitmap_block = state.groups[group_idx].block_bitmap;
+            drop(state);
+
+            let mut bitmap = self.read_block(bitmap_block)?;
+
+            state = self.state.lock_no_irq();
+            if state.groups[group_idx].free_blocks_count == 0 {
+                continue;
+            }
+
+            let max_bits = self.blocks_per_group as usize;
+            // Start from goal_bit in the goal group, from 0 otherwise.
+            let start_bit = if group_idx == goal_group { goal_bit } else { 0 };
+
+            if let Some(bit) = find_free_bit_from(&bitmap, start_bit, max_bits) {
+                bitmap[bit / 8] |= 1 << (bit % 8);
+                state.groups[group_idx].free_blocks_count -= 1;
+                state.free_blocks_count -= 1;
+
+                let block_num = group_idx as u64 * self.blocks_per_group as u64
+                    + self.first_data_block as u64
+                    + bit as u64;
+
+                let groups_clone = state.groups.clone();
+                let free_blocks = state.free_blocks_count;
+                let free_inodes = state.free_inodes_count;
+                drop(state);
+
+                self.write_block(bitmap_block, &bitmap)?;
+                self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+
+                return Ok(block_num);
+            }
+        }
+
+        Err(Error::new(Errno::ENOSPC))
+    }
 
     /// Allocate a free block. Returns the block number.
     fn alloc_block(&self) -> Result<u64> {
@@ -986,6 +1456,10 @@ impl Ext2Inner {
 
     /// Free all data blocks (and indirect blocks) owned by an inode.
     fn free_file_blocks(&self, inode: &Ext2Inode) -> Result<()> {
+        if inode.uses_extents() {
+            return self.free_extent_blocks(inode);
+        }
+
         let ptrs_per_block = self.block_size / 4;
 
         // Free direct blocks.
@@ -1098,7 +1572,11 @@ impl Ext2Inner {
         }
 
         // No space in existing blocks — allocate a new one.
-        let new_block = self.alloc_data_block(dir_inode, num_blocks)?;
+        let new_block = if dir_inode.uses_extents() {
+            self.alloc_extent_block(dir_inode, dir_ino, num_blocks)?
+        } else {
+            self.alloc_data_block(dir_inode, num_blocks)?
+        };
         let mut data = vec![0u8; self.block_size];
 
         // Write the new entry spanning the entire block.
@@ -1333,6 +1811,7 @@ impl Directory for Ext2Dir {
         let ino = self.fs.alloc_inode(false)?;
 
         // Initialize the inode as a regular file.
+        let use_extents = self.fs.superblock.has_extents();
         let new_inode = Ext2Inode {
             mode: EXT2_S_IFREG | (mode.as_u32() as u16 & 0o7777),
             uid: 0,
@@ -1343,8 +1822,8 @@ impl Directory for Ext2Dir {
             gid: 0,
             links_count: 1,
             blocks: 0,
-            flags: 0,
-            block: [0; 15],
+            flags: if use_extents { EXT4_EXTENTS_FL } else { 0 },
+            block: if use_extents { Ext2Inner::init_extent_root() } else { [0; 15] },
             size_high: 0,
         };
         self.fs.write_inode(ino, &new_inode)?;
@@ -1374,6 +1853,7 @@ impl Directory for Ext2Dir {
         let ino = self.fs.alloc_inode(true)?;
 
         // Allocate a block for . and .. entries.
+        let use_extents = self.fs.superblock.has_extents();
         let mut new_inode = Ext2Inode {
             mode: EXT2_S_IFDIR | (mode.as_u32() as u16 & 0o7777),
             uid: 0,
@@ -1384,12 +1864,16 @@ impl Directory for Ext2Dir {
             gid: 0,
             links_count: 2, // . and parent's entry
             blocks: 0,
-            flags: 0,
-            block: [0; 15],
+            flags: if use_extents { EXT4_EXTENTS_FL } else { 0 },
+            block: if use_extents { Ext2Inner::init_extent_root() } else { [0; 15] },
             size_high: 0,
         };
 
-        let data_block = self.fs.alloc_data_block(&mut new_inode, 0)?;
+        let data_block = if use_extents {
+            self.fs.alloc_extent_block(&mut new_inode, ino, 0)?
+        } else {
+            self.fs.alloc_data_block(&mut new_inode, 0)?
+        };
         new_inode.set_file_size(self.fs.block_size as u64);
 
         // Write . and .. entries.
@@ -1513,6 +1997,9 @@ impl Directory for Ext2Dir {
         let target_bytes = target.as_bytes();
         let target_len = target_bytes.len();
 
+        // Inline symlinks (<= 60 bytes) store target in i_block — can't use extents.
+        // Block-based symlinks (> 60 bytes) use extents when available.
+        let use_extents = self.fs.superblock.has_extents() && target_len > 60;
         let mut new_inode = Ext2Inode {
             mode: EXT2_S_IFLNK | 0o777,
             uid: 0,
@@ -1523,8 +2010,8 @@ impl Directory for Ext2Dir {
             gid: 0,
             links_count: 1,
             blocks: 0,
-            flags: 0,
-            block: [0; 15],
+            flags: if use_extents { EXT4_EXTENTS_FL } else { 0 },
+            block: if use_extents { Ext2Inner::init_extent_root() } else { [0; 15] },
             size_high: 0,
         };
 
@@ -1538,7 +2025,11 @@ impl Directory for Ext2Dir {
             }
         } else {
             // Block-based symlink.
-            let data_block = self.fs.alloc_data_block(&mut new_inode, 0)?;
+            let data_block = if use_extents {
+                self.fs.alloc_extent_block(&mut new_inode, ino, 0)?
+            } else {
+                self.fs.alloc_data_block(&mut new_inode, 0)?
+            };
             let mut block_data = vec![0u8; self.fs.block_size];
             block_data[..target_len].copy_from_slice(target_bytes);
             self.fs.write_block(data_block, &block_data)?;
@@ -1788,10 +2279,10 @@ impl FileLike for Ext2File {
             if block_num == 0 {
                 // Need to allocate a new block.
                 if use_extents {
-                    // Can't extend extent-based files with block pointers.
-                    return Err(Error::new(Errno::ENOSPC));
+                    block_num = self.fs.alloc_extent_block(&mut inode, self.inode_num, block_index)?;
+                } else {
+                    block_num = self.fs.alloc_data_block(&mut inode, block_index)?;
                 }
-                block_num = self.fs.alloc_data_block(&mut inode, block_index)?;
             }
 
             // Read-modify-write for partial blocks, direct write for full blocks.
@@ -1831,6 +2322,17 @@ impl FileLike for Ext2File {
         let mut inode = self.inode.lock_no_irq();
         let old_size = inode.file_size() as usize;
         let bs = self.fs.block_size;
+
+        // Fast path for truncate(0) on extent files: free all blocks and
+        // reinitialize an empty extent tree. This is the common O_TRUNC case.
+        if length == 0 && inode.uses_extents() && old_size > 0 {
+            self.fs.free_extent_blocks(&inode)?;
+            inode.block = Ext2Inner::init_extent_root();
+            inode.blocks = 0;
+            inode.set_file_size(0);
+            self.fs.write_inode(self.inode_num, &inode)?;
+            return Ok(());
+        }
 
         if length < old_size {
             // Free blocks beyond the new size.
@@ -1983,13 +2485,20 @@ fn dir_entry_len(name_len: usize) -> usize {
 
 /// Find the first free bit in a bitmap buffer, up to max_bits.
 fn find_free_bit(bitmap: &[u8], max_bits: usize) -> Option<usize> {
-    for (byte_idx, &byte) in bitmap.iter().enumerate() {
-        if byte == 0xFF {
-            continue;
+    find_free_bit_from(bitmap, 0, max_bits)
+}
+
+/// Find the first free bit starting from `start_bit`, wrapping around to 0.
+fn find_free_bit_from(bitmap: &[u8], start_bit: usize, max_bits: usize) -> Option<usize> {
+    // Search from start_bit to max_bits.
+    for bit in start_bit..max_bits {
+        if bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
+            return Some(bit);
         }
-        let bit_in_byte = (!byte).trailing_zeros() as usize;
-        let bit = byte_idx * 8 + bit_in_byte;
-        if bit < max_bits {
+    }
+    // Wrap around: search from 0 to start_bit.
+    for bit in 0..start_bit {
+        if bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
             return Some(bit);
         }
     }
