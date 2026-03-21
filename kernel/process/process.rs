@@ -2275,6 +2275,58 @@ fn build_and_save_prefault_template(vm: &Vm, file_ptr: usize) {
 /// gaps with anonymous VMAs so that addresses within the full page-aligned
 /// span are always backed by a VMA.  This is required because libc (e.g.
 /// musl's `reclaim_gaps`) reuses these gap pages for its allocator.
+/// Eagerly map writable data segment pages so the dynamic linker can apply
+/// PIE relocations to ALL data pages before any fork. Without this, fork
+/// children demand-fault raw file data with unpatched relocation pointers.
+fn prefault_writable_segments(
+    vm: &mut Vm,
+    phdrs: &[ProgramHeader],
+    base_offset: usize,
+    file: &Arc<dyn FileLike>,
+) -> Result<()> {
+    use kevlar_platform::arch::PAGE_SIZE;
+    use kevlar_utils::alignment::align_up;
+
+    for phdr in phdrs {
+        if phdr.p_type != PT_LOAD || phdr.p_flags & 2 == 0 || phdr.p_filesz == 0 {
+            continue;
+        }
+        let seg_start = (phdr.p_vaddr as usize) + base_offset;
+        let seg_file_offset = phdr.p_offset as usize;
+        let seg_filesz = phdr.p_filesz as usize;
+        let first_page = kevlar_utils::alignment::align_down(seg_start, PAGE_SIZE);
+        let end_page = align_up(seg_start + seg_filesz, PAGE_SIZE);
+
+        for page_addr in (first_page..end_page).step_by(PAGE_SIZE) {
+            if let Ok(vaddr) = UserVAddr::new_nonnull(page_addr) {
+                if vm.page_table().lookup_paddr(vaddr).is_some() {
+                    continue;
+                }
+                let paddr = kevlar_platform::page_allocator::alloc_page(
+                    kevlar_platform::page_allocator::AllocPageFlags::USER)?;
+                let offset_in_page = if page_addr < seg_start { seg_start - page_addr } else { 0 };
+                let page_file_start = if page_addr < seg_start { 0 } else { page_addr - seg_start };
+                let file_off = seg_file_offset + page_file_start;
+                let remaining = seg_filesz.saturating_sub(page_file_start);
+                let copy_len = core::cmp::min(remaining, PAGE_SIZE - offset_in_page);
+                if copy_len > 0 {
+                    #[cfg(not(feature = "profile-fortress"))]
+                    {
+                        let buf = kevlar_platform::page_ops::page_as_slice_mut(paddr);
+                        let _ = file.read(file_off,
+                            (&mut buf[offset_in_page..offset_in_page + copy_len]).into(),
+                            &kevlar_vfs::inode::OpenOptions::readwrite());
+                    }
+                }
+                vm.page_table_mut().map_user_page_with_prot(vaddr, paddr,
+                    elf_flags_to_prot(phdr.p_flags).bits());
+                kevlar_platform::page_refcount::page_ref_init(paddr);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_elf_segments(
     vm: &mut Vm,
     phdrs: &[ProgramHeader],
@@ -2919,54 +2971,7 @@ fn do_elf_binfmt(
         // Eagerly pre-fault writable data segment pages so the dynamic linker
         // can apply PIE relocations to ALL data pages. Without this, fork
         // children demand-fault raw file data with unpatched pointers.
-        for phdr in elf.program_headers() {
-            if phdr.p_type == PT_LOAD && phdr.p_flags & 2 != 0 && phdr.p_filesz > 0 {
-                let seg_start = (phdr.p_vaddr as usize) + main_base_offset;
-                let seg_file_offset = phdr.p_offset as usize;
-                let seg_filesz = phdr.p_filesz as usize;
-                // Pre-fault each page that contains file data.
-                let first_page = kevlar_utils::alignment::align_down(seg_start, PAGE_SIZE);
-                let last_byte = seg_start + seg_filesz;
-                let end_page = align_up(last_byte, PAGE_SIZE);
-                for page_addr in (first_page..end_page).step_by(PAGE_SIZE) {
-                    if let Ok(vaddr) = UserVAddr::new_nonnull(page_addr) {
-                        // Check if already mapped by the VMA demand-fault path.
-                        if vm.page_table().lookup_paddr(vaddr).is_some() {
-                            continue;
-                        }
-                        let paddr = kevlar_platform::page_allocator::alloc_page(
-                            kevlar_platform::page_allocator::AllocPageFlags::USER)?;
-                        // Calculate which part of this page has file data.
-                        let page_file_start = if page_addr < seg_start {
-                            // First page: file data starts at seg_start offset within page
-                            0 // read from file offset 0 of the segment
-                        } else {
-                            page_addr - seg_start
-                        };
-                        let offset_in_page = if page_addr < seg_start {
-                            seg_start - page_addr
-                        } else {
-                            0
-                        };
-                        let file_off = seg_file_offset + page_file_start;
-                        let remaining = seg_filesz.saturating_sub(page_file_start);
-                        let copy_len = core::cmp::min(remaining, PAGE_SIZE - offset_in_page);
-                        if copy_len > 0 {
-                            #[cfg(not(feature = "profile-fortress"))]
-                            {
-                                let buf = kevlar_platform::page_ops::page_as_slice_mut(paddr);
-                                let _ = executable.read(file_off,
-                                    (&mut buf[offset_in_page..offset_in_page + copy_len]).into(),
-                                    &kevlar_vfs::inode::OpenOptions::readwrite());
-                            }
-                        }
-                        vm.page_table_mut().map_user_page_with_prot(vaddr, paddr,
-                            elf_flags_to_prot(phdr.p_flags).bits());
-                        kevlar_platform::page_refcount::page_ref_init(paddr);
-                    }
-                }
-            }
-        }
+        prefault_writable_segments(&mut vm, elf.program_headers(), main_base_offset, executable)?;
 
         // Allocate address range for interpreter and load its segments.
         let interp_base_uaddr = vm.alloc_vaddr_range(interp_span)?;
@@ -2975,6 +2980,7 @@ fn do_elf_binfmt(
                interp_base_uaddr.value(), interp_lo, interp_hi, interp_base_offset);
 
         load_elf_segments(&mut vm, &interp_phdrs, interp_base_offset, &interp_file)?;
+        prefault_writable_segments(&mut vm, &interp_phdrs, interp_base_offset, &interp_file)?;
 
         // Entry point is the interpreter's entry, relocated.
         ip = UserVAddr::new_nonnull(interp_entry_offset + interp_base_offset)?;
