@@ -245,26 +245,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
                 unaligned_vaddr.value(), pid, ip
             );
-            // Dump crash registers + stack for the Alpine pipe investigation.
-            if unaligned_vaddr.value() < 0x100 && pid > 2 {
-                let cpu = kevlar_platform::arch::cpu_id() as usize;
-                if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
-                    warn!("  RAX={:#x} RBX={:#x} RCX={:#x} RDX={:#x}",
-                        r.rax, r.rbx, r.rcx, r.rdx);
-                    warn!("  RSI={:#x} RDI={:#x} RBP={:#x} RSP={:#x}",
-                        r.rsi, r.rdi, r.rbp, r.rsp);
-                    warn!("  R8={:#x} R9={:#x} R10={:#x} R11={:#x} R12={:#x}",
-                        r.r8, r.r9, r.r10, r.r11, r.r12);
-                    warn!("  R13={:#x} R14={:#x} R15={:#x}",
-                        r.r13, r.r14, r.r15);
-                    // Dump stack: 8 qwords from RSP
-                    if let Some(vm_ref) = current.vm().as_ref() {
-                        let vm_lock = vm_ref.lock_no_irq();
-                        kevlar_platform::page_trace::dump_stack(r.rsp as usize, pid,
-                            vm_lock.page_table().pml4());
-                    }
-                }
-            }
             current_process().send_signal(SIGSEGV);
             return;
         }
@@ -289,14 +269,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     let vm_ref = current.vm();
     let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
 
-    // Page trace: check PTE state for key pages.
-    if (aligned_vaddr.value() >= 0xa0016b000 && aligned_vaddr.value() <= 0xa0016f000
-        || aligned_vaddr.value() == 0xa0000c6000)
-       && current.pid().as_i32() > 2 {
-        let pid = current.pid().as_i32();
-        kevlar_platform::page_trace::dump_pte(
-            vm.page_table().pml4(), aligned_vaddr.value(), pid);
-    }
 
     let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
