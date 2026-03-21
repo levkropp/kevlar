@@ -378,7 +378,25 @@ impl RootFs {
                         if follow_symlink {
                             if let INode::Symlink(symlink) = &inode {
                                 let linked_to = symlink.linked_to()?;
-                                return self.lookup_inode(Path::new(&*linked_to), follow_symlink);
+                                let target_path = linked_to.as_ref();
+                                if target_path.starts_with('/') {
+                                    // Absolute symlink: resolve from root.
+                                    return self.lookup_inode(Path::new(target_path), follow_symlink);
+                                } else {
+                                    // Relative symlink: resolve from parent directory.
+                                    // Reconstruct parent path from the original path.
+                                    if let Some((parent, _)) = path.parent_and_basename() {
+                                        let mut full = alloc::string::String::from(parent.as_str());
+                                        if !full.ends_with('/') {
+                                            full.push('/');
+                                        }
+                                        full.push_str(target_path);
+                                        return self.lookup_inode(
+                                            Path::new(&full), follow_symlink);
+                                    }
+                                    // No parent (bare filename) — resolve from cwd.
+                                    return self.lookup_inode(Path::new(target_path), follow_symlink);
+                                }
                             }
                         }
                         return Ok(inode);
