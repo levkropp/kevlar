@@ -761,22 +761,22 @@ impl FileLike for UnixSocket {
 
         let path = sockaddr_un_path(sa)?;
 
-        // For DGRAM sockets, connect just sets the default destination.
-        // If there's no listener, accept silently (systemd's sd_notify pattern).
+        // Look up the listener at the target path.
         let listener = match find_listener(path) {
             Some(l) => l,
             None => {
-                // No listener — for DGRAM sockets this is fine.
-                // Just store the peer address and return success.
+                // No listener at this path.
                 let state = self.state.lock();
-                match &*state {
-                    SocketState::Created | SocketState::Bound(_) => {
-                        // Mark as "connected" by storing peer path.
-                        // Actual sends will be no-ops until a receiver binds.
-                    }
-                    _ => {}
+                let is_dgram = matches!(&*state,
+                    SocketState::Created | SocketState::Bound(_));
+                // For DGRAM sockets, connect just sets the default destination.
+                // Accept silently (systemd's sd_notify pattern).
+                // For STREAM sockets, no listener = ECONNREFUSED (POSIX).
+                if self.sock_type == 2 {
+                    // SOCK_DGRAM: accept silently
+                    return Ok(());
                 }
-                return Ok(());
+                return Err(Errno::ECONNREFUSED.into());
             }
         };
         let client_end = listener.enqueue_connection(None)?;
