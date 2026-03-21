@@ -219,6 +219,33 @@ impl RootFs {
         Ok(())
     }
 
+    /// Set the root directory (used by pivot_root).
+    pub fn set_root(&mut self, new_root: Arc<dyn Directory>) {
+        self.root_path = Arc::new(PathComponent {
+            parent_dir: None,
+            name: String::new(),
+            inode: new_root.into(),
+        });
+    }
+
+    /// Set the current working directory to an absolute path string.
+    pub fn set_cwd(&mut self, path: &str) {
+        self.cwd_path = self.root_path.clone();
+        self.cwd_abs = String::from(path);
+    }
+
+    /// Get the filesystem mounted at a specific directory, if any.
+    pub fn get_mount_at_dir(&self, dir: &Arc<dyn Directory>) -> Option<Arc<dyn FileSystem>> {
+        if let Ok(key) = dir.mount_key() {
+            for (k, mp) in &self.mount_points {
+                if *k == key {
+                    return Some(mp.fs.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Resolves a path (from the current working directory) into an inode.
     /// This method resolves symbolic links: it will never return `INode::Symlink`.
     pub fn lookup(&self, path: &Path) -> Result<INode> {

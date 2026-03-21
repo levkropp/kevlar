@@ -54,16 +54,28 @@ int main(void) {
     mkdir("/mnt/root/tmp", 01777);
     mount("tmpfs", "/mnt/root/tmp", "tmpfs", 0, NULL);
 
-    r = chroot("/mnt/root");
-    if (r != 0) {
-        char buf[64];
-        int n = snprintf(buf, sizeof(buf), "kevlar: chroot failed (errno=%d)\n", errno);
-        write(1, buf, n);
-        char *sh_argv[] = { "/bin/sh", NULL };
-        execv("/bin/sh", sh_argv);
-        return 1;
+    // Try pivot_root first (proper root switch, no path prefix issues).
+    // Fallback to chroot if pivot_root isn't available.
+    mkdir("/mnt/root/oldroot", 0755);
+    r = syscall(155, "/mnt/root", "/mnt/root/oldroot"); // pivot_root
+    if (r == 0) {
+        msg("kevlar: pivot_root succeeded\n");
+        chdir("/");
+        // Unmount old root (best-effort)
+        umount2("/oldroot", MNT_DETACH);
+    } else {
+        msg("kevlar: pivot_root failed, falling back to chroot\n");
+        r = chroot("/mnt/root");
+        if (r != 0) {
+            char buf[64];
+            int n = snprintf(buf, sizeof(buf), "kevlar: chroot failed (errno=%d)\n", errno);
+            write(1, buf, n);
+            char *sh_argv[] = { "/bin/sh", NULL };
+            execv("/bin/sh", sh_argv);
+            return 1;
+        }
+        chdir("/");
     }
-    chdir("/");
 
     msg("kevlar: exec /sbin/init\n");
 
