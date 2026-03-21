@@ -623,6 +623,31 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     } else {
         // Intermediate page table (PML4, PDPT, PD): fix up entries that
         // need recursion or CoW treatment (huge pages).
+        //
+        // Debug: log PML4[1] state for Alpine pipe crash investigation.
+        if level == 4 {
+            let e1 = unsafe { *orig_table.offset(1) };
+            let cr3 = unsafe { x86::controlregs::cr3() };
+            warn!("DUP_PML4: orig_pml4={:#x} cr3={:#x} orig[1]={:#x}",
+                original_table_paddr.value(), cr3, e1);
+            // Also dump all non-zero user PDPT entries from PML4[0]
+            let e0 = unsafe { *orig_table.offset(0) };
+            if e0 & 1 != 0 {
+                let pdpt = entry_paddr(e0).as_mut_ptr::<u64>();
+                let mut pdpt_str = alloc::string::String::new();
+                for j in 0..512usize {
+                    let pe = unsafe { *pdpt.add(j) };
+                    if pe != 0 {
+                        use core::fmt::Write;
+                        let _ = write!(pdpt_str, " PDPT[{}]={:#x}", j, pe);
+                    }
+                }
+                if !pdpt_str.is_empty() {
+                    warn!("DUP_PML4:{}", pdpt_str);
+                }
+            }
+        }
+
         for i in 0..ENTRIES_PER_TABLE {
             if level == 4 && i >= 0x80 {
                 continue;
@@ -652,7 +677,17 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
                 unsafe {
                     *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
                 }
+                if level == 4 && i == 1 {
+                    warn!("DUP_PML4: wrote new[1]={:#x} (child_paddr={:#x} flags={:#x})",
+                        unsafe { *new_table.offset(1) }, new_child_paddr.value(), entry_flags(entry));
+                }
             }
+        }
+
+        if level == 4 {
+            let n0 = unsafe { *new_table.offset(0) };
+            let n1 = unsafe { *new_table.offset(1) };
+            warn!("DUP_PML4: after loop new[0]={:#x} new[1]={:#x}", n0, n1);
         }
     }
 
