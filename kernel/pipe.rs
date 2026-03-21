@@ -110,6 +110,11 @@ impl FileLike for PipeWriter {
         {
             let mut pipe = self.0.inner.lock_no_irq();
             if pipe.closed_by_reader {
+                // Send SIGPIPE to the writing process (matches Linux behavior).
+                // If SIGPIPE is not blocked/ignored, it terminates the process
+                // before the write() returns. If blocked/ignored, return EPIPE.
+                crate::process::current_process()
+                    .send_signal(crate::process::signal::SIGPIPE);
                 return Err(Errno::EPIPE.into());
             }
 
@@ -134,6 +139,8 @@ impl FileLike for PipeWriter {
         let ret_value = self.0.waitq.sleep_signalable_until(|| {
             let mut pipe = self.0.inner.lock_no_irq();
             if pipe.closed_by_reader {
+                crate::process::current_process()
+                    .send_signal(crate::process::signal::SIGPIPE);
                 return Err(Errno::EPIPE.into());
             }
 
