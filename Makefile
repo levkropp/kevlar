@@ -285,6 +285,7 @@ build/alpine.img:
 	@echo "ttyS0" >> build/alpine-root/etc/securetty
 	@echo "kevlar" > build/alpine-root/etc/hostname
 	@echo "nameserver 10.0.2.3" > build/alpine-root/etc/resolv.conf
+	@chmod 777 build/alpine-root/var/cache/apk
 	@printf '::sysinit:/sbin/ip link set lo up\n\
 ::sysinit:/sbin/ip link set eth0 up\n\
 ::sysinit:/sbin/ip addr add 10.0.2.15/24 dev eth0\n\
