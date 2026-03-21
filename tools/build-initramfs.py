@@ -116,6 +116,8 @@ def compile_all_local():
         ("testing/test_ash_pipe2.c",      "test-ash-pipe2",   []),
         ("testing/test_login_flow.c",     "test-login-flow",  []),
         ("testing/test_libz.c",           "test-libz",        []),
+        ("testing/test_apk_db.c",          "test-apk-db",      []),
+        ("testing/test_ext4_dir.c",         "test-ext4-dir",    []),
         ("testing/busybox_suite.c",      "busybox-suite",    []),
         ("testing/dd_diag.c",            "dd-diag",          []),
         ("testing/test_net.c",           "test-net",         []),
