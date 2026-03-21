@@ -16,13 +16,12 @@ int main(void) {
         printf("CONTRACT_FAIL mmap: errno=%d\n", errno);
         return 1;
     }
-    printf("mmap_large: ok addr=%p\n", addr);
+    printf("mmap_large: ok\n");
 
     /* Check huge-page alignment (2MB) */
     uintptr_t a = (uintptr_t)addr;
     if (a % SIZE_2MB != 0) {
-        printf("alignment: addr=0x%lx not 2MB-aligned (offset=0x%lx)\n",
-               (unsigned long)a, (unsigned long)(a % SIZE_2MB));
+        printf("alignment: not 2MB-aligned\n");
         /* Not fatal — alignment is best-effort on some systems */
     } else {
         printf("alignment: ok 2MB-aligned\n");

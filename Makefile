@@ -287,16 +287,18 @@ build/alpine.img:
 	@echo "nameserver 10.0.2.3" > build/alpine-root/etc/resolv.conf
 	@sed -i 's|https://|http://|g' build/alpine-root/etc/apk/repositories
 	@chmod 777 build/alpine-root/var/cache/apk
-	@printf '::sysinit:/sbin/ip link set lo up\n\
-::sysinit:/sbin/ip link set eth0 up\n\
-::sysinit:/sbin/ip addr add 10.0.2.15/24 dev eth0\n\
-::sysinit:/sbin/ip route add default via 10.0.2.2\n\
-::sysinit:/sbin/openrc sysinit\n\
-::sysinit:/sbin/openrc boot\n\
-::wait:/sbin/openrc default\n\
-ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100\n\
-::ctrlaltdel:/sbin/reboot\n\
-::shutdown:/sbin/openrc shutdown\n' > build/alpine-root/etc/inittab
+	@printf '%s\n' \
+		'::sysinit:/sbin/ip link set lo up' \
+		'::sysinit:/sbin/ip link set eth0 up' \
+		'::sysinit:/sbin/ip addr add 10.0.2.15/24 dev eth0' \
+		'::sysinit:/sbin/ip route add default via 10.0.2.2' \
+		'::sysinit:/sbin/openrc sysinit' \
+		'::sysinit:/sbin/openrc boot' \
+		'::wait:/sbin/openrc default' \
+		'ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100' \
+		'::ctrlaltdel:/sbin/reboot' \
+		'::shutdown:/sbin/openrc shutdown' \
+		> build/alpine-root/etc/inittab
 	dd if=/dev/zero of=build/alpine.img bs=1M count=256 2>/dev/null
 	fakeroot mke2fs -t ext4 -q -d build/alpine-root build/alpine.img
 	@rm -rf build/alpine-root

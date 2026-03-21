@@ -12,6 +12,7 @@ use kevlar_platform::address::UserVAddr;
 //   [16]: sa_restorer (8 bytes)
 //   [24]: sa_mask     (8 bytes)
 const SA_RESTORER: usize = 0x04000000;
+const SA_ONSTACK: usize = 0x08000000;
 
 // Provenance: Own (POSIX sigaction(2) man page).
 impl<'a> SyscallHandler<'a> {
@@ -45,6 +46,7 @@ impl<'a> SyscallHandler<'a> {
                 _ => SigAction::Handler {
                     handler: UserVAddr::new(handler).ok_or_else(|| Error::new(Errno::EFAULT))?,
                     restorer,
+                    on_altstack: sa_flags & SA_ONSTACK != 0,
                 },
             };
             Some((new_action, handler))

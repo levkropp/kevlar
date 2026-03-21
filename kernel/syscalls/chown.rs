@@ -9,12 +9,21 @@ use crate::{
 };
 use kevlar_vfs::stat::{GId, UId};
 
+/// Resolve uid/gid: -1 (0xFFFFFFFF) means "keep current".
+pub fn resolve_owner(inode: &kevlar_vfs::inode::INode, uid: u32, gid: u32) -> Result<(UId, GId)> {
+    let st = inode.stat()?;
+    let new_uid = if uid == 0xFFFFFFFF { st.uid } else { UId::new(uid) };
+    let new_gid = if gid == 0xFFFFFFFF { st.gid } else { GId::new(gid) };
+    Ok((new_uid, new_gid))
+}
+
 impl<'a> SyscallHandler<'a> {
     pub fn sys_chown(&mut self, path: &Path, uid: u32, gid: u32) -> Result<isize> {
         let root_fs = current_process().root_fs();
         let root_fs = root_fs.lock();
         let inode = root_fs.lookup_inode(path, true)?;
-        inode.chown(UId::new(uid), GId::new(gid))?;
+        let (new_uid, new_gid) = resolve_owner(&inode, uid, gid)?;
+        inode.chown(new_uid, new_gid)?;
         Ok(0)
     }
 
@@ -22,7 +31,9 @@ impl<'a> SyscallHandler<'a> {
         let current = current_process();
         let opened_files = current.opened_files().lock();
         let file = opened_files.get(Fd::new(fd))?;
-        file.inode().chown(UId::new(uid), GId::new(gid))?;
+        let inode = file.inode();
+        let (new_uid, new_gid) = resolve_owner(&inode, uid, gid)?;
+        inode.chown(new_uid, new_gid)?;
         Ok(0)
     }
 }

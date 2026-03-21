@@ -10,6 +10,7 @@ use kevlar_vfs::stat::{GId, UId};
 impl<'a> SyscallHandler<'a> {
     pub fn sys_mkdirat(&mut self, dirfd: CwdOrFd, path: &Path, mode: FileMode) -> Result<isize> {
         let current = current_process();
+        let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
         let root_fs_arc = current.root_fs();
         let root_fs = root_fs_arc.lock();
         let opened_files = current.opened_files().lock();
@@ -17,7 +18,7 @@ impl<'a> SyscallHandler<'a> {
         let (parent_inode, name) = root_fs.lookup_parent_inode_at(
             &opened_files, &dirfd, path, true,
         )?;
-        parent_inode.as_dir()?.create_dir(name, mode, UId::new(current.euid()), GId::new(current.egid()))?;
+        parent_inode.as_dir()?.create_dir(name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
         Ok(0)
     }
 }

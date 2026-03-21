@@ -66,8 +66,10 @@ impl<'a> SyscallHandler<'a> {
             // Check the statuses of all specified files one by one.
             let mut ready_fds = 0;
             if let Some(fds) = readfds {
-                ready_fds +=
-                    check_fd_statuses(max_fd, fds, |status| status.contains(PollStatus::POLLIN))?;
+                ready_fds += check_fd_statuses(max_fd, fds, |status| {
+                    // POSIX: POLLHUP means EOF is readable (e.g. pipe write-end closed).
+                    status.intersects(PollStatus::POLLIN | PollStatus::POLLHUP)
+                })?;
             }
             if let Some(fds) = writefds {
                 ready_fds +=

@@ -49,9 +49,10 @@ impl<'a> SyscallHandler<'a> {
                     root_fs.lookup_parent_inode_at(&opened_files, &dirfd, path, true)
                 };
 
+                let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
                 match create_result {
                     Ok((parent_inode, name)) => {
-                        match parent_inode.as_dir()?.create_file(name, mode, UId::new(current.euid()), GId::new(current.egid())) {
+                        match parent_inode.as_dir()?.create_file(name, effective_mode, UId::new(current.euid()), GId::new(current.egid())) {
                             Ok(inode) => {
                                 // Created — build flat PathComponent, skip re-lookup.
                                 root_fs.make_flat_path_component(path, inode)

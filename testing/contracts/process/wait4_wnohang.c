@@ -40,7 +40,7 @@ int main(void) {
                WIFEXITED(status), WEXITSTATUS(status));
         return 1;
     }
-    printf("wait_blocking: ok pid=%d exit=%d\n", ret, WEXITSTATUS(status));
+    printf("wait_blocking: ok exit=%d\n", WEXITSTATUS(status));
 
     printf("CONTRACT_PASS\n");
     return 0;

@@ -77,7 +77,7 @@ pub enum SigAction {
     Terminate,
     Stop,
     Continue,
-    Handler { handler: UserVAddr, restorer: Option<UserVAddr> },
+    Handler { handler: UserVAddr, restorer: Option<UserVAddr>, on_altstack: bool },
 }
 
 // Default signal dispositions per POSIX / signal(7).

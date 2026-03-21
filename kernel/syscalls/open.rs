@@ -23,7 +23,8 @@ impl<'a> SyscallHandler<'a> {
 
             if flags.contains(OpenFlags::O_CREAT) && !flags.contains(OpenFlags::O_DIRECTORY) {
                 let (parent_inode, name) = root_fs.lookup_parent_inode(path, true)?;
-                match parent_inode.as_dir()?.create_file(name, mode, UId::new(current.euid()), GId::new(current.egid())) {
+                let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
+                match parent_inode.as_dir()?.create_file(name, effective_mode, UId::new(current.euid()), GId::new(current.egid())) {
                     Ok(inode) => {
                         if let Some((parent, fname)) = path.parent_and_basename() {
                             inotify::notify(parent.as_str(), fname, inotify::IN_CREATE);

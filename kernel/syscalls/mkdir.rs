@@ -11,11 +11,12 @@ impl<'a> SyscallHandler<'a> {
             .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
 
         let current = current_process();
+        let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
         let root_fs = current.root_fs();
         root_fs
             .lock()
             .lookup_dir(parent_dir)?
-            .create_dir(name, mode, UId::new(current.euid()), GId::new(current.egid()))?;
+            .create_dir(name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
 
         inotify::notify(parent_dir.as_str(), name, inotify::IN_CREATE);
         Ok(0)

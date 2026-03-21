@@ -228,8 +228,11 @@ impl FileLike for PipeReader {
         let mut status = PollStatus::empty();
         let inner = self.0.inner.lock_no_irq();
 
-        if inner.buf.is_readable() || inner.closed_by_writer {
+        if inner.buf.is_readable() {
             status |= PollStatus::POLLIN;
+        } else if inner.closed_by_writer {
+            // Write end closed + buffer empty = EOF (hangup).
+            status |= PollStatus::POLLHUP;
         }
 
         Ok(status)

@@ -18,13 +18,13 @@ int main(void) {
     errno = 0;
     void *addr2 = mremap(addr, pgsz, pgsz * 2, MREMAP_MAYMOVE);
     if (addr2 != MAP_FAILED) {
-        printf("mremap_succeeded: addr2=%p (unexpected success)\n", addr2);
+        printf("mremap_succeeded: ok\n");
         munmap(addr2, pgsz * 2);
         printf("CONTRACT_PASS\n");
         return 0;
     }
     if (errno == ENOSYS) {
-        printf("mremap_enosys: ok errno=%d\n", errno);
+        printf("mremap_enosys: ok\n");
         munmap(addr, pgsz);
         printf("CONTRACT_PASS\n");
         return 0;

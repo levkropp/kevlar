@@ -16,7 +16,7 @@ int main(void) {
         return 1;
     }
     *(unsigned char *)addr = 0xAA;
-    printf("mmap1: ok addr=%p\n", addr);
+    printf("mmap1: ok\n");
 
     /* MAP_FIXED at same address — must return exact address */
     void *addr2 = mmap(addr, pgsz, PROT_READ | PROT_WRITE,
@@ -26,7 +26,7 @@ int main(void) {
                addr2, addr, errno);
         return 1;
     }
-    printf("mmap_fixed: ok addr=%p\n", addr2);
+    printf("mmap_fixed: ok\n");
 
     /* Sentinel must be gone (new zeroed page) */
     if (*(unsigned char *)addr2 != 0) {

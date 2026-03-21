@@ -306,6 +306,10 @@ pub struct Process {
     sigsuspend_saved_mask: AtomicU64,
     /// True when `sigsuspend_saved_mask` contains a valid mask to restore.
     sigsuspend_has_mask: AtomicBool,
+    /// Alternate signal stack (sigaltstack). sp=0 means not set.
+    pub alt_stack_sp: AtomicUsize,
+    pub alt_stack_size: AtomicUsize,
+    pub alt_stack_flags: AtomicU32,
     /// O3: Cached epoll fd number for hot-path bypass (-1 = invalid).
     #[cfg(not(feature = "profile-fortress"))]
     epoll_hot_fd: AtomicI32,
@@ -375,6 +379,9 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
             #[cfg(not(feature = "profile-fortress"))]
             epoll_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
@@ -491,6 +498,9 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
             #[cfg(not(feature = "profile-fortress"))]
             epoll_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
@@ -1393,7 +1403,7 @@ impl Process {
                         });
                         trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
-                    SigAction::Handler { handler, restorer } => {
+                    SigAction::Handler { handler, restorer, on_altstack } => {
                         #[cfg(target_arch = "x86_64")]
                         let rsp_before = frame.rsp as usize;
                         #[cfg(target_arch = "aarch64")]
@@ -1411,6 +1421,31 @@ impl Process {
                             signal, pid, handler.value()
                         );
                         current.signaled_frame.store(Some(*frame));
+
+                        // Switch to alternate signal stack if SA_ONSTACK and alt stack registered.
+                        if on_altstack {
+                            let alt_sp = current.alt_stack_sp.load(core::sync::atomic::Ordering::Relaxed);
+                            let alt_size = current.alt_stack_size.load(core::sync::atomic::Ordering::Relaxed);
+                            if alt_sp != 0 && alt_size > 0 {
+                                // Use top of alt stack (stack grows down).
+                                let alt_top = alt_sp + alt_size;
+                                // Only switch if not already on the alt stack.
+                                #[cfg(target_arch = "x86_64")]
+                                {
+                                    let sp = frame.rsp as usize;
+                                    if sp < alt_sp || sp >= alt_top {
+                                        frame.rsp = alt_top as u64;
+                                    }
+                                }
+                                #[cfg(target_arch = "aarch64")]
+                                {
+                                    let sp = frame.sp as usize;
+                                    if sp < alt_sp || sp >= alt_top {
+                                        frame.sp = alt_top as u64;
+                                    }
+                                }
+                            }
+                        }
 
                         // Set usercopy context for fault attribution.
                         debug::usercopy::set_context("signal_stack_setup");
@@ -1697,6 +1732,9 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
             #[cfg(not(feature = "profile-fortress"))]
             epoll_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
@@ -1811,6 +1849,9 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
             #[cfg(not(feature = "profile-fortress"))]
             epoll_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
@@ -1915,6 +1956,9 @@ impl Process {
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
             #[cfg(not(feature = "profile-fortress"))]
             epoll_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
