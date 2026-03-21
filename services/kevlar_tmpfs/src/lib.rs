@@ -25,7 +25,7 @@ use kevlar_vfs::{
         Symlink as SymlinkTrait,
     },
     result::{Errno, Error, Result},
-    stat::{FileMode, Stat, S_IFDIR, S_IFLNK, S_IFREG},
+    stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFLNK, S_IFREG},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 
@@ -105,6 +105,8 @@ pub struct Dir {
     dev_id: usize,
     stat: Stat,
     mode: SpinLock<FileMode>,
+    uid: SpinLock<UId>,
+    gid: SpinLock<GId>,
     inner: SpinLock<DirInner>,
 }
 
@@ -120,6 +122,8 @@ impl Dir {
                 ..Stat::zeroed()
             },
             mode: SpinLock::new(mode),
+            uid: SpinLock::new(UId::new(0)),
+            gid: SpinLock::new(GId::new(0)),
             inner: SpinLock::new(DirInner {
                 files: HashMap::new(),
                 order: Vec::new(),
@@ -205,6 +209,8 @@ impl Directory for Dir {
     fn stat(&self) -> Result<Stat> {
         let mut st = self.stat;
         st.mode = *self.mode.lock_no_irq();
+        st.uid = *self.uid.lock_no_irq();
+        st.gid = *self.gid.lock_no_irq();
         Ok(st)
     }
 
@@ -213,6 +219,12 @@ impl Directory for Dir {
         let mut m = self.mode.lock_no_irq();
         let type_bits = m.as_u32() & 0o170000;
         *m = FileMode::new(type_bits | (mode.as_u32() & 0o7777));
+        Ok(())
+    }
+
+    fn chown(&self, uid: UId, gid: GId) -> Result<()> {
+        *self.uid.lock_no_irq() = uid;
+        *self.gid.lock_no_irq() = gid;
         Ok(())
     }
 
@@ -366,6 +378,8 @@ struct File {
     data: SpinLock<Vec<u8>>,
     stat: Stat,
     mode: SpinLock<FileMode>,
+    uid: SpinLock<UId>,
+    gid: SpinLock<GId>,
     nlink: AtomicUsize,
 }
 
@@ -380,6 +394,8 @@ impl File {
                 ..Stat::zeroed()
             },
             mode: SpinLock::new(mode),
+            uid: SpinLock::new(UId::new(0)),
+            gid: SpinLock::new(GId::new(0)),
             nlink: AtomicUsize::new(1),
         }
     }
@@ -390,6 +406,8 @@ impl FileLike for File {
         use kevlar_vfs::stat::{FileSize, NLink};
         let mut stat = self.stat;
         stat.mode = *self.mode.lock_no_irq();
+        stat.uid = *self.uid.lock_no_irq();
+        stat.gid = *self.gid.lock_no_irq();
         stat.size = FileSize(self.data.lock_no_irq().len() as isize);
         stat.nlink = NLink::new(self.nlink.load(Ordering::Relaxed));
         Ok(stat)
@@ -399,6 +417,12 @@ impl FileLike for File {
         let mut m = self.mode.lock_no_irq();
         let type_bits = m.as_u32() & 0o170000;
         *m = FileMode::new(type_bits | (mode.as_u32() & 0o7777));
+        Ok(())
+    }
+
+    fn chown(&self, uid: UId, gid: GId) -> Result<()> {
+        *self.uid.lock_no_irq() = uid;
+        *self.gid.lock_no_irq() = gid;
         Ok(())
     }
 

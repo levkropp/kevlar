@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 // Own implementation based on Linux man pages.
 use crate::fs::path::Path;
+use crate::fs::permission::check_access;
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
 
 impl<'a> SyscallHandler<'a> {
-    pub fn sys_access(&mut self, path: &Path) -> Result<isize> {
-        // Resolve the path — if it doesn't exist, lookup returns ENOENT.
-        // We don't check real permissions since we run as root (uid 0).
-        let root_fs = current_process().root_fs();
-        let _inode = root_fs.lock_no_irq().lookup(path)?;
+    pub fn sys_access(&mut self, path: &Path, mode: u32) -> Result<isize> {
+        let current = current_process();
+        let root_fs = current.root_fs();
+        let inode = root_fs.lock_no_irq().lookup(path)?;
+        let stat = inode.stat()?;
+        // access(2) uses real UID/GID, not effective.
+        check_access(&stat, current.uid(), current.gid(), mode)?;
         Ok(0)
     }
 }

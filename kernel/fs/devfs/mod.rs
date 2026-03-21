@@ -49,6 +49,7 @@ impl DevFs {
         root_dir.add_file("ptmx", PTMX.clone() as Arc<dyn FileLike>);
         root_dir.add_file("kmsg", Arc::new(KmsgFile) as Arc<dyn FileLike>);
         root_dir.add_file("urandom", Arc::new(UrandomFile) as Arc<dyn FileLike>);
+        root_dir.add_file("random", Arc::new(UrandomFile) as Arc<dyn FileLike>);
         root_dir.add_file("full", Arc::new(FullFile) as Arc<dyn FileLike>);
         // /dev/shm directory for POSIX shared memory.
         root_dir.add_dir("shm");

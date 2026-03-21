@@ -26,7 +26,7 @@ use kevlar_vfs::{
     },
     path::{Path, PathBuf},
     result::{Errno, Error, Result},
-    stat::{FileMode, FileSize, Stat, S_IFDIR},
+    stat::{FileMode, FileSize, GId, Stat, UId, S_IFDIR},
     user_buffer::{UserBufWriter, UserBuffer, UserBufferMut},
 };
 
@@ -227,8 +227,8 @@ impl InitramFs {
 
             let ino = parse_hex_field(image.consume_bytes(8).unwrap());
             let mode = FileMode::new(parse_hex_field(image.consume_bytes(8).unwrap()) as u32);
-            let _uid = parse_hex_field(image.consume_bytes(8).unwrap());
-            let _gid = parse_hex_field(image.consume_bytes(8).unwrap());
+            let uid = parse_hex_field(image.consume_bytes(8).unwrap());
+            let gid = parse_hex_field(image.consume_bytes(8).unwrap());
             let _nlink = parse_hex_field(image.consume_bytes(8).unwrap());
             let _mtime = parse_hex_field(image.consume_bytes(8).unwrap());
             let filesize = parse_hex_field(image.consume_bytes(8).unwrap());
@@ -299,6 +299,8 @@ impl InitramFs {
                         stat: Stat {
                             inode_no: INodeNo::new(ino),
                             mode,
+                            uid: UId::new(uid as u32),
+                            gid: GId::new(gid as u32),
                             ..Stat::zeroed()
                         },
                         dst: PathBuf::from(core::str::from_utf8(data).unwrap()),
@@ -315,6 +317,8 @@ impl InitramFs {
                         stat: Stat {
                             inode_no: INodeNo::new(ino),
                             mode,
+                            uid: UId::new(uid as u32),
+                            gid: GId::new(gid as u32),
                             ..Stat::zeroed()
                         },
                     })),
@@ -329,6 +333,8 @@ impl InitramFs {
                         stat: Stat {
                             inode_no: INodeNo::new(ino),
                             mode,
+                            uid: UId::new(uid as u32),
+                            gid: GId::new(gid as u32),
                             size: FileSize(filesize as isize),
                             ..Stat::zeroed()
                         },

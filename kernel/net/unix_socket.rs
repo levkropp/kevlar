@@ -9,6 +9,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
@@ -79,9 +80,11 @@ struct StreamInner {
 /// writes, the data shows up in our `rx`, and vice versa.
 pub struct UnixStream {
     /// Our write buffer — peer reads from this.
-    tx: Arc<SpinLock<StreamInner>>,
+    /// Box-allocated because StreamInner is 16KB+ (the ring buffer).
+    /// Can't live on the 8KB syscall_stack.
+    tx: Arc<SpinLock<Box<StreamInner>>>,
     /// Peer's write buffer — we read from this.
-    rx: Arc<SpinLock<StreamInner>>,
+    rx: Arc<SpinLock<Box<StreamInner>>>,
     /// Set when the peer's Arc is dropped (peer closed).
     peer_closed: Arc<AtomicBool>,
     /// Set when our side of the pair is the one that set peer_closed on drop.
@@ -94,19 +97,33 @@ pub struct UnixStream {
     sock_type: i32,
 }
 
+/// Allocate a StreamInner directly on the heap via alloc_zeroed.
+///
+/// StreamInner contains a 16KB RingBuffer<u8, 16384> inline array.
+/// Box::new() / Arc::new(SpinLock::new(StreamInner { .. })) would construct
+/// it on the stack first, overflowing the 8KB syscall_stack and corrupting
+/// adjacent physical memory (same class of bug as the pipe stack overflow
+/// fixed in e5366c0).
+///
+/// All fields are correct when zeroed:
+/// - RingBuffer: buf=uninit (MaybeUninit), rp=0, wp=0, full=false → empty buffer
+/// - ancillary: Option<VecDeque<_>> = None (discriminant 0)
+/// - shut_wr: false = 0
+#[allow(unsafe_code)]
+fn alloc_stream_inner() -> Box<StreamInner> {
+    unsafe {
+        let layout = core::alloc::Layout::new::<StreamInner>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut StreamInner;
+        assert!(!ptr.is_null(), "unix stream: failed to allocate StreamInner");
+        Box::from_raw(ptr)
+    }
+}
+
 impl UnixStream {
     /// Create a connected pair of Unix sockets with the given type.
     pub fn new_pair_typed(sock_type: i32) -> (Arc<UnixStream>, Arc<UnixStream>) {
-        let buf_a = Arc::new(SpinLock::new(StreamInner {
-            buf: RingBuffer::new(),
-            ancillary: None,
-            shut_wr: false,
-        }));
-        let buf_b = Arc::new(SpinLock::new(StreamInner {
-            buf: RingBuffer::new(),
-            ancillary: None,
-            shut_wr: false,
-        }));
+        let buf_a = Arc::new(SpinLock::new(alloc_stream_inner()));
+        let buf_b = Arc::new(SpinLock::new(alloc_stream_inner()));
 
         let peer_flag = Arc::new(AtomicBool::new(false));
 

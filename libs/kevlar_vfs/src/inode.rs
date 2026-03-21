@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::result::{Errno, Error, Result};
 use crate::socket_types::{RecvFromFlags, ShutdownHow, SockAddr};
-use crate::stat::{FileMode, Stat};
+use crate::stat::{FileMode, GId, Stat, UId};
 use crate::user_buffer::{UserBuffer, UserBufferMut};
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -206,6 +206,11 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         Ok(()) // silently succeed for filesystems that don't support it
     }
 
+    /// `fchown(2)`.
+    fn chown(&self, _uid: UId, _gid: GId) -> Result<()> {
+        Ok(()) // silently succeed for filesystems that don't support it
+    }
+
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -353,6 +358,10 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn chmod(&self, _mode: FileMode) -> Result<()> {
         Ok(()) // silently succeed for filesystems that don't support it
     }
+    /// `fchown(2)`.
+    fn chown(&self, _uid: UId, _gid: GId) -> Result<()> {
+        Ok(()) // silently succeed for filesystems that don't support it
+    }
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -454,6 +463,15 @@ impl INode {
             INode::FileLike(file) => file.chmod(mode),
             INode::Directory(dir) => dir.chmod(mode),
             INode::Symlink(_) => Ok(()), // symlink chmod is a no-op on Linux too
+        }
+    }
+
+    /// `chown(2)`
+    pub fn chown(&self, uid: UId, gid: GId) -> Result<()> {
+        match self {
+            INode::FileLike(file) => file.chown(uid, gid),
+            INode::Directory(dir) => dir.chown(uid, gid),
+            INode::Symlink(_) => Ok(()),
         }
     }
 }

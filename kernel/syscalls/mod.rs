@@ -24,6 +24,7 @@ mod bind;
 mod brk;
 mod chdir;
 mod chmod;
+mod chown;
 mod clock_gettime;
 mod close;
 mod connect;
@@ -1045,7 +1046,10 @@ impl<'a> SyscallHandler<'a> {
             ),
             SYS_READLINK => self.sys_readlink(&resolve_path(a1)?, UserVAddr::new_nonnull(a2)?, a3),
             SYS_CHMOD => self.sys_chmod(&resolve_path(a1)?, FileMode::new(a2 as u32)),
-            SYS_CHOWN => Ok(0), // TODO:
+            SYS_CHOWN => {
+                let p = resolve_path(a1)?;
+                self.sys_chown(p.as_path(), a2 as u32, a3 as u32)
+            }
             SYS_FSYNC => self.sys_fsync(Fd::new(a1 as i32)),
             SYS_UTIMES => self.sys_utimes(&resolve_path(a1)?, UserVAddr::new(a2)),
             SYS_GETDENTS64 => {
@@ -1208,7 +1212,7 @@ impl<'a> SyscallHandler<'a> {
             SYS_LSEEK => self.sys_lseek(Fd::new(a1 as c_int), a2 as i64, a3 as c_int),
             SYS_ACCESS => {
                 let p = StackPathBuf::from_user(a1)?;
-                self.sys_access(p.as_path())
+                self.sys_access(p.as_path(), a2 as u32)
             }
             SYS_OPENAT => {
                 let p = StackPathBuf::from_user(a2)?;
@@ -1253,7 +1257,7 @@ impl<'a> SyscallHandler<'a> {
             // ARM64-specific *at syscalls (also available on x86_64)
             SYS_FACCESSAT | SYS_FACCESSAT2 => {
                 let p = StackPathBuf::from_user(a2)?;
-                self.sys_access(p.as_path())
+                self.sys_access(p.as_path(), a3 as u32)
             }
             SYS_PPOLL => {
                 // ppoll(fds, nfds, timeout, sigmask) — musl's pause() calls
@@ -1341,7 +1345,7 @@ impl<'a> SyscallHandler<'a> {
             }
             SYS_RT_SIGSUSPEND => self.sys_rt_sigsuspend(UserVAddr::new_nonnull(a1)?, a2),
             SYS_FCHMOD => self.sys_fchmod(a1 as i32, a2 as u32),
-            SYS_FCHOWN => Ok(0), // stub
+            SYS_FCHOWN => self.sys_fchown(a1 as i32, a2 as u32, a3 as u32),
             SYS_FCHMODAT => self.sys_fchmodat(
                 a1 as i32,
                 &resolve_path(a2)?,
