@@ -45,13 +45,20 @@ struct PipeShared {
 pub struct Pipe(Arc<PipeShared>);
 
 impl Pipe {
+    #[allow(unsafe_code)]
     pub fn new() -> Pipe {
-        // Allocate PipeInner on heap — 64KB buffer can't fit on kernel stack.
-        let inner = Box::new(PipeInner {
-            buf: RingBuffer::new(),
-            closed_by_reader: false,
-            closed_by_writer: false,
-        });
+        // Allocate PipeInner directly on the heap via alloc_zeroed.
+        // Box::new() would construct the 65KB RingBuffer on the stack first,
+        // overflowing the 16KB kernel stack when the call stack is deep
+        // (e.g. benchmark #43 in a 44-benchmark suite).
+        // All fields are correct when zeroed: rp=0, wp=0, full=false,
+        // closed_by_reader=false, closed_by_writer=false, MaybeUninit is uninit.
+        let inner = unsafe {
+            let layout = core::alloc::Layout::new::<PipeInner>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut PipeInner;
+            assert!(!ptr.is_null(), "pipe: failed to allocate PipeInner");
+            Box::from_raw(ptr)
+        };
         Pipe(Arc::new(PipeShared {
             inner: SpinLock::new(inner),
             waitq: WaitQueue::new(),
