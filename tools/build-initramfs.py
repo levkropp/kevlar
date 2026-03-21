@@ -112,6 +112,8 @@ def compile_all_local():
         ("testing/test_dynamic_exec.c",   "test-dyn-exec",    []),
         ("testing/test_dynamic_pipe.c",   "test-dyn-pipe",    []),
         ("testing/test_vfork_pipe.c",     "test-vfork-pipe",  []),
+        ("testing/test_alpine_shell.c",   "test-ash-pipe",    []),
+        ("testing/test_ash_pipe2.c",      "test-ash-pipe2",   []),
         ("testing/busybox_suite.c",      "busybox-suite",    []),
         ("testing/dd_diag.c",            "dd-diag",          []),
         ("testing/test_net.c",           "test-net",         []),

@@ -267,6 +267,25 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     // Look for the associated vma area.
     let vm_ref = current.vm();
     let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
+
+    // Debug: log page faults for addresses in musl's .rodata range
+    // (0xa0013xxxx to 0xa0016xxxx) to diagnose Alpine pipe crash.
+    if aligned_vaddr.value() >= 0xa00130000 && aligned_vaddr.value() < 0xa00170000 {
+        let pid = current.pid().as_i32();
+        // Find which VMA this falls into
+        let mut vma_info = "none";
+        for vma in vm.vm_areas().iter() {
+            if vma.contains(unaligned_vaddr) {
+                vma_info = match vma.area_type() {
+                    VmAreaType::Anonymous => "anon",
+                    VmAreaType::File { .. } => "file",
+                };
+                break;
+            }
+        }
+        info!("PF_DBG: pid={} vaddr={:#x} ip={:#x} vma={}", pid, aligned_vaddr.value(), ip, vma_info);
+    }
+
     let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
         None => {
