@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use kevlar_vfs::{
     inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions, Symlink},
     result::{Errno, Error, Result},
-    stat::{FileMode, Stat, S_IFLNK, S_IFDIR, S_IFREG},
+    stat::{FileMode, GId, Stat, UId, S_IFLNK, S_IFDIR, S_IFREG},
     user_buffer::{UserBufWriter, UserBufferMut},
 };
 
@@ -114,11 +114,11 @@ impl Directory for ProcPidDir {
         }
     }
 
-    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_file(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         Err(Error::new(Errno::EPERM))
     }
 
-    fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         Err(Error::new(Errno::EPERM))
     }
 
@@ -509,11 +509,11 @@ impl Directory for ProcPidFdDir {
         ))
     }
 
-    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_file(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         Err(Error::new(Errno::EPERM))
     }
 
-    fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
         Err(Error::new(Errno::EPERM))
     }
 

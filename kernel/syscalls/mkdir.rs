@@ -2,6 +2,7 @@
 use crate::fs::{inotify, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
+use kevlar_vfs::stat::{GId, UId};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_mkdir(&mut self, path: &Path, mode: FileMode) -> Result<isize> {
@@ -9,11 +10,12 @@ impl<'a> SyscallHandler<'a> {
             .parent_and_basename()
             .ok_or_else::<Error, _>(|| Errno::EEXIST.into())?;
 
-        let root_fs = current_process().root_fs();
+        let current = current_process();
+        let root_fs = current.root_fs();
         root_fs
             .lock()
             .lookup_dir(parent_dir)?
-            .create_dir(name, mode)?;
+            .create_dir(name, mode, UId::new(current.euid()), GId::new(current.egid()))?;
 
         inotify::notify(parent_dir.as_str(), name, inotify::IN_CREATE);
         Ok(0)

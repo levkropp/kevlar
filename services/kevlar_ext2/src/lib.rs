@@ -1795,7 +1795,7 @@ impl Directory for Ext2Dir {
         Err(Error::new(Errno::ENOENT))
     }
 
-    fn create_file(&self, name: &str, mode: FileMode) -> Result<INode> {
+    fn create_file(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         // Check for existing entry.
         {
             let inode = self.inode.lock_no_irq();
@@ -1814,12 +1814,12 @@ impl Directory for Ext2Dir {
         let use_extents = self.fs.superblock.has_extents();
         let new_inode = Ext2Inode {
             mode: EXT2_S_IFREG | (mode.as_u32() as u16 & 0o7777),
-            uid: 0,
+            uid: uid.as_u32() as u16,
             size: 0,
             atime: 0,
             ctime: 0,
             mtime: 0,
-            gid: 0,
+            gid: gid.as_u32() as u16,
             links_count: 1,
             blocks: 0,
             flags: if use_extents { EXT4_EXTENTS_FL } else { 0 },
@@ -1838,7 +1838,7 @@ impl Directory for Ext2Dir {
         Ok(self.fs.make_inode(ino, new_inode))
     }
 
-    fn create_dir(&self, name: &str, mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         // Check for existing entry.
         {
             let inode = self.inode.lock_no_irq();
@@ -1856,12 +1856,12 @@ impl Directory for Ext2Dir {
         let use_extents = self.fs.superblock.has_extents();
         let mut new_inode = Ext2Inode {
             mode: EXT2_S_IFDIR | (mode.as_u32() as u16 & 0o7777),
-            uid: 0,
+            uid: uid.as_u32() as u16,
             size: 0,
             atime: 0,
             ctime: 0,
             mtime: 0,
-            gid: 0,
+            gid: gid.as_u32() as u16,
             links_count: 2, // . and parent's entry
             blocks: 0,
             flags: if use_extents { EXT4_EXTENTS_FL } else { 0 },

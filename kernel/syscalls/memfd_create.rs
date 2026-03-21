@@ -14,7 +14,7 @@ use kevlar_platform::address::UserVAddr;
 use kevlar_vfs::{
     file_system::FileSystem,
     inode::OpenOptions,
-    stat::FileMode,
+    stat::{FileMode, GId, UId},
 };
 
 impl<'a> SyscallHandler<'a> {
@@ -24,7 +24,8 @@ impl<'a> SyscallHandler<'a> {
         // Create a temporary file in a fresh tmpfs.
         let tmpfs = TmpFs::new();
         let root_dir = tmpfs.root_dir()?;
-        let inode = root_dir.create_file(name.as_str(), FileMode::new(0o600))?;
+        let current = current_process();
+        let inode = root_dir.create_file(name.as_str(), FileMode::new(0o600), UId::new(current.euid()), GId::new(current.egid()))?;
 
         let path_component = Arc::new(PathComponent {
             parent_dir: None,

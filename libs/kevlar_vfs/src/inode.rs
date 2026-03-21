@@ -313,9 +313,9 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     /// Looks for an existing file.
     fn lookup(&self, name: &str) -> Result<INode>;
     /// Creates a file. Returns `EEXIST` if the it already exists.
-    fn create_file(&self, _name: &str, _mode: FileMode) -> Result<INode>;
+    fn create_file(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode>;
     /// Creates a directory. Returns `EEXIST` if the it already exists.
-    fn create_dir(&self, _name: &str, _mode: FileMode) -> Result<INode>;
+    fn create_dir(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode>;
     /// `stat(2)`.
     fn stat(&self) -> Result<Stat>;
     /// Returns the inode number without acquiring locks.

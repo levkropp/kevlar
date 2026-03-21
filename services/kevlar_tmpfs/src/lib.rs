@@ -260,13 +260,15 @@ impl Directory for Dir {
         Ok(())
     }
 
-    fn create_file(&self, name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_file(&self, name: &str, _mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
 
         let inode = Arc::new(File::new(alloc_inode_no()));
+        *inode.uid.lock_no_irq() = uid;
+        *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::File(inode.clone()));
 
         Ok((inode as Arc<dyn FileLike>).into())
@@ -290,12 +292,14 @@ impl Directory for Dir {
         Ok((inode as Arc<dyn SymlinkTrait>).into())
     }
 
-    fn create_dir(&self, name: &str, _mode: FileMode) -> Result<INode> {
+    fn create_dir(&self, name: &str, _mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
         let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
         }
         let inode = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
+        *inode.uid.lock_no_irq() = uid;
+        *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::Directory(inode.clone()));
         Ok((inode as Arc<dyn Directory>).into())
     }

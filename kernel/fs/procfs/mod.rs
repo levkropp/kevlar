@@ -17,7 +17,7 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 use kevlar_vfs::{
     inode::{DirEntry, FileType, INode, INodeNo},
-    stat::{FileMode, Stat, S_IFDIR},
+    stat::{FileMode, GId, Stat, UId, S_IFDIR},
     user_buffer::UserBuffer,
 };
 use kevlar_utils::once::Once;
@@ -161,12 +161,12 @@ impl Directory for ProcRootDir {
         self.static_dir.lookup(name)
     }
 
-    fn create_file(&self, name: &str, mode: FileMode) -> Result<INode> {
-        self.static_dir.create_file(name, mode)
+    fn create_file(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
+        self.static_dir.create_file(name, mode, uid, gid)
     }
 
-    fn create_dir(&self, name: &str, mode: FileMode) -> Result<INode> {
-        self.static_dir.create_dir(name, mode)
+    fn create_dir(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
+        self.static_dir.create_dir(name, mode, uid, gid)
     }
 
     fn stat(&self) -> Result<Stat> {

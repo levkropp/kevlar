@@ -5,6 +5,7 @@ use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::{process::current_process, syscalls::SyscallHandler};
+use kevlar_vfs::stat::{GId, UId};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_openat(
@@ -44,7 +45,7 @@ impl<'a> SyscallHandler<'a> {
 
                 match create_result {
                     Ok((parent_inode, name)) => {
-                        match parent_inode.as_dir()?.create_file(name, mode) {
+                        match parent_inode.as_dir()?.create_file(name, mode, UId::new(current.euid()), GId::new(current.egid())) {
                             Ok(inode) => {
                                 // Created — build flat PathComponent, skip re-lookup.
                                 root_fs.make_flat_path_component(path, inode)
