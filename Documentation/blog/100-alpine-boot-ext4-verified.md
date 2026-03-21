@@ -169,6 +169,37 @@ Kevlar as the kernel, boot via QEMU or real hardware (GRUB).
 | devtmpfs in chroot | All 12 device nodes populated |
 | Getty spawn | Reached, fails on tcsetattr — last barrier |
 
+## Update: Alpine Proof of Life
+
+Running Alpine's BusyBox commands via inittab sysinit lines confirms
+the full userland works:
+
+```
+=========================================
+  Alpine Linux 3.21 running on Kevlar!
+=========================================
+Linux kevlar 6.19.8 Kevlar x86_64 Linux
+3.21.6
+
+PID   USER     TIME  COMMAND
+    1 root      0:01 {/sbin/init} /sbin/init
+   10 root      0:00 {/bin/ps} /bin/ps
+
+Filesystem           1K-blocks      Used Available Use% Mounted on
+none                     65536     32768     32768  50% /mnt/root
+
+bin  dev  etc  home  lib  lost+found  media  mnt  opt
+proc  root  run  sbin  srv  sys  tmp  usr  var
+```
+
+Working: `uname`, `cat`, `echo`, `ls`, `ps`, `mount`, `df`, `mkdir`,
+`hostname`. The full Alpine directory tree is visible from the ext4 rootfs.
+
+Remaining issues:
+- Pipe crash: `busybox | head` → SIGSEGV at 0x3d (pipe-related)
+- Getty tcsetattr: respawned gettys lack inherited fds
+- `/etc/os-release` empty (Docker export artifact)
+
 **Contract tests:** 118/118 PASS
 **ext4 test:** 30/30 PASS
-**Alpine boot:** sysinit complete, getty reached, tcsetattr fix needed
+**Alpine boot:** Commands running, userland functional
