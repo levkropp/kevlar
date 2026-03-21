@@ -901,7 +901,7 @@ bench:
 bench-kvm:
 	$(PROGRESS) "BENCH-KVM" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-kvm-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-kvm-$(PROFILE).log > /tmp/kevlar-bench-$(PROFILE).txt 2>/dev/null; \

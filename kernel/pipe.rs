@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 //! Unnamed pipe (`pipe(2)`).
+use alloc::boxed::Box;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -16,7 +17,10 @@ use crate::{
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 
-const PIPE_SIZE: usize = 4096;
+/// Pipe buffer size: 64KB, matching Linux default (16 × 4KB pages).
+/// Larger buffers reduce context switches for pipeline workloads
+/// (sort | uniq | sort) where data fits in one buffer fill.
+const PIPE_SIZE: usize = 65536;
 
 struct PipeInner {
     buf: RingBuffer<u8, PIPE_SIZE>,
@@ -26,7 +30,9 @@ struct PipeInner {
 
 /// Shared state for a pipe: data buffer + per-pipe wait queue.
 struct PipeShared {
-    inner: SpinLock<PipeInner>,
+    /// Box-allocated because PipeInner is 64KB+ (the ring buffer).
+    /// Can't live on the 16KB kernel stack.
+    inner: SpinLock<Box<PipeInner>>,
     waitq: WaitQueue,
     /// Monotonically increasing generation counter for edge-triggered epoll.
     /// Incremented on every state change (read, write, close).
@@ -40,12 +46,14 @@ pub struct Pipe(Arc<PipeShared>);
 
 impl Pipe {
     pub fn new() -> Pipe {
+        // Allocate PipeInner on heap — 64KB buffer can't fit on kernel stack.
+        let inner = Box::new(PipeInner {
+            buf: RingBuffer::new(),
+            closed_by_reader: false,
+            closed_by_writer: false,
+        });
         Pipe(Arc::new(PipeShared {
-            inner: SpinLock::new(PipeInner {
-                buf: RingBuffer::new(),
-                closed_by_reader: false,
-                closed_by_writer: false,
-            }),
+            inner: SpinLock::new(inner),
             waitq: WaitQueue::new(),
             state_gen: AtomicU64::new(1),
             et_watcher_count: AtomicU32::new(0),
