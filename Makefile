@@ -256,12 +256,14 @@ run-sh: build
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
-# `make run-alpine` — Boot with Alpine disk, auto-mount, interactive shell
+# `make run-alpine` — Boot Alpine Linux 3.21 with OpenRC on Kevlar.
+# First run builds the ext4 disk image from Docker (requires Docker).
+# Subsequent runs reuse the cached image (delete build/alpine.img to rebuild).
 .PHONY: run-alpine
-run-alpine: build alpine-disk
+run-alpine: build/alpine.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
 	$(PYTHON3) tools/run-qemu.py                                           \
-		--arch $(ARCH) --kvm                                           \
-		--disk build/alpine-disk.img                                   \
+		--arch $(ARCH) --kvm --disk build/alpine.img                   \
 		$(if $(GUI),--gui,)                                            \
 		$(if $(GDB),--gdb,)                                            \
 		$(if $(LOG),--append-cmdline "log=$(LOG)",)                    \
@@ -269,6 +271,23 @@ run-alpine: build alpine-disk
 		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+build/alpine.img:
+	$(PROGRESS) "MKALPINE" "build/alpine.img"
+	@$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
+	@rm -rf build/alpine-root
+	@mkdir -p build/alpine-root
+	@docker rm -f kevlar-alpine 2>/dev/null || true
+	docker run --name kevlar-alpine alpine:3.21 sh -c 'apk add --no-cache openrc'
+	docker export kevlar-alpine | tar -xf - -C build/alpine-root
+	@docker rm kevlar-alpine
+	@sed -i 's|^#ttyS0::respawn|ttyS0::respawn|' build/alpine-root/etc/inittab
+	@sed -i 's/^root:\*:/root::/' build/alpine-root/etc/shadow
+	@echo "ttyS0" >> build/alpine-root/etc/securetty
+	@echo "kevlar" > build/alpine-root/etc/hostname
+	dd if=/dev/zero of=build/alpine.img bs=1M count=256 2>/dev/null
+	mke2fs -t ext4 -q -d build/alpine-root build/alpine.img
+	@rm -rf build/alpine-root
 
 .PHONY: run-systemd
 run-systemd: build
