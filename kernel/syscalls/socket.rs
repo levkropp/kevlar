@@ -55,8 +55,10 @@ impl<'a> SyscallHandler<'a> {
                 (AF_INET, SOCK_DGRAM, IPPROTO_ICMP) => {
                     net.create_icmp_socket()
                 }
-                (AF_NETLINK, _, _) | (AF_PACKET, _, _) => {
-                    // Return EAFNOSUPPORT so tools fall back to ioctl-based config.
+                (AF_NETLINK, _, _) => {
+                    Ok(crate::net::netlink::NetlinkSocket::new() as Arc<dyn FileLike>)
+                }
+                (AF_PACKET, _, _) => {
                     Err(Errno::EAFNOSUPPORT.into())
                 }
                 (_, _, _) => {

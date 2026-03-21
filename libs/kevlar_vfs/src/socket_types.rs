@@ -27,6 +27,7 @@ pub const AF_NETLINK: i32 = 16;
 pub const AF_PACKET: i32 = 17;
 pub const SOCK_STREAM: i32 = 1;
 pub const SOCK_DGRAM: i32 = 2;
+pub const SOCK_RAW: i32 = 3;
 pub const IPPROTO_ICMP: i32 = 1;
 pub const IPPROTO_TCP: i32 = 6;
 pub const IPPROTO_UDP: i32 = 17;
@@ -52,6 +53,7 @@ pub enum ShutdownHow {
 pub enum SockAddr {
     In(SockAddrIn),
     Un(SockAddrUn),
+    Nl(SockAddrNl),
 }
 
 /// `struct sockaddr_in`
@@ -76,4 +78,14 @@ pub struct SockAddrUn {
     pub family: sa_family_t,
     /// The unix domain socket file path.
     pub path: [u8; 108],
+}
+
+/// `struct sockaddr_nl`
+#[derive(Debug, Copy, Clone)]
+#[repr(C, packed)]
+pub struct SockAddrNl {
+    pub family: sa_family_t,
+    pub pad: u16,
+    pub pid: u32,
+    pub groups: u32,
 }

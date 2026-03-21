@@ -21,6 +21,7 @@ use smoltcp::wire::{self, EthernetAddress, EthernetFrame, HardwareAddress, IpCid
 pub mod service;
 pub mod socket;
 mod icmp_socket;
+pub mod netlink;
 mod tcp_socket;
 mod udp_socket;
 pub(crate) mod unix_socket;

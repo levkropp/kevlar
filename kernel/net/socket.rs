@@ -47,6 +47,12 @@ pub fn read_sockaddr(uaddr: UserVAddr, len: usize) -> Result<SockAddr> {
             // TODO: Should we check `len` for sockaddr_un as well?
             SockAddr::Un(uaddr.read::<SockAddrUn>()?)
         }
+        AF_NETLINK => {
+            if len < size_of::<SockAddrNl>() {
+                return Err(Errno::EINVAL.into());
+            }
+            SockAddr::Nl(uaddr.read::<SockAddrNl>()?)
+        }
         _ => {
             return Err(Errno::EINVAL.into());
         }
@@ -79,6 +85,15 @@ pub fn write_sockaddr(
                 socklen.write::<socklen_t>(&(size_of::<SockAddrUn>() as u32))?;
             }
         }
+        SockAddr::Nl(sockaddr_nl) => {
+            if let Some(dst) = dst {
+                dst.write::<SockAddrNl>(sockaddr_nl)?;
+            }
+            if let Some(socklen) = socklen {
+                socklen.write::<socklen_t>(&(size_of::<SockAddrNl>() as u32))?;
+            }
+        }
+        #[allow(unreachable_patterns)]
         _ => return Err(Errno::EINVAL.into()),
     }
 
