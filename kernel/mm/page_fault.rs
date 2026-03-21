@@ -240,10 +240,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     {
         Ok(uaddr) => uaddr,
         _ => {
+            let pid = current_process().pid().as_i32();
             warn!(
                 "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
-                unaligned_vaddr.value(), current_process().pid().as_i32(), ip
+                unaligned_vaddr.value(), pid, ip
             );
+            // Dump crash registers for the Alpine pipe investigation.
+            if unaligned_vaddr.value() < 0x100 && pid > 2 {
+                let cpu = kevlar_platform::arch::cpu_id() as usize;
+                if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
+                    warn!("  RAX={:#x} RBX={:#x} RCX={:#x} RDX={:#x}",
+                        r.rax, r.rbx, r.rcx, r.rdx);
+                    warn!("  RSI={:#x} RDI={:#x} RBP={:#x} RSP={:#x}",
+                        r.rsi, r.rdi, r.rbp, r.rsp);
+                    warn!("  R8={:#x} R9={:#x} R10={:#x} R11={:#x}",
+                        r.r8, r.r9, r.r10, r.r11);
+                }
+            }
             current_process().send_signal(SIGSEGV);
             return;
         }
@@ -268,28 +281,12 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     let vm_ref = current.vm();
     let mut vm = vm_ref.as_ref().unwrap().lock_no_irq();
 
-    // Debug: log the ACTUAL VMA returned by find_vma_cached for addresses
-    // in musl's data range (pid > 2 to skip early boot processes).
-    if aligned_vaddr.value() >= 0xa00168000 && aligned_vaddr.value() <= 0xa0016c000
+    // Page trace: check PTE state for BSS pages before demand faulting.
+    if aligned_vaddr.value() >= 0xa0016b000 && aligned_vaddr.value() <= 0xa0016f000
        && current.pid().as_i32() > 2 {
         let pid = current.pid().as_i32();
-        let mut found_vma = "scan_pending";
-        let mut fs = 0usize;
-        let mut fe = 0usize;
-        // Check what find_vma_cached will find (peek at cache)
-        if let Some(idx) = vm.last_fault_vma_idx() {
-            if idx < vm.vm_areas().len() {
-                let cached_vma = &vm.vm_areas()[idx];
-                let ct = match cached_vma.area_type() {
-                    VmAreaType::Anonymous => "anon",
-                    VmAreaType::File { .. } => "file",
-                };
-                let hit = cached_vma.contains(unaligned_vaddr);
-                info!("PF_DBG2: pid={} vaddr={:#x} cache_idx={} cached={}[{:#x}-{:#x}] hit={}",
-                    pid, aligned_vaddr.value(), idx, ct, cached_vma.start().value(),
-                    cached_vma.end().value(), hit);
-            }
-        }
+        kevlar_platform::page_trace::dump_pte(
+            vm.page_table().pml4(), aligned_vaddr.value(), pid);
     }
 
     let vma = match vm.find_vma_cached(unaligned_vaddr) {

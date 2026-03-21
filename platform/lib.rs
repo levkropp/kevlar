@@ -40,6 +40,7 @@ pub mod stack_cache;
 pub mod profile;
 pub mod spinlock;
 pub mod usercopy_trace;
+pub mod page_trace;
 
 /// ktrace trace-device output — ISA debugcon on x86_64, semihosting on ARM64.
 ///
