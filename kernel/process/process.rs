@@ -133,8 +133,11 @@ static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
 /// Ghost-fork with targeted restore: page table duplication skips all
 /// refcount operations. A bitmap of CoW-marked addresses enables O(N)
 /// restore (N=writable pages, ~200) instead of O(all PTEs, ~10K).
-/// Currently disabled: the spin-wait hangs on 1-vCPU boot configurations.
-/// Needs SMP-aware spin-yield or sleep-based wait with lower overhead.
+/// Ghost-fork with targeted restore via address bitmap. DISABLED because it
+/// deadlocks fork+interact patterns (e.g. pipe_pingpong: child writes to pipe,
+/// parent blocked in fork → can't read → deadlock). Only safe for fork+exec
+/// or fork+exit-immediately, but we can't distinguish at fork() time.
+/// Could be enabled as opt-in via posix_spawn() or a dedicated syscall.
 pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
 pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -1589,10 +1592,10 @@ impl Process {
         *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
 
         // Ghost-fork: restore parent's writable PTEs using the saved list.
-        if let Some(addrs) = ghost_cow_addrs {
+        if let Some(ref addrs) = ghost_cow_addrs {
             if let Some(parent) = current.parent.upgrade() {
                 if let Some(vm_ref) = parent.vm().as_ref() {
-                    vm_ref.lock().restore_writable_with_list(&addrs);
+                    vm_ref.lock().restore_writable_with_list(addrs);
                 }
             }
         }
