@@ -17,6 +17,12 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let current = current_process();
 
+        // O_TMPFILE: return EOPNOTSUPP so callers fall back to regular temp files.
+        // Full O_TMPFILE requires linkat(AT_EMPTY_PATH) which we don't support yet.
+        if flags.contains(OpenFlags::O_TMPFILE) {
+            return Err(Error::new(Errno::ENOSYS));
+        }
+
         // Reject writes to read-only mounts (MS_RDONLY).
         let access = mode.access_mode();
         if (flags.contains(OpenFlags::O_CREAT) || access == O_WRONLY || access == O_RDWR)
