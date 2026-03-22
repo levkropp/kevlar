@@ -58,6 +58,7 @@ impl<'a> SyscallHandler<'a> {
             let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
             let newtls_val = if flags & CLONE_SETTLS != 0 { newtls as u64 } else { 0 };
             let is_vfork = flags & CLONE_VFORK != 0;
+            let is_thread = flags & CLONE_THREAD != 0;
 
             let child = Process::new_thread(
                 parent,
@@ -68,6 +69,7 @@ impl<'a> SyscallHandler<'a> {
                 set_child_tid,
                 clear_child_tid,
                 is_vfork,
+                is_thread,
             )?;
 
             if flags & CLONE_PARENT_SETTID != 0 && ptid != 0 {

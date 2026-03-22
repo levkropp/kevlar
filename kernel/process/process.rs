@@ -1889,7 +1889,7 @@ impl Process {
 
     /// Wake the vfork parent (if any). Called from _exit and exec.
     pub fn wake_vfork_parent(&self) {
-        if let Some(_parent_pid) = self.vfork_parent {
+        if let Some(parent_pid) = self.vfork_parent {
             VFORK_WAIT_QUEUE.wake_all();
         }
     }
@@ -1910,6 +1910,7 @@ impl Process {
         set_child_tid: bool,
         clear_child_tid: bool,
         is_vfork: bool,      // CLONE_VFORK: set vfork_parent so exec/exit wakes parent
+        is_thread: bool,     // CLONE_THREAD: share thread group (tgid)
     ) -> Result<Arc<Process>> {
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
@@ -1922,7 +1923,7 @@ impl Process {
             is_idle: false,
             process_group: AtomicRefCell::new(parent.process_group.borrow().clone()),
             pid,
-            tgid: parent.tgid,   // same thread group
+            tgid: if is_thread { parent.tgid } else { pid },
             state: AtomicCell::new(ProcessState::Runnable),
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
