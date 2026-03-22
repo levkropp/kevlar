@@ -31,8 +31,10 @@ int main(void) {
         return 1;
     }
     chdir("/");
-    msg("kevlar: running gcc test\n");
+    msg("kevlar: running tests\n");
     char *argv[] = { "/bin/sh", "-c",
+        // Test 0: system time + localtime
+        "date 2>&1; echo date=$?; "
         // Test 1: compile minimal program
         "echo 'int main(){return 42;}' > /root/t.c; "
         "gcc -o /root/t /root/t.c 2>&1; "

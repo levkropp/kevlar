@@ -284,6 +284,8 @@ build/alpine.img:
 	@sed -i 's/^root:\*:/root::/' build/alpine-root/etc/shadow
 	@echo "ttyS0" >> build/alpine-root/etc/securetty
 	@echo "kevlar" > build/alpine-root/etc/hostname
+	@echo "UTC0" > build/alpine-root/etc/TZ
+	@ln -sf /usr/share/zoneinfo/UTC build/alpine-root/etc/localtime 2>/dev/null || echo "UTC0" > build/alpine-root/etc/localtime
 	@echo "nameserver 10.0.2.3" > build/alpine-root/etc/resolv.conf
 	@sed -i 's|https://|http://|g' build/alpine-root/etc/apk/repositories
 	@chmod 777 build/alpine-root/var/cache/apk
