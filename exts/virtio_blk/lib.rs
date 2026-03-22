@@ -42,8 +42,13 @@ const VIRTIO_BLK_S_OK: u8 = 0;
 // Block request queue index.
 const VIRTIO_BLK_QUEUE: u16 = 0;
 
-// Block cache size (number of sectors).
-const CACHE_SIZE: usize = 256;
+// Block cache size (number of sectors). 4096 entries = 2MB of cached data.
+// Larger cache dramatically improves sequential read hit rates for tar/ext4.
+const CACHE_SIZE: usize = 4096;
+
+// Number of sectors to read in a single batch (read-ahead).
+// One page = 4096 bytes = 8 sectors.
+const BATCH_SECTORS: usize = 8;
 
 /// VirtIO block request header (16 bytes).
 #[repr(C)]
@@ -254,23 +259,59 @@ impl VirtioBlk {
         self.do_request(VIRTIO_BLK_T_OUT, sector, 1)
     }
 
+    /// Read multiple sectors from device in a single batch (up to 8 sectors = 1 page).
+    fn read_batch_raw(&mut self, sector: u64, count: usize) -> Result<(), BlockError> {
+        debug_assert!(count <= BATCH_SECTORS);
+        self.do_request(VIRTIO_BLK_T_IN, sector, count)
+    }
+
     fn read_sectors_impl(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let num_sectors = buf.len() / SECTOR_SIZE;
-        for i in 0..num_sectors {
+        let mut i = 0;
+
+        while i < num_sectors {
             let sector = start_sector + i as u64;
             let offset = i * SECTOR_SIZE;
 
             // Check cache first.
             if let Some(cached) = self.cache.get(sector) {
                 buf[offset..offset + SECTOR_SIZE].copy_from_slice(cached);
+                i += 1;
                 continue;
             }
 
-            // Cache miss — read from device.
-            self.read_sector_raw(sector, &mut buf[offset..offset + SECTOR_SIZE])?;
+            // Cache miss — batch read: read up to BATCH_SECTORS at once.
+            // Align the batch to BATCH_SECTORS boundaries for better locality.
+            let batch_start = sector & !(BATCH_SECTORS as u64 - 1);
+            let batch_count = core::cmp::min(
+                BATCH_SECTORS,
+                (self.capacity_sectors - batch_start) as usize,
+            );
 
-            // Populate cache.
-            self.cache.put(sector, &buf[offset..offset + SECTOR_SIZE]);
+            self.read_batch_raw(batch_start, batch_count)?;
+
+            // Copy batch data to cache and to output buffer.
+            let data_ptr = self.req_buf.add(PAGE_SIZE).as_ptr::<u8>();
+            for j in 0..batch_count {
+                let s = batch_start + j as u64;
+                let src = unsafe {
+                    core::slice::from_raw_parts(data_ptr.add(j * SECTOR_SIZE), SECTOR_SIZE)
+                };
+                self.cache.put(s, src);
+
+                // If this sector is in the requested range, copy to output buffer.
+                if s >= start_sector && s < start_sector + num_sectors as u64 {
+                    let out_idx = (s - start_sector) as usize;
+                    let out_off = out_idx * SECTOR_SIZE;
+                    buf[out_off..out_off + SECTOR_SIZE].copy_from_slice(src);
+                }
+            }
+
+            // Advance past all sectors covered by this batch.
+            let batch_end = batch_start + batch_count as u64;
+            let next_sector = if sector < batch_start { batch_start } else { batch_end };
+            let advance = (next_sector - sector) as usize;
+            i += if advance > 0 { advance } else { 1 };
         }
 
         Ok(())
@@ -278,14 +319,33 @@ impl VirtioBlk {
 
     fn write_sectors_impl(&mut self, start_sector: u64, buf: &[u8]) -> Result<(), BlockError> {
         let num_sectors = buf.len() / SECTOR_SIZE;
-        for i in 0..num_sectors {
+        let mut i = 0;
+
+        while i < num_sectors {
+            // Batch writes: up to BATCH_SECTORS per request.
+            let batch = core::cmp::min(BATCH_SECTORS, num_sectors - i);
             let sector = start_sector + i as u64;
             let offset = i * SECTOR_SIZE;
 
-            self.write_sector_raw(sector, &buf[offset..offset + SECTOR_SIZE])?;
+            // Copy data to request buffer.
+            let data_ptr = self.req_buf.add(PAGE_SIZE).as_mut_ptr::<u8>();
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf[offset..].as_ptr(),
+                    data_ptr,
+                    batch * SECTOR_SIZE,
+                );
+            }
 
-            // Write-through: invalidate cache entry.
-            self.cache.invalidate(sector);
+            self.do_request(VIRTIO_BLK_T_OUT, sector, batch)?;
+
+            // Update cache with written data (write-through).
+            for j in 0..batch {
+                let s = sector + j as u64;
+                self.cache.put(s, &buf[offset + j * SECTOR_SIZE..offset + (j + 1) * SECTOR_SIZE]);
+            }
+
+            i += batch;
         }
 
         Ok(())
