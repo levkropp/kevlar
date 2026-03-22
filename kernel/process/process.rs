@@ -1928,13 +1928,16 @@ impl Process {
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             children: SpinLock::new(Vec::new()),
-            // Share address space, fds, and signal handlers.
-            // Note: for CLONE_VM without CLONE_FILES, Linux gives an
-            // independent fd table. But CLONE_VM|CLONE_VFORK (posix_spawn)
-            // needs shared fds so exec's CLOEXEC closes the parent's pipe.
-            // Since CLONE_VM children exec immediately, sharing fds is safe.
+            // Share address space and signal handlers.
             vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
-            opened_files: Arc::clone(&parent.opened_files),
+            // CLONE_FILES: share fd table. Without it, child gets a copy
+            // so exec's CLOEXEC doesn't destroy parent's pipe fds.
+            opened_files: if is_thread {
+                // CLONE_THREAD implies CLONE_FILES
+                Arc::clone(&parent.opened_files)
+            } else {
+                Arc::new(SpinLock::new(parent.opened_files.lock_no_irq().clone()))
+            },
             root_fs: AtomicRefCell::new(parent.root_fs()),
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
