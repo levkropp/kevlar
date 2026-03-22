@@ -1792,6 +1792,24 @@ impl Directory for Ext2Dir {
                 return Ok(self.fs.make_inode(entry.inode, child_inode));
             }
         }
+        // Trace misses for hello/fib to debug ext4 visibility issue.
+        if name == "hello" || name == "fib" || name == "hello.c" || name == "fib.c" {
+            let inode = self.inode.lock_no_irq();
+            let size = inode.file_size();
+            let blk0 = inode.block[0];
+            let uses_ext = inode.uses_extents();
+            drop(inode);
+            // Also try a fresh read from disk for comparison.
+            let fresh = self.fs.read_inode(self.inode_num);
+            let (fsize, fblk0) = match fresh {
+                Ok(fi) => (fi.file_size(), fi.block[0]),
+                Err(_) => (0, 0),
+            };
+            kevlar_platform::println!(
+                "\x1b[33mext2 MISS: {:?} dir_ino={} entries={} cached(size={},blk0={},ext={}) disk(size={},blk0={})\x1b[0m",
+                name, self.inode_num, entries.len(), size, blk0, uses_ext, fsize, fblk0
+            );
+        }
         Err(Error::new(Errno::ENOENT))
     }
 
