@@ -33,12 +33,14 @@ int main(void) {
     chdir("/");
     msg("kevlar: running gcc test\n");
     char *argv[] = { "/bin/sh", "-c",
-        "echo 'int main(){return 42;}' > /root/t.c && "
-        "gcc -o /root/t /root/t.c 2>&1 && "
-        "echo gcc=OK && "
-        "ls -la /root/t && "
-        "/root/t; echo run=$? && "
-        "echo DONE || echo gcc=FAIL",
+        "echo 'int main(){return 42;}' > /root/t.c; "
+        "echo write=$?; "
+        "cat /root/t.c; "
+        "gcc -o /root/t /root/t.c 2>&1; "
+        "echo gcc=$?; "
+        "ls -la /root/t 2>&1; "
+        "echo ls=$?; "
+        "echo DONE",
         NULL };
     char *envp[] = { "HOME=/root", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "TERM=vt100", NULL };
     execve("/bin/sh", argv, envp);

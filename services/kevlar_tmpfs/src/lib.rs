@@ -261,6 +261,9 @@ impl Directory for Dir {
     }
 
     fn create_file(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
+        if name == "t" || name == "t.c" || name == "t.o" {
+            kevlar_platform::println!("\x1b[31mtmpfs create: {:?}\x1b[0m", name);
+        }
         let mut dir_lock = self.inner.lock_no_irq();
         if dir_lock.files.contains_key(name) {
             return Err(Errno::EEXIST.into());
