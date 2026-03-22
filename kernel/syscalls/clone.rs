@@ -4,8 +4,10 @@
 //   x86_64: clone(rdi=flags, rsi=child_stack, rdx=ptid, r10=ctid, r8=newtls)
 //   ARM64:  clone(x0=flags, x1=child_stack, x2=ptid, x3=newtls, x4=ctid)
 
+use core::sync::atomic::Ordering;
+
 use crate::{
-    process::{current_process, Process},
+    process::{current_process, signal::SigSet, Process, VFORK_WAIT_QUEUE},
     result::{Errno, Result},
     syscalls::SyscallHandler,
 };
@@ -14,10 +16,10 @@ use kevlar_platform::address::UserVAddr;
 const CLONE_VM: usize        = 0x00000100;
 #[allow(dead_code)]
 const CLONE_FS: usize        = 0x00000200;
-#[allow(dead_code)]
 const CLONE_FILES: usize     = 0x00000400;
 #[allow(dead_code)]
 const CLONE_SIGHAND: usize   = 0x00000800;
+const CLONE_VFORK: usize     = 0x00004000;
 #[allow(dead_code)]
 const CLONE_THREAD: usize    = 0x00010000;
 const CLONE_CHILD_SETTID: usize  = 0x01000000;
@@ -55,6 +57,8 @@ impl<'a> SyscallHandler<'a> {
             let set_child_tid   = flags & CLONE_CHILD_SETTID  != 0;
             let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
             let newtls_val = if flags & CLONE_SETTLS != 0 { newtls as u64 } else { 0 };
+            let clone_files = flags & CLONE_FILES != 0;
+            let is_vfork = flags & CLONE_VFORK != 0;
 
             let child = Process::new_thread(
                 parent,
@@ -64,6 +68,8 @@ impl<'a> SyscallHandler<'a> {
                 ctid,
                 set_child_tid,
                 clear_child_tid,
+                clone_files,
+                is_vfork,
             )?;
 
             if flags & CLONE_PARENT_SETTID != 0 && ptid != 0 {
@@ -72,7 +78,27 @@ impl<'a> SyscallHandler<'a> {
                 }
             }
 
-            Ok(child.pid().as_i32() as isize)
+            let child_pid = child.pid().as_i32() as isize;
+
+            // CLONE_VFORK: block the parent until the child execs or exits.
+            // The child's execve/exit calls wake_vfork_parent() which sets
+            // ghost_fork_done and wakes VFORK_WAIT_QUEUE.
+            if is_vfork {
+                let saved_mask = parent.sigset_load();
+                parent.sigset_store(SigSet::ALL);
+                while !child.ghost_fork_done.load(Ordering::Acquire) {
+                    let _ = VFORK_WAIT_QUEUE.sleep_signalable_until(|| {
+                        if child.ghost_fork_done.load(Ordering::Acquire) {
+                            Ok(Some(()))
+                        } else {
+                            Ok(None)
+                        }
+                    });
+                }
+                parent.sigset_store(saved_mask);
+            }
+
+            Ok(child_pid)
         } else {
             // Fork: copy address space.
             if child_stack != 0 {
