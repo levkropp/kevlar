@@ -758,6 +758,7 @@ impl Process {
         &self.opened_files
     }
 
+
     /// The opened files table, locked without cli/sti.
     ///
     /// Safe because the fd table is never accessed from interrupt context.
