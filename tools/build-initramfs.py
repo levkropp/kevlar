@@ -108,6 +108,7 @@ def compile_all_local():
         ("testing/test_ext4_mknod.c",    "test-ext4-mknod",  []),
         ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/test_pipe_crash.c",    "test-pipe-crash",  []),
+        ("testing/bb_minimal.c",         "bb-minimal",       []),
         ("testing/test_gcc_alpine.c",     "test-gcc-alpine", []),
         ("testing/test_static_pipe.c",    "test-static-pipe", []),
         ("testing/test_dynamic_exec.c",   "test-dyn-exec",    []),
