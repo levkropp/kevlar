@@ -1909,6 +1909,8 @@ impl Process {
         child_tidptr: usize, // CLONE_CHILD_SETTID address (0 = none)
         set_child_tid: bool,
         clear_child_tid: bool,
+        clone_files: bool,   // CLONE_FILES: share fd table (true) or copy (false)
+        is_vfork: bool,      // CLONE_VFORK: set vfork_parent so exec/exit wakes parent
     ) -> Result<Arc<Process>> {
         let mut process_table = PROCESSES.lock();
         let pid = alloc_pid(&mut process_table)?;
@@ -1926,9 +1928,16 @@ impl Process {
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             children: SpinLock::new(Vec::new()),
-            // Share address space, fds, and signal handlers.
+            // Share address space and signal handlers.
             vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
-            opened_files: Arc::clone(&parent.opened_files),
+            opened_files: if clone_files {
+                Arc::clone(&parent.opened_files)
+            } else {
+                // CLONE_FILES not set: child gets independent fd table copy.
+                // posix_spawn needs this so exec's CLOEXEC doesn't close
+                // the parent's signaling pipe.
+                Arc::new(SpinLock::new(parent.opened_files.lock_no_irq().clone()))
+            },
             root_fs: AtomicRefCell::new(parent.root_fs()),
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
@@ -1945,7 +1954,7 @@ impl Process {
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
             clear_child_tid: AtomicUsize::new(0),
-            vfork_parent: None,
+            vfork_parent: if is_vfork { Some(parent.pid()) } else { None },
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
