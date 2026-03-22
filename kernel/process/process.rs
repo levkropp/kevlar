@@ -3029,12 +3029,13 @@ fn do_elf_binfmt(
         // Entry point is the interpreter's entry, relocated.
         ip = UserVAddr::new_nonnull(interp_entry_offset + interp_base_offset)?;
 
-        // Update AT_PHDR for PIE: point into the relocated main executable image.
+        // Update AT_PHDR to point into the loaded main executable image.
         // The dynamic linker computes load bias as (AT_PHDR - phdr[0].p_vaddr).
-        // For PIE, phdrs are at main_base + e_phoff (within the first PT_LOAD segment).
-        if is_pie {
-            let phdr_addr = main_base_offset + (elf.header().e_phoff as usize);
-            trace!("AT_PHDR (PIE relocated): {:#x}", phdr_addr);
+        // For PIE: main_lo=0, main_base_offset=base → phdr at base + e_phoff.
+        // For ET_EXEC: main_base_offset=0, main_lo=0x400000 → phdr at 0x400000 + e_phoff.
+        {
+            let phdr_addr = main_lo + main_base_offset + (elf.header().e_phoff as usize);
+            trace!("AT_PHDR: {:#x} (is_pie={}, main_lo={:#x})", phdr_addr, is_pie, main_lo);
             auxv[0] = Auxv::Phdr(UserVAddr::new_nonnull(phdr_addr)?);
         }
 
