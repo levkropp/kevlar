@@ -254,6 +254,10 @@ impl Vm {
         self.heap_end
     }
 
+    pub fn heap_bottom(&self) -> UserVAddr {
+        self.heap_bottom
+    }
+
     pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<()> {
         if new_heap_end < self.heap_bottom {
             return Err(Errno::EINVAL.into());
@@ -289,8 +293,16 @@ impl Vm {
 
         if aligned_new.value() > aligned_old {
             let grow = aligned_new.value() - aligned_old;
+            // Guard against heap growing into the stack, but only when the heap
+            // is below the stack (non-PIE layout). For PIE binaries the heap is
+            // in the valloc region above the stack, so use valloc end instead.
             let stack_bottom = self.stack_vma().start();
-            if aligned_new >= stack_bottom {
+            let limit = if self.heap_bottom >= stack_bottom {
+                USER_VALLOC_END
+            } else {
+                stack_bottom
+            };
+            if aligned_new >= limit {
                 return Err(Errno::ENOMEM.into());
             }
             // Add an anonymous VMA for the new heap pages. If the range overlaps
