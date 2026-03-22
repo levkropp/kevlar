@@ -278,7 +278,7 @@ build/alpine.img:
 	@rm -rf build/alpine-root
 	@mkdir -p build/alpine-root
 	@docker rm -f kevlar-alpine 2>/dev/null || true
-	docker run --name kevlar-alpine alpine:3.21 sh -c 'apk add --no-cache openrc'
+	docker run --name kevlar-alpine alpine:3.21 sh -c 'apk add --no-cache openrc build-base'
 	fakeroot sh -c 'docker export kevlar-alpine | tar -xf - -C build/alpine-root && chown -R 0:0 build/alpine-root'
 	@docker rm kevlar-alpine
 	@sed -i 's/^root:\*:/root::/' build/alpine-root/etc/shadow
@@ -299,7 +299,7 @@ build/alpine.img:
 		'::ctrlaltdel:/sbin/reboot' \
 		'::shutdown:/sbin/openrc shutdown' \
 		> build/alpine-root/etc/inittab
-	dd if=/dev/zero of=build/alpine.img bs=1M count=256 2>/dev/null
+	dd if=/dev/zero of=build/alpine.img bs=1M count=512 2>/dev/null
 	fakeroot mke2fs -t ext4 -q -d build/alpine-root build/alpine.img
 	@rm -rf build/alpine-root
 
