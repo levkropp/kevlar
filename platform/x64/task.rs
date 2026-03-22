@@ -383,8 +383,16 @@ impl ArchTask {
         // Prepare the sigreturn stack in the userspace.
         let mut user_rsp = UserVAddr::new_nonnull(frame.rsp as usize)?;
 
-        // Avoid corrupting the red zone.
+        // Avoid corrupting the red zone (128 bytes below RSP on x86_64).
         user_rsp = user_rsp.sub(128);
+
+        // Reserve space for the signal frame (ucontext_t + siginfo_t).
+        // On Linux this is sizeof(struct rt_sigframe) ≈ 832 bytes.
+        // We must reserve this space even though we save/restore the
+        // context via Process.signaled_frame rather than the user stack,
+        // because the signal handler's own stack usage must NOT overlap
+        // with the interrupted function's local variables.
+        user_rsp = user_rsp.sub(832);
 
         // Determine the return address for the signal handler:
         // If the caller provided SA_RESTORER (e.g. musl's __restore_rt), use it —
@@ -403,6 +411,10 @@ impl ArchTask {
             user_rsp.write_bytes(TRAMPOLINE)?;
             trampoline_rip.as_isize() as u64
         };
+
+        // Align RSP to 16 bytes (x86_64 ABI requirement for function calls).
+        let aligned = user_rsp.value() & !0xF;
+        user_rsp = UserVAddr::new_nonnull(aligned)?;
 
         user_rsp = push_to_user_stack(user_rsp, return_rip)?;
 
