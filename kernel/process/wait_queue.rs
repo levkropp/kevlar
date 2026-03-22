@@ -20,6 +20,10 @@ impl WaitQueue {
         }
     }
 
+    pub fn waiter_count(&self) -> usize {
+        self.waiter_count.load(Ordering::Relaxed)
+    }
+
     /// Sleeps until `condition` returns `Some`, or a signal arrives (EINTR).
     ///
     /// Optimized vs previous version:

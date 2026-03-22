@@ -36,7 +36,7 @@ int main(void) {
         "echo 'int main(){return 42;}' > /root/t.c; "
         "echo write=$?; "
         "cat /root/t.c; "
-        "gcc -o /root/t /root/t.c 2>&1; "
+        "gcc -v -o /root/t /root/t.c 2>&1; "
         "echo gcc=$?; "
         "ls -la /root/t 2>&1; "
         "echo ls=$?; "
