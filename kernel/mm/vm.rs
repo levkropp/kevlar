@@ -208,6 +208,12 @@ impl Vm {
             self.vm_areas[1].start = new_bottom;
             self.vm_areas[1].len = 0;
         }
+        // Advance valloc_next past the heap so mmap allocations don't
+        // conflict with the heap VMA. Leave a 1-page gap for brk growth.
+        let past_heap = new_bottom.add(PAGE_SIZE);
+        if past_heap > self.valloc_next {
+            self.valloc_next = past_heap;
+        }
     }
 
     pub fn add_vm_area(
@@ -252,6 +258,10 @@ impl Vm {
 
     pub fn heap_end(&self) -> UserVAddr {
         self.heap_end
+    }
+
+    pub fn vm_areas_ref(&self) -> &[VmArea] {
+        &self.vm_areas
     }
 
     pub fn heap_bottom(&self) -> UserVAddr {
@@ -524,13 +534,34 @@ impl Vm {
     }
 
     pub fn alloc_vaddr_range(&mut self, len: usize) -> Result<UserVAddr> {
-        let next = self.valloc_next;
-        self.valloc_next = self.valloc_next.add(align_up(len, PAGE_SIZE));
-        if self.valloc_next >= USER_VALLOC_END {
-            return Err(Errno::ENOMEM.into());
+        let aligned_len = align_up(len, PAGE_SIZE);
+        // Skip over any existing VMAs that overlap with the candidate range.
+        // This handles the case where heap VMA or file-backed VMAs were placed
+        // in the valloc region by set_heap_bottom or load_elf_segments.
+        loop {
+            let next = self.valloc_next;
+            let end = next.add(aligned_len);
+            if end >= USER_VALLOC_END {
+                return Err(Errno::ENOMEM.into());
+            }
+            if self.is_free_vaddr_range(next, aligned_len) {
+                self.valloc_next = end;
+                return Ok(next);
+            }
+            // Advance past the conflicting VMA.
+            let mut advanced = false;
+            for area in &self.vm_areas {
+                if area.overlaps(next, aligned_len) {
+                    self.valloc_next = area.end();
+                    advanced = true;
+                    break;
+                }
+            }
+            if !advanced {
+                // Shouldn't happen, but avoid infinite loop.
+                self.valloc_next = self.valloc_next.add(PAGE_SIZE);
+            }
         }
-
-        Ok(next)
     }
 
     /// Allocate a virtual address range with a specific alignment.
