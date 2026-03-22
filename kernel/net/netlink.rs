@@ -33,6 +33,7 @@ const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 
 const RTM_NEWLINK: u16 = 16;
+const RTM_SETLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_GETADDR: u16 = 22;
@@ -127,7 +128,7 @@ impl NetlinkSocket {
             let payload = &data[offset + NLMSGHDR_SIZE..offset + msg_len];
 
             let result = match msg_type {
-                RTM_NEWLINK => self.handle_newlink(payload),
+                RTM_NEWLINK | RTM_SETLINK => self.handle_newlink(payload),
                 RTM_NEWADDR => self.handle_newaddr(payload),
                 RTM_NEWROUTE => self.handle_newroute(payload),
                 RTM_GETLINK => {
@@ -141,13 +142,14 @@ impl NetlinkSocket {
                     Ok(())
                 }
                 _ => {
-                    // Unknown message type — return error.
+                    // Unknown message type — accept silently.
                     Ok(())
                 }
             };
 
-            // Queue ACK if requested.
-            if msg_flags & NLM_F_ACK != 0 {
+            // Queue ACK if requested (NLM_F_ACK) or always for set operations.
+            // BusyBox ip expects an ACK for RTM_SETLINK etc.
+            if msg_flags & NLM_F_ACK != 0 || matches!(msg_type, RTM_SETLINK | RTM_NEWLINK | RTM_NEWADDR | RTM_NEWROUTE) {
                 let error = match &result {
                     Ok(()) => 0,
                     Err(e) => -(e.errno() as i32),
