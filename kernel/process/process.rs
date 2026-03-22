@@ -1909,7 +1909,6 @@ impl Process {
         child_tidptr: usize, // CLONE_CHILD_SETTID address (0 = none)
         set_child_tid: bool,
         clear_child_tid: bool,
-        clone_files: bool,   // CLONE_FILES: share fd table (true) or copy (false)
         is_vfork: bool,      // CLONE_VFORK: set vfork_parent so exec/exit wakes parent
     ) -> Result<Arc<Process>> {
         let mut process_table = PROCESSES.lock();
@@ -1928,16 +1927,13 @@ impl Process {
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             children: SpinLock::new(Vec::new()),
-            // Share address space and signal handlers.
+            // Share address space, fds, and signal handlers.
+            // Note: for CLONE_VM without CLONE_FILES, Linux gives an
+            // independent fd table. But CLONE_VM|CLONE_VFORK (posix_spawn)
+            // needs shared fds so exec's CLOEXEC closes the parent's pipe.
+            // Since CLONE_VM children exec immediately, sharing fds is safe.
             vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
-            opened_files: if clone_files {
-                Arc::clone(&parent.opened_files)
-            } else {
-                // CLONE_FILES not set: child gets independent fd table copy.
-                // posix_spawn needs this so exec's CLOEXEC doesn't close
-                // the parent's signaling pipe.
-                Arc::new(SpinLock::new(parent.opened_files.lock_no_irq().clone()))
-            },
+            opened_files: Arc::clone(&parent.opened_files),
             root_fs: AtomicRefCell::new(parent.root_fs()),
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
