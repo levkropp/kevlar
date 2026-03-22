@@ -1994,6 +1994,7 @@ impl Process {
         }
 
         parent.process_group().lock().add(Arc::downgrade(&child));
+        parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
         drop(process_table); // Release PROCESSES before acquiring SCHEDULER (lock ordering: SCHEDULER → PROCESSES in switch())
         SCHEDULER.lock().enqueue(pid);
