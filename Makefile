@@ -766,9 +766,10 @@ test-systemd:
 .PHONY: test-busybox
 test-busybox:
 	$(PROGRESS) "TEST" "BusyBox applet suite (102 tests)"
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
+	$(MAKE) build PROFILE=$(PROFILE)
 	timeout 120 $(PYTHON3) tools/run-qemu.py \
-		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		--kvm --arch $(ARCH) --append-cmdline "init=/bin/busybox-suite" \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-busybox-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
 		/tmp/kevlar-test-busybox-$(PROFILE).log || echo "(no TEST output found)"
