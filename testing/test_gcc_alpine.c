@@ -33,14 +33,28 @@ int main(void) {
     chdir("/");
     msg("kevlar: running gcc test\n");
     char *argv[] = { "/bin/sh", "-c",
+        // Test 1: compile minimal program
         "echo 'int main(){return 42;}' > /root/t.c; "
-        "echo write=$?; "
-        "cat /root/t.c; "
-        "gcc -v -o /root/t /root/t.c 2>&1; "
-        "echo gcc=$?; "
-        "ls -la /root/t 2>&1; "
-        "echo ls=$?; "
-        "echo DONE",
+        "gcc -o /root/t /root/t.c 2>&1; "
+        "echo gcc1=$?; "
+        // Test 2: run the compiled binary
+        "chmod +x /root/t; "
+        "/root/t; echo run1=$?; "
+        // Test 3: compile and run hello world with printf
+        "echo '#include <stdio.h>' > /root/hello.c; "
+        "echo 'int main(){printf(\"Hello from Kevlar!\\n\");return 0;}' >> /root/hello.c; "
+        "gcc -o /root/hello /root/hello.c 2>&1; "
+        "echo gcc2=$?; "
+        "chmod +x /root/hello; "
+        "/root/hello; echo run2=$?; "
+        // Test 4: compile with -O2
+        "echo 'int fib(int n){return n<=1?n:fib(n-1)+fib(n-2);}' > /root/fib.c; "
+        "echo 'int main(){return fib(10)==55?0:1;}' >> /root/fib.c; "
+        "gcc -O2 -o /root/fib /root/fib.c 2>&1; "
+        "echo gcc3=$?; "
+        "chmod +x /root/fib; "
+        "/root/fib; echo run3=$?; "
+        "echo DONE; poweroff -f",
         NULL };
     char *envp[] = { "HOME=/root", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "TERM=vt100", NULL };
     execve("/bin/sh", argv, envp);
