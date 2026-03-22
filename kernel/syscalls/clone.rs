@@ -47,7 +47,7 @@ impl<'a> SyscallHandler<'a> {
         let parent = current_process();
 
         if flags & CLONE_VM != 0 {
-            // Thread creation: share address space.
+            // Shared VM: thread or posix_spawn-style clone.
             if child_stack == 0 {
                 return Err(Errno::EINVAL.into());
             }

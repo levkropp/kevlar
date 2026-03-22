@@ -18,6 +18,11 @@ bitflags! {
         const WNOHANG    = 1;
         const WUNTRACED  = 2;
         const WCONTINUED = 8;
+        /// __WCLONE: wait only for children created with clone() that use a
+        /// non-default (non-SIGCHLD) exit signal. Since all our children use
+        /// SIGCHLD, this flag causes an immediate ECHILD return. musl's
+        /// posix_spawn relies on this to detect successful exec.
+        const __WCLONE   = 0x8000_0000u32 as i32;
     }
 }
 
@@ -35,6 +40,13 @@ impl<'a> SyscallHandler<'a> {
         options: WaitOptions,
         _rusage: Option<UserVAddr>,
     ) -> Result<isize> {
+        // __WCLONE: only match children with non-SIGCHLD exit signal. All our
+        // children use SIGCHLD, so no children match → return ECHILD. musl's
+        // posix_spawn uses this to detect that clone+exec succeeded.
+        if options.contains(WaitOptions::__WCLONE) {
+            return Err(Error::new(Errno::ECHILD));
+        }
+
         let _wait_span = debug::tracer::span_guard(debug::tracer::span::WAIT_TOTAL);
         let (got_pid, encoded_status) = JOIN_WAIT_QUEUE.sleep_signalable_until(|| {
             let current = current_process();
