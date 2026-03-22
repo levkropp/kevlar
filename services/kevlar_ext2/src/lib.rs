@@ -748,7 +748,7 @@ impl Ext2Inner {
     fn alloc_extent_block(
         &self,
         inode: &mut Ext2Inode,
-        ino: u32,
+        _ino: u32,
         logical_block: usize,
     ) -> Result<u64> {
         let mut root = Self::extent_root_data(inode);
