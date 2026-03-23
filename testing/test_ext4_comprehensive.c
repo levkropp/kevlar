@@ -424,6 +424,134 @@ int main(int argc, char **argv) {
     test_dynamic_exec("dyn_curl", "/usr/bin/curl", "curl");
     test_dynamic_exec("dyn_apk", "/sbin/apk", "apk-tools");
 
+    // ── Test: isolate libcrypto as the cause ──
+    // LD_PRELOAD libcrypto into busybox (which normally works).
+    // If this fails, libcrypto's constructor is the problem.
+    {
+        char out[4096];
+        // Test A: busybox echo without libcrypto (should work)
+        const char *argv_a[] = {"/bin/busybox", "echo", "NO_CRYPTO", NULL};
+        int rc_a = run(argv_a, out, sizeof(out));
+
+        // Test B: busybox echo WITH libcrypto preloaded
+        // We can't set env in run(), so use sh -c with env
+        const char *argv_b[] = {"/bin/sh", "-c",
+            "LD_PRELOAD=/lib/libcrypto.so.3 /bin/busybox echo WITH_CRYPTO", NULL};
+        char out_b[4096];
+        int rc_b = run(argv_b, out_b, sizeof(out_b));
+
+        msgf("CRYPTO_TEST: without=%d('%s') with=%d('%s')\n",
+             rc_a, out[0] ? out : "(empty)",
+             rc_b, out_b[0] ? out_b : "(empty)");
+
+        if (strstr(out, "NO_CRYPTO") && strstr(out_b, "WITH_CRYPTO"))
+            pass("libcrypto_preload");
+        else if (strstr(out, "NO_CRYPTO") && !strstr(out_b, "WITH_CRYPTO"))
+            fail("libcrypto_preload", "libcrypto constructor breaks programs");
+        else
+            fail("libcrypto_preload", "unexpected");
+
+        // Test C: preload ALL of curl's dependencies
+        const char *argv_c[] = {"/bin/sh", "-c",
+            "LD_PRELOAD='/usr/lib/libcurl.so.4 /lib/libcrypto.so.3 /lib/libssl.so.3 /lib/libz.so.1' "
+            "/bin/busybox echo ALL_LIBS", NULL};
+        char out_c[4096];
+        int rc_c = run(argv_c, out_c, sizeof(out_c));
+        msgf("ALL_LIBS_TEST: exit=%d output='%.40s'\n", rc_c, out_c);
+        if (strstr(out_c, "ALL_LIBS")) pass("all_libs_preload");
+        else fail("all_libs_preload", out_c[0] ? out_c : "(empty)");
+
+        // Test D: run curl --version and capture result
+        const char *argv_d[] = {"/bin/sh", "-c",
+            "/usr/bin/curl --version 2>&1; echo CURL_EXIT=$?", NULL};
+        char out_d[4096];
+        int rc_d = run(argv_d, out_d, sizeof(out_d));
+        msgf("CURL_SH_TEST: exit=%d output='%.100s'\n", rc_d, out_d);
+
+        // Test E: test individual library constructors
+        {
+            const char *libs[] = {
+                "/lib/libapk.so.2.14.0",
+                "/usr/lib/libcurl.so.4",
+                "/usr/lib/libbrotlidec.so.1",
+                "/usr/lib/libcares.so.2",
+                "/usr/lib/libidn2.so.0",
+                "/usr/lib/libnghttp2.so.14",
+                "/usr/lib/libpsl.so.5",
+                NULL
+            };
+            for (int i = 0; libs[i]; i++) {
+                char cmd[256];
+                char out_e[256];
+                snprintf(cmd, sizeof(cmd), "LD_PRELOAD=%s /bin/busybox echo LIB_OK", libs[i]);
+                const char *argv_e[] = {"/bin/sh", "-c", cmd, NULL};
+                int rc_e = run(argv_e, out_e, sizeof(out_e));
+                if (strstr(out_e, "LIB_OK"))
+                    msgf("LIB_CTOR %s: OK\n", libs[i]);
+                else
+                    msgf("LIB_CTOR %s: FAIL exit=%d output='%.40s'\n", libs[i], rc_e, out_e);
+            }
+        }
+
+        // Test F: verify installed curl matches the REAL package binary
+        // Real curl 8.14.1-r2: 256216 bytes, byte sum = 23686133
+        {
+            int fd = open("/usr/bin/curl", O_RDONLY);
+            if (fd >= 0) {
+                unsigned char buf[4096];
+                unsigned long sum = 0;
+                int total = 0, n;
+                while ((n = read(fd, buf, sizeof(buf))) > 0 && total < 256216) {
+                    int use = (total + n > 256216) ? (256216 - total) : n;
+                    for (int j = 0; j < use; j++) sum += buf[j];
+                    total += use;
+                }
+                close(fd);
+                msgf("VERIFY curl: bytes_checked=%d sum=%lu expected=23686133 match=%s\n",
+                     total, sum, sum == 23686133 ? "YES" : "NO");
+                if (sum == 23686133) pass("curl_integrity");
+                else { char r[64]; snprintf(r,64,"sum=%lu",sum); fail("curl_integrity",r); }
+            } else {
+                fail("curl_integrity", "can't open");
+            }
+        }
+
+        // Test G: check first 16KB checksum
+        // Compute a simple checksum of the first 16KB of the installed curl
+        {
+            int fd = open("/usr/bin/curl", O_RDONLY);
+            if (fd >= 0) {
+                unsigned char buf[4096];
+                unsigned long sum = 0;
+                int total_read = 0;
+                // Checksum first 16KB
+                for (int i = 0; i < 4 && total_read < 16384; i++) {
+                    int n = read(fd, buf, sizeof(buf));
+                    if (n <= 0) break;
+                    for (int j = 0; j < n; j++) sum += buf[j];
+                    total_read += n;
+                }
+                // Also read bytes around the section header area
+                struct stat st; fstat(fd, &st);
+                // Read last 4KB
+                if (st.st_size > 4096) {
+                    lseek(fd, st.st_size - 4096, SEEK_SET);
+                    int n = read(fd, buf, 4096);
+                    unsigned long tail_sum = 0;
+                    for (int j = 0; j < n; j++) tail_sum += buf[j];
+                    msgf("DETAIL curl_tail: last_4k_sum=%lu last_byte=%d\n",
+                         tail_sum, n > 0 ? buf[n-1] : -1);
+                    // Check if tail has all zeros (padding)
+                    int zeros = 0;
+                    for (int j = n - 1; j >= 0 && buf[j] == 0; j--) zeros++;
+                    msgf("DETAIL curl_tail: trailing_zeros=%d\n", zeros);
+                }
+                close(fd);
+                msgf("DETAIL curl_checksum: first_16k_sum=%lu bytes=%d\n", sum, total_read);
+            }
+        }
+    }
+
     // ── Detailed binary analysis ──
     // Compare installed curl to expected size and check for ELF validity
     {
