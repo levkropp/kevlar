@@ -469,6 +469,16 @@ struct Ext2MutableState {
 
 /// Shared filesystem state. All Ext2Dir/Ext2File/Ext2Symlink instances
 /// hold `Arc<Ext2Inner>` so they share mutable state.
+/// Write-back cache entry for dirty blocks.
+struct DirtyBlock {
+    block_num: u64,
+    data: Vec<u8>,
+}
+
+/// Write-back cache: batches block writes to reduce I/O overhead.
+/// Flushed automatically when full, or explicitly via flush_dirty().
+const DIRTY_CACHE_SIZE: usize = 64;
+
 struct Ext2Inner {
     device: Arc<dyn BlockDevice>,
     superblock: Ext2Superblock,
@@ -481,12 +491,24 @@ struct Ext2Inner {
     first_data_block: u32,
     state: SpinLock<Ext2MutableState>,
     dev_id: usize,
+    /// Dirty block write-back cache. Writes go here first;
+    /// flushed when full or on fsync.
+    dirty_cache: SpinLock<Vec<DirtyBlock>>,
 }
 
 impl Ext2Inner {
-    // ── Block I/O ──────────────────────────────────────────────────
+    // ── Block I/O (with write-back cache) ────────────────────────
 
     fn read_block(&self, block_num: u64) -> Result<Vec<u8>> {
+        // Check dirty cache first — return cached data if present.
+        {
+            let cache = self.dirty_cache.lock_no_irq();
+            for entry in cache.iter().rev() {
+                if entry.block_num == block_num {
+                    return Ok(entry.data.clone());
+                }
+            }
+        }
         let sector = block_num * (self.block_size as u64 / 512);
         let mut buf = vec![0u8; self.block_size];
         self.device
@@ -496,6 +518,42 @@ impl Ext2Inner {
     }
 
     fn write_block(&self, block_num: u64, data: &[u8]) -> Result<()> {
+        let mut cache = self.dirty_cache.lock_no_irq();
+        // Update existing entry if present, otherwise add new.
+        for entry in cache.iter_mut() {
+            if entry.block_num == block_num {
+                entry.data.copy_from_slice(&data[..self.block_size]);
+                return Ok(());
+            }
+        }
+        cache.push(DirtyBlock {
+            block_num,
+            data: data[..self.block_size].to_vec(),
+        });
+        // Flush if cache is full.
+        if cache.len() >= DIRTY_CACHE_SIZE {
+            drop(cache);
+            self.flush_dirty()?;
+        }
+        Ok(())
+    }
+
+    /// Flush all dirty blocks to the block device.
+    fn flush_dirty(&self) -> Result<()> {
+        let entries: Vec<DirtyBlock> = {
+            let mut cache = self.dirty_cache.lock_no_irq();
+            core::mem::take(&mut *cache)
+        };
+        for entry in &entries {
+            let sector = entry.block_num * (self.block_size as u64 / 512);
+            self.device
+                .write_sectors(sector, &entry.data)
+                .map_err(|_| Error::new(Errno::EIO))?;
+        }
+        Ok(())
+    }
+
+    fn write_block_sync(&self, block_num: u64, data: &[u8]) -> Result<()> {
         let sector = block_num * (self.block_size as u64 / 512);
         self.device
             .write_sectors(sector, data)
@@ -1751,6 +1809,7 @@ impl Ext2Filesystem {
                     free_inodes_count,
                 }),
                 dev_id: kevlar_vfs::inode::alloc_dev_id(),
+                dirty_cache: SpinLock::new(Vec::new()),
             }),
         }))
     }
@@ -2330,13 +2389,15 @@ impl FileLike for Ext2File {
 
     fn chmod(&self, mode: FileMode) -> Result<()> {
         let mut inode = self.inode.lock_no_irq();
-        // Preserve the file type bits (top 4 bits of the ext2 mode u16),
-        // replace the permission bits (lower 12 bits).
         let type_bits = inode.mode & 0xF000;
         let new_perm = mode.bits() as u16 & 0o7777;
         inode.mode = type_bits | new_perm;
         self.fs.write_inode(self.inode_num, &inode)?;
         Ok(())
+    }
+
+    fn fsync(&self) -> Result<()> {
+        self.fs.flush_dirty()
     }
 
     fn poll(&self) -> Result<PollStatus> {
