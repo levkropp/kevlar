@@ -19,12 +19,12 @@ use crate::{
 /// Use for unrecoverable faults (invalid address, no VMA).
 fn deliver_sigsegv_fatal() {
     let current = current_process();
+    let pid = current.pid().as_i32();
     let action = current.signals().lock_no_irq().get_action(SIGSEGV);
     if matches!(action, SigAction::Terminate) {
-        // No user handler — kill immediately to avoid infinite re-fault loop.
         Process::exit_by_signal(SIGSEGV);
     } else {
-        // User has a SIGSEGV handler — queue the signal for delivery.
+        warn!("SIGSEGV->handler pid={}", pid);
         current.send_signal(SIGSEGV);
     }
 }
@@ -674,8 +674,10 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         }
 
         // Permission violation: write fault on a page the VMA doesn't allow writing.
-        // This happens after mprotect(PROT_READ) on a previously writable page.
         if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0) {
+            let pid = current.pid().as_i32();
+            warn!("SIGSEGV: write to RO page {:#x} (pid={}, ip={:#x}, prot={:#x})",
+                  aligned_vaddr.value(), pid, ip, prot_flags);
             drop(vm);
             drop(vm_ref);
             current.send_signal(SIGSEGV);
