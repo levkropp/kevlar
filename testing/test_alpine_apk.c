@@ -43,12 +43,25 @@ int main(void) {
     mkdir("/mnt/root/tmp", 01777);
     mount("tmpfs", "/mnt/root/tmp", "tmpfs", 0, NULL);
 
-    // Copy apk.static from initramfs into the Alpine rootfs
-    // (the dynamic /sbin/apk has library issues)
+    // Copy tools from initramfs into the Alpine rootfs before pivot_root
     {
+        // Copy apk.static (working package manager)
         int src = open("/bin/apk.static", O_RDONLY);
         if (src >= 0) {
             int dst = open("/mnt/root/sbin/apk.static", O_WRONLY|O_CREAT|O_TRUNC, 0755);
+            if (dst >= 0) {
+                char buf[4096];
+                int n;
+                while ((n = read(src, buf, sizeof(buf))) > 0)
+                    write(dst, buf, n);
+                close(dst);
+            }
+            close(src);
+        }
+        // Copy dyntest (static diagnostic tool)
+        src = open("/bin/dyntest", O_RDONLY);
+        if (src >= 0) {
+            int dst = open("/mnt/root/usr/bin/dyntest", O_WRONLY|O_CREAT|O_TRUNC, 0755);
             if (dst >= 0) {
                 char buf[4096];
                 int n;
@@ -101,6 +114,11 @@ int main(void) {
         "  /usr/bin/curl --version 2>&1 | head -1\n"
         "  if [ $? -eq 0 ]; then echo TEST_PASS curl_version; else echo TEST_FAIL curl_version; fi\n"
         "  # Test curl HTTP — save to file, check result\n"
+        "  # Run dyntest AFTER curl is installed to probe dynamic linking\n"
+        "  if [ -x /usr/bin/dyntest ]; then\n"
+        "    echo DIAG: running dyntest after curl install...\n"
+        "    /usr/bin/dyntest 2>&1\n"
+        "  fi\n"
         "  echo DIAG: testing curl http to example.com...\n"
         "  /usr/bin/curl -s --max-time 15 http://example.com/ > /tmp/curl-out.html 2> /tmp/curl-err.txt\n"
         "  CURL_EXIT=$?\n"

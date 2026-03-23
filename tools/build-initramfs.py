@@ -220,6 +220,14 @@ def compile_all_local():
     if not ok:
         log("FAIL", f"hello-dynamic: {err}")
 
+    # ── dyntest: static musl diagnostic for probing dynamic linking ──
+    dyntest_src = ROOT / "testing" / "dyntest.c"
+    if dyntest_src.exists():
+        out = LOCAL_BIN / "dyntest"
+        _, ok, err = compile_one("musl-gcc", dyntest_src, out, ["-static", "-O2"])
+        if not ok:
+            log("FAIL", f"dyntest: {err}")
+
     if failed:
         log("WARN", f"{len(failed)} compilation(s) failed")
     return len(failed) == 0
