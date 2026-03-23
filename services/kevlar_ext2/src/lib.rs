@@ -504,6 +504,9 @@ struct Ext2Inner {
     /// Set when superblock/GDT free counts are modified.  Actual disk write is
     /// deferred until flush_all() (called from fsync/sync/umount).
     metadata_dirty: SpinLock<bool>,
+    /// Dentry cache: (parent_ino, name) → child_ino.
+    /// Avoids re-reading directory blocks for repeated path lookups.
+    dentry_cache: SpinLock<BTreeMap<(u32, String), u32>>,
 }
 
 impl Ext2Inner {
@@ -621,6 +624,32 @@ impl Ext2Inner {
     /// Mark that superblock/GDT free counts need flushing.
     fn mark_metadata_dirty(&self) {
         *self.metadata_dirty.lock_no_irq() = true;
+    }
+
+    // ── Dentry cache ──────────────────────────────────────────────
+
+    fn dcache_lookup(&self, parent_ino: u32, name: &str) -> Option<u32> {
+        let cache = self.dentry_cache.lock_no_irq();
+        // BTreeMap::get requires an owned key, but we can use range to avoid allocation.
+        // Since (u32, String) is Ord and we want exact match, we iterate the range.
+        let key = (parent_ino, String::from(name));
+        cache.get(&key).copied()
+    }
+
+    fn dcache_insert(&self, parent_ino: u32, name: &str, child_ino: u32) {
+        let mut cache = self.dentry_cache.lock_no_irq();
+        cache.insert((parent_ino, String::from(name)), child_ino);
+        // Evict if too large (simple cap).
+        if cache.len() > 4096 {
+            if let Some(key) = cache.keys().next().cloned() {
+                cache.remove(&key);
+            }
+        }
+    }
+
+    fn dcache_remove(&self, parent_ino: u32, name: &str) {
+        let mut cache = self.dentry_cache.lock_no_irq();
+        cache.remove(&(parent_ino, String::from(name)));
     }
 
     /// Flush everything: dirty block cache + deferred metadata (SB + GDT).
@@ -1891,6 +1920,7 @@ impl Ext2Filesystem {
                 dirty_cache: SpinLock::new(BTreeMap::new()),
                 read_cache: SpinLock::new(Vec::with_capacity(READ_CACHE_SIZE)),
                 metadata_dirty: SpinLock::new(false),
+                dentry_cache: SpinLock::new(BTreeMap::new()),
             }),
         }))
     }
@@ -1925,11 +1955,22 @@ struct Ext2Dir {
 
 impl Directory for Ext2Dir {
     fn lookup(&self, name: &str) -> Result<INode> {
+        // Fast path: check dentry cache.
+        if let Some(child_ino) = self.fs.dcache_lookup(self.inode_num, name) {
+            let child_inode = self.fs.read_inode(child_ino)?;
+            return Ok(self.fs.make_inode(child_ino, child_inode));
+        }
+
+        // Slow path: read directory entries.
         let inode = self.inode.lock_no_irq();
         let entries = self.fs.read_dir_entries(&inode)?;
         drop(inode);
+
         for entry in &entries {
             if entry.name == name {
+                // Cache only the found entry (avoid bulk-populating for directories
+                // where we'll only ever look up a few names).
+                self.fs.dcache_insert(self.inode_num, name, entry.inode);
                 let child_inode = self.fs.read_inode(entry.inode)?;
                 return Ok(self.fs.make_inode(entry.inode, child_inode));
             }
@@ -1938,19 +1979,8 @@ impl Directory for Ext2Dir {
     }
 
     fn create_file(&self, name: &str, mode: FileMode, uid: UId, gid: GId) -> Result<INode> {
-        if name == "t" {
-            kevlar_platform::println!("\x1b[32mext4 create_file({:?}) dir_ino={}\x1b[0m", name, self.inode_num);
-        }
-        // Check for existing entry.
-        {
-            let inode = self.inode.lock_no_irq();
-            let entries = self.fs.read_dir_entries(&inode)?;
-            for entry in &entries {
-                if entry.name == name {
-                    return Err(Error::new(Errno::EEXIST));
-                }
-            }
-        }
+        // The VFS layer already did lookup(name) → ENOENT before calling create_file,
+        // so we skip the duplicate-check directory scan here.
 
         // Allocate inode.
         let ino = self.fs.alloc_inode(false)?;
@@ -1979,6 +2009,9 @@ impl Directory for Ext2Dir {
             self.fs
                 .add_dir_entry(self.inode_num, &mut dir_inode, ino, name, EXT2_FT_REG_FILE)?;
         }
+
+        // Update dentry cache with the new entry.
+        self.fs.dcache_insert(self.inode_num, name, ino);
 
         Ok(self.fs.make_inode(ino, new_inode))
     }
@@ -2054,6 +2087,9 @@ impl Directory for Ext2Dir {
             dir_inode.links_count += 1; // child's ".." points to us
             self.fs.write_inode(self.inode_num, &dir_inode)?;
         }
+
+        // Update dentry cache with the new entry.
+        self.fs.dcache_insert(self.inode_num, name, ino);
 
         Ok(self.fs.make_inode(ino, new_inode))
     }
@@ -2238,6 +2274,9 @@ impl Directory for Ext2Dir {
             self.fs.free_inode(target_ino, false)?;
         }
 
+        // Remove from dentry cache.
+        self.fs.dcache_remove(self.inode_num, name);
+
         Ok(())
     }
 
@@ -2292,6 +2331,9 @@ impl Directory for Ext2Dir {
             dir_inode.links_count = dir_inode.links_count.saturating_sub(1);
             self.fs.write_inode(self.inode_num, &dir_inode)?;
         }
+
+        // Remove from dentry cache.
+        self.fs.dcache_remove(self.inode_num, name);
 
         Ok(())
     }
@@ -2361,6 +2403,10 @@ impl Directory for Ext2Dir {
                 file_type,
             )?;
         }
+
+        // Update dentry cache.
+        self.fs.dcache_remove(self.inode_num, old_name);
+        self.fs.dcache_insert(self.inode_num, new_name, target_ino);
 
         Ok(())
     }
