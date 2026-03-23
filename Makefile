@@ -391,6 +391,26 @@ run-apk: build alpine-disk
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
+# Standalone ext4 test: run the comprehensive ext4 + dynamic linking test suite
+# directly (no Alpine boot, no OpenRC, just mount ext4 and run tests).
+.PHONY: test-ext4
+test-ext4: build/alpine.img
+	$(PROGRESS) "TEST" "ext4 comprehensive (write/mmap/sendfile + dynamic linking)"
+	@cp build/alpine.img build/alpine-test.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test-alpine-apk"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-test.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-ext4-$(PROFILE).log; true
+	@rm -f build/alpine-test.img
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|BENCH)' \
+		/tmp/kevlar-test-ext4-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-ext4-$(PROFILE).log; then \
+		echo "EXT4 TESTS: some failures"; exit 1; \
+	elif grep -q '^=== RESULTS' /tmp/kevlar-test-ext4-$(PROFILE).log; then \
+		echo "EXT4 TESTS PASSED"; \
+	fi
+
 # Full Alpine boot test: mount ext4, OpenRC, apk update, apk add curl.
 # Uses a COPY of alpine.img so the test's /etc/inittab changes don't
 # corrupt the interactive run-alpine image.
