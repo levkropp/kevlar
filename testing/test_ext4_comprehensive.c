@@ -502,7 +502,7 @@ static void bench_create_delete(void) {
     msgf("BENCH create_%d: %lld us, %lld us/op\n", count, create_elapsed, create_elapsed/count);
     msgf("BENCH delete_%d: %lld us, %lld us/op\n", count, delete_elapsed, delete_elapsed/count);
 
-    // Also measure just open+close (no write) to isolate overhead
+    // Measure just open+close (no write) to isolate overhead
     start = now_us();
     for (int i = 0; i < count; i++) {
         char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
@@ -511,10 +511,44 @@ static void bench_create_delete(void) {
     }
     long long openclose_elapsed = now_us() - start;
     msgf("BENCH open_close_%d: %lld us, %lld us/op\n", count, openclose_elapsed, openclose_elapsed/count);
-    // cleanup
     for (int i = 0; i < count; i++) {
         char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
         unlink(p);
+    }
+
+    // Measure stat() on the same file 1000 times (tests read cache)
+    {
+        char p[256]; snprintf(p, sizeof(p), "%s/bench_stat", TD);
+        int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        write(fd, "x", 1); close(fd);
+        struct stat st;
+        start = now_us();
+        for (int i = 0; i < 1000; i++) stat(p, &st);
+        long long stat_elapsed = now_us() - start;
+        msgf("BENCH stat_1000: %lld us, %lld ns/op\n", stat_elapsed, stat_elapsed * 1000 / 1000);
+        unlink(p);
+    }
+
+    // Measure deep path resolution: /var/ext4test/d1/d2/d3/d4/file
+    {
+        char base[256]; snprintf(base, sizeof(base), "%s/d1", TD);
+        mkdir(base, 0755);
+        char d2[256]; snprintf(d2, sizeof(d2), "%s/d2", base);
+        mkdir(d2, 0755);
+        char d3[256]; snprintf(d3, sizeof(d3), "%s/d3", d2);
+        mkdir(d3, 0755);
+        char d4[256]; snprintf(d4, sizeof(d4), "%s/d4", d3);
+        mkdir(d4, 0755);
+        char deep[256]; snprintf(deep, sizeof(deep), "%s/file", d4);
+        int fd = open(deep, O_WRONLY|O_CREAT, 0644);
+        write(fd, "x", 1); close(fd);
+
+        struct stat st;
+        start = now_us();
+        for (int i = 0; i < 100; i++) stat(deep, &st);
+        long long deep_elapsed = now_us() - start;
+        msgf("BENCH deep_stat_100: %lld us, %lld us/op (5-component path)\n",
+             deep_elapsed, deep_elapsed / 100);
     }
 }
 

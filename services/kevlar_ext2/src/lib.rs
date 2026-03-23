@@ -479,6 +479,16 @@ struct DirtyBlock {
 /// Flushed automatically when full, or explicitly via flush_dirty().
 const DIRTY_CACHE_SIZE: usize = 64;
 
+/// Read cache: LRU block cache for hot metadata blocks (inode tables, directories).
+/// Eliminates redundant disk reads during path resolution and inode access.
+const READ_CACHE_SIZE: usize = 512;
+
+struct ReadCacheEntry {
+    block_num: u64,
+    data: Vec<u8>,
+    access_count: u32,
+}
+
 struct Ext2Inner {
     device: Arc<dyn BlockDevice>,
     superblock: Ext2Superblock,
@@ -494,13 +504,15 @@ struct Ext2Inner {
     /// Dirty block write-back cache. Writes go here first;
     /// flushed when full or on fsync.
     dirty_cache: SpinLock<Vec<DirtyBlock>>,
+    /// LRU read cache for hot blocks (inode tables, directories, indirect blocks).
+    read_cache: SpinLock<Vec<ReadCacheEntry>>,
 }
 
 impl Ext2Inner {
     // ── Block I/O (with write-back cache) ────────────────────────
 
     fn read_block(&self, block_num: u64) -> Result<Vec<u8>> {
-        // Check dirty cache first — return cached data if present.
+        // 1. Check dirty write-back cache first (most recent writes).
         {
             let cache = self.dirty_cache.lock_no_irq();
             for entry in cache.iter().rev() {
@@ -509,31 +521,88 @@ impl Ext2Inner {
                 }
             }
         }
+        // 2. Check read cache (hot metadata blocks).
+        {
+            let mut cache = self.read_cache.lock_no_irq();
+            for entry in cache.iter_mut() {
+                if entry.block_num == block_num {
+                    entry.access_count = entry.access_count.saturating_add(1);
+                    return Ok(entry.data.clone());
+                }
+            }
+        }
+        // 3. Cache miss — read from device.
         let sector = block_num * (self.block_size as u64 / 512);
         let mut buf = vec![0u8; self.block_size];
         self.device
             .read_sectors(sector, &mut buf)
             .map_err(|_| Error::new(Errno::EIO))?;
+        // Insert into read cache, evicting lowest-access entry if full.
+        {
+            let mut cache = self.read_cache.lock_no_irq();
+            if cache.len() >= READ_CACHE_SIZE {
+                // Evict the entry with the lowest access count.
+                let min_idx = cache.iter().enumerate()
+                    .min_by_key(|(_, e)| e.access_count)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                cache.swap_remove(min_idx);
+            }
+            cache.push(ReadCacheEntry {
+                block_num,
+                data: buf.clone(),
+                access_count: 1,
+            });
+        }
         Ok(buf)
     }
 
     fn write_block(&self, block_num: u64, data: &[u8]) -> Result<()> {
-        let mut cache = self.dirty_cache.lock_no_irq();
-        // Update existing entry if present, otherwise add new.
-        for entry in cache.iter_mut() {
-            if entry.block_num == block_num {
-                entry.data.copy_from_slice(&data[..self.block_size]);
-                return Ok(());
+        // Update dirty write-back cache.
+        {
+            let mut cache = self.dirty_cache.lock_no_irq();
+            let mut found = false;
+            for entry in cache.iter_mut() {
+                if entry.block_num == block_num {
+                    entry.data.copy_from_slice(&data[..self.block_size]);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                cache.push(DirtyBlock {
+                    block_num,
+                    data: data[..self.block_size].to_vec(),
+                });
+            }
+            if cache.len() >= DIRTY_CACHE_SIZE {
+                drop(cache);
+                self.flush_dirty()?;
             }
         }
-        cache.push(DirtyBlock {
-            block_num,
-            data: data[..self.block_size].to_vec(),
-        });
-        // Flush if cache is full.
-        if cache.len() >= DIRTY_CACHE_SIZE {
-            drop(cache);
-            self.flush_dirty()?;
+        // Also update read cache so subsequent reads see the written data.
+        {
+            let mut cache = self.read_cache.lock_no_irq();
+            for entry in cache.iter_mut() {
+                if entry.block_num == block_num {
+                    entry.data.copy_from_slice(&data[..self.block_size]);
+                    entry.access_count = entry.access_count.saturating_add(1);
+                    return Ok(());
+                }
+            }
+            // Not in read cache — insert it (the data is hot since we just wrote it).
+            if cache.len() >= READ_CACHE_SIZE {
+                let min_idx = cache.iter().enumerate()
+                    .min_by_key(|(_, e)| e.access_count)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                cache.swap_remove(min_idx);
+            }
+            cache.push(ReadCacheEntry {
+                block_num,
+                data: data[..self.block_size].to_vec(),
+                access_count: 1,
+            });
         }
         Ok(())
     }
@@ -1810,6 +1879,7 @@ impl Ext2Filesystem {
                 }),
                 dev_id: kevlar_vfs::inode::alloc_dev_id(),
                 dirty_cache: SpinLock::new(Vec::new()),
+                read_cache: SpinLock::new(Vec::with_capacity(READ_CACHE_SIZE)),
             }),
         }))
     }
