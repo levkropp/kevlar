@@ -32,6 +32,7 @@ impl FileLike for NullFile {
         Ok(Stat {
             inode_no: INodeNo::new(2),
             mode: FileMode::new(S_IFCHR | 0o666),
+            rdev: kevlar_vfs::stat::DevId::new((1 << 8) | 3), // major=1 minor=3
             ..Stat::zeroed()
         })
     }

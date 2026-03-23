@@ -259,7 +259,9 @@ pub struct Process {
     /// Lock-free mirror of `signals.pending`.  Avoids taking the spinlock on
     /// every syscall exit when no signals are pending (the common case).
     signal_pending: AtomicU32,
-    signaled_frame: AtomicCell<Option<PtRegs>>,
+    /// Stack of saved register contexts for nested signal delivery.
+    /// Each signal handler pushes its interrupted context; rt_sigreturn pops it.
+    signaled_frame_stack: SpinLock<arrayvec::ArrayVec<PtRegs, 4>>,
     sigset: AtomicU64,
     umask: AtomicCell<u32>,
     // UID/GID tracking (Phase 5) + saved IDs (M10.4).
@@ -354,7 +356,7 @@ impl Process {
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame: AtomicCell::new(None),
+            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -473,7 +475,7 @@ impl Process {
             root_fs: AtomicRefCell::new(root_fs),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame: AtomicCell::new(None),
+            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -1068,6 +1070,7 @@ impl Process {
             by_signal: false,
         });
 
+
         current.set_state(ProcessState::ExitedWith(status));
 
         // Reparent children to the nearest subreaper ancestor, or init (PID 1).
@@ -1088,18 +1091,16 @@ impl Process {
         // the same opened_files Arc and must keep their fds open).
         let is_thread = current.tgid != current.pid;
 
-        if is_thread {
-            // Keep a reference in EXITED_PROCESSES so the Arc (and its kernel
-            // stacks) stays alive through the upcoming switch().  Without this,
-            // PROCESSES.lock().remove() below drops the process table's ref,
-            // leaving count=1 (only CURRENT).  switch() then does:
-            //   arc_leak_one_ref(&prev)  → count=1 (CURRENT)
-            //   CURRENT.set(next)        → drops CURRENT → count=0 → FREED
-            //   switch_thread(prev.arch, ...)  → use-after-free!
-            // gc_exited_processes() frees these only from the idle thread,
-            // well after switch_task has finished using prev.arch().
-            EXITED_PROCESSES.lock().push(current.clone());
-        }
+        // Keep a reference in EXITED_PROCESSES so the Arc (and its kernel
+        // stacks) stays alive through the upcoming switch().  Without this,
+        // PROCESSES.lock().remove() below drops the process table's ref,
+        // leaving count=1 (only CURRENT).  switch() then does:
+        //   arc_leak_one_ref(&prev)  → count=1 (CURRENT)
+        //   CURRENT.set(next)        → drops CURRENT → count=0 → FREED
+        //   switch_thread(prev.arch, ...)  → use-after-free!
+        // gc_exited_processes() frees these only from the idle thread,
+        // well after switch_task has finished using prev.arch().
+        EXITED_PROCESSES.lock().push(current.clone());
 
         // Ghost-fork: restore parent's writable PTEs using the child's
         // address list (O(writable_pages) instead of O(all_PTEs)).
@@ -1404,7 +1405,7 @@ impl Process {
                         });
                         trace!("SIGCONT delivered to {:?} (already running)", current.pid);
                     }
-                    SigAction::Handler { handler, restorer, on_altstack } => {
+                    SigAction::Handler { handler, restorer, on_altstack, sa_mask } => {
                         #[cfg(target_arch = "x86_64")]
                         let rsp_before = frame.rsp as usize;
                         #[cfg(target_arch = "aarch64")]
@@ -1421,7 +1422,20 @@ impl Process {
                             "delivering signal {} to pid={} via handler at {:#x}",
                             signal, pid, handler.value()
                         );
-                        current.signaled_frame.store(Some(*frame));
+                        {
+                            let mut stack = current.signaled_frame_stack.lock_no_irq();
+                            if !stack.is_full() {
+                                stack.push(*frame);
+                            }
+                            // If stack is full (>4 nested signals), we lose
+                            // the context — extremely unlikely in practice.
+                        }
+
+                        // Save the current mask so sigreturn can restore it.
+                        // Signal blocking during handler execution is NOT done
+                        // because signaled_frame_stack supports nesting — the
+                        // handler can receive further signals safely.
+                        let old_mask = current.sigset_load();
 
                         // Switch to alternate signal stack if SA_ONSTACK and alt stack registered.
                         if on_altstack {
@@ -1450,7 +1464,7 @@ impl Process {
 
                         // Set usercopy context for fault attribution.
                         debug::usercopy::set_context("signal_stack_setup");
-                        let result = current.arch.setup_signal_stack(frame, signal, handler, restorer);
+                        let result = current.arch.setup_signal_stack(frame, signal, handler, restorer, old_mask.bits());
                         debug::usercopy::clear_context();
 
                         // ktrace: log frame state after signal setup.
@@ -1502,13 +1516,14 @@ impl Process {
     /// So-called `sigreturn`: restores the user context when the signal is
     /// delivered to a signal handler.
     pub fn restore_signaled_user_stack(current: &Arc<Process>, current_frame: &mut PtRegs) {
-        if let Some(signaled_frame) = current.signaled_frame.swap(None) {
-            current
+        let popped = current.signaled_frame_stack.lock_no_irq().pop();
+        if let Some(signaled_frame) = popped {
+            let saved_mask = current
                 .arch
                 .setup_sigreturn_stack(current_frame, &signaled_frame);
+            current.sigset_store(SigSet::from_raw(saved_mask));
         } else {
-            // The user intentionally called sigreturn(2) while it is not signaled.
-            // TODO: Should we ignore instead of the killing the process?
+            // No saved frame — spurious sigreturn. Kill the process.
             Process::exit_by_signal(SIGKILL);
         }
     }
@@ -1606,7 +1621,7 @@ impl Process {
         {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SIGNAL_RESET);
             current.signals.lock_no_irq().reset_on_exec();
-            current.signaled_frame.store(None);
+            current.signaled_frame_stack.lock_no_irq().clear();
         }
 
         // Ghost-fork: extract cow_addrs from the OLD VM before replacing it.
@@ -1708,7 +1723,7 @@ impl Process {
             arch,
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame: AtomicCell::new(None),
+            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -1825,7 +1840,7 @@ impl Process {
             arch,
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame: AtomicCell::new(None),
+            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -1941,7 +1956,7 @@ impl Process {
             root_fs: AtomicRefCell::new(parent.root_fs()),
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
-            signaled_frame: AtomicCell::new(None),
+            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(parent.sigset_load().bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),

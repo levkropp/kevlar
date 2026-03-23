@@ -80,6 +80,7 @@ impl ArchTask {
             }
         }
     }
+
 }
 
 impl Drop for ArchTask {
@@ -367,12 +368,19 @@ impl ArchTask {
         frame.rsp = user_sp.as_isize() as u64;
     }
 
+    /// Set up the user stack for signal handler invocation.
+    ///
+    /// Saves the complete interrupted context (all GPRs, RIP, RSP, RFLAGS)
+    /// and signal mask on the user stack.  `rt_sigreturn` reads them back,
+    /// so nested signal delivery works correctly — each signal frame is
+    /// independent on the user stack, no kernel-side single-slot limitation.
     pub fn setup_signal_stack(
         &self,
         frame: &mut PtRegs,
         signal: i32,
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
+        saved_sigmask: u64,
     ) -> Result<(), AccessError> {
         fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let rsp = rsp.sub(8);
@@ -380,24 +388,51 @@ impl ArchTask {
             Ok(rsp)
         }
 
-        // Prepare the sigreturn stack in the userspace.
         let mut user_rsp = UserVAddr::new_nonnull(frame.rsp as usize)?;
 
-        // Avoid corrupting the red zone (128 bytes below RSP on x86_64).
+        // Red zone (128 bytes below RSP that the function may use).
         user_rsp = user_rsp.sub(128);
 
-        // Reserve space for the signal frame (ucontext_t + siginfo_t).
-        // On Linux this is sizeof(struct rt_sigframe) ≈ 832 bytes.
-        // We must reserve this space even though we save/restore the
-        // context via Process.signaled_frame rather than the user stack,
-        // because the signal handler's own stack usage must NOT overlap
-        // with the interrupted function's local variables.
+        // === Signal context frame (saved on user stack) ===
+        // Layout (152 bytes, at the top of the 832-byte reserved area):
+        //   [+0]   saved_sigmask  (u64)
+        //   [+8]   rip            (u64)
+        //   [+16]  rsp            (u64)
+        //   [+24]  rbp            (u64)
+        //   [+32]  rax            (u64)
+        //   [+40]  rbx            (u64)
+        //   [+48]  rcx            (u64)
+        //   [+56]  rdx            (u64)
+        //   [+64]  rsi            (u64)
+        //   [+72]  rdi            (u64)
+        //   [+80]  r8             (u64)
+        //   [+88]  r9             (u64)
+        //   [+96]  r10            (u64)
+        //   [+104] r11            (u64)
+        //   [+112] r12            (u64)
+        //   [+120] r13            (u64)
+        //   [+128] r14            (u64)
+        //   [+136] r15            (u64)
+        //   [+144] rflags         (u64)
+        //   [+152..832] padding/unused
         user_rsp = user_rsp.sub(832);
+        let ctx_base = user_rsp;
 
-        // Determine the return address for the signal handler:
-        // If the caller provided SA_RESTORER (e.g. musl's __restore_rt), use it —
-        // it lives in executable text and calls rt_sigreturn for us.
-        // Otherwise fall back to writing a small trampoline on the stack.
+        // Write the full context to the user stack.
+        // Use a flat array to avoid unaligned-ref errors on packed PtRegs.
+        let regs: [u64; 19] = [
+            saved_sigmask,
+            { frame.rip }, { frame.rsp }, { frame.rbp },
+            { frame.rax }, { frame.rbx }, { frame.rcx }, { frame.rdx },
+            { frame.rsi }, { frame.rdi },
+            { frame.r8  }, { frame.r9  }, { frame.r10 }, { frame.r11 },
+            { frame.r12 }, { frame.r13 }, { frame.r14 }, { frame.r15 },
+            { frame.rflags },
+        ];
+        for (i, &val) in regs.iter().enumerate() {
+            ctx_base.add(i * 8).write::<u64>(&val)?;
+        }
+
         let return_rip = if let Some(res) = restorer {
             res.as_isize() as u64
         } else {
@@ -412,7 +447,7 @@ impl ArchTask {
             trampoline_rip.as_isize() as u64
         };
 
-        // Align RSP to 16 bytes (x86_64 ABI requirement for function calls).
+        // 16-byte align RSP (x86_64 ABI).
         let aligned = user_rsp.value() & !0xF;
         user_rsp = UserVAddr::new_nonnull(aligned)?;
 
@@ -427,8 +462,44 @@ impl ArchTask {
         Ok(())
     }
 
-    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) {
-        *current_frame = *signaled_frame;
+    /// Restore the interrupted context from the user stack.
+    /// Reads all saved GPRs, RIP, RSP, RFLAGS, and signal mask from
+    /// the signal frame that was written by `setup_signal_stack`.
+    /// Returns the saved signal mask for the caller to restore.
+    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) -> u64 {
+        // The context was saved at original_rsp - 128 (red zone) - 832 (frame top).
+        let original_rsp = signaled_frame.rsp as usize;
+        let ctx_base_val = original_rsp.wrapping_sub(128).wrapping_sub(832);
+        let ctx = match UserVAddr::new_nonnull(ctx_base_val) {
+            Ok(addr) => addr,
+            Err(_) => {
+                *current_frame = *signaled_frame;
+                return 0;
+            }
+        };
+
+        // Read all fields from the user stack context frame.
+        let saved_mask = ctx.read::<u64>().unwrap_or(0);
+        current_frame.rip = ctx.add(8).read::<u64>().unwrap_or(signaled_frame.rip);
+        current_frame.rsp = ctx.add(16).read::<u64>().unwrap_or(signaled_frame.rsp);
+        current_frame.rbp = ctx.add(24).read::<u64>().unwrap_or(signaled_frame.rbp);
+        current_frame.rax = ctx.add(32).read::<u64>().unwrap_or(signaled_frame.rax);
+        current_frame.rbx = ctx.add(40).read::<u64>().unwrap_or(signaled_frame.rbx);
+        current_frame.rcx = ctx.add(48).read::<u64>().unwrap_or(signaled_frame.rcx);
+        current_frame.rdx = ctx.add(56).read::<u64>().unwrap_or(signaled_frame.rdx);
+        current_frame.rsi = ctx.add(64).read::<u64>().unwrap_or(signaled_frame.rsi);
+        current_frame.rdi = ctx.add(72).read::<u64>().unwrap_or(signaled_frame.rdi);
+        current_frame.r8 = ctx.add(80).read::<u64>().unwrap_or(signaled_frame.r8);
+        current_frame.r9 = ctx.add(88).read::<u64>().unwrap_or(signaled_frame.r9);
+        current_frame.r10 = ctx.add(96).read::<u64>().unwrap_or(signaled_frame.r10);
+        current_frame.r11 = ctx.add(104).read::<u64>().unwrap_or(signaled_frame.r11);
+        current_frame.r12 = ctx.add(112).read::<u64>().unwrap_or(signaled_frame.r12);
+        current_frame.r13 = ctx.add(120).read::<u64>().unwrap_or(signaled_frame.r13);
+        current_frame.r14 = ctx.add(128).read::<u64>().unwrap_or(signaled_frame.r14);
+        current_frame.r15 = ctx.add(136).read::<u64>().unwrap_or(signaled_frame.r15);
+        current_frame.rflags = ctx.add(144).read::<u64>().unwrap_or(signaled_frame.rflags);
+
+        saved_mask
     }
 }
 

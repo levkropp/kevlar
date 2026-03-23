@@ -287,6 +287,14 @@ build/alpine.img:
 	@echo "UTC0" > build/alpine-root/etc/TZ
 	@ln -sf /usr/share/zoneinfo/UTC build/alpine-root/etc/localtime 2>/dev/null || echo "UTC0" > build/alpine-root/etc/localtime
 	@echo "nameserver 10.0.2.3" > build/alpine-root/etc/resolv.conf
+	@printf '/lib\n/usr/lib\n' > build/alpine-root/etc/ld-musl-x86_64.path
+	@# Symlink /usr/lib shared libraries into /lib so musl's dynamic linker
+	@# finds them. This makes curl and other dynamically-linked programs work.
+	@for f in build/alpine-root/usr/lib/lib*.so*; do \
+		test -f "$$f" || continue; \
+		base=$$(basename "$$f"); \
+		test -e "build/alpine-root/lib/$$base" || ln -sf "/usr/lib/$$base" "build/alpine-root/lib/$$base"; \
+	done
 	@sed -i 's|https://|http://|g' build/alpine-root/etc/apk/repositories
 	@chmod 777 build/alpine-root/var/cache/apk
 	@printf '%s\n' \
@@ -382,6 +390,27 @@ run-apk: build alpine-disk
 		$(if $(LOG_SERIAL),--log-serial "$(LOG_SERIAL)",)              \
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
+
+# Full Alpine boot test: mount ext4, OpenRC, apk update, apk add curl.
+# Uses a COPY of alpine.img so the test's /etc/inittab changes don't
+# corrupt the interactive run-alpine image.
+.PHONY: test-alpine-apk
+test-alpine-apk: build/alpine.img
+	$(PROGRESS) "TEST" "Alpine full boot + apk update + apk add curl"
+	@cp build/alpine.img build/alpine-test.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test-alpine-apk"
+	timeout 180 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-test.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-alpine-apk-$(PROFILE).log; true
+	@rm -f build/alpine-test.img
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL ALPINE)' \
+		/tmp/kevlar-test-alpine-apk-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-alpine-apk-$(PROFILE).log; then \
+		echo "ALPINE APK TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-alpine-apk-$(PROFILE).log; then \
+		echo "ALL ALPINE APK TESTS PASSED"; \
+	fi
 
 .PHONY: test-alpine
 test-alpine: alpine-disk

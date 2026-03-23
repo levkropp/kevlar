@@ -195,6 +195,7 @@ impl FileLike for UrandomFile {
     fn stat(&self) -> kevlar_vfs::result::Result<Stat> {
         Ok(Stat {
             mode: FileMode::new(S_IFCHR | 0o666),
+            rdev: kevlar_vfs::stat::DevId::new((1 << 8) | 9), // major=1 minor=9
             ..Stat::zeroed()
         })
     }

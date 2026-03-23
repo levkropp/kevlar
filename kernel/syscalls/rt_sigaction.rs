@@ -2,7 +2,7 @@
 use crate::ctypes::*;
 use crate::prelude::*;
 use crate::process::current_process;
-use crate::process::signal::{SigAction, DEFAULT_ACTIONS, SIGCHLD, SIG_DFL, SIG_IGN};
+use crate::process::signal::{SigAction, SigSet, DEFAULT_ACTIONS, SIGCHLD, SIG_DFL, SIG_IGN};
 use crate::syscalls::SyscallHandler;
 use kevlar_platform::address::UserVAddr;
 
@@ -37,6 +37,8 @@ impl<'a> SyscallHandler<'a> {
                 None
             };
 
+            let sa_mask = SigSet::from_raw(raw[3] as u64);
+
             let new_action = match handler {
                 SIG_IGN => SigAction::Ignore,
                 SIG_DFL => match DEFAULT_ACTIONS.get(signum as usize) {
@@ -47,6 +49,7 @@ impl<'a> SyscallHandler<'a> {
                     handler: UserVAddr::new(handler).ok_or_else(|| Error::new(Errno::EFAULT))?,
                     restorer,
                     on_altstack: sa_flags & SA_ONSTACK != 0,
+                    sa_mask,
                 },
             };
             Some((new_action, handler))

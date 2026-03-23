@@ -31,6 +31,7 @@ impl FileLike for ZeroFile {
         Ok(Stat {
             inode_no: INodeNo::new(3),
             mode: FileMode::new(S_IFCHR | 0o666),
+            rdev: kevlar_vfs::stat::DevId::new((1 << 8) | 5), // major=1 minor=5
             ..Stat::zeroed()
         })
     }

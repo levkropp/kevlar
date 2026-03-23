@@ -1,19 +1,52 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//! Buddy allocator with coalescing on free.
+//! Buddy allocator with coalescing on free and allocation bitmap.
 //!
 //! Uses intrusive free lists stored in the free pages themselves.
 //! On free, coalesces with the buddy block if both are free, recursing
 //! up to MAX_ORDER.
 //!
-//! Coalescing is essential under KVM: freed pages have warm EPT entries
-//! from prior use.  When coalesced blocks are re-split for allocation,
-//! the sub-pages retain warm EPT entries, making zeroing ~6x faster
-//! than fresh (cold-EPT) blocks.
+//! An allocation bitmap tracks which pages are currently allocated.
+//! `free_coalesce` only merges with a buddy whose bitmap bits are ALL
+//! clear, preventing coalescing with pages that left the buddy's free
+//! lists (e.g., pages sitting in the page-allocator's PAGE_CACHE).
 
 const PAGE_SIZE: usize = 4096;
 
 /// Maximum block order: 2^MAX_ORDER pages = 4MB.
 const MAX_ORDER: usize = 10;
+
+/// Maximum pages tracked by the global bitmap (supports up to 1GB).
+const MAX_BITMAP_PAGES: usize = 262144;
+const BITMAP_BYTES: usize = MAX_BITMAP_PAGES / 8;
+
+/// Global allocation bitmap shared by all zones.
+/// Indexed by physical page number (paddr / PAGE_SIZE).
+/// bit=1 → page is allocated, bit=0 → page is free.
+///
+/// Safety: only accessed while the ZONES SpinLock is held (same lock
+/// that protects BuddyAllocator), so no additional synchronization needed.
+static mut ALLOC_BITMAP: [u8; BITMAP_BYTES] = [0u8; BITMAP_BYTES];
+
+#[inline(always)]
+fn bitmap_is_allocated(paddr: usize) -> bool {
+    let idx = paddr / PAGE_SIZE;
+    if idx >= MAX_BITMAP_PAGES { return false; }
+    unsafe { (ALLOC_BITMAP[idx / 8] & (1 << (idx % 8))) != 0 }
+}
+
+#[inline(always)]
+fn bitmap_set_allocated(paddr: usize) {
+    let idx = paddr / PAGE_SIZE;
+    if idx >= MAX_BITMAP_PAGES { return; }
+    unsafe { ALLOC_BITMAP[idx / 8] |= 1 << (idx % 8); }
+}
+
+#[inline(always)]
+fn bitmap_clear_allocated(paddr: usize) {
+    let idx = paddr / PAGE_SIZE;
+    if idx >= MAX_BITMAP_PAGES { return; }
+    unsafe { ALLOC_BITMAP[idx / 8] &= !(1 << (idx % 8)); }
+}
 
 pub struct BuddyAllocator {
     free_lists: [usize; MAX_ORDER + 1], // head paddr per order (0 = empty)
@@ -48,6 +81,7 @@ impl BuddyAllocator {
         };
 
         // Build free lists by creating the largest aligned blocks possible.
+        // All pages start as "free" in the bitmap (global static is zero-init).
         let mut offset = 0; // in pages
         while offset < num_pages {
             let paddr = base_paddr + offset * PAGE_SIZE;
@@ -106,12 +140,21 @@ impl BuddyAllocator {
     }
 
     /// Pop a block from the given order's free list, splitting higher-order
-    /// blocks if needed.
+    /// blocks if needed.  Marks all pages as allocated in the bitmap.
     #[inline(always)]
     fn alloc_order(&mut self, target_order: usize) -> Option<usize> {
         // Fast path: pop from target order.
         if self.free_lists[target_order] != 0 {
-            return Some(self.pop_free(target_order));
+            let block = self.pop_free(target_order);
+            let count = 1usize << target_order;
+            for i in 0..count {
+                let page = block + i * PAGE_SIZE;
+                debug_assert!(!bitmap_is_allocated(page),
+                    "buddy_alloc: double alloc page {:#x} block {:#x} order {}",
+                    page, block, target_order);
+                bitmap_set_allocated(page);
+            }
+            return Some(block);
         }
 
         // Find the smallest non-empty higher-order list and split down.
@@ -135,17 +178,41 @@ impl BuddyAllocator {
             self.push_free(buddy, order);
         }
 
+        let count = 1usize << target_order;
+        for i in 0..count {
+            let page = block + i * PAGE_SIZE;
+            debug_assert!(!bitmap_is_allocated(page),
+                "buddy_alloc: double alloc (split) page {:#x} block {:#x} order {}",
+                page, block, target_order);
+            bitmap_set_allocated(page);
+        }
+
         Some(block)
     }
 
     /// Free a block with buddy coalescing.
-    /// Checks if the buddy is in the same-order free list; if so, removes
-    /// the buddy, merges into a higher-order block, and recurses.
+    /// Only coalesces with a buddy if ALL its pages are free in the bitmap.
     fn free_coalesce(&mut self, mut ptr: usize, mut order: usize) {
+        let count = 1usize << order;
+        for i in 0..count {
+            let page = ptr + i * PAGE_SIZE;
+            debug_assert!(bitmap_is_allocated(page),
+                "buddy_alloc: double free page {:#x} block {:#x} order {}",
+                page, ptr, order);
+            bitmap_clear_allocated(page);
+        }
+
         while order < MAX_ORDER {
             let buddy = ptr ^ ((1usize << order) * PAGE_SIZE);
             // Buddy must be within our managed region.
             if buddy < self.base || buddy >= self.end {
+                break;
+            }
+            // Bitmap guard: only coalesce if ALL buddy pages are free.
+            // This prevents merging with pages that are in the PAGE_CACHE
+            // (removed from buddy free lists but still "allocated").
+            let buddy_pages = 1usize << order;
+            if (0..buddy_pages).any(|i| bitmap_is_allocated(buddy + i * PAGE_SIZE)) {
                 break;
             }
             // Check if buddy is in the free list at this order.

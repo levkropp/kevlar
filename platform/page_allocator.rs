@@ -14,6 +14,7 @@ static ZONES: SpinLock<ArrayVec<Allocator, 8>> = SpinLock::new(ArrayVec::new_con
 static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NUM_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 
+
 /// A simple LIFO cache of single free pages to bypass the buddy allocator.
 /// Sized to absorb large fault-around bursts (64 pages) across multiple
 /// consecutive faults without immediate buddy allocator refills.
@@ -195,6 +196,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
             if let Some(paddr) = PREZEROED_4K_POOL.lock_no_irq().pop() {
                 PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
+
                 return Ok(paddr);
             }
         }
@@ -205,6 +207,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
+
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }
@@ -218,6 +221,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
+
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }

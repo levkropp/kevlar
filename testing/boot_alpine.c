@@ -54,6 +54,26 @@ int main(void) {
     mkdir("/mnt/root/tmp", 01777);
     mount("tmpfs", "/mnt/root/tmp", "tmpfs", 0, NULL);
 
+    // Copy apk.static from initramfs into the Alpine rootfs so the
+    // interactive shell has a working package manager. The dynamic /sbin/apk
+    // fails silently due to a musl/libcrypto initialization issue.
+    {
+        int src = open("/bin/apk.static", O_RDONLY);
+        if (src >= 0) {
+            int dst = open("/mnt/root/usr/sbin/apk.static", O_WRONLY|O_CREAT|O_TRUNC, 0755);
+            if (dst >= 0) {
+                char cpbuf[4096];
+                int n;
+                while ((n = read(src, cpbuf, sizeof(cpbuf))) > 0)
+                    write(dst, cpbuf, n);
+                close(dst);
+                // Also create 'apk' alias so users can type 'apk update'
+                symlink("/usr/sbin/apk.static", "/mnt/root/usr/sbin/apk-static");
+            }
+            close(src);
+        }
+    }
+
     // Try pivot_root first (proper root switch, no path prefix issues).
     // Fallback to chroot if pivot_root isn't available.
     mkdir("/mnt/root/oldroot", 0755);
