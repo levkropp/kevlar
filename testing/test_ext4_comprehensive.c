@@ -381,17 +381,175 @@ int main(int argc, char **argv) {
     test_chmod();
     test_symlink();
 
-    // Dynamic linking tests (programs from Alpine packages)
-    // BusyBox doesn't have --version; use --help which prints the version header
+    // ── Dynamic linking tests ──────────────────────────────────────
+    // BusyBox (links: just musl) — known to work
     {
         char out[4096];
         const char *argv[] = {"/bin/busybox", "--help", NULL};
         int rc = run(argv, out, sizeof(out));
-        if (strstr(out, "BusyBox")) pass("busybox_dynamic");
-        else { char r[64]; snprintf(r,64,"exit=%d len=%d",rc,(int)strlen(out)); fail("busybox_dynamic",r); }
+        if (strstr(out, "BusyBox")) pass("dyn_busybox");
+        else { char r[64]; snprintf(r,64,"exit=%d len=%d",rc,(int)strlen(out)); fail("dyn_busybox",r); }
     }
-    test_dynamic_exec("curl_version", "/usr/bin/curl", "curl");
-    test_dynamic_exec("apk_version", "/sbin/apk", "apk-tools");
+
+    // Incremental library loading tests: write tiny test programs to /tmp,
+    // compile with gcc (if available) or just test existing binaries.
+    // Since gcc may not work, test existing Alpine binaries that link
+    // different numbers of libraries:
+    //
+    // openrc (links: libeinfo, librc, musl) — works for OpenRC boot
+    // apk (links: libapk, libcrypto, libssl, libz, musl) — fails
+    // curl (links: libcurl, libcrypto, libssl, libz, + more, musl) — fails
+
+    // Test: /sbin/openrc --help (links libeinfo + librc)
+    {
+        char out[4096];
+        const char *argv[] = {"/sbin/openrc", "--help", NULL};
+        int rc = run(argv, out, sizeof(out));
+        // openrc --help exits 1 but produces output
+        if (strlen(out) > 0) pass("dyn_openrc");
+        else { char r[64]; snprintf(r,64,"exit=%d len=%d",rc,(int)strlen(out)); fail("dyn_openrc",r); }
+    }
+
+    // Test: /usr/bin/file --version (if installed — links libmagic + libz)
+    {
+        struct stat fst;
+        if (stat("/usr/bin/file", &fst) == 0 && fst.st_size > 0) {
+            test_dynamic_exec("dyn_file", "/usr/bin/file", NULL);
+        } else {
+            msgf("  SKIP dyn_file (not installed)\n");
+        }
+    }
+
+    // Test existing multi-lib binaries
+    test_dynamic_exec("dyn_curl", "/usr/bin/curl", "curl");
+    test_dynamic_exec("dyn_apk", "/sbin/apk", "apk-tools");
+
+    // ── Detailed binary analysis ──
+    // Compare installed curl to expected size and check for ELF validity
+    {
+        struct stat st;
+        if (stat("/usr/bin/curl", &st) == 0) {
+            // Real Alpine curl 8.14.1-r2 is 256216 bytes
+            msgf("DETAIL curl: size=%ld expected=256216 diff=%ld\n",
+                 (long)st.st_size, (long)st.st_size - 256216);
+            // Read first 64 bytes (ELF header) and check key fields
+            int fd = open("/usr/bin/curl", O_RDONLY);
+            if (fd >= 0) {
+                unsigned char eh[64];
+                read(fd, eh, 64);
+                unsigned short e_type = *(unsigned short*)(eh + 16);
+                unsigned short e_machine = *(unsigned short*)(eh + 18);
+                unsigned long e_entry = *(unsigned long*)(eh + 24);
+                unsigned long e_phoff = *(unsigned long*)(eh + 32);
+                unsigned short e_phnum = *(unsigned short*)(eh + 56);
+                unsigned long e_shoff = *(unsigned long*)(eh + 40);
+                unsigned short e_shnum = *(unsigned short*)(eh + 60);
+                msgf("DETAIL curl ELF: type=%d machine=%d entry=%lx phoff=%ld phnum=%d shoff=%ld shnum=%d\n",
+                     e_type, e_machine, e_entry, (long)e_phoff, e_phnum, (long)e_shoff, e_shnum);
+                // Check if section headers are within file
+                unsigned long sh_end = e_shoff + e_shnum * (*(unsigned short*)(eh + 58));
+                msgf("DETAIL curl: sh_end=%ld file_size=%ld sh_within=%s\n",
+                     (long)sh_end, (long)st.st_size,
+                     sh_end <= (unsigned long)st.st_size ? "YES" : "NO");
+                close(fd);
+            }
+        }
+    }
+
+    // ── Detailed library loading probe ──────────────────────────────
+    // For each library that curl needs, check if it can be dlopen'd
+    // by writing a tiny test and running it. Since we can't compile,
+    // we'll check another way: run ldd-like analysis by reading the
+    // dynamic section of each library and checking its NEEDED deps.
+    {
+        msg("\n=== Library dependency chain ===\n");
+        const char *libs[] = {
+            "/usr/bin/curl",
+            "/usr/lib/libcurl.so.4",
+            "/usr/lib/libcrypto.so.3",
+            "/usr/lib/libssl.so.3",
+            "/lib/libapk.so.2.14.0",
+            NULL
+        };
+        for (int i = 0; libs[i]; i++) {
+            // Read the ELF header to find PT_DYNAMIC
+            int fd = open(libs[i], O_RDONLY);
+            if (fd < 0) { msgf("  %s: not found\n", libs[i]); continue; }
+            unsigned char ehdr[64];
+            if (read(fd, ehdr, 64) != 64 || ehdr[0] != 0x7f) {
+                close(fd); msgf("  %s: not ELF\n", libs[i]); continue;
+            }
+            unsigned long phoff = *(unsigned long*)(ehdr + 32);
+            int phnum = *(unsigned short*)(ehdr + 56);
+            int phentsz = *(unsigned short*)(ehdr + 54);
+
+            // Find PT_DYNAMIC (type=2)
+            unsigned long dyn_off = 0, dyn_sz = 0;
+            for (int j = 0; j < phnum; j++) {
+                unsigned char ph[56];
+                lseek(fd, phoff + j * phentsz, SEEK_SET);
+                if (read(fd, ph, 56) < 56) break;
+                if (*(unsigned int*)ph == 2) { // PT_DYNAMIC
+                    dyn_off = *(unsigned long*)(ph + 8);
+                    dyn_sz = *(unsigned long*)(ph + 32);
+                    break;
+                }
+            }
+
+            // Find PT_LOAD for .dynstr (type=1, containing the string table)
+            // Actually just read DT_NEEDED entries from .dynamic
+            if (dyn_off == 0) { close(fd); continue; }
+
+            // Find strtab offset from dynamic section
+            unsigned long strtab_off = 0;
+            unsigned char dynbuf[4096];
+            lseek(fd, dyn_off, SEEK_SET);
+            int dsz = read(fd, dynbuf, sizeof(dynbuf) < dyn_sz ? sizeof(dynbuf) : dyn_sz);
+
+            // Parse DT entries (each is 16 bytes: tag + val)
+            unsigned long needed[16];
+            int needed_count = 0;
+            for (int off = 0; off + 16 <= dsz; off += 16) {
+                long tag = *(long*)(dynbuf + off);
+                unsigned long val = *(unsigned long*)(dynbuf + off + 8);
+                if (tag == 5) strtab_off = val; // DT_STRTAB (vaddr)
+                if (tag == 1 && needed_count < 16) // DT_NEEDED
+                    needed[needed_count++] = val;
+                if (tag == 0) break; // DT_NULL
+            }
+
+            // strtab_off is a virtual address — we need the file offset
+            // Find the PT_LOAD that contains strtab_off
+            unsigned long strtab_file_off = 0;
+            for (int j = 0; j < phnum; j++) {
+                unsigned char ph[56];
+                lseek(fd, phoff + j * phentsz, SEEK_SET);
+                if (read(fd, ph, 56) < 56) break;
+                if (*(unsigned int*)ph == 1) { // PT_LOAD
+                    unsigned long p_vaddr = *(unsigned long*)(ph + 16);
+                    unsigned long p_offset = *(unsigned long*)(ph + 8);
+                    unsigned long p_filesz = *(unsigned long*)(ph + 32);
+                    if (strtab_off >= p_vaddr && strtab_off < p_vaddr + p_filesz) {
+                        strtab_file_off = p_offset + (strtab_off - p_vaddr);
+                        break;
+                    }
+                }
+            }
+
+            msgf("  %s needs:", libs[i]);
+            if (strtab_file_off > 0) {
+                char strtab[4096];
+                lseek(fd, strtab_file_off, SEEK_SET);
+                int stsz = read(fd, strtab, sizeof(strtab));
+                for (int k = 0; k < needed_count; k++) {
+                    if (needed[k] < (unsigned long)stsz)
+                        msgf(" %s", strtab + needed[k]);
+                }
+            }
+            msgf("\n");
+            close(fd);
+        }
+    }
 
     // Benchmarks
     bench_seq_write();
