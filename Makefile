@@ -397,7 +397,7 @@ run-apk: build alpine-disk
 test-ext4: build/alpine.img
 	$(PROGRESS) "TEST" "ext4 comprehensive (write/mmap/sendfile + dynamic linking)"
 	@cp build/alpine.img build/alpine-test.img
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test-alpine-apk"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine-apk"
 	timeout 180 $(PYTHON3) tools/run-qemu.py \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-test.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \

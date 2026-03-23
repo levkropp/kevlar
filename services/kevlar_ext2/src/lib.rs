@@ -17,6 +17,7 @@
 extern crate alloc;
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -469,19 +470,13 @@ struct Ext2MutableState {
 
 /// Shared filesystem state. All Ext2Dir/Ext2File/Ext2Symlink instances
 /// hold `Arc<Ext2Inner>` so they share mutable state.
-/// Write-back cache entry for dirty blocks.
-struct DirtyBlock {
-    block_num: u64,
-    data: Vec<u8>,
-}
-
-/// Write-back cache: batches block writes to reduce I/O overhead.
-/// Flushed automatically when full, or explicitly via flush_dirty().
-const DIRTY_CACHE_SIZE: usize = 64;
+/// Dirty write-back cache: writes are batched here and flushed on fsync/sync.
+/// 1024 entries × 4KB = 4MB of buffered writes before forced flush.
+const DIRTY_CACHE_SIZE: usize = 1024;
 
 /// Read cache: LRU block cache for hot metadata blocks (inode tables, directories).
 /// Eliminates redundant disk reads during path resolution and inode access.
-const READ_CACHE_SIZE: usize = 512;
+const READ_CACHE_SIZE: usize = 512;  // 512 × 4KB = 2MB of cached blocks
 
 struct ReadCacheEntry {
     block_num: u64,
@@ -501,11 +496,14 @@ struct Ext2Inner {
     first_data_block: u32,
     state: SpinLock<Ext2MutableState>,
     dev_id: usize,
-    /// Dirty block write-back cache. Writes go here first;
-    /// flushed when full or on fsync.
-    dirty_cache: SpinLock<Vec<DirtyBlock>>,
+    /// Dirty block write-back cache (BTreeMap for O(log n) lookup + sorted flush).
+    /// Writes go here first; flushed when full or on fsync.
+    dirty_cache: SpinLock<BTreeMap<u64, Vec<u8>>>,
     /// LRU read cache for hot blocks (inode tables, directories, indirect blocks).
     read_cache: SpinLock<Vec<ReadCacheEntry>>,
+    /// Set when superblock/GDT free counts are modified.  Actual disk write is
+    /// deferred until flush_all() (called from fsync/sync/umount).
+    metadata_dirty: SpinLock<bool>,
 }
 
 impl Ext2Inner {
@@ -515,10 +513,8 @@ impl Ext2Inner {
         // 1. Check dirty write-back cache first (most recent writes).
         {
             let cache = self.dirty_cache.lock_no_irq();
-            for entry in cache.iter().rev() {
-                if entry.block_num == block_num {
-                    return Ok(entry.data.clone());
-                }
+            if let Some(data) = cache.get(&block_num) {
+                return Ok(data.clone());
             }
         }
         // 2. Check read cache (hot metadata blocks).
@@ -558,29 +554,25 @@ impl Ext2Inner {
     }
 
     fn write_block(&self, block_num: u64, data: &[u8]) -> Result<()> {
-        // Update dirty write-back cache.
+        // Update dirty write-back cache (BTreeMap: O(log n) insert/update).
         {
             let mut cache = self.dirty_cache.lock_no_irq();
-            let mut found = false;
-            for entry in cache.iter_mut() {
-                if entry.block_num == block_num {
-                    entry.data.copy_from_slice(&data[..self.block_size]);
-                    found = true;
-                    break;
+            // insert_or_update: if key exists, overwrite value; if not, insert.
+            match cache.get_mut(&block_num) {
+                Some(existing) => {
+                    existing.copy_from_slice(&data[..self.block_size]);
                 }
-            }
-            if !found {
-                cache.push(DirtyBlock {
-                    block_num,
-                    data: data[..self.block_size].to_vec(),
-                });
+                None => {
+                    cache.insert(block_num, data[..self.block_size].to_vec());
+                }
             }
             if cache.len() >= DIRTY_CACHE_SIZE {
                 drop(cache);
                 self.flush_dirty()?;
             }
         }
-        // Also update read cache so subsequent reads see the written data.
+        // Also update read cache so subsequent reads see the written data
+        // even after the dirty cache has been flushed.
         {
             let mut cache = self.read_cache.lock_no_irq();
             for entry in cache.iter_mut() {
@@ -590,7 +582,6 @@ impl Ext2Inner {
                     return Ok(());
                 }
             }
-            // Not in read cache — insert it (the data is hot since we just wrote it).
             if cache.len() >= READ_CACHE_SIZE {
                 let min_idx = cache.iter().enumerate()
                     .min_by_key(|(_, e)| e.access_count)
@@ -608,17 +599,52 @@ impl Ext2Inner {
     }
 
     /// Flush all dirty blocks to the block device.
+    /// BTreeMap is already sorted by block number for sequential I/O throughput.
     fn flush_dirty(&self) -> Result<()> {
-        let entries: Vec<DirtyBlock> = {
+        let entries: BTreeMap<u64, Vec<u8>> = {
             let mut cache = self.dirty_cache.lock_no_irq();
             core::mem::take(&mut *cache)
         };
-        for entry in &entries {
-            let sector = entry.block_num * (self.block_size as u64 / 512);
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let sectors_per_block = self.block_size as u64 / 512;
+        for (block_num, data) in &entries {
+            let sector = block_num * sectors_per_block;
             self.device
-                .write_sectors(sector, &entry.data)
+                .write_sectors(sector, data)
                 .map_err(|_| Error::new(Errno::EIO))?;
         }
+        Ok(())
+    }
+
+    /// Mark that superblock/GDT free counts need flushing.
+    fn mark_metadata_dirty(&self) {
+        *self.metadata_dirty.lock_no_irq() = true;
+    }
+
+    /// Flush everything: dirty block cache + deferred metadata (SB + GDT).
+    /// Called from fsync, sync, and unmount.
+    fn flush_all(&self) -> Result<()> {
+        self.flush_dirty()?;
+
+        let dirty = {
+            let mut flag = self.metadata_dirty.lock_no_irq();
+            let was = *flag;
+            *flag = false;
+            was
+        };
+
+        if dirty {
+            let state = self.state.lock_no_irq();
+            let groups_clone = state.groups.clone();
+            let free_blocks = state.free_blocks_count;
+            let free_inodes = state.free_inodes_count;
+            drop(state);
+
+            self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+        }
+
         Ok(())
     }
 
@@ -872,6 +898,7 @@ impl Ext2Inner {
     /// Allocate a block for an extent-based file at `logical_block`.
     /// Tries to extend an adjacent extent for contiguity; otherwise inserts
     /// a new extent entry. Returns the allocated physical block number.
+    /// May pre-allocate additional contiguous blocks for performance.
     fn alloc_extent_block(
         &self,
         inode: &mut Ext2Inode,
@@ -1244,13 +1271,10 @@ impl Ext2Inner {
                     + self.first_data_block as u64
                     + bit as u64;
 
-                let groups_clone = state.groups.clone();
-                let free_blocks = state.free_blocks_count;
-                let free_inodes = state.free_inodes_count;
                 drop(state);
 
                 self.write_block(bitmap_block, &bitmap)?;
-                self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+                self.mark_metadata_dirty();
 
                 return Ok(block_num);
             }
@@ -1298,14 +1322,10 @@ impl Ext2Inner {
                     + self.first_data_block as u64
                     + bit as u64;
 
-                // Drop lock during I/O.
-                let groups_clone = state.groups.clone();
-                let free_blocks = state.free_blocks_count;
-                let free_inodes = state.free_inodes_count;
                 drop(state);
 
                 self.write_block(bitmap_block, &bitmap)?;
-                self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+                self.mark_metadata_dirty();
 
                 return Ok(block_num);
             }
@@ -1336,14 +1356,10 @@ impl Ext2Inner {
         let mut state = self.state.lock_no_irq();
         state.groups[group_idx].free_blocks_count += 1;
         state.free_blocks_count += 1;
-
-        let groups_clone = state.groups.clone();
-        let free_blocks = state.free_blocks_count;
-        let free_inodes = state.free_inodes_count;
         drop(state);
 
         self.write_block(bitmap_block, &bitmap)?;
-        self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+        self.mark_metadata_dirty();
         Ok(())
     }
 
@@ -1381,13 +1397,10 @@ impl Ext2Inner {
 
                 let ino = group_idx as u32 * self.inodes_per_group + bit as u32 + 1;
 
-                let groups_clone = state.groups.clone();
-                let free_blocks = state.free_blocks_count;
-                let free_inodes = state.free_inodes_count;
                 drop(state);
 
                 self.write_block(bitmap_block, &bitmap)?;
-                self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+                self.mark_metadata_dirty();
 
                 // Zero the on-disk inode.
                 let zero_inode = Ext2Inode {
@@ -1437,13 +1450,10 @@ impl Ext2Inner {
                 state.groups[group_idx].used_dirs_count.saturating_sub(1);
         }
 
-        let groups_clone = state.groups.clone();
-        let free_blocks = state.free_blocks_count;
-        let free_inodes = state.free_inodes_count;
         drop(state);
 
         self.write_block(bitmap_block, &bitmap)?;
-        self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
+        self.mark_metadata_dirty();
         Ok(())
     }
 
@@ -1878,8 +1888,9 @@ impl Ext2Filesystem {
                     free_inodes_count,
                 }),
                 dev_id: kevlar_vfs::inode::alloc_dev_id(),
-                dirty_cache: SpinLock::new(Vec::new()),
+                dirty_cache: SpinLock::new(BTreeMap::new()),
                 read_cache: SpinLock::new(Vec::with_capacity(READ_CACHE_SIZE)),
+                metadata_dirty: SpinLock::new(false),
             }),
         }))
     }
@@ -2379,9 +2390,11 @@ impl FileLike for Ext2File {
         _options: &OpenOptions,
     ) -> Result<usize> {
         let inode = self.inode.lock_no_irq();
+        let data = self.fs.read_file_data(&inode, offset, buf.len())?;
+        drop(inode);
         let mut writer = UserBufWriter::from(buf);
-        let data = self.fs.read_file_data(&inode, offset, writer.remaining_len())?;
-        writer.write_bytes(&data)
+        writer.write_bytes(&data)?;
+        Ok(data.len())
     }
 
     fn write(
@@ -2467,7 +2480,7 @@ impl FileLike for Ext2File {
     }
 
     fn fsync(&self) -> Result<()> {
-        self.fs.flush_dirty()
+        self.fs.flush_all()
     }
 
     fn poll(&self) -> Result<PollStatus> {
