@@ -58,18 +58,24 @@ int main(void) {
             }
             close(src);
         }
-        // Copy dyntest (static diagnostic tool)
-        src = open("/bin/dyntest", O_RDONLY);
-        if (src >= 0) {
-            int dst = open("/mnt/root/usr/bin/dyntest", O_WRONLY|O_CREAT|O_TRUNC, 0755);
-            if (dst >= 0) {
-                char buf[4096];
-                int n;
-                while ((n = read(src, buf, sizeof(buf))) > 0)
-                    write(dst, buf, n);
-                close(dst);
+        // Copy diagnostic tools
+        const char *tools[][2] = {
+            {"/bin/dyntest", "/mnt/root/usr/bin/dyntest"},
+            {"/bin/test-ext4", "/mnt/root/usr/bin/test-ext4"},
+            {NULL, NULL},
+        };
+        for (int i = 0; tools[i][0]; i++) {
+            src = open(tools[i][0], O_RDONLY);
+            if (src >= 0) {
+                int dst = open(tools[i][1], O_WRONLY|O_CREAT|O_TRUNC, 0755);
+                if (dst >= 0) {
+                    char buf[4096]; int n;
+                    while ((n = read(src, buf, sizeof(buf))) > 0)
+                        write(dst, buf, n);
+                    close(dst);
+                }
+                close(src);
             }
-            close(src);
         }
     }
 
@@ -114,10 +120,10 @@ int main(void) {
         "  /usr/bin/curl --version 2>&1 | head -1\n"
         "  if [ $? -eq 0 ]; then echo TEST_PASS curl_version; else echo TEST_FAIL curl_version; fi\n"
         "  # Test curl HTTP — save to file, check result\n"
-        "  # Run dyntest AFTER curl is installed to probe dynamic linking\n"
-        "  if [ -x /usr/bin/dyntest ]; then\n"
-        "    echo DIAG: running dyntest after curl install...\n"
-        "    /usr/bin/dyntest 2>&1\n"
+        "  # Run comprehensive ext4 + dynamic linking tests\n"
+        "  if [ -x /usr/bin/test-ext4 ]; then\n"
+        "    echo DIAG: running ext4 test suite...\n"
+        "    /usr/bin/test-ext4 2>&1\n"
         "  fi\n"
         "  echo DIAG: testing curl http to example.com...\n"
         "  /usr/bin/curl -s --max-time 15 http://example.com/ > /tmp/curl-out.html 2> /tmp/curl-err.txt\n"
