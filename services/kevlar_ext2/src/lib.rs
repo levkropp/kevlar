@@ -1923,6 +1923,15 @@ impl Directory for Ext2Dir {
         Ok(self.fs.make_stat(self.inode_num, &inode))
     }
 
+    fn chmod(&self, mode: FileMode) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        let type_bits = inode.mode & 0xF000;
+        let new_perm = mode.bits() as u16 & 0o7777;
+        inode.mode = type_bits | new_perm;
+        self.fs.write_inode(self.inode_num, &inode)?;
+        Ok(())
+    }
+
     fn inode_no(&self) -> Result<INodeNo> {
         Ok(INodeNo::new(self.inode_num as usize))
     }
@@ -2317,6 +2326,17 @@ impl FileLike for Ext2File {
     fn stat(&self) -> Result<Stat> {
         let inode = self.inode.lock_no_irq();
         Ok(self.fs.make_stat(self.inode_num, &inode))
+    }
+
+    fn chmod(&self, mode: FileMode) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        // Preserve the file type bits (top 4 bits of the ext2 mode u16),
+        // replace the permission bits (lower 12 bits).
+        let type_bits = inode.mode & 0xF000;
+        let new_perm = mode.bits() as u16 & 0o7777;
+        inode.mode = type_bits | new_perm;
+        self.fs.write_inode(self.inode_num, &inode)?;
+        Ok(())
     }
 
     fn poll(&self) -> Result<PollStatus> {

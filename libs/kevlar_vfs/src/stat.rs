@@ -121,6 +121,10 @@ impl FileMode {
         FileMode(value)
     }
 
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
     pub fn access_mode(self) -> u32 {
         self.0 & O_ACCMODE
     }

@@ -260,8 +260,116 @@ static void test_chmod(void) {
     int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644); close(fd);
     chmod(p, 0755);
     struct stat st; stat(p, &st);
-    if ((st.st_mode & 0777) == 0755) pass("chmod");
-    else { char r[32]; snprintf(r,32,"mode=%o",st.st_mode&0777); fail("chmod",r); }
+    if ((st.st_mode & 0777) == 0755) pass("chmod_755");
+    else { char r[32]; snprintf(r,32,"mode=%o",st.st_mode&0777); fail("chmod_755",r); }
+
+    // Also test setting to 0600, 0444, and back
+    chmod(p, 0600);
+    stat(p, &st);
+    if ((st.st_mode & 0777) == 0600) pass("chmod_600");
+    else { char r[32]; snprintf(r,32,"mode=%o",st.st_mode&0777); fail("chmod_600",r); }
+
+    chmod(p, 0444);
+    stat(p, &st);
+    if ((st.st_mode & 0777) == 0444) pass("chmod_444");
+    else { char r[32]; snprintf(r,32,"mode=%o",st.st_mode&0777); fail("chmod_444",r); }
+}
+
+static void test_hardlink(void) {
+    char src[256], dst[256];
+    snprintf(src, sizeof(src), "%s/t_hardlink_src", TD);
+    snprintf(dst, sizeof(dst), "%s/t_hardlink_dst", TD);
+    int fd = open(src, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    write(fd, "hardlink", 8); close(fd);
+    link(src, dst);
+    struct stat st1, st2;
+    stat(src, &st1);
+    stat(dst, &st2);
+    // Hard links share the same inode
+    if (st1.st_ino == st2.st_ino && st1.st_nlink == 2)
+        pass("hardlink");
+    else {
+        char r[64]; snprintf(r,64,"ino1=%ld ino2=%ld nlink=%ld",
+                             (long)st1.st_ino, (long)st2.st_ino, (long)st1.st_nlink);
+        fail("hardlink", r);
+    }
+}
+
+static void test_sparse_file(void) {
+    char p[256]; snprintf(p, sizeof(p), "%s/t_sparse", TD);
+    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    // Write 8 bytes at offset 1MB to create a sparse file
+    pwrite(fd, "SPARSE!!", 8, 1024*1024);
+    close(fd);
+    struct stat st; stat(p, &st);
+    // File should be ~1MB+8 in size
+    if (st.st_size == 1024*1024 + 8) pass("sparse_file");
+    else { char r[32]; snprintf(r,32,"size=%ld",(long)st.st_size); fail("sparse_file",r); }
+    // Read back from the sparse region (should be zeros)
+    fd = open(p, O_RDONLY);
+    char buf[8];
+    pread(fd, buf, 8, 0);
+    int zeros_ok = (buf[0] == 0 && buf[7] == 0);
+    pread(fd, buf, 8, 1024*1024);
+    int data_ok = (memcmp(buf, "SPARSE!!", 8) == 0);
+    close(fd);
+    if (zeros_ok && data_ok) pass("sparse_readback");
+    else fail("sparse_readback", "content mismatch");
+}
+
+static void test_many_files(void) {
+    char dir[256]; snprintf(dir, sizeof(dir), "%s/t_manyfiles", TD);
+    mkdir(dir, 0755);
+    int ok = 1;
+    for (int i = 0; i < 50; i++) {
+        char p[300]; snprintf(p, sizeof(p), "%s/f%04d", dir, i);
+        int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        if (fd < 0) { ok = 0; break; }
+        char data[32]; snprintf(data, sizeof(data), "file %d\n", i);
+        write(fd, data, strlen(data));
+        close(fd);
+    }
+    // Count via readdir
+    DIR *d = opendir(dir);
+    int count = 0;
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d))) if (ent->d_name[0] != '.') count++;
+        closedir(d);
+    }
+    if (ok && count == 50) pass("many_files_50");
+    else { char r[32]; snprintf(r,32,"ok=%d count=%d",ok,count); fail("many_files_50",r); }
+}
+
+static void test_large_readwrite(void) {
+    // Write 4MB file and verify content
+    char p[256]; snprintf(p, sizeof(p), "%s/t_large4m", TD);
+    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    char buf[4096];
+    for (int i = 0; i < 4096; i++) buf[i] = (i * 7 + 13) & 0xFF;
+    int total = 0;
+    for (int i = 0; i < 1024; i++) { // 4MB
+        int n = write(fd, buf, sizeof(buf));
+        if (n > 0) total += n;
+    }
+    close(fd);
+    struct stat st; stat(p, &st);
+    if (st.st_size != 4*1024*1024) {
+        char r[32]; snprintf(r,32,"size=%ld",(long)st.st_size);
+        fail("large_4mb_write", r);
+        return;
+    }
+    // Read back and verify
+    fd = open(p, O_RDONLY);
+    int ok = 1;
+    for (int i = 0; i < 1024; i++) {
+        char rbuf[4096];
+        int n = read(fd, rbuf, sizeof(rbuf));
+        if (n != 4096 || memcmp(rbuf, buf, 4096) != 0) { ok = 0; break; }
+    }
+    close(fd);
+    if (ok) pass("large_4mb_readback");
+    else fail("large_4mb_readback", "content mismatch");
 }
 
 static void test_symlink(void) {
@@ -380,6 +488,10 @@ int main(int argc, char **argv) {
     test_unlink();
     test_chmod();
     test_symlink();
+    test_hardlink();
+    test_sparse_file();
+    test_many_files();
+    test_large_readwrite();
 
     // ── Dynamic linking tests ──────────────────────────────────────
     // BusyBox (links: just musl) — known to work
