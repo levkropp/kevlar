@@ -428,45 +428,94 @@ static void test_dynamic_exec(const char *name, const char *path, const char *ex
 // ── BENCHMARKS ─────────────────────────────────────────────────────
 
 static void bench_seq_write(void) {
-    char p[256]; snprintf(p, sizeof(p), "%s/bench_write", TD);
-    char buf[4096]; memset(buf, 'W', sizeof(buf));
-    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-    long long start = now_us();
-    int total = 0;
-    for (int i = 0; i < 256; i++) total += write(fd, buf, sizeof(buf));
-    close(fd);
-    long long elapsed = now_us() - start;
-    long long kbps = elapsed > 0 ? (long long)total * 1000 / elapsed : 0;
-    msgf("BENCH seq_write_1mb: %d bytes, %lld us, %lld KB/s\n", total, elapsed, kbps);
+    // Test with multiple buffer sizes to find the optimal
+    int sizes[] = {4096, 32768, 131072, 0};
+    for (int si = 0; sizes[si]; si++) {
+        int bufsz = sizes[si];
+        char *buf = malloc(bufsz);
+        memset(buf, 'W', bufsz);
+        char p[256]; snprintf(p, sizeof(p), "%s/bench_w_%d", TD, bufsz);
+        int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        int target = 4*1024*1024; // 4MB
+        long long start = now_us();
+        int total = 0;
+        while (total < target) {
+            int n = write(fd, buf, bufsz);
+            if (n <= 0) break;
+            total += n;
+        }
+        close(fd);
+        long long elapsed = now_us() - start;
+        long long kbps = elapsed > 0 ? (long long)total * 1000 / elapsed : 0;
+        msgf("BENCH seq_write_%dk_buf%dk: %d bytes, %lld us, %lld KB/s\n",
+             total/1024, bufsz/1024, total, elapsed, kbps);
+        free(buf);
+        unlink(p);
+    }
 }
 
 static void bench_seq_read(void) {
-    char p[256]; snprintf(p, sizeof(p), "%s/bench_write", TD);
-    char buf[4096];
-    int fd = open(p, O_RDONLY);
-    long long start = now_us();
-    int total = 0, n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) total += n;
-    close(fd);
-    long long elapsed = now_us() - start;
-    long long kbps = elapsed > 0 ? (long long)total * 1000 / elapsed : 0;
-    msgf("BENCH seq_read_1mb: %d bytes, %lld us, %lld KB/s\n", total, elapsed, kbps);
+    // Write 4MB first, then read with different buffer sizes
+    char p[256]; snprintf(p, sizeof(p), "%s/bench_read", TD);
+    {
+        int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        char buf[32768]; memset(buf, 'R', sizeof(buf));
+        for (int i = 0; i < 128; i++) write(fd, buf, sizeof(buf));
+        close(fd);
+    }
+    int sizes[] = {4096, 32768, 131072, 0};
+    for (int si = 0; sizes[si]; si++) {
+        int bufsz = sizes[si];
+        char *buf = malloc(bufsz);
+        int fd = open(p, O_RDONLY);
+        long long start = now_us();
+        int total = 0, n;
+        while ((n = read(fd, buf, bufsz)) > 0) total += n;
+        close(fd);
+        long long elapsed = now_us() - start;
+        long long kbps = elapsed > 0 ? (long long)total * 1000 / elapsed : 0;
+        msgf("BENCH seq_read_%dk_buf%dk: %d bytes, %lld us, %lld KB/s\n",
+             total/1024, bufsz/1024, total, elapsed, kbps);
+        free(buf);
+    }
+    unlink(p);
 }
 
 static void bench_create_delete(void) {
-    long long start = now_us();
+    // Measure create and delete separately
     int count = 100;
+    long long start = now_us();
     for (int i = 0; i < count; i++) {
         char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
         int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
         write(fd, "x", 1); close(fd);
     }
+    long long create_elapsed = now_us() - start;
+
+    start = now_us();
     for (int i = 0; i < count; i++) {
         char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
         unlink(p);
     }
-    long long elapsed = now_us() - start;
-    msgf("BENCH create_delete_%d: %lld us, %lld us/op\n", count, elapsed, elapsed/(count*2));
+    long long delete_elapsed = now_us() - start;
+
+    msgf("BENCH create_%d: %lld us, %lld us/op\n", count, create_elapsed, create_elapsed/count);
+    msgf("BENCH delete_%d: %lld us, %lld us/op\n", count, delete_elapsed, delete_elapsed/count);
+
+    // Also measure just open+close (no write) to isolate overhead
+    start = now_us();
+    for (int i = 0; i < count; i++) {
+        char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
+        int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+        close(fd);
+    }
+    long long openclose_elapsed = now_us() - start;
+    msgf("BENCH open_close_%d: %lld us, %lld us/op\n", count, openclose_elapsed, openclose_elapsed/count);
+    // cleanup
+    for (int i = 0; i < count; i++) {
+        char p[256]; snprintf(p, sizeof(p), "%s/bench_%04d", TD, i);
+        unlink(p);
+    }
 }
 
 int main(int argc, char **argv) {
