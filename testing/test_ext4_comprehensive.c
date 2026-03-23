@@ -424,6 +424,17 @@ int main(int argc, char **argv) {
     test_dynamic_exec("dyn_curl", "/usr/bin/curl", "curl");
     test_dynamic_exec("dyn_apk", "/sbin/apk", "apk-tools");
 
+    // Test: dlopen libcurl and call curl_global_init to isolate the failure
+    {
+        struct stat fst2;
+    if (stat("/usr/bin/curl-init-test", &fst2) == 0) {
+        char out[4096];
+        const char *argv[] = {"/usr/bin/curl-init-test", NULL};
+        int rc = run(argv, out, sizeof(out));
+        msgf("CURL_INIT_TEST: exit=%d output='%.200s'\n", rc, out);
+    }
+    }
+
     // ── Test: isolate libcrypto as the cause ──
     // LD_PRELOAD libcrypto into busybox (which normally works).
     // If this fails, libcrypto's constructor is the problem.
