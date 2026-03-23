@@ -272,15 +272,35 @@ t9:
         }
     }
 
-    // ── Test 11: Check installed curl binary ──
+    // ── Test 11: Check installed binaries + library deps ──
     {
         struct stat st;
-        const char *bins[] = {"/usr/bin/curl", "/sbin/apk", "/usr/bin/gcc", NULL};
-        for (int i = 0; bins[i]; i++) {
-            if (stat(bins[i], &st) == 0) {
-                msgf("BINARY %s size=%ld mode=%o\n", bins[i], (long)st.st_size, st.st_mode);
+        const char *files[] = {
+            "/usr/bin/curl",
+            "/sbin/apk",
+            "/usr/bin/gcc",
+            // curl's library dependencies (installed by apk.static add curl)
+            "/usr/lib/libcurl.so.4",
+            "/usr/lib/libcurl.so.4.8.0",
+            "/usr/lib/libbrotlidec.so.1",
+            "/usr/lib/libbrotlicommon.so.1",
+            "/usr/lib/libcares.so.2",
+            "/usr/lib/libunistring.so.5",
+            "/usr/lib/libidn2.so.0",
+            "/usr/lib/libnghttp2.so.14",
+            "/usr/lib/libpsl.so.5",
+            // Libraries from Docker (should be fine)
+            "/lib/libcrypto.so.3",
+            "/lib/libssl.so.3",
+            "/lib/libz.so.1",
+            NULL,
+        };
+        for (int i = 0; files[i]; i++) {
+            if (stat(files[i], &st) == 0) {
                 if (st.st_size == 0)
-                    msgf("  ** ZERO-SIZE BINARY — ext4 write bug!\n");
+                    msgf("ZERO_FILE %s\n", files[i]);
+                else
+                    msgf("OK_FILE %s size=%ld\n", files[i], (long)st.st_size);
             }
         }
     }
@@ -311,6 +331,69 @@ t9:
         waitpid(pid, &st, 0);
         int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
         msgf("APK --version: exit=%d len=%d output='%.80s'\n", rc, total, out);
+    }
+
+    // ── Test 13: Run curl --version ──
+    {
+        char out[4096];
+        int pipefd[2];
+        pipe(pipefd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], 1); dup2(pipefd[1], 2);
+            close(pipefd[1]);
+            execl("/usr/bin/curl", "curl", "--version", (char*)NULL);
+            // If execl fails, report why
+            char ebuf[64];
+            int n = snprintf(ebuf, sizeof(ebuf), "execl failed: errno=%d\n", errno);
+            write(2, ebuf, n);
+            _exit(127);
+        }
+        close(pipefd[1]);
+        int total = 0;
+        while (total < (int)sizeof(out) - 1) {
+            int n = read(pipefd[0], out + total, sizeof(out) - 1 - total);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            total += n;
+        }
+        out[total] = 0;
+        close(pipefd[0]);
+        int st;
+        waitpid(pid, &st, 0);
+        int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -(WTERMSIG(st));
+        msgf("CURL --version: exit=%d len=%d output='%.200s'\n", rc, total, out);
+    }
+
+    // ── Test 14: Run ld-musl directly on curl (shows linker errors) ──
+    {
+        char out[4096];
+        int pipefd[2];
+        pipe(pipefd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], 1); dup2(pipefd[1], 2);
+            close(pipefd[1]);
+            execl("/lib/ld-musl-x86_64.so.1", "ld-musl-x86_64.so.1",
+                  "--list", "/usr/bin/curl", (char*)NULL);
+            _exit(127);
+        }
+        close(pipefd[1]);
+        int total = 0;
+        while (total < (int)sizeof(out) - 1) {
+            int n = read(pipefd[0], out + total, sizeof(out) - 1 - total);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            total += n;
+        }
+        out[total] = 0;
+        close(pipefd[0]);
+        int st;
+        waitpid(pid, &st, 0);
+        int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -(WTERMSIG(st));
+        msgf("LD-MUSL --list curl: exit=%d len=%d output='%.500s'\n", rc, total, out);
     }
 
     // ── Results ──
