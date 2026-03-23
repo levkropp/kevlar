@@ -507,6 +507,9 @@ struct Ext2Inner {
     /// Dentry cache: (parent_ino, name) → child_ino.
     /// Avoids re-reading directory blocks for repeated path lookups.
     dentry_cache: SpinLock<BTreeMap<(u32, String), u32>>,
+    /// Inode cache: ino → parsed Ext2Inode.
+    /// Avoids re-reading + re-parsing inode table blocks for hot inodes.
+    inode_cache: SpinLock<BTreeMap<u32, Ext2Inode>>,
 }
 
 impl Ext2Inner {
@@ -688,6 +691,15 @@ impl Ext2Inner {
     // ── Inode I/O ──────────────────────────────────────────────────
 
     fn read_inode(&self, ino: u32) -> Result<Ext2Inode> {
+        // Fast path: check inode cache.
+        {
+            let cache = self.inode_cache.lock_no_irq();
+            if let Some(cached) = cache.get(&ino) {
+                return Ok(cached.clone());
+            }
+        }
+
+        // Slow path: read from block device.
         let state = self.state.lock_no_irq();
         let group = ((ino - 1) / self.inodes_per_group) as usize;
         let index = ((ino - 1) % self.inodes_per_group) as usize;
@@ -704,10 +716,29 @@ impl Ext2Inner {
         let offset_in_block = byte_offset % self.block_size;
 
         let block_data = self.read_block(inode_table_block + block_offset as u64)?;
-        Ok(Ext2Inode::parse(&block_data[offset_in_block..]))
+        let parsed = Ext2Inode::parse(&block_data[offset_in_block..]);
+
+        // Insert into inode cache (evict if > 1024 entries).
+        {
+            let mut cache = self.inode_cache.lock_no_irq();
+            cache.insert(ino, parsed.clone());
+            if cache.len() > 1024 {
+                if let Some(&key) = cache.keys().next() {
+                    cache.remove(&key);
+                }
+            }
+        }
+
+        Ok(parsed)
     }
 
     fn write_inode(&self, ino: u32, inode: &Ext2Inode) -> Result<()> {
+        // Update inode cache.
+        {
+            let mut cache = self.inode_cache.lock_no_irq();
+            cache.insert(ino, inode.clone());
+        }
+
         let state = self.state.lock_no_irq();
         let group = ((ino - 1) / self.inodes_per_group) as usize;
         let index = ((ino - 1) % self.inodes_per_group) as usize;
@@ -1921,6 +1952,7 @@ impl Ext2Filesystem {
                 read_cache: SpinLock::new(Vec::with_capacity(READ_CACHE_SIZE)),
                 metadata_dirty: SpinLock::new(false),
                 dentry_cache: SpinLock::new(BTreeMap::new()),
+                inode_cache: SpinLock::new(BTreeMap::new()),
             }),
         }))
     }
