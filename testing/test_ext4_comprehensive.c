@@ -281,6 +281,27 @@ static void test_symlink(void) {
 // ── DYNAMIC LINKING TESTS ──────────────────────────────────────────
 
 static void test_dynamic_exec(const char *name, const char *path, const char *expected) {
+    // First check the file exists and has ELF magic
+    struct stat fst;
+    if (stat(path, &fst) != 0) {
+        char r[64]; snprintf(r, 64, "stat failed: errno=%d", errno);
+        fail(name, r);
+        return;
+    }
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        unsigned char magic[4];
+        read(fd, magic, 4);
+        close(fd);
+        if (magic[0] != 0x7f || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+            char r[64]; snprintf(r, 64, "not ELF: %02x%02x%02x%02x size=%ld",
+                                 magic[0], magic[1], magic[2], magic[3], (long)fst.st_size);
+            fail(name, r);
+            return;
+        }
+    }
+    msgf("  %s: ELF ok, size=%ld\n", path, (long)fst.st_size);
+
     char out[4096];
     const char *argv[] = {path, "--version", NULL};
     int rc = run(argv, out, sizeof(out));
@@ -288,9 +309,11 @@ static void test_dynamic_exec(const char *name, const char *path, const char *ex
         if (expected == NULL || strstr(out, expected)) pass(name);
         else { char r[128]; snprintf(r,128,"unexpected: %.60s",out); fail(name,r); }
     } else if (rc == 127) {
-        fail(name, "ENOEXEC or not found");
+        char r[64]; snprintf(r, 64, "ENOEXEC/not found, output='%.40s'", out);
+        fail(name, r);
     } else {
-        char r[64]; snprintf(r,64,"exit=%d len=%d",rc,(int)strlen(out)); fail(name,r);
+        char r[96]; snprintf(r, 96, "exit=%d len=%d output='%.40s'", rc, (int)strlen(out), out);
+        fail(name, r);
     }
 }
 
@@ -359,7 +382,14 @@ int main(int argc, char **argv) {
     test_symlink();
 
     // Dynamic linking tests (programs from Alpine packages)
-    test_dynamic_exec("busybox_version", "/bin/busybox", "BusyBox");
+    // BusyBox doesn't have --version; use --help which prints the version header
+    {
+        char out[4096];
+        const char *argv[] = {"/bin/busybox", "--help", NULL};
+        int rc = run(argv, out, sizeof(out));
+        if (strstr(out, "BusyBox")) pass("busybox_dynamic");
+        else { char r[64]; snprintf(r,64,"exit=%d len=%d",rc,(int)strlen(out)); fail("busybox_dynamic",r); }
+    }
     test_dynamic_exec("curl_version", "/usr/bin/curl", "curl");
     test_dynamic_exec("apk_version", "/sbin/apk", "apk-tools");
 
