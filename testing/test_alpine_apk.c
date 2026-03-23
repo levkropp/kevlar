@@ -62,6 +62,7 @@ int main(void) {
         const char *tools[][2] = {
             {"/bin/dyntest", "/mnt/root/usr/bin/dyntest"},
             {"/bin/test-ext4", "/mnt/root/usr/bin/test-ext4"},
+            {"/bin/curl-init-test", "/mnt/root/usr/bin/curl-init-test"},
             {NULL, NULL},
         };
         for (int i = 0; tools[i][0]; i++) {
@@ -122,7 +123,6 @@ int main(void) {
         "  # Test curl HTTP — save to file, check result\n"
         "  # Run comprehensive ext4 + dynamic linking tests\n"
         "  if [ -x /usr/bin/test-ext4 ]; then\n"
-        "    echo DIAG: running ext4 test suite...\n"
         "    /usr/bin/test-ext4 2>&1\n"
         "  fi\n"
         "  echo DIAG: testing curl http to example.com...\n"
