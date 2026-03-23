@@ -673,14 +673,47 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             }
         }
 
-        // Permission violation: write fault on a page the VMA doesn't allow writing.
+        // Write fault on a page the VMA doesn't allow writing.
+        // For MAP_PRIVATE file-backed pages: do COW (copy page, remap writable).
+        // This is needed for the dynamic linker's RELR relocation processing:
+        // musl maps the entire library with PROT_READ (reservation), then
+        // applies RELR relocations that write to the .data segment pages.
+        // Some RELR bitmaps may overflow into adjacent read-only pages.
+        // On Linux, the dynamic linker's writes to MAP_PRIVATE read-only
+        // pages succeed via the COW mechanism.
         if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0) {
-            let pid = current.pid().as_i32();
-            warn!("SIGSEGV: write to RO page {:#x} (pid={}, ip={:#x}, prot={:#x})",
-                  aligned_vaddr.value(), pid, ip, prot_flags);
+            if !vma_is_shared {
+                // MAP_PRIVATE: COW-copy the page and make it writable.
+                if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                    let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            drop(vm); drop(vm_ref);
+                            Process::exit_by_signal(SIGKILL);
+                        }
+                    };
+                    #[cfg(not(feature = "profile-fortress"))]
+                    {
+                        let src = kevlar_platform::page_ops::page_as_slice(old_paddr);
+                        let dst = kevlar_platform::page_ops::page_as_slice_mut(new_paddr);
+                        dst.copy_from_slice(src);
+                    }
+                    kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                    // Unmap old page, map new writable copy
+                    vm.page_table_mut().unmap_user_page(aligned_vaddr);
+                    vm.page_table_mut().map_user_page_with_prot(
+                        aligned_vaddr, new_paddr, prot_flags | 2);
+                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                        kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    }
+                    return;
+                }
+            }
+            // MAP_SHARED or no existing page: genuine SIGSEGV
             drop(vm);
             drop(vm_ref);
-            current.send_signal(SIGSEGV);
+            deliver_sigsegv_fatal();
             return;
         }
 
