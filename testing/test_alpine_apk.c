@@ -62,7 +62,8 @@ int main(void) {
         const char *tools[][2] = {
             {"/bin/dyntest", "/mnt/root/usr/bin/dyntest"},
             {"/bin/test-ext4", "/mnt/root/usr/bin/test-ext4"},
-            {"/bin/curl-init-test", "/mnt/root/usr/bin/curl-init-test"},
+            {"/bin/curl-debug", "/mnt/root/usr/bin/curl-debug"},
+            {"/bin/ssl-test", "/mnt/root/usr/bin/ssl-test"},
             {NULL, NULL},
         };
         for (int i = 0; tools[i][0]; i++) {
@@ -120,7 +121,11 @@ int main(void) {
         "if [ -x /usr/bin/curl ]; then\n"
         "  /usr/bin/curl --version 2>&1 | head -1\n"
         "  if [ $? -eq 0 ]; then echo TEST_PASS curl_version; else echo TEST_FAIL curl_version; fi\n"
-        "  # Test curl HTTP — save to file, check result\n"
+        "  # Run ssl-test to isolate OpenSSL failure\n"
+        "  if [ -x /usr/bin/ssl-test ]; then\n"
+        "    /usr/bin/ssl-test 2>&1\n"
+        "    echo DIAG: ssl-test exit=$?\n"
+        "  fi\n"
         "  # Run comprehensive ext4 + dynamic linking tests\n"
         "  if [ -x /usr/bin/test-ext4 ]; then\n"
         "    /usr/bin/test-ext4 2>&1\n"

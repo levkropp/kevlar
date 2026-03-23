@@ -424,15 +424,17 @@ int main(int argc, char **argv) {
     test_dynamic_exec("dyn_curl", "/usr/bin/curl", "curl");
     test_dynamic_exec("dyn_apk", "/sbin/apk", "apk-tools");
 
-    // Test: dlopen libcurl and call curl_global_init to isolate the failure
+    // Test: run debug-curl to trace exactly where curl fails
     {
         struct stat fst2;
-    if (stat("/usr/bin/curl-init-test", &fst2) == 0) {
-        char out[4096];
-        const char *argv[] = {"/usr/bin/curl-init-test", NULL};
-        int rc = run(argv, out, sizeof(out));
-        msgf("CURL_INIT_TEST: exit=%d output='%.200s'\n", rc, out);
-    }
+        if (stat("/usr/bin/curl-debug", &fst2) == 0) {
+            char out[4096];
+            const char *argv[] = {"/usr/bin/curl-debug", NULL};
+            int rc = run(argv, out, sizeof(out));
+            msgf("CURL_DEBUG: exit=%d output='%.300s'\n", rc, out);
+        } else {
+            msgf("CURL_DEBUG: binary not found\n");
+        }
     }
 
     // ── Test: isolate libcrypto as the cause ──
