@@ -262,12 +262,45 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: invalid address {:#x} (pid={}, ip={:#x})",
                 unaligned_vaddr.value(), pid, ip
             );
-            // Dump registers for crash investigation.
+            // Dump registers and syscall trace for crash investigation.
             if pid > 2 {
                 let cpu = kevlar_platform::arch::cpu_id() as usize;
                 if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
                     warn!("  RDI={:#x} RSI={:#x} RBP={:#x} RSP={:#x}",
                         r.rdi, r.rsi, r.rbp, r.rsp);
+                }
+                // Dump last syscalls for this process
+                let trace = current.dump_trace();
+                if !trace.is_empty() {
+                    warn!("  last {} syscalls:", trace.len());
+                    for e in trace.iter().rev().take(8) {
+                        warn!("    nr={} result={} a0={:#x} a1={:#x}", e.nr, e.result, e.arg0, e.arg1);
+                    }
+                }
+                // Dump VMAs near the crash address
+                if let Some(vm_ref) = current.vm().as_ref() {
+                    let vm = vm_ref.lock();
+                    let vmas = vm.vm_areas_ref();
+                    warn!("  VMAs total: {}", vmas.len());
+                    // Show VMAs containing or near the crash IP
+                    let crash_ip_page = ip & !0xFFF;
+                    for vma in vmas.iter() {
+                        let s = vma.start().value();
+                        let e = vma.end().value();
+                        // Show if contains the crash IP or fault address
+                        if (s <= ip && ip < e) || (s <= unaligned_vaddr.value() && unaligned_vaddr.value() < e) {
+                            warn!("  * VMA {:#x}-{:#x} prot={:#x} CONTAINS target", s, e, vma.prot().bits());
+                        }
+                    }
+                    // Show first text (prot=5) VMAs
+                    let mut text_count = 0;
+                    for vma in vmas.iter() {
+                        if vma.prot().bits() == 0x5 {
+                            warn!("  text VMA: {:#x}-{:#x}", vma.start().value(), vma.end().value());
+                            text_count += 1;
+                            if text_count >= 5 { break; }
+                        }
+                    }
                 }
             }
             deliver_sigsegv_fatal();

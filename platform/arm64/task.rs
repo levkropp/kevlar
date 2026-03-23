@@ -388,6 +388,7 @@ impl ArchTask {
         signal: i32,
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
+        _saved_sigmask: u64,
     ) -> Result<(), AccessError> {
         let mut user_sp = UserVAddr::new_nonnull(frame.sp as usize)?;
 
@@ -420,8 +421,9 @@ impl ArchTask {
         Ok(())
     }
 
-    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) {
+    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) -> u64 {
         *current_frame = *signaled_frame;
+        0 // TODO: ARM64 signal mask save/restore on user stack
     }
 }
 

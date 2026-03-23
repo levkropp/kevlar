@@ -242,6 +242,14 @@ impl Vm {
         start.access_ok(len)?;
 
         if !self.is_free_vaddr_range(start, len) {
+            warn!("add_vm_area: OVERLAP detected! {:#x}-{:#x} prot={:#x} conflicts with:",
+                  start.value(), start.value() + len, prot.bits());
+            for vma in &self.vm_areas {
+                if vma.overlaps(start, len) {
+                    warn!("  existing: {:#x}-{:#x} prot={:#x}",
+                          vma.start().value(), vma.start().value() + vma.len(), vma.prot().bits());
+                }
+            }
             return Err(Errno::EINVAL.into());
         }
 
@@ -323,19 +331,34 @@ impl Vm {
             if self.is_free_vaddr_range(start, grow) {
                 self.add_vm_area(start, grow, VmAreaType::Anonymous)?;
             } else {
-                // Try to extend the existing heap VMA that ends at aligned_old.
-                let extended = self.vm_areas.iter_mut().any(|area| {
-                    let area_end = area.start().value() + area.len();
-                    area_end == aligned_old && matches!(area.area_type(), VmAreaType::Anonymous) && {
-                        area.extend_by(grow);
-                        true
-                    }
+                // Try to extend the existing heap VMA that ends at aligned_old,
+                // but ONLY if the extension range doesn't overlap other VMAs.
+                let extend_start = UserVAddr::new_nonnull(aligned_old).ok();
+                let can_extend = extend_start.map_or(false, |es| {
+                    // Check that [aligned_old, aligned_old+grow) is free,
+                    // ignoring the VMA we're about to extend.
+                    self.vm_areas.iter().all(|area| {
+                        let area_end = area.start().value() + area.len();
+                        // Skip the VMA we'd extend (it ends at aligned_old)
+                        if area_end == aligned_old && matches!(area.area_type(), VmAreaType::Anonymous) {
+                            return true; // don't count this one as conflicting
+                        }
+                        !area.overlaps(es, grow)
+                    })
                 });
-                if !extended {
-                    // Last resort: force-add. The overlapping VMA might be fine
-                    // (e.g. brk expansion that partially covers an mmap region).
-                    let _ = self.add_vm_area(start, grow, VmAreaType::Anonymous);
+                if can_extend {
+                    let _extended = self.vm_areas.iter_mut().any(|area| {
+                        let area_end = area.start().value() + area.len();
+                        area_end == aligned_old && matches!(area.area_type(), VmAreaType::Anonymous) && {
+                            area.extend_by(grow);
+                            true
+                        }
+                    });
                 }
+                // If we can't extend (would overlap), skip — the heap_end
+                // is still advanced but the conflicting VMA keeps its mapping.
+                // This matches Linux's behavior where brk into mmap'd regions
+                // is silently accepted.
             }
         }
         self.heap_end = new_heap_end;
