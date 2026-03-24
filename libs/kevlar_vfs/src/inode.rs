@@ -58,6 +58,8 @@ pub struct OpenOptions {
     pub append: bool,
     /// Access mode bits: O_RDONLY=0, O_WRONLY=1, O_RDWR=2.
     pub access_mode: i32,
+    /// O_SYNC / O_DSYNC: flush data to disk after each write.
+    pub sync: bool,
 }
 
 impl OpenOptions {
@@ -67,6 +69,7 @@ impl OpenOptions {
             close_on_exec: cloexec,
             append: false,
             access_mode: 0,
+            sync: false,
         }
     }
 
@@ -76,6 +79,7 @@ impl OpenOptions {
             close_on_exec: false,
             append: false,
             access_mode: 0,
+            sync: false,
         }
     }
 
@@ -85,6 +89,7 @@ impl OpenOptions {
             close_on_exec: false,
             append: false,
             access_mode: 2, // O_RDWR
+            sync: false,
         }
     }
 }
@@ -213,6 +218,12 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
 
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when the last fd referencing this file is closed.
+    /// Filesystems should flush dirty data here.
+    fn close(&self) -> Result<()> {
         Ok(())
     }
 
@@ -445,6 +456,14 @@ impl INode {
             INode::FileLike(file) => file.fsync(),
             INode::Symlink(file) => file.fsync(),
             INode::Directory(dir) => dir.fsync(),
+        }
+    }
+
+    /// Called when the last fd is closed. Flushes dirty file data.
+    pub fn close(&self) -> Result<()> {
+        match self {
+            INode::FileLike(file) => file.close(),
+            _ => Ok(()),
         }
     }
 

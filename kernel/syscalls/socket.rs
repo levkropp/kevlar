@@ -29,6 +29,7 @@ impl From<SocketFlags> for OpenOptions {
             close_on_exec: flags.contains(SocketFlags::SOCK_CLOEXEC),
             append: false,
             access_mode: 2,
+            sync: false,
         }
     }
 }
