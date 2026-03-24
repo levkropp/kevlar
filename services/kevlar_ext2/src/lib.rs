@@ -471,8 +471,8 @@ struct Ext2MutableState {
 /// Shared filesystem state. All Ext2Dir/Ext2File/Ext2Symlink instances
 /// hold `Arc<Ext2Inner>` so they share mutable state.
 /// Dirty write-back cache: writes are batched here and flushed on fsync/sync.
-/// 1024 entries × 4KB = 4MB of buffered writes before forced flush.
-const DIRTY_CACHE_SIZE: usize = 1024;
+/// 8192 entries × 4KB = 32MB of buffered writes before forced flush.
+const DIRTY_CACHE_SIZE: usize = 8192;
 
 /// Read cache: LRU block cache for hot metadata blocks (inode tables, directories).
 /// Eliminates redundant disk reads during path resolution and inode access.
@@ -504,9 +504,9 @@ struct Ext2Inner {
     /// Set when superblock/GDT free counts are modified.  Actual disk write is
     /// deferred until flush_all() (called from fsync/sync/umount).
     metadata_dirty: SpinLock<bool>,
-    /// Dentry cache: (parent_ino, name) → child_ino.
-    /// Avoids re-reading directory blocks for repeated path lookups.
-    dentry_cache: SpinLock<BTreeMap<(u32, String), u32>>,
+    /// Dentry cache: FNV-1a hash of (parent_ino, name) → child_ino.
+    /// Uses u64 hash key to avoid String heap allocation on every lookup.
+    dentry_cache: SpinLock<BTreeMap<u64, u32>>,
     /// Inode cache: ino → parsed Ext2Inode.
     /// Avoids re-reading + re-parsing inode table blocks for hot inodes.
     inode_cache: SpinLock<BTreeMap<u32, Ext2Inode>>,
@@ -561,45 +561,20 @@ impl Ext2Inner {
 
     fn write_block(&self, block_num: u64, data: &[u8]) -> Result<()> {
         // Update dirty write-back cache (BTreeMap: O(log n) insert/update).
-        {
-            let mut cache = self.dirty_cache.lock_no_irq();
-            // insert_or_update: if key exists, overwrite value; if not, insert.
-            match cache.get_mut(&block_num) {
-                Some(existing) => {
-                    existing.copy_from_slice(&data[..self.block_size]);
-                }
-                None => {
-                    cache.insert(block_num, data[..self.block_size].to_vec());
-                }
+        // read_block() checks dirty_cache first, so reads always see written data.
+        // After flush_dirty(), blocks are on disk and re-read into read_cache on demand.
+        let mut cache = self.dirty_cache.lock_no_irq();
+        match cache.get_mut(&block_num) {
+            Some(existing) => {
+                existing.copy_from_slice(&data[..self.block_size]);
             }
-            if cache.len() >= DIRTY_CACHE_SIZE {
-                drop(cache);
-                self.flush_dirty()?;
+            None => {
+                cache.insert(block_num, data[..self.block_size].to_vec());
             }
         }
-        // Also update read cache so subsequent reads see the written data
-        // even after the dirty cache has been flushed.
-        {
-            let mut cache = self.read_cache.lock_no_irq();
-            for entry in cache.iter_mut() {
-                if entry.block_num == block_num {
-                    entry.data.copy_from_slice(&data[..self.block_size]);
-                    entry.access_count = entry.access_count.saturating_add(1);
-                    return Ok(());
-                }
-            }
-            if cache.len() >= READ_CACHE_SIZE {
-                let min_idx = cache.iter().enumerate()
-                    .min_by_key(|(_, e)| e.access_count)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                cache.swap_remove(min_idx);
-            }
-            cache.push(ReadCacheEntry {
-                block_num,
-                data: data[..self.block_size].to_vec(),
-                access_count: 1,
-            });
+        if cache.len() >= DIRTY_CACHE_SIZE {
+            drop(cache);
+            self.flush_dirty()?;
         }
         Ok(())
     }
@@ -634,20 +609,31 @@ impl Ext2Inner {
 
     // ── Dentry cache ──────────────────────────────────────────────
 
+    /// FNV-1a hash of (parent_ino, name) for dentry cache key.
+    /// No heap allocation — just integer math on stack.
+    fn dcache_key(parent_ino: u32, name: &str) -> u64 {
+        let mut h: u64 = 14695981039346656037; // FNV-1a offset basis
+        for &b in &parent_ino.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211); // FNV-1a prime
+        }
+        for &b in name.as_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
+    }
+
     fn dcache_lookup(&self, parent_ino: u32, name: &str) -> Option<u32> {
         let cache = self.dentry_cache.lock_no_irq();
-        // BTreeMap::get requires an owned key, but we can use range to avoid allocation.
-        // Since (u32, String) is Ord and we want exact match, we iterate the range.
-        let key = (parent_ino, String::from(name));
-        cache.get(&key).copied()
+        cache.get(&Self::dcache_key(parent_ino, name)).copied()
     }
 
     fn dcache_insert(&self, parent_ino: u32, name: &str, child_ino: u32) {
         let mut cache = self.dentry_cache.lock_no_irq();
-        cache.insert((parent_ino, String::from(name)), child_ino);
-        // Evict if too large (simple cap).
-        if cache.len() > 4096 {
-            if let Some(key) = cache.keys().next().cloned() {
+        cache.insert(Self::dcache_key(parent_ino, name), child_ino);
+        if cache.len() > 8192 {
+            if let Some(&key) = cache.keys().next() {
                 cache.remove(&key);
             }
         }
@@ -655,7 +641,7 @@ impl Ext2Inner {
 
     fn dcache_remove(&self, parent_ino: u32, name: &str) {
         let mut cache = self.dentry_cache.lock_no_irq();
-        cache.remove(&(parent_ino, String::from(name)));
+        cache.remove(&Self::dcache_key(parent_ino, name));
     }
 
     /// Flush everything: dirty block cache + deferred metadata (SB + GDT).
@@ -2490,20 +2476,18 @@ impl FileLike for Ext2File {
             return Ok(0);
         }
 
-        // Read all data from user buffer first.
-        let mut user_data = vec![0u8; write_len];
-        reader.read_bytes(&mut user_data)?;
-
         let mut inode = self.inode.lock_no_irq();
         let ptrs_per_block = self.fs.block_size / 4;
         let bs = self.fs.block_size;
         let mut pos = offset;
-        let mut src_off = 0;
+        let mut written = 0;
+        // Single reusable block buffer — avoids large intermediate Vec.
+        let mut block_buf = vec![0u8; bs];
 
-        while src_off < write_len {
+        while written < write_len {
             let block_index = pos / bs;
             let offset_in_block = pos % bs;
-            let chunk_len = min(write_len - src_off, bs - offset_in_block);
+            let chunk_len = min(write_len - written, bs - offset_in_block);
 
             // Resolve or allocate the block.
             let use_extents = inode.uses_extents();
@@ -2514,7 +2498,6 @@ impl FileLike for Ext2File {
             };
 
             if block_num == 0 {
-                // Need to allocate a new block.
                 if use_extents {
                     block_num = self.fs.alloc_extent_block(&mut inode, self.inode_num, block_index)?;
                 } else {
@@ -2522,21 +2505,21 @@ impl FileLike for Ext2File {
                 }
             }
 
-            // Read-modify-write for partial blocks, direct write for full blocks.
             if chunk_len == bs {
-                self.fs.write_block(block_num, &user_data[src_off..src_off + chunk_len])?;
+                // Full block: read from user directly into reusable buffer.
+                reader.read_bytes(&mut block_buf)?;
+                self.fs.write_block(block_num, &block_buf)?;
             } else {
+                // Partial block: read-modify-write.
                 let mut block_data = self.fs.read_block(block_num)?;
-                block_data[offset_in_block..offset_in_block + chunk_len]
-                    .copy_from_slice(&user_data[src_off..src_off + chunk_len]);
+                reader.read_bytes(&mut block_data[offset_in_block..offset_in_block + chunk_len])?;
                 self.fs.write_block(block_num, &block_data)?;
             }
 
             pos += chunk_len;
-            src_off += chunk_len;
+            written += chunk_len;
         }
 
-        // Update size if we grew.
         let new_end = (offset + write_len) as u64;
         if new_end > inode.file_size() {
             inode.set_file_size(new_end);

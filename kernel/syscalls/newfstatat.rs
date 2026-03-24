@@ -34,9 +34,18 @@ impl<'a> SyscallHandler<'a> {
         } else {
             let root_fs_arc = current.root_fs();
             let root_fs = root_fs_arc.lock_no_irq();
-            let opened_files = current.opened_files_no_irq();
-            let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, follow_symlink)?;
-            path_comp.inode.stat()?
+            // Fast path for AT_FDCWD: use lookup_inode which avoids
+            // Arc<PathComponent> + String allocation per path component.
+            match &dirfd {
+                CwdOrFd::AtCwd => {
+                    root_fs.lookup_inode(path, follow_symlink)?.stat()?
+                }
+                _ => {
+                    let opened_files = current.opened_files_no_irq();
+                    let path_comp = root_fs.lookup_path_at(&opened_files, &dirfd, path, follow_symlink)?;
+                    path_comp.inode.stat()?
+                }
+            }
         };
 
         buf.write(&stat.to_abi_bytes())?;
