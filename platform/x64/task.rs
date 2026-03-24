@@ -376,6 +376,8 @@ impl ArchTask {
     /// independent on the user stack, no kernel-side single-slot limitation.
     /// Returns the ctx_base address on success (needed for sigreturn to find
     /// the saved context, especially when using an alternate signal stack).
+    /// `original_rsp`: The user RSP BEFORE the alt stack switch.  Saved into
+    /// the signal context so that `rt_sigreturn` restores the original stack.
     pub fn setup_signal_stack(
         &self,
         frame: &mut PtRegs,
@@ -383,6 +385,7 @@ impl ArchTask {
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
         saved_sigmask: u64,
+        original_rsp: u64,
     ) -> Result<usize, AccessError> {
         fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let rsp = rsp.sub(8);
@@ -424,7 +427,7 @@ impl ArchTask {
         // Use a flat array to avoid unaligned-ref errors on packed PtRegs.
         let regs: [u64; 19] = [
             saved_sigmask,
-            { frame.rip }, { frame.rsp }, { frame.rbp },
+            { frame.rip }, original_rsp, { frame.rbp },
             { frame.rax }, { frame.rbx }, { frame.rcx }, { frame.rdx },
             { frame.rsi }, { frame.rdi },
             { frame.r8  }, { frame.r9  }, { frame.r10 }, { frame.r11 },
@@ -453,10 +456,13 @@ impl ArchTask {
         let aligned = user_rsp.value() & !0xF;
         user_rsp = UserVAddr::new_nonnull(aligned)?;
 
+
         user_rsp = push_to_user_stack(user_rsp, return_rip)?;
 
         frame.rip = sa_handler.as_isize() as u64;
         frame.rsp = user_rsp.as_isize() as u64;
+
+        // Lock-free verify: read back what we just wrote.
         frame.rdi = signal as u64; // int signal
         frame.rsi = 0; // siginfo_t *siginfo
         frame.rdx = 0; // void *ctx

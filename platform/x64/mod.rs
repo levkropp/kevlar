@@ -61,6 +61,11 @@ pub fn start_ap_preemption_timer() {
     unsafe { apic::lapic_timer_init(); }
 }
 
+/// Lock-free emergency serial write. Safe from any context (signal, NMI, etc).
+pub fn emergency_serial_hex(prefix: &[u8], value: u64) {
+    serial::emergency_serial_hex(prefix, value);
+}
+
 /// Read the CMOS RTC and return seconds since Unix epoch.
 pub fn read_rtc_epoch_secs() -> u64 {
     fn cmos_read(reg: u8) -> u8 {

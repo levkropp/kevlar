@@ -247,6 +247,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: null pointer access (pid={}, ip={:#x}, fsbase={:#x})",
                 pid, ip, fsbase
             );
+            // Full register dump for crash investigation.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let cpu = kevlar_platform::arch::cpu_id() as usize;
+                if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
+                    warn!("  RAX={:#x} RBX={:#x} RCX={:#x} RDX={:#x}",
+                        r.rax, r.rbx, r.rcx, r.rdx);
+                    warn!("  RSI={:#x} RDI={:#x} RBP={:#x} RSP={:#x}",
+                        r.rsi, r.rdi, r.rbp, r.rsp);
+                    warn!("  R8={:#x}  R9={:#x}  R10={:#x} R11={:#x}",
+                        r.r8, r.r9, r.r10, r.r11);
+                    warn!("  R12={:#x} R13={:#x} R14={:#x} R15={:#x}",
+                        r.r12, r.r13, r.r14, r.r15);
+                    warn!("  RIP={:#x} RFLAGS={:#x} fault_addr={:#x}",
+                        r.rip, r.rflags, r.fault_addr);
+                }
+            }
             deliver_sigsegv_fatal();
             return;
         }

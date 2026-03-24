@@ -389,6 +389,7 @@ impl ArchTask {
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
         _saved_sigmask: u64,
+        _original_rsp: u64,
     ) -> Result<usize, AccessError> {
         let mut user_sp = UserVAddr::new_nonnull(frame.sp as usize)?;
 
