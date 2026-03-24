@@ -17,7 +17,7 @@ int main(void) {
         printf("CONTRACT_FAIL plausible: tv_sec=%ld\n", ts.tv_sec);
         return 1;
     }
-    printf("realtime: ok tv_sec=%ld\n", ts.tv_sec);
+    printf("realtime: ok\n");
 
     /* tv_nsec in [0, 999999999] */
     if (ts.tv_nsec < 0 || ts.tv_nsec > 999999999L) {
@@ -36,7 +36,7 @@ int main(void) {
         printf("CONTRACT_FAIL coarse_plausible: tv_sec=%ld\n", ts.tv_sec);
         return 1;
     }
-    printf("realtime_coarse: ok tv_sec=%ld\n", ts.tv_sec);
+    printf("realtime_coarse: ok\n");
 
     printf("CONTRACT_PASS\n");
     return 0;
