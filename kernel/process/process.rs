@@ -1422,15 +1422,6 @@ impl Process {
                             "delivering signal {} to pid={} via handler at {:#x}",
                             signal, pid, handler.value()
                         );
-                        {
-                            let mut stack = current.signaled_frame_stack.lock_no_irq();
-                            if !stack.is_full() {
-                                stack.push(*frame);
-                            }
-                            // If stack is full (>4 nested signals), we lose
-                            // the context — extremely unlikely in practice.
-                        }
-
                         // Save the current mask so sigreturn can restore it.
                         // Signal blocking during handler execution is NOT done
                         // because signaled_frame_stack supports nesting — the
@@ -1438,6 +1429,8 @@ impl Process {
                         let old_mask = current.sigset_load();
 
                         // Switch to alternate signal stack if SA_ONSTACK and alt stack registered.
+                        // Must happen BEFORE saving to signaled_frame_stack, so
+                        // sigreturn reads the saved context from the right stack.
                         if on_altstack {
                             let alt_sp = current.alt_stack_sp.load(core::sync::atomic::Ordering::Relaxed);
                             let alt_size = current.alt_stack_size.load(core::sync::atomic::Ordering::Relaxed);
@@ -1459,6 +1452,15 @@ impl Process {
                                         frame.sp = alt_top as u64;
                                     }
                                 }
+                            }
+                        }
+
+                        // Save frame AFTER alt stack switch so sigreturn knows
+                        // where to read the saved context from.
+                        {
+                            let mut stack = current.signaled_frame_stack.lock_no_irq();
+                            if !stack.is_full() {
+                                stack.push(*frame);
                             }
                         }
 
