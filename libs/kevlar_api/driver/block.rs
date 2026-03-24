@@ -25,6 +25,16 @@ pub trait BlockDevice: Send + Sync {
     /// Flush any cached writes to the device.
     fn flush(&self) -> Result<(), BlockError>;
 
+    /// Batch write: submit multiple writes and wait for all completions.
+    /// Default implementation falls back to sequential `write_sectors()`.
+    /// `requests` is a slice of (start_sector, data) pairs.
+    fn write_sectors_batch(&self, requests: &[(u64, &[u8])]) -> Result<(), BlockError> {
+        for &(sector, data) in requests {
+            self.write_sectors(sector, data)?;
+        }
+        Ok(())
+    }
+
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;
 

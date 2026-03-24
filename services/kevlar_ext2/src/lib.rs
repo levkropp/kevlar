@@ -615,12 +615,15 @@ impl Ext2Inner {
             return Ok(());
         }
         let sectors_per_block = self.block_size as u64 / 512;
-        for (block_num, data) in &entries {
-            let sector = block_num * sectors_per_block;
-            self.device
-                .write_sectors(sector, data)
-                .map_err(|_| Error::new(Errno::EIO))?;
-        }
+        // Collect (sector, data) pairs for batch write.
+        // BTreeMap is already sorted by block number → sequential I/O.
+        let batch: Vec<(u64, &[u8])> = entries
+            .iter()
+            .map(|(blk, data)| (blk * sectors_per_block, data.as_slice()))
+            .collect();
+        self.device
+            .write_sectors_batch(&batch)
+            .map_err(|_| Error::new(Errno::EIO))?;
         Ok(())
     }
 

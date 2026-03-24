@@ -10,6 +10,7 @@ extern crate kevlar_api;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cmp::min;
 use core::hint;
 
 use virtio::device::{IsrStatus, Virtio, VirtqDescBuffer};
@@ -49,6 +50,11 @@ const CACHE_SIZE: usize = 4096;
 // Number of sectors to read in a single batch (read-ahead).
 // One page = 4096 bytes = 8 sectors.
 const BATCH_SECTORS: usize = 8;
+
+/// Maximum number of in-flight batch write requests.
+/// Each request uses 3 virtqueue descriptors (header + data + status).
+/// Actual count is capped by virtqueue size at init time.
+const MAX_INFLIGHT: usize = 32;
 
 /// VirtIO block request header (16 bytes).
 #[repr(C)]
@@ -115,11 +121,14 @@ impl BlockCache {
 pub struct VirtioBlk {
     virtio: Virtio,
     capacity_sectors: u64,
-    /// Pre-allocated request buffer (2 pages):
-    /// [0..16): request header (device-readable)
-    /// [16..17): status byte (device-writable)
-    /// [PAGE_SIZE..2*PAGE_SIZE): data buffer (up to 8 sectors)
+    /// Pre-allocated request buffer (2 pages) for single-request I/O (reads).
+    /// Slot 0 in the pool — kept as a field for backward compat with do_request.
     req_buf: VAddr,
+    /// Pool of request slots for batch writes. Each slot is 2 pages:
+    /// [0..16) header, [16..17) status, [PAGE_SIZE..2*PAGE_SIZE) data.
+    req_pool: VAddr,
+    /// Number of usable batch write slots (1..num_batch_slots are for writes).
+    num_batch_slots: usize,
     cache: BlockCache,
 }
 
@@ -143,10 +152,22 @@ impl VirtioBlk {
             .expect("failed to allocate virtio-blk request buffer")
             .as_vaddr();
 
+        // Allocate batch write pool: up to MAX_INFLIGHT slots, each 2 pages.
+        // Cap by virtqueue descriptor count (each request uses 3 descriptors).
+        let num_descs = virtio.virtq_mut(VIRTIO_BLK_QUEUE).num_descs() as usize;
+        // Reserve 3 descs for slot 0 (reads via do_request), use rest for batch.
+        let num_batch_slots = min(MAX_INFLIGHT, (num_descs / 3).saturating_sub(1));
+        let pool_pages = if num_batch_slots > 0 { num_batch_slots * 2 } else { 2 };
+        let req_pool = alloc_pages(pool_pages, AllocPageFlags::KERNEL)
+            .expect("failed to allocate virtio-blk batch request pool")
+            .as_vaddr();
+
         Ok(VirtioBlk {
             virtio,
             capacity_sectors,
             req_buf,
+            req_pool,
+            num_batch_slots,
             cache: BlockCache::new(),
         })
     }
@@ -362,6 +383,127 @@ impl VirtioBlk {
         // For synchronous I/O, the IRQ just acknowledges the interrupt.
         // Completions are processed by the spin-wait loop in do_request().
     }
+
+    // ── Batch write I/O ─────────────────────────────────────────────
+
+    /// Get the base VAddr of a batch write slot.
+    fn slot_base(&self, slot: usize) -> VAddr {
+        self.req_pool.add(slot * 2 * PAGE_SIZE)
+    }
+
+    /// Enqueue a write request on the given slot. Does NOT notify the device.
+    fn submit_write(&mut self, slot: usize, sector: u64, num_sectors: usize) {
+        let base = self.slot_base(slot);
+        let header_ptr = base.as_mut_ptr::<VirtioBlkReqHeader>();
+        unsafe {
+            (*header_ptr).type_ = VIRTIO_BLK_T_OUT;
+            (*header_ptr).reserved = 0;
+            (*header_ptr).sector = sector;
+        }
+
+        // Clear status byte (sentinel).
+        let status_ptr = base.add(16).as_mut_ptr::<u8>();
+        unsafe { *status_ptr = 0xFF; }
+
+        let header_paddr = base.as_paddr();
+        let status_paddr = base.add(16).as_paddr();
+        let data_paddr = base.add(PAGE_SIZE).as_paddr();
+        let data_len = num_sectors * SECTOR_SIZE;
+
+        let chain = &[
+            VirtqDescBuffer::ReadOnlyFromDevice {
+                addr: header_paddr,
+                len: 16,
+            },
+            VirtqDescBuffer::ReadOnlyFromDevice {
+                addr: data_paddr,
+                len: data_len,
+            },
+            VirtqDescBuffer::WritableFromDevice {
+                addr: status_paddr,
+                len: 1,
+            },
+        ];
+
+        self.virtio.virtq_mut(VIRTIO_BLK_QUEUE).enqueue(chain);
+    }
+
+    /// Notify device and spin-wait until `count` completions arrive.
+    fn reap_completions(&mut self, count: usize) -> Result<(), BlockError> {
+        self.virtio.virtq_mut(VIRTIO_BLK_QUEUE).notify();
+        let mut completed = 0;
+        while completed < count {
+            if self
+                .virtio
+                .virtq_mut(VIRTIO_BLK_QUEUE)
+                .pop_used()
+                .is_some()
+            {
+                completed += 1;
+            } else {
+                hint::spin_loop();
+            }
+        }
+        Ok(())
+    }
+
+    /// Batch-write multiple blocks. Submits up to num_batch_slots requests
+    /// at once, notifies once, then waits for all completions.
+    /// `requests` is a slice of (start_sector, data) pairs.
+    fn write_sectors_batch_impl(
+        &mut self,
+        requests: &[(u64, &[u8])],
+    ) -> Result<(), BlockError> {
+        if self.num_batch_slots == 0 {
+            // Fallback: sequential writes (no batch slots available).
+            for &(sector, data) in requests {
+                self.write_sectors_impl(sector, data)?;
+            }
+            return Ok(());
+        }
+
+        let mut i = 0;
+        while i < requests.len() {
+            let batch_end = min(i + self.num_batch_slots, requests.len());
+            let batch = &requests[i..batch_end];
+
+            // Copy data to slot buffers and enqueue.
+            for (j, &(sector, data)) in batch.iter().enumerate() {
+                let slot = j; // slots 0..num_batch_slots
+                let data_dst = self.slot_base(slot).add(PAGE_SIZE).as_mut_ptr::<u8>();
+                let copy_len = min(data.len(), PAGE_SIZE);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), data_dst, copy_len);
+                }
+                let num_sectors = (copy_len + SECTOR_SIZE - 1) / SECTOR_SIZE;
+                self.submit_write(slot, sector, num_sectors);
+            }
+
+            // Notify once, wait for all completions.
+            self.reap_completions(batch.len())?;
+
+            // Check status bytes for all slots.
+            for j in 0..batch.len() {
+                let status = unsafe { *self.slot_base(j).add(16).as_ptr::<u8>() };
+                if status != VIRTIO_BLK_S_OK {
+                    return Err(BlockError::IoError);
+                }
+            }
+
+            // Update sector cache with written data.
+            for &(sector, data) in batch {
+                let num_sectors = data.len() / SECTOR_SIZE;
+                for s in 0..num_sectors {
+                    let sec = sector + s as u64;
+                    self.cache.put(sec, &data[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
+                }
+            }
+
+            i = batch_end;
+        }
+
+        Ok(())
+    }
 }
 
 /// Thread-safe wrapper around VirtioBlk that implements BlockDevice.
@@ -376,6 +518,10 @@ impl BlockDevice for VirtioBlockDriver {
 
     fn write_sectors(&self, start_sector: u64, buf: &[u8]) -> Result<(), BlockError> {
         self.device.lock().write_sectors_impl(start_sector, buf)
+    }
+
+    fn write_sectors_batch(&self, requests: &[(u64, &[u8])]) -> Result<(), BlockError> {
+        self.device.lock().write_sectors_batch_impl(requests)
     }
 
     fn flush(&self) -> Result<(), BlockError> {
