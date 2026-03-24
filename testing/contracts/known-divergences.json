@@ -1,4 +1,4 @@
 {
     "_comment": "Tests listed here are known to diverge from Linux. They still run and are reported as XFAIL, but do not fail the suite. Remove entries as implementations are completed.",
-    "time.clock_realtime": "Wall-clock tv_sec differs by 1s due to sequential test execution timing (test artifact)."
+    "time.clock_realtime": "Output includes tv_sec timestamp which naturally differs between Linux and Kevlar runs. Both report CONTRACT_PASS."
 }
