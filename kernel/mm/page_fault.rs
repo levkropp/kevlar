@@ -682,8 +682,10 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         // On Linux, the dynamic linker's writes to MAP_PRIVATE read-only
         // pages succeed via the COW mechanism.
         if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0) {
-            if !vma_is_shared {
-                // MAP_PRIVATE: COW-copy the page and make it writable.
+            if !vma_is_shared && !is_anonymous {
+                // MAP_PRIVATE file-backed: COW-copy the page and make it writable.
+                // This handles musl's RELR relocations writing to read-only
+                // file-mapped pages. Anonymous pages with PROT_READ should SIGSEGV.
                 if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
                     let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
                         Ok(p) => p,
