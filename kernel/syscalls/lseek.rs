@@ -8,6 +8,8 @@ use crate::{process::current_process, syscalls::SyscallHandler};
 const SEEK_SET: c_int = 0;
 const SEEK_CUR: c_int = 1;
 const SEEK_END: c_int = 2;
+const SEEK_DATA: c_int = 3;
+const SEEK_HOLE: c_int = 4;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_lseek(&mut self, fd: Fd, offset: i64, whence: c_int) -> Result<isize> {
@@ -23,6 +25,22 @@ impl<'a> SyscallHandler<'a> {
                 SEEK_END => {
                     let stat = opened_file.inode().stat()?;
                     stat.size.0 as i64 + offset
+                }
+                SEEK_DATA => {
+                    // For non-sparse files: data starts at offset if within file.
+                    let stat = opened_file.inode().stat()?;
+                    if offset >= stat.size.0 as i64 {
+                        return Err(Errno::ENXIO.into());
+                    }
+                    offset
+                }
+                SEEK_HOLE => {
+                    // For non-sparse files: the only "hole" is at EOF.
+                    let stat = opened_file.inode().stat()?;
+                    if offset >= stat.size.0 as i64 {
+                        return Err(Errno::ENXIO.into());
+                    }
+                    stat.size.0 as i64
                 }
                 _ => return Err(Errno::EINVAL.into()),
             };

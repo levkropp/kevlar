@@ -38,6 +38,7 @@ impl<'a> SyscallHandler<'a> {
             close_on_exec: (flags & SOCK_CLOEXEC) != 0,
             append: false,
             access_mode: 2,
+            sync: false,
         };
         let fd = current_process()
             .opened_files()

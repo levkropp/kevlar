@@ -24,6 +24,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::min;
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kevlar_api::driver::block::{block_device, BlockDevice};
 use kevlar_platform::spinlock::SpinLock;
@@ -1387,6 +1388,10 @@ impl Ext2Inner {
 
     /// Free a previously allocated block.
     fn free_block(&self, block_num: u64) -> Result<()> {
+        // Invalidate caches so freed blocks don't serve stale data if reallocated.
+        self.dirty_cache.lock_no_irq().remove(&block_num);
+        self.read_cache.lock_no_irq().retain(|e| e.block_num != block_num);
+
         let relative = block_num - self.first_data_block as u64;
         let group_idx = (relative / self.blocks_per_group as u64) as usize;
         let bit = (relative % self.blocks_per_group as u64) as usize;
@@ -1831,6 +1836,7 @@ impl Ext2Inner {
                 fs: self.clone(),
                 inode_num: ino,
                 inode: SpinLock::new(inode),
+                dirty: AtomicBool::new(false),
             }))
         }
     }
@@ -2447,6 +2453,8 @@ struct Ext2File {
     fs: Arc<Ext2Inner>,
     inode_num: u32,
     inode: SpinLock<Ext2Inode>,
+    /// Set when write() modifies the file; cleared on close()/fsync().
+    dirty: AtomicBool,
 }
 
 impl FileLike for Ext2File {
@@ -2525,6 +2533,7 @@ impl FileLike for Ext2File {
             inode.set_file_size(new_end);
         }
         self.fs.write_inode(self.inode_num, &inode)?;
+        self.dirty.store(true, Ordering::Relaxed);
 
         Ok(write_len)
     }
@@ -2544,7 +2553,20 @@ impl FileLike for Ext2File {
     }
 
     fn fsync(&self) -> Result<()> {
+        self.dirty.store(false, Ordering::Relaxed);
         self.fs.flush_all()
+    }
+
+    fn close(&self) -> Result<()> {
+        if self.dirty.load(Ordering::Relaxed) {
+            self.dirty.store(false, Ordering::Relaxed);
+            // Persist inode metadata (size, block count) so future opens see
+            // the correct state. Data blocks stay in dirty cache until the
+            // cache fills or explicit fsync — matching Linux close() semantics.
+            let inode = self.inode.lock_no_irq();
+            let _ = self.fs.write_inode(self.inode_num, &inode);
+        }
+        Ok(())
     }
 
     fn poll(&self) -> Result<PollStatus> {

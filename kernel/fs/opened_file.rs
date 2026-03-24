@@ -30,6 +30,8 @@ bitflags! {
         const O_NONBLOCK = 0o4000;
         const O_DIRECTORY = 0o200000;
         const O_NOFOLLOW = 0o400000;
+        const O_DSYNC    = 0o10000;
+        const O_SYNC     = 0o4010000;
         const O_CLOEXEC  = 0o2000000;
         /// O_TMPFILE: create an unnamed temporary file. We treat it as O_CREAT
         /// for simplicity — the file gets a name but apk's atomic rename works.
@@ -46,6 +48,7 @@ impl From<OpenFlags> for OpenOptions {
             close_on_exec: flags.contains(OpenFlags::O_CLOEXEC),
             append: flags.contains(OpenFlags::O_APPEND),
             access_mode: flags.bits() & 0o3, // O_RDONLY=0, O_WRONLY=1, O_RDWR=2
+            sync: flags.contains(OpenFlags::O_SYNC) || flags.contains(OpenFlags::O_DSYNC),
         }
     }
 }
@@ -221,6 +224,12 @@ impl OpenedFile {
 
         let written_len = file.write(pos, buf, &options)?;
         self.pos.fetch_add(written_len);
+
+        // O_SYNC / O_DSYNC: flush data to disk after each write.
+        if options.sync {
+            file.fsync()?;
+        }
+
         Ok(written_len)
     }
 
@@ -385,10 +394,16 @@ impl OpenedFileTable {
         }
     }
 
-    /// Closes an opened file.
+    /// Closes an opened file. Calls FileLike::close() to flush dirty data.
     pub fn close(&mut self, fd: Fd) -> Result<()> {
         match self.files.get_mut(fd.as_usize()) {
-            Some(opened_file) => *opened_file = None,
+            Some(slot @ Some(_)) => {
+                // Call close() on the file before dropping it.
+                if let Some(local) = slot.as_ref() {
+                    let _ = local.opened_file.path.inode.close();
+                }
+                *slot = None;
+            }
             _ => return Err(Errno::EBADF.into()),
         }
 
