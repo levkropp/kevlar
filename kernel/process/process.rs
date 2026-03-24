@@ -262,6 +262,11 @@ pub struct Process {
     /// Stack of saved register contexts for nested signal delivery.
     /// Each signal handler pushes its interrupted context; rt_sigreturn pops it.
     signaled_frame_stack: SpinLock<arrayvec::ArrayVec<PtRegs, 4>>,
+    /// Stack of user-stack context base addresses for nested signal delivery.
+    /// Paired with signaled_frame_stack: setup_signal_stack pushes ctx_base,
+    /// setup_sigreturn_stack pops it. Needed when signal is delivered on an
+    /// alternate stack (SA_ONSTACK) since signaled_frame.rsp is the pre-switch RSP.
+    signal_ctx_base_stack: SpinLock<arrayvec::ArrayVec<usize, 4>>,
     sigset: AtomicU64,
     umask: AtomicCell<u32>,
     // UID/GID tracking (Phase 5) + saved IDs (M10.4).
@@ -357,6 +362,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -476,6 +482,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -1422,15 +1429,17 @@ impl Process {
                             "delivering signal {} to pid={} via handler at {:#x}",
                             signal, pid, handler.value()
                         );
+                        {
+                            let mut stack = current.signaled_frame_stack.lock_no_irq();
+                            if !stack.is_full() {
+                                stack.push(*frame);
+                            }
+                        }
+
                         // Save the current mask so sigreturn can restore it.
-                        // Signal blocking during handler execution is NOT done
-                        // because signaled_frame_stack supports nesting — the
-                        // handler can receive further signals safely.
                         let old_mask = current.sigset_load();
 
                         // Switch to alternate signal stack if SA_ONSTACK and alt stack registered.
-                        // Must happen BEFORE saving to signaled_frame_stack, so
-                        // sigreturn reads the saved context from the right stack.
                         if on_altstack {
                             let alt_sp = current.alt_stack_sp.load(core::sync::atomic::Ordering::Relaxed);
                             let alt_size = current.alt_stack_size.load(core::sync::atomic::Ordering::Relaxed);
@@ -1455,19 +1464,18 @@ impl Process {
                             }
                         }
 
-                        // Save frame AFTER alt stack switch so sigreturn knows
-                        // where to read the saved context from.
-                        {
-                            let mut stack = current.signaled_frame_stack.lock_no_irq();
-                            if !stack.is_full() {
-                                stack.push(*frame);
-                            }
-                        }
-
                         // Set usercopy context for fault attribution.
                         debug::usercopy::set_context("signal_stack_setup");
                         let result = current.arch.setup_signal_stack(frame, signal, handler, restorer, old_mask.bits());
                         debug::usercopy::clear_context();
+
+                        // Store ctx_base for sigreturn (needed for alt stack).
+                        if let Ok(ctx_base) = &result {
+                            let mut cbs = current.signal_ctx_base_stack.lock_no_irq();
+                            if !cbs.is_full() {
+                                cbs.push(*ctx_base);
+                            }
+                        }
 
                         // ktrace: log frame state after signal setup.
                         #[cfg(feature = "ktrace-mm")]
@@ -1519,10 +1527,11 @@ impl Process {
     /// delivered to a signal handler.
     pub fn restore_signaled_user_stack(current: &Arc<Process>, current_frame: &mut PtRegs) {
         let popped = current.signaled_frame_stack.lock_no_irq().pop();
+        let ctx_base = current.signal_ctx_base_stack.lock_no_irq().pop().unwrap_or(0);
         if let Some(signaled_frame) = popped {
             let saved_mask = current
                 .arch
-                .setup_sigreturn_stack(current_frame, &signaled_frame);
+                .setup_sigreturn_stack(current_frame, &signaled_frame, ctx_base);
             current.sigset_store(SigSet::from_raw(saved_mask));
         } else {
             // No saved frame — spurious sigreturn. Kill the process.
@@ -1726,6 +1735,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -1843,6 +1853,7 @@ impl Process {
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -1959,6 +1970,7 @@ impl Process {
             signals: Arc::clone(&parent.signals),
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             sigset: AtomicU64::new(parent.sigset_load().bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),

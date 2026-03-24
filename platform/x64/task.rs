@@ -374,6 +374,8 @@ impl ArchTask {
     /// and signal mask on the user stack.  `rt_sigreturn` reads them back,
     /// so nested signal delivery works correctly — each signal frame is
     /// independent on the user stack, no kernel-side single-slot limitation.
+    /// Returns the ctx_base address on success (needed for sigreturn to find
+    /// the saved context, especially when using an alternate signal stack).
     pub fn setup_signal_stack(
         &self,
         frame: &mut PtRegs,
@@ -381,7 +383,7 @@ impl ArchTask {
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
         saved_sigmask: u64,
-    ) -> Result<(), AccessError> {
+    ) -> Result<usize, AccessError> {
         fn push_to_user_stack(rsp: UserVAddr, value: u64) -> Result<UserVAddr, AccessError> {
             let rsp = rsp.sub(8);
             rsp.write::<u64>(&value)?;
@@ -459,17 +461,17 @@ impl ArchTask {
         frame.rsi = 0; // siginfo_t *siginfo
         frame.rdx = 0; // void *ctx
 
-        Ok(())
+        Ok(ctx_base.value())
     }
 
     /// Restore the interrupted context from the user stack.
     /// Reads all saved GPRs, RIP, RSP, RFLAGS, and signal mask from
     /// the signal frame that was written by `setup_signal_stack`.
     /// Returns the saved signal mask for the caller to restore.
-    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) -> u64 {
-        // The context was saved at original_rsp - 128 (red zone) - 832 (frame top).
-        let original_rsp = signaled_frame.rsp as usize;
-        let ctx_base_val = original_rsp.wrapping_sub(128).wrapping_sub(832);
+    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs, ctx_base_val: usize) -> u64 {
+        // ctx_base_val was saved by setup_signal_stack and stored in signal_ctx_base_stack.
+        // It points to where the register context was written on the user stack
+        // (possibly the alternate signal stack).
         let ctx = match UserVAddr::new_nonnull(ctx_base_val) {
             Ok(addr) => addr,
             Err(_) => {

@@ -389,7 +389,7 @@ impl ArchTask {
         sa_handler: UserVAddr,
         restorer: Option<UserVAddr>,
         _saved_sigmask: u64,
-    ) -> Result<(), AccessError> {
+    ) -> Result<usize, AccessError> {
         let mut user_sp = UserVAddr::new_nonnull(frame.sp as usize)?;
 
         // Determine the LR (return address) for the signal handler.
@@ -418,10 +418,10 @@ impl ArchTask {
         frame.regs[1] = 0;               // siginfo_t *siginfo
         frame.regs[2] = 0;               // void *ctx
 
-        Ok(())
+        Ok(0) // ARM64 doesn't use user-stack context save (yet)
     }
 
-    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs) -> u64 {
+    pub fn setup_sigreturn_stack(&self, current_frame: &mut PtRegs, signaled_frame: &PtRegs, _ctx_base: usize) -> u64 {
         *current_frame = *signaled_frame;
         0 // TODO: ARM64 signal mask save/restore on user stack
     }
