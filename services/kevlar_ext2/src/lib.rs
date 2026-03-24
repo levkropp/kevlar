@@ -465,6 +465,9 @@ struct Ext2MutableState {
     groups: Vec<Ext2GroupDesc>,
     free_blocks_count: u32,
     free_inodes_count: u32,
+    /// Pre-allocated free inode pool. alloc_inode returns from here first,
+    /// refills by scanning bitmap once when empty.
+    inode_pool: Vec<u32>,
 }
 
 // ── Shared filesystem inner ────────────────────────────────────────
@@ -1941,6 +1944,7 @@ impl Ext2Filesystem {
                     groups,
                     free_blocks_count,
                     free_inodes_count,
+                    inode_pool: Vec::new(),
                 }),
                 dev_id: kevlar_vfs::inode::alloc_dev_id(),
                 dirty_cache: SpinLock::new(BTreeMap::new()),
@@ -2576,6 +2580,37 @@ impl FileLike for Ext2File {
 
     fn poll(&self) -> Result<PollStatus> {
         Ok(PollStatus::POLLIN | PollStatus::POLLOUT)
+    }
+
+    fn fallocate(&self, offset: usize, len: usize) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        let bs = self.fs.block_size;
+        let end = offset + len;
+        let start_block = offset / bs;
+        let end_block = (end + bs - 1) / bs;
+        let ptrs_per_block = bs / 4;
+        let use_extents = inode.uses_extents();
+
+        for blk_idx in start_block..end_block {
+            let block_num = if use_extents {
+                self.fs.resolve_extent(&inode, blk_idx)?
+            } else {
+                self.fs.resolve_block_ptr(&inode, blk_idx, ptrs_per_block)? as u64
+            };
+            if block_num == 0 {
+                if use_extents {
+                    self.fs.alloc_extent_block(&mut inode, self.inode_num, blk_idx)?;
+                } else {
+                    self.fs.alloc_data_block(&mut inode, blk_idx)?;
+                }
+            }
+        }
+
+        if end as u64 > inode.file_size() {
+            inode.set_file_size(end as u64);
+        }
+        self.fs.write_inode(self.inode_num, &inode)?;
+        Ok(())
     }
 
     fn truncate(&self, length: usize) -> Result<()> {

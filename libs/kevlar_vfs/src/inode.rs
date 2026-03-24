@@ -206,6 +206,13 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         Err(Error::new(Errno::EINVAL))
     }
 
+    /// `fallocate(2)`. Preallocate disk space for a file.
+    /// Default: accept without action (tmpfs, devfs, etc.).
+    /// Ext2/ext4 overrides to actually allocate blocks.
+    fn fallocate(&self, _offset: usize, _len: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// `fchmod(2)`.
     fn chmod(&self, _mode: FileMode) -> Result<()> {
         Ok(()) // silently succeed for filesystems that don't support it
