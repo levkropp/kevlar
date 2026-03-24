@@ -1444,9 +1444,7 @@ impl Process {
                             let alt_sp = current.alt_stack_sp.load(core::sync::atomic::Ordering::Relaxed);
                             let alt_size = current.alt_stack_size.load(core::sync::atomic::Ordering::Relaxed);
                             if alt_sp != 0 && alt_size > 0 {
-                                // Use top of alt stack (stack grows down).
                                 let alt_top = alt_sp + alt_size;
-                                // Only switch if not already on the alt stack.
                                 #[cfg(target_arch = "x86_64")]
                                 {
                                     let sp = frame.rsp as usize;
@@ -1468,6 +1466,7 @@ impl Process {
                         debug::usercopy::set_context("signal_stack_setup");
                         let result = current.arch.setup_signal_stack(frame, signal, handler, restorer, old_mask.bits());
                         debug::usercopy::clear_context();
+
 
                         // Store ctx_base for sigreturn (needed for alt stack).
                         if let Ok(ctx_base) = &result {
