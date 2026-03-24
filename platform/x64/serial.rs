@@ -93,6 +93,24 @@ impl SerialPort {
 static SERIAL0: SerialPort = SerialPort::new(SERIAL0_IOPORT, SERIAL0_IRQ);
 static SERIAL1: SerialPort = SerialPort::new(SERIAL1_IOPORT, SERIAL1_IRQ);
 
+/// Lock-free emergency serial write. Safe to call from any context
+/// (signal delivery, page fault handler, NMI). No locks, no allocation.
+pub fn emergency_serial_hex(prefix: &[u8], value: u64) {
+    for &ch in prefix {
+        unsafe { outb(SERIAL0_IOPORT + THR, ch); }
+    }
+    unsafe { outb(SERIAL0_IOPORT + THR, b'='); }
+    unsafe { outb(SERIAL0_IOPORT + THR, b'0'); }
+    unsafe { outb(SERIAL0_IOPORT + THR, b'x'); }
+    for i in (0..16).rev() {
+        let nibble = ((value >> (i * 4)) & 0xF) as u8;
+        let ch = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+        unsafe { outb(SERIAL0_IOPORT + THR, ch); }
+    }
+    unsafe { outb(SERIAL0_IOPORT + THR, b'\r'); }
+    unsafe { outb(SERIAL0_IOPORT + THR, b'\n'); }
+}
+
 struct Serial0Printer;
 
 impl Printer for Serial0Printer {

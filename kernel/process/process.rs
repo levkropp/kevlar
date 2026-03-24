@@ -1429,6 +1429,10 @@ impl Process {
                             "delivering signal {} to pid={} via handler at {:#x}",
                             signal, pid, handler.value()
                         );
+                        #[cfg(target_arch = "x86_64")]
+                        let original_rsp = { frame.rsp };
+                        #[cfg(target_arch = "aarch64")]
+                        let original_rsp = { frame.sp };
                         {
                             let mut stack = current.signaled_frame_stack.lock_no_irq();
                             if !stack.is_full() {
@@ -1464,7 +1468,7 @@ impl Process {
 
                         // Set usercopy context for fault attribution.
                         debug::usercopy::set_context("signal_stack_setup");
-                        let result = current.arch.setup_signal_stack(frame, signal, handler, restorer, old_mask.bits());
+                        let result = current.arch.setup_signal_stack(frame, signal, handler, restorer, old_mask.bits(), original_rsp);
                         debug::usercopy::clear_context();
 
 

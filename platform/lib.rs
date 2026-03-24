@@ -70,7 +70,8 @@ mod arm64;
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
-        broadcast_halt_ipi, cpu_id, cpuid_family_model_stepping, enable_irq, halt, idle,
+        broadcast_halt_ipi, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
+        enable_irq, halt, idle,
         in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, read_rtc_epoch_secs,
         semihosting_halt,
