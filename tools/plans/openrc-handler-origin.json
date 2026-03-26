@@ -1,0 +1,20 @@
+{
+    "_comment": "Trace where the bogus SIGCHLD handler 0xa000411f1 comes from. Break at musl's sigaction wrapper right where it reads sa->sa_handler, before writing ksa. The user's sigaction call in openrc passes the handler in the struct sigaction pointed to by RSI. Break at musl's inner sigaction at offset 0x5de6a (mov (%rsi),%rdx — reads sa->sa_handler into RDX).",
+    "init": "/bin/test-openssl-boot",
+    "steps": [
+        {
+            "name": "sigaction_reads_handler",
+            "_comment": "musl at 0x5de6a: mov (%rsi),%rdx — loads sa->sa_handler. R8=user sa ptr. RDI=signal. Break here and check if RDX gets the bogus value. Use ld-musl base 0xa0000b000 for openrc.",
+            "break": "hbreak *0xffff80000016ee90",
+            "_comment2": "Actually, we can't break in userspace. Break at handle_user_fault (the crash) and then examine the PtRegs to find the user call stack. Look at the stack contents at RSP=0x9ffffe960 to find the caller.",
+            "collect": [
+                "regs",
+                "x/16gx 0x9ffffe960",
+                "x/16gx 0x9ffffe8e0",
+                "x/16gx 0x9ffffe860",
+                "bt 5"
+            ],
+            "then": "stop"
+        }
+    ]
+}

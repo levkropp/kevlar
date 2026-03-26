@@ -1,0 +1,22 @@
+{
+    "_comment": "Trace rt_sigaction(SIGCHLD) calls. Break at x64_handle_syscall call site. At that point: [RSP]=syscall_num, [RSP+8]=frame_ptr. In the PtRegs frame: rdi(+112)=signum, rsi(+104)=act_ptr. Condition: syscall==13 AND signum==17.",
+    "init": "/bin/test-openssl-boot",
+    "steps": [
+        {
+            "name": "find_sigchld_sigaction",
+            "_comment": "Break at every syscall entry, filter for rt_sigaction(SIGCHLD). The condition checks RAX==13 at syscall_entry.",
+            "break": "hbreak *0xffff800000101380",
+            "condition": "$rax == 13 && $rdi == 17",
+            "max_hits": 500000,
+            "collect": [
+                "regs",
+                "expr $rax",
+                "expr $rdi",
+                "expr $rsi",
+                "x/4gx $rsi",
+                "x/16bx $rsi"
+            ],
+            "then": "stop"
+        }
+    ]
+}

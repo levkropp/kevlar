@@ -108,6 +108,7 @@ def compile_all_local():
         ("testing/test_ext4_mknod.c",    "test-ext4-mknod",  []),
         ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/test_alpine_apk.c",    "test-alpine-apk",  []),
+        ("testing/test_cgroups_hang.c",  "test-cgroups-hang", []),
         ("testing/test_pipe_crash.c",    "test-pipe-crash",  []),
         ("testing/bb_minimal.c",         "bb-minimal",       []),
         ("testing/test_gcc_alpine.c",     "test-gcc-alpine", []),

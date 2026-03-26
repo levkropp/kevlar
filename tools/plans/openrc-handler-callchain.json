@@ -1,0 +1,22 @@
+{
+    "_comment": "Find who passes the bogus SIGCHLD handler. Break at syscall_entry when RAX==13 (rt_sigaction) AND RDI==17 (SIGCHLD). At this point RSP is the USER RSP (before kernel stack switch). Dump the user stack to find the caller chain. Also read the struct sigaction at RSI to see the handler value.",
+    "init": "/bin/test-openssl-boot",
+    "steps": [
+        {
+            "name": "catch_bogus_sigchld",
+            "break": "hbreak *0xffff800000101380",
+            "condition": "$rax == 13 && $rdi == 17 && $rsi != 0",
+            "max_hits": 500000,
+            "collect": [
+                "regs",
+                "expr $rax",
+                "expr $rdi",
+                "expr $rcx",
+                "x/4gx $rsi",
+                "x/32gx $rsp",
+                "disasm $rcx-16 12"
+            ],
+            "then": "stop"
+        }
+    ]
+}
