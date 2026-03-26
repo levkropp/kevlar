@@ -23,7 +23,7 @@ use x86::current::segmentation::wrfsbase;
 ///
 /// With per-CPU stack caching, allocation cost is amortized regardless of
 /// size, so the bigger stacks don't hurt fork latency.
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 4;
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8;
 
 /// End of the user virtual address allocation region.
 pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
