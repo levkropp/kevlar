@@ -55,6 +55,7 @@ mod listen;
 mod lstat;
 mod mkdir;
 mod mmap;
+mod msync;
 mod open;
 mod pipe;
 mod poll;
@@ -263,6 +264,7 @@ mod syscall_numbers {
     pub const SYS_SELECT: usize = 23;
     pub const SYS_SCHED_YIELD: usize = 24;
     pub const SYS_MREMAP: usize = 25;
+    pub const SYS_MSYNC: usize = 26;
     pub const SYS_DUP: usize = 32;
     pub const SYS_DUP2: usize = 33;
     pub const SYS_NANOSLEEP: usize = 35;
@@ -497,6 +499,7 @@ mod syscall_numbers {
     pub const SYS_MPROTECT: usize = 226;
     pub const SYS_MUNMAP: usize = 215;
     pub const SYS_MREMAP: usize = 216;
+    pub const SYS_MSYNC: usize = 227;
     pub const SYS_BRK: usize = 214;
     pub const SYS_SCHED_GETAFFINITY: usize = 123;
     pub const SYS_SCHED_YIELD: usize = 124;
@@ -1245,6 +1248,7 @@ impl<'a> SyscallHandler<'a> {
                 a3,
                 a4 as c_int,
             ),
+            SYS_MSYNC => self.sys_msync(UserVAddr::new_nonnull(a1)?, a2, a3 as i32),
             // M1 Phase 4: Filesystem mutations
             SYS_UNLINK => self.sys_unlink(&resolve_path(a1)?),
             SYS_RMDIR => self.sys_rmdir(&resolve_path(a1)?),
@@ -1617,6 +1621,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_MPROTECT => "mprotect",
         SYS_MUNMAP => "munmap",
         SYS_MREMAP => "mremap",
+        SYS_MSYNC => "msync",
         SYS_BRK => "brk",
         SYS_RT_SIGACTION => "rt_sigaction",
         SYS_RT_SIGPROCMASK => "rt_sigprocmask",

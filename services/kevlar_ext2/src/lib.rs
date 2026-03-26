@@ -593,6 +593,13 @@ impl Ext2Inner {
         if entries.is_empty() {
             return Ok(());
         }
+        // Invalidate read cache entries for blocks we're about to flush,
+        // so subsequent reads see the updated data from disk (or re-cache
+        // the fresh version) instead of stale cached copies.
+        {
+            let mut rcache = self.read_cache.lock_no_irq();
+            rcache.retain(|e| !entries.contains_key(&e.block_num));
+        }
         let sectors_per_block = self.block_size as u64 / 512;
         // Collect (sector, data) pairs for batch write.
         // BTreeMap is already sorted by block number → sequential I/O.
