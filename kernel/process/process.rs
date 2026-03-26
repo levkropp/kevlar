@@ -1138,6 +1138,11 @@ impl Process {
                     parent.send_signal(SIGCHLD);
                 }
             }
+            // Always wake waiters so wait4/waitpid sees the new exit state.
+            // This is needed even when SIGCHLD is Ignore (the default) —
+            // send_signal skips Ignore-disposition signals, but wait4 must
+            // still see the child's exit.
+            JOIN_WAIT_QUEUE.wake_all();
 
             // Close opened files here instead of in Drop::drop because `proc`
             // is not dropped until it's joined by the parent process. Drop them
@@ -1970,7 +1975,11 @@ impl Process {
                 Arc::new(SpinLock::new(parent.opened_files.lock_no_irq().clone()))
             },
             root_fs: AtomicRefCell::new(parent.root_fs()),
-            signals: Arc::clone(&parent.signals),
+            signals: if is_thread {
+                Arc::clone(&parent.signals)
+            } else {
+                Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone()))
+            },
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
             signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),

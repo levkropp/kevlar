@@ -1,0 +1,21 @@
+{
+    "_comment": "Verify fork corrupts the user stack. Break at the fork syscall (RAX=57) from openrc's signal setup function. Read the struct sigaction before fork, then after fork in the child, check if it changed. The struct is at RBX = RSP+0x100 at the time of the call. We break at syscall_entry when RAX=57 (fork) and check the stack.",
+    "init": "/bin/test-openssl-boot",
+    "steps": [
+        {
+            "name": "catch_fork_from_signal_setup",
+            "break": "hbreak *0xffff800000101380",
+            "_comment": "syscall_entry. Condition: RAX=57 (fork) AND the caller is openrc's signal setup function (RCX near 0xa00004f5e = return addr after fork call at 0x4f58). Check RCX for this process.",
+            "condition": "$rax == 57 && ($rcx & 0xfff) == 0xf5e",
+            "max_hits": 500000,
+            "collect": [
+                "regs",
+                "expr $rax",
+                "expr $rcx",
+                "x/4gx ($rsp + 0x100)",
+                "x/4gx $rsp"
+            ],
+            "then": "stop"
+        }
+    ]
+}

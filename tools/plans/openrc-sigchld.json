@@ -1,0 +1,22 @@
+{
+    "_comment": "Investigate OpenRC's bogus SIGCHLD handler address (0xa000411f1). Break at the kernel's rt_sigaction handler when signum==17 (SIGCHLD) and dump the raw struct sigaction from user memory.",
+    "init": "/bin/test-openssl-boot",
+    "steps": [
+        {
+            "name": "catch_sigchld_sigaction",
+            "break": "hbreak *0xffff8000001013c1",
+            "_comment": "Break at call x64_handle_syscall — check if syscall is rt_sigaction(SIGCHLD)",
+            "condition": "*(unsigned long long *)($rsp) == 13 && *(unsigned long long *)($rsp+8+112) == 17",
+            "max_hits": 200000,
+            "collect": [
+                "regs",
+                "expr *(unsigned long long *)($rsp)",
+                "expr *(unsigned long long *)($rsp+8+112)",
+                "expr *(unsigned long long *)($rsp+8+104)",
+                "x/4gx *(unsigned long long *)($rsp+8+104)",
+                "bt 5"
+            ],
+            "then": "stop"
+        }
+    ]
+}

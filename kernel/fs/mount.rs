@@ -174,10 +174,10 @@ pub struct RootFs {
     /// Cached absolute path of cwd — avoids walking the parent chain when
     /// building flat PathComponents for relative paths.
     cwd_abs: String,
-    /// Mount point table. Stored as a plain Vec (not behind a lock) because
-    /// path resolution already holds the outer RootFs SpinLock. Searched
-    /// linearly — typically 3-5 entries, so no HashMap overhead needed.
-    mount_points: Vec<(MountKey, MountPoint)>,
+    /// Mount point table. Shared across fork() so child processes see mounts
+    /// made by parent and vice versa (POSIX mount namespace semantics).
+    /// Inner SpinLock is separate from the outer RootFs lock — use lock_no_irq().
+    mount_points: Arc<SpinLock<Vec<(MountKey, MountPoint)>>>,
     symlink_follow_limit: usize,
 }
 
@@ -190,7 +190,7 @@ impl RootFs {
         });
 
         Ok(RootFs {
-            mount_points: Vec::new(),
+            mount_points: Arc::new(SpinLock::new(Vec::new())),
             root_path: root_path.clone(),
             cwd_path: root_path,
             cwd_abs: String::from("/"),
@@ -200,21 +200,22 @@ impl RootFs {
 
     pub fn mount(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
         let key = dir.mount_key()?;
-        // Replace existing entry or add new one.
-        if let Some(entry) = self.mount_points.iter_mut().find(|(k, _)| *k == key) {
+        let mut mps = self.mount_points.lock_no_irq();
+        if let Some(entry) = mps.iter_mut().find(|(k, _)| *k == key) {
             entry.1 = MountPoint { fs, readonly: false };
         } else {
-            self.mount_points.push((key, MountPoint { fs, readonly: false }));
+            mps.push((key, MountPoint { fs, readonly: false }));
         }
         Ok(())
     }
 
     pub fn mount_readonly(&mut self, dir: Arc<dyn Directory>, fs: Arc<dyn FileSystem>) -> Result<()> {
         let key = dir.mount_key()?;
-        if let Some(entry) = self.mount_points.iter_mut().find(|(k, _)| *k == key) {
+        let mut mps = self.mount_points.lock_no_irq();
+        if let Some(entry) = mps.iter_mut().find(|(k, _)| *k == key) {
             entry.1 = MountPoint { fs, readonly: true };
         } else {
-            self.mount_points.push((key, MountPoint { fs, readonly: true }));
+            mps.push((key, MountPoint { fs, readonly: true }));
         }
         Ok(())
     }
@@ -237,7 +238,8 @@ impl RootFs {
     /// Get the filesystem mounted at a specific directory, if any.
     pub fn get_mount_at_dir(&self, dir: &Arc<dyn Directory>) -> Option<Arc<dyn FileSystem>> {
         if let Ok(key) = dir.mount_key() {
-            for (k, mp) in &self.mount_points {
+            let mps = self.mount_points.lock_no_irq();
+            for (k, mp) in mps.iter() {
                 if *k == key {
                     return Some(mp.fs.clone());
                 }
@@ -412,7 +414,8 @@ impl RootFs {
     #[inline(always)]
     fn lookup_mount_point(&self, dir: &Arc<dyn Directory>) -> Result<Option<MountPoint>> {
         let key = dir.mount_key()?;
-        Ok(self.mount_points.iter()
+        let mps = self.mount_points.lock_no_irq();
+        Ok(mps.iter()
             .find(|(k, _)| *k == key)
             .map(|(_, mp)| mp.clone()))
     }
