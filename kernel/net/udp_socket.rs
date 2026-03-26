@@ -200,6 +200,21 @@ impl FileLike for UdpSocket {
         })
     }
 
+    fn getsockname(&self) -> Result<SockAddr> {
+        let sockets = SOCKETS.lock();
+        let socket: &udp::Socket = sockets.get(self.handle);
+        let ep = socket.endpoint();
+        let addr = ep.addr.unwrap_or(smoltcp::wire::IpAddress::v4(0, 0, 0, 0));
+        Ok(super::socket::endpoint_to_sockaddr(IpEndpoint::new(addr, ep.port)))
+    }
+
+    fn getpeername(&self) -> Result<SockAddr> {
+        match *self.peer.lock_no_irq() {
+            Some(ep) => Ok(super::socket::endpoint_to_sockaddr(ep)),
+            None => Err(Errno::ENOTCONN.into()),
+        }
+    }
+
     fn poll(&self) -> Result<PollStatus> {
         process_packets();
         let sockets = SOCKETS.lock();
