@@ -132,6 +132,7 @@ def compile_all_local():
         ("testing/busybox_suite.c",      "busybox-suite",    []),
         ("testing/dd_diag.c",            "dd-diag",          []),
         ("testing/test_net.c",           "test-net",         []),
+        ("testing/test_ssh_dropbear.c",  "test-ssh-dropbear", []),
         ("testing/test_alpine.c",        "test-alpine",      []),
         ("testing/fork_exec_stress.c",   "fork-exec-stress", []),
         ("testing/disk_hello.c",         "disk_hello",       []),
@@ -365,7 +366,8 @@ def build_dropbear():
     """Build dropbear 2024.85 SSH server."""
     out_db = EXT_BIN / "dropbear"
     out_key = EXT_BIN / "dropbearkey"
-    if out_db.exists() and out_key.exists():
+    out_dbc = EXT_BIN / "dbclient"
+    if out_db.exists() and out_key.exists() and out_dbc.exists():
         return out_db, out_key
 
     tarball = download(
@@ -404,6 +406,9 @@ def build_dropbear():
     EXT_BIN.mkdir(parents=True, exist_ok=True)
     shutil.copy2(bdir / "dropbear", out_db)
     shutil.copy2(bdir / "dropbearkey", out_key)
+    if (bdir / "dbclient").exists():
+        shutil.copy2(bdir / "dbclient", out_dbc)
+        os.chmod(out_dbc, 0o755)
     os.chmod(out_db, 0o755)
     os.chmod(out_key, 0o755)
     shutil.rmtree(bdir)
@@ -756,6 +761,7 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
         "curl":        "bin/curl",
         "dropbear":    "bin/dropbear",
         "dropbearkey": "bin/dropbearkey",
+        "dbclient":    "bin/dbclient",
         "bash":        "bin/bash",
     }
     for src_name, dest_rel in ext_copy.items():

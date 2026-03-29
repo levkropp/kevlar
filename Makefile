@@ -484,6 +484,23 @@ run-alpine-ssh: build alpine-disk
 		$(if $(QEMU),--qemu $(QEMU),)                                  \
 		$(kernel_qemu_arg) -- $(QEMU_ARGS) -nic user,hostfwd=tcp::2222-:22
 
+# M10 Phase B: SSH integration test (runs in initramfs, no Alpine disk needed)
+.PHONY: test-ssh
+test-ssh:
+	$(PROGRESS) "TEST" "SSH: dropbear start + dbclient connect"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-ssh-dropbear"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
+		| tee /tmp/kevlar-test-ssh-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL SSH|DIAG:)' \
+		/tmp/kevlar-test-ssh-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-ssh-$(PROFILE).log; then \
+		echo "SSH TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-ssh-$(PROFILE).log; then \
+		echo "ALL SSH TESTS PASSED"; \
+	fi
+
 .PHONY: bochs
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc
