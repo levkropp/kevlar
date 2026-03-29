@@ -2553,6 +2553,13 @@ impl FileLike for Ext2File {
         if new_end > inode.file_size() {
             inode.set_file_size(new_end);
         }
+        // Update mtime/ctime to current time on write.
+        let now = kevlar_vfs::vfs_clock_secs();
+        if now != 0 {
+            inode.mtime = now;
+            inode.ctime = now;
+        }
+
         // Update inode cache so other lookups see the new size, but defer
         // the disk write to close()/fsync() for performance.
         {

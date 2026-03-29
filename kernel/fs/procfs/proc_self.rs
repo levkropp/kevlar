@@ -223,6 +223,8 @@ impl FileLike for ProcPidStat {
         let sid = proc.as_ref()
             .map(|p| p.session_id())
             .unwrap_or(pid);
+        let tty_nr = crate::fs::devfs::tty::session_ctty_rdev(sid)
+            .unwrap_or(0) as i32;
 
         // /proc/[pid]/stat format (fields 1-52, most zeroed).
         // Fields: pid comm state ppid pgrp session tty_nr tpgid flags
@@ -230,7 +232,7 @@ impl FileLike for ProcPidStat {
         //   priority nice num_threads itrealvalue starttime vsize rss ...
         let _ = write!(
             s,
-            "{pid} ({comm}) {state_char} {ppid} {pgid} {sid} 0 -1 0 \
+            "{pid} ({comm}) {state_char} {ppid} {pgid} {sid} {tty_nr} -1 0 \
              0 0 0 0 {utime} {stime} 0 0 \
              20 0 {num_threads} 0 {starttime} {vsize} {rss} \
              0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
@@ -669,26 +671,44 @@ impl FileLike for ProcPidLimits {
             return Ok(0);
         }
 
-        let content = "\
-Limit                     Soft Limit           Hard Limit           Units     \n\
-Max cpu time              unlimited            unlimited            seconds   \n\
-Max file size             unlimited            unlimited            bytes     \n\
-Max data size             unlimited            unlimited            bytes     \n\
-Max stack size            8388608              unlimited            bytes     \n\
-Max core file size        0                    unlimited            bytes     \n\
-Max resident set          unlimited            unlimited            bytes     \n\
-Max processes             unlimited            unlimited            processes \n\
-Max open files            1024                 1024                 files     \n\
-Max locked memory         unlimited            unlimited            bytes     \n\
-Max address space         unlimited            unlimited            bytes     \n\
-Max file locks            unlimited            unlimited            locks     \n\
-Max pending signals       unlimited            unlimited            signals   \n\
-Max msgqueue size         unlimited            unlimited            bytes     \n\
-Max nice priority         0                    0                    \n\
-Max realtime priority     0                    0                    \n\
-Max realtime timeout      unlimited            unlimited            us        \n";
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = writeln!(s, "{:<26}{:<21}{:<21}{}", "Limit", "Soft Limit", "Hard Limit", "Units");
 
-        let bytes = content.as_bytes();
+        let rl = Process::find_by_pid(self.pid)
+            .map(|p| p.rlimits())
+            .unwrap_or_else(|| {
+                const INF: u64 = !0u64;
+                [[INF; 2]; 16]
+            });
+
+        const NAMES: [(&str, &str); 16] = [
+            ("Max cpu time", "seconds"),
+            ("Max file size", "bytes"),
+            ("Max data size", "bytes"),
+            ("Max stack size", "bytes"),
+            ("Max core file size", "bytes"),
+            ("Max resident set", "bytes"),
+            ("Max processes", "processes"),
+            ("Max open files", "files"),
+            ("Max locked memory", "bytes"),
+            ("Max address space", "bytes"),
+            ("Max file locks", "locks"),
+            ("Max pending signals", "signals"),
+            ("Max msgqueue size", "bytes"),
+            ("Max nice priority", ""),
+            ("Max realtime priority", ""),
+            ("Max realtime timeout", "us"),
+        ];
+
+        for (i, (name, units)) in NAMES.iter().enumerate() {
+            let fmt_val = |v: u64| -> String {
+                if v == !0u64 { String::from("unlimited") } else { alloc::format!("{}", v) }
+            };
+            let _ = writeln!(s, "{:<26}{:<21}{:<21}{}", name, fmt_val(rl[i][0]), fmt_val(rl[i][1]), units);
+        }
+
+        let bytes = s.as_bytes();
         let len = core::cmp::min(bytes.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
         writer.write_bytes(&bytes[..len])?;

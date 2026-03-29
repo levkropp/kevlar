@@ -19,6 +19,14 @@ use crate::{
 };
 use kevlar_platform::{address::UserVAddr, print::get_printer, spinlock::SpinLock};
 
+/// Global map: session_id -> TTY rdev (controlling terminal for each session).
+static CTTY_MAP: SpinLock<Option<alloc::collections::BTreeMap<i32, usize>>> = SpinLock::new(None);
+
+/// Look up the controlling terminal device number for a session.
+pub fn session_ctty_rdev(session_id: i32) -> Option<usize> {
+    CTTY_MAP.lock_no_irq().as_ref()?.get(&session_id).copied()
+}
+
 pub struct Tty {
     name: ArrayString<8>,
     discipline: LineDiscipline,
@@ -141,14 +149,17 @@ impl FileLike for Tty {
             }
             TIOCSCTTY => {
                 // Set controlling terminal for the calling session.
-                // Per POSIX, only the session leader can set a controlling terminal.
-                // We accept the request and set the foreground process group to
-                // the caller's process group.
+                // Only the session leader should call this (we don't enforce yet).
                 use crate::process::current_process;
                 let proc = current_process();
+                let sid = proc.session_id();
                 let pg = proc.process_group();
                 self.discipline
                     .set_foreground_process_group(Arc::downgrade(&pg));
+                // Register this TTY as the controlling terminal for the session.
+                let mut map = CTTY_MAP.lock_no_irq();
+                map.get_or_insert_with(alloc::collections::BTreeMap::new)
+                    .insert(sid, self.rdev);
             }
             TIOCMGET => {
                 // Virtual serial port: always report carrier detect + DSR present.
@@ -169,7 +180,13 @@ impl FileLike for Tty {
                 arg.write::<c_int>(&sid)?;
             }
             TIOCNOTTY => {
-                // Detach from controlling terminal. Accept silently.
+                // Detach from controlling terminal.
+                use crate::process::current_process;
+                let sid = current_process().session_id();
+                let mut map = CTTY_MAP.lock_no_irq();
+                if let Some(m) = map.as_mut() {
+                    m.remove(&sid);
+                }
             }
             TIOCGWINSZ => {
                 let ws = self.discipline.winsize();

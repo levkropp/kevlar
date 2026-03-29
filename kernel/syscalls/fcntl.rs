@@ -60,6 +60,11 @@ struct RecordLock {
 }
 
 static RECORD_LOCKS: SpinLock<Option<HashMap<InodeKey, Vec<RecordLock>>>> = SpinLock::new(None);
+static RECORD_LOCK_WAITQ: spin::Once<crate::process::WaitQueue> = spin::Once::new();
+
+fn record_lock_waitq() -> &'static crate::process::WaitQueue {
+    RECORD_LOCK_WAITQ.call_once(crate::process::WaitQueue::new)
+}
 
 /// Release all POSIX record locks held by a given PID on all inodes.
 /// Called from process exit.
@@ -69,15 +74,24 @@ pub fn release_all_record_locks(pid: i32) {
         Some(t) => t,
         None => return,
     };
+    let mut any_removed = false;
     let mut empty_keys = Vec::new();
     for (key, locks) in table.iter_mut() {
+        let before = locks.len();
         locks.retain(|l| l.pid != pid);
+        if locks.len() < before {
+            any_removed = true;
+        }
         if locks.is_empty() {
             empty_keys.push(*key);
         }
     }
     for key in empty_keys {
         table.remove(&key);
+    }
+    drop(guard);
+    if any_removed {
+        record_lock_waitq().wake_all();
     }
 }
 
@@ -267,29 +281,51 @@ impl<'a> SyscallHandler<'a> {
                 let fl: Flock = fl_ptr.read()?;
                 let (start, end) = resolve_range(&fl, file_size);
 
-                let mut guard = RECORD_LOCKS.lock_no_irq();
-                let table = guard.get_or_insert_with(HashMap::new);
-
+                // Unlock: always non-blocking.
                 if fl.l_type == F_UNLCK {
-                    // Unlock: remove locks in range.
+                    let mut guard = RECORD_LOCKS.lock_no_irq();
+                    let table = guard.get_or_insert_with(HashMap::new);
                     if let Some(locks) = table.get_mut(&key) {
                         set_lock(locks, start, end, F_UNLCK, pid);
                         if locks.is_empty() {
                             table.remove(&key);
                         }
                     }
+                    drop(guard);
+                    record_lock_waitq().wake_all();
                     return Ok(0);
                 }
 
-                // Check for conflicts.
-                let locks = table.entry(key).or_insert_with(Vec::new);
-                if let Some(_conflict) = find_conflict(locks, start, end, fl.l_type, pid) {
-                    // F_SETLKW would block; we return EAGAIN (no real blocking support yet).
+                // Try to acquire the lock.
+                {
+                    let mut guard = RECORD_LOCKS.lock_no_irq();
+                    let table = guard.get_or_insert_with(HashMap::new);
+                    let locks = table.entry(key).or_insert_with(Vec::new);
+                    if find_conflict(locks, start, end, fl.l_type, pid).is_none() {
+                        set_lock(locks, start, end, fl.l_type, pid);
+                        return Ok(0);
+                    }
+                }
+
+                // Conflict exists.
+                if cmd == F_SETLK {
                     return Err(Error::new(Errno::EAGAIN));
                 }
 
-                // No conflict — set the lock.
-                set_lock(locks, start, end, fl.l_type, pid);
+                // F_SETLKW: block until the lock can be acquired.
+                // Drop opened_files lock before sleeping to avoid deadlock.
+                drop(opened_files);
+                record_lock_waitq().sleep_signalable_until(|| {
+                    let mut guard = RECORD_LOCKS.lock_no_irq();
+                    let table = guard.get_or_insert_with(HashMap::new);
+                    let locks = table.entry(key).or_insert_with(Vec::new);
+                    if find_conflict(locks, start, end, fl.l_type, pid).is_none() {
+                        set_lock(locks, start, end, fl.l_type, pid);
+                        Ok(Some(()))
+                    } else {
+                        Ok(None) // Still conflicting — keep sleeping
+                    }
+                })?;
                 Ok(0)
             }
             _ => Err(Errno::ENOSYS.into()),
