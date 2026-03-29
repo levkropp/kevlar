@@ -35,13 +35,12 @@ impl<'a> SyscallHandler<'a> {
         let resolved = inode.readlink()?;
         let bytes = resolved.as_bytes();
 
-        if buf_size < bytes.len() {
-            return Err(Errno::ERANGE.into());
-        }
-
+        // POSIX: readlink truncates if buf_size is too small (no error).
+        // The caller detects truncation by checking if retval == buf_size.
+        let copy_len = core::cmp::min(bytes.len(), buf_size);
         let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
-        writer.write_bytes(bytes)?;
+        writer.write_bytes(&bytes[..copy_len])?;
         // POSIX: readlink does NOT write a NUL terminator.
-        Ok(bytes.len() as isize)
+        Ok(copy_len as isize)
     }
 }

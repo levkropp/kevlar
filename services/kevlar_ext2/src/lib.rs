@@ -2146,6 +2146,13 @@ impl Directory for Ext2Dir {
         Ok(())
     }
 
+    fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        if let Some(a) = atime_secs { inode.atime = a as u32; }
+        if let Some(m) = mtime_secs { inode.mtime = m as u32; inode.ctime = m as u32; }
+        self.fs.write_inode(self.inode_num, &inode)
+    }
+
     fn inode_no(&self) -> Result<INodeNo> {
         Ok(INodeNo::new(self.inode_num as usize))
     }
@@ -2252,12 +2259,15 @@ impl Directory for Ext2Dir {
                 block_bytes[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             }
         } else {
-            // Block-based symlink.
+            // Block-based symlink (target > 60 bytes).
+            log::trace!("ext4: block-based symlink ino={} target_len={} use_extents={}",
+                   ino, target_len, use_extents);
             let data_block = if use_extents {
                 self.fs.alloc_extent_block(&mut new_inode, ino, 0)?
             } else {
                 self.fs.alloc_data_block(&mut new_inode, 0)?
             };
+            log::trace!("ext4: symlink ino={} allocated block={}", ino, data_block);
             let mut block_data = vec![0u8; self.fs.block_size];
             block_data[..target_len].copy_from_slice(target_bytes);
             self.fs.write_block(data_block, &block_data)?;
@@ -2568,6 +2578,13 @@ impl FileLike for Ext2File {
         Ok(())
     }
 
+    fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        if let Some(a) = atime_secs { inode.atime = a as u32; }
+        if let Some(m) = mtime_secs { inode.mtime = m as u32; inode.ctime = m as u32; }
+        self.fs.write_inode(self.inode_num, &inode)
+    }
+
     fn fsync(&self) -> Result<()> {
         self.dirty.store(false, Ordering::Relaxed);
         self.fs.flush_all()
@@ -2705,6 +2722,13 @@ impl SymlinkTrait for Ext2Symlink {
         Ok(self.fs.make_stat(self.inode_num, &inode))
     }
 
+    fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        if let Some(a) = atime_secs { inode.atime = a as u32; }
+        if let Some(m) = mtime_secs { inode.mtime = m as u32; inode.ctime = m as u32; }
+        self.fs.write_inode(self.inode_num, &inode)
+    }
+
     fn linked_to(&self) -> Result<Cow<'_, str>> {
         let inode = self.inode.lock_no_irq();
         let size = inode.file_size() as usize;
@@ -2725,10 +2749,15 @@ impl SymlinkTrait for Ext2Symlink {
                 core::str::from_utf8(&buf[..size]).map_err(|_| Error::new(Errno::EIO))?;
             Ok(Cow::Owned(String::from(target)))
         } else {
-            // Block-based symlink.
+            // Block-based symlink (target > 60 bytes or uses extents).
+            log::trace!("ext4: reading block-based symlink ino={} size={} extents={}",
+                   self.inode_num, size, inode.uses_extents());
             let data = self.fs.read_file_data(&inode, 0, size)?;
-            let target =
-                core::str::from_utf8(&data).map_err(|_| Error::new(Errno::EIO))?;
+            let target = core::str::from_utf8(&data).map_err(|e| {
+                log::warn!("ext4: symlink ino={} size={} utf8 error: {:?} first_bytes={:02x?}",
+                      self.inode_num, size, e, &data[..core::cmp::min(16, data.len())]);
+                Error::new(Errno::EIO)
+            })?;
             Ok(Cow::Owned(String::from(target)))
         }
     }

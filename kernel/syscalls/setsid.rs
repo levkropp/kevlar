@@ -18,7 +18,7 @@ impl<'a> SyscallHandler<'a> {
             return Err(Errno::EPERM.into());
         }
 
-        // Create a new session: new process group with pgid == pid.
+        // Create a new session and process group with pgid == pid.
         let proc_weak = Arc::downgrade(&proc);
         let old_pg = proc.process_group();
         let new_pg = ProcessGroup::find_or_create_by_pgid(PgId::new(pid));
@@ -26,6 +26,9 @@ impl<'a> SyscallHandler<'a> {
         old_pg.lock().remove(&proc_weak);
         new_pg.lock().add(proc_weak);
         proc.set_process_group(Arc::downgrade(&new_pg));
+
+        // Set the session ID to caller's PID (caller becomes session leader).
+        proc.set_session_id(pid);
 
         Ok(pid as isize)
     }

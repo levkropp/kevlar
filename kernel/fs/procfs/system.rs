@@ -419,6 +419,74 @@ Inter-|   Receive                                                |  Transmit\n\
     }
 }
 
+// ── /proc/net/tcp ─────────────────────────────────────────────────
+
+pub struct ProcNetTcpFile;
+
+impl fmt::Debug for ProcNetTcpFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcNetTcpFile").finish()
+    }
+}
+
+impl FileLike for ProcNetTcpFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+        let s = crate::net::format_proc_net_tcp();
+        let len = core::cmp::min(s.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&s.as_bytes()[..len])?;
+        Ok(len)
+    }
+}
+
+// ── /proc/net/udp ─────────────────────────────────────────────────
+
+pub struct ProcNetUdpFile;
+
+impl fmt::Debug for ProcNetUdpFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProcNetUdpFile").finish()
+    }
+}
+
+impl FileLike for ProcNetUdpFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+        let s = crate::net::format_proc_net_udp();
+        let len = core::cmp::min(s.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&s.as_bytes()[..len])?;
+        Ok(len)
+    }
+}
+
 // ── /proc/loadavg ──────────────────────────────────────────────────
 
 pub struct ProcLoadavgFile;

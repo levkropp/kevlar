@@ -109,6 +109,9 @@ def compile_all_local():
         ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/test_alpine_apk.c",    "test-alpine-apk",  []),
         ("testing/test_cgroups_hang.c",  "test-cgroups-hang", []),
+        ("testing/test_openrc_boot.c",  "test-openrc-boot",  []),
+        ("testing/test_sigchld_pipe.c", "test-sigchld-pipe", []),
+        ("testing/test_gcc_build.c",   "test-gcc-build",   []),
         ("testing/test_pipe_crash.c",    "test-pipe-crash",  []),
         ("testing/bb_minimal.c",         "bb-minimal",       []),
         ("testing/test_gcc_alpine.c",     "test-gcc-alpine", []),
@@ -232,6 +235,14 @@ def compile_all_local():
             _, ok, err = compile_one("musl-gcc", src, out, ["-static", "-O2"])
             if not ok:
                 log("FAIL", f"{bin_name}: {err}")
+
+    # ── Dynamically-linked dlopen test (for dlopen crash investigation) ──
+    dlopen_src = ROOT / "testing" / "test_dlopen.c"
+    if dlopen_src.exists():
+        dlopen_out = LOCAL_BIN / "test_dlopen"
+        _, ok, err = compile_one("musl-gcc", dlopen_src, dlopen_out, ["-O2", "-ldl"])
+        if not ok:
+            log("WARN", f"test_dlopen: {err} (non-fatal)")
 
     if failed:
         log("WARN", f"{len(failed)} compilation(s) failed")
@@ -826,6 +837,8 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     musl_libc = find_musl_libc()
     if musl_libc:
         shutil.copy2(musl_libc, ROOTFS / "lib" / "ld-musl-x86_64.so.1")
+
+    # Patched musl disabled (dlopen bug fixed)
 
     # glibc dynamic libs (for hello-dynamic-glibc, hello-multilib, etc.)
     glibc = find_glibc_libs()

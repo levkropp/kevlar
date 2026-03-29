@@ -273,6 +273,11 @@ run-alpine: build/alpine.img
 		$(kernel_qemu_arg) -- $(QEMU_ARGS)
 
 build/alpine.img:
+	@if ! docker info >/dev/null 2>&1; then \
+		echo "  Docker not available, using native builder"; \
+		$(PYTHON3) tools/build-alpine-full.py build/alpine.img; \
+		exit 0; \
+	fi
 	$(PROGRESS) "MKALPINE" "build/alpine.img"
 	@$(PYTHON3) -c "import os; os.makedirs('build', exist_ok=True)"
 	@rm -rf build/alpine-root

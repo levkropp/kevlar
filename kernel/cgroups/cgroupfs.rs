@@ -8,7 +8,7 @@ use core::fmt;
 use core::sync::atomic::Ordering;
 use kevlar_vfs::{
     file_system::FileSystem,
-    inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions},
+    inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions, PollStatus},
     result::{Errno, Error, Result},
     stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFREG},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
@@ -54,6 +54,7 @@ const BASE_ENTRIES: &[(&str, FileType)] = &[
     ("cgroup.subtree_control", FileType::Regular),
     ("cgroup.type", FileType::Regular),
     ("cgroup.stat", FileType::Regular),
+    ("cgroup.events", FileType::Regular),
 ];
 
 /// Controller-specific file entries.
@@ -102,7 +103,14 @@ impl Directory for CgroupDir {
         Err(Error::new(Errno::ENOENT))
     }
 
-    fn create_file(&self, _name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
+    fn create_file(&self, name: &str, _mode: FileMode, _uid: UId, _gid: GId) -> Result<INode> {
+        // Control files and child cgroup dirs always "exist" — return EEXIST
+        // so open(O_CREAT) falls through to the existing-file lookup path.
+        if file_kind_from_name(name, self.node.available_controllers()).is_some()
+            || self.node.children.lock().contains_key(name)
+        {
+            return Err(Error::new(Errno::EEXIST));
+        }
         Err(Error::new(Errno::EPERM))
     }
 
@@ -207,11 +215,13 @@ enum CgroupFileKind {
     MemoryCurrent,
     CpuMax,
     CpuStat,
+    CgroupEvents,
 }
 
 fn file_kind_from_name(name: &str, avail: u32) -> Option<CgroupFileKind> {
     match name {
         "cgroup.procs" => Some(CgroupFileKind::CgroupProcs),
+        "cgroup.events" => Some(CgroupFileKind::CgroupEvents),
         "cgroup.controllers" => Some(CgroupFileKind::CgroupControllers),
         "cgroup.subtree_control" => Some(CgroupFileKind::SubtreeControl),
         "cgroup.type" => Some(CgroupFileKind::CgroupType),
@@ -238,6 +248,11 @@ impl fmt::Debug for CgroupControlFile {
 }
 
 impl FileLike for CgroupControlFile {
+    fn poll(&self) -> Result<PollStatus> {
+        // Cgroupfs files are always ready for I/O (like regular files).
+        Ok(PollStatus::POLLIN | PollStatus::POLLOUT)
+    }
+
     fn stat(&self) -> Result<Stat> {
         let mode = match self.kind {
             CgroupFileKind::CgroupProcs
@@ -254,10 +269,6 @@ impl FileLike for CgroupControlFile {
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
-        if offset > 0 {
-            return Ok(0);
-        }
-
         use core::fmt::Write;
         let mut s = String::new();
 
@@ -310,6 +321,12 @@ impl FileLike for CgroupControlFile {
                 let nr_desc = self.node.children.lock().len();
                 let _ = write!(s, "nr_descendants {}\nnr_dying_descendants 0\n", nr_desc);
             }
+            CgroupFileKind::CgroupEvents => {
+                // populated: 1 if this cgroup or its descendants have processes
+                let populated = if !self.node.member_pids.lock().is_empty() { 1 } else { 0 };
+                let frozen = 0; // freezer not implemented
+                let _ = write!(s, "populated {}\nfrozen {}\n", populated, frozen);
+            }
             CgroupFileKind::PidsMax => {
                 let max = self.node.pids_max.load(Ordering::Relaxed);
                 if max < 0 {
@@ -348,9 +365,13 @@ impl FileLike for CgroupControlFile {
         }
 
         let bytes = s.as_bytes();
-        let len = core::cmp::min(bytes.len(), buf.len());
+        if offset >= bytes.len() {
+            return Ok(0); // EOF
+        }
+        let remaining = &bytes[offset..];
+        let len = core::cmp::min(remaining.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
-        writer.write_bytes(&bytes[..len])?;
+        writer.write_bytes(&remaining[..len])?;
         Ok(len)
     }
 
@@ -364,21 +385,35 @@ impl FileLike for CgroupControlFile {
 
         match self.kind {
             CgroupFileKind::CgroupProcs => {
-                let pid: i32 = input.parse().map_err(|_| Error::new(Errno::EINVAL))?;
-                let pid = PId::new(pid);
+                let raw_pid: i32 = input.parse().map_err(|_| Error::new(Errno::EINVAL))?;
+                // PID 0 means "current process" per Linux cgroup2 semantics.
+                let pid = if raw_pid == 0 {
+                    crate::process::current_process().pid()
+                } else {
+                    PId::new(raw_pid)
+                };
                 let proc = Process::find_by_pid(pid).ok_or_else(|| Error::new(Errno::ESRCH))?;
 
-                // Remove from old cgroup.
-                {
-                    let old_cgroup = proc.cgroup();
-                    old_cgroup.member_pids.lock().retain(|p| *p != pid);
+                let old_cgroup = proc.cgroup();
+                // No-op if already in this cgroup.
+                if !Arc::ptr_eq(&old_cgroup, &self.node) {
+                    // Lock both cgroups in pointer order to prevent deadlock.
+                    let old_ptr = Arc::as_ptr(&old_cgroup) as usize;
+                    let new_ptr = Arc::as_ptr(&self.node) as usize;
+                    if old_ptr < new_ptr {
+                        let mut old_pids = old_cgroup.member_pids.lock();
+                        let mut new_pids = self.node.member_pids.lock();
+                        old_pids.retain(|p| *p != pid);
+                        new_pids.push(pid);
+                    } else {
+                        let mut new_pids = self.node.member_pids.lock();
+                        let mut old_pids = old_cgroup.member_pids.lock();
+                        old_pids.retain(|p| *p != pid);
+                        new_pids.push(pid);
+                    }
+                    // Update process's cgroup reference.
+                    proc.set_cgroup(self.node.clone());
                 }
-
-                // Add to new cgroup.
-                self.node.member_pids.lock().push(pid);
-
-                // Update process's cgroup reference.
-                proc.set_cgroup(self.node.clone());
             }
             CgroupFileKind::SubtreeControl => {
                 // Parse "+cpu -memory +pids" format.

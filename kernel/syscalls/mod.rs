@@ -32,7 +32,7 @@ mod dup2;
 mod execve;
 mod exit;
 mod exit_group;
-mod fcntl;
+pub mod fcntl;
 mod fork;
 mod fstat;
 mod fsync;
@@ -192,7 +192,7 @@ mod net_ioctl;
 
 // M9 Phase 1: Syscall gap closure
 mod close_range;
-mod flock;
+pub mod flock;
 mod memfd_create;
 mod mknod;
 mod name_to_handle_at;
@@ -505,6 +505,7 @@ mod syscall_numbers {
     pub const SYS_SCHED_YIELD: usize = 124;
     pub const SYS_NANOSLEEP: usize = 101;
     pub const SYS_GETTIMEOFDAY: usize = 169;
+    pub const SYS_SETRLIMIT: usize = 160;
     pub const SYS_GETRLIMIT: usize = 163;  // prlimit64 is 261
     pub const SYS_SYSINFO: usize = 179;
     pub const SYS_GETPID: usize = 172;
@@ -875,6 +876,8 @@ impl<'a> SyscallHandler<'a> {
         #[cfg(feature = "ktrace-syscall")]
         crate::debug::ktrace::trace(crate::debug::ktrace::event::SYSCALL_ENTER,
             n as u32, a1 as u32, (a1 >> 32) as u32, a2 as u32, (a2 >> 32) as u32);
+
+
 
         let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n).map_err(|err| {
             if dbg_syscall {
@@ -1256,6 +1259,7 @@ impl<'a> SyscallHandler<'a> {
             // M1 Phase 5: Time & system info
             SYS_NANOSLEEP => self.sys_nanosleep(UserVAddr::new_nonnull(a1)?),
             SYS_GETTIMEOFDAY => self.sys_gettimeofday(UserVAddr::new_nonnull(a1)?),
+            SYS_SETRLIMIT => self.sys_setrlimit(a1 as c_int, UserVAddr::new_nonnull(a2)?),
             SYS_GETRLIMIT => self.sys_getrlimit(a1 as c_int, UserVAddr::new_nonnull(a2)?),
             SYS_SYSINFO => self.sys_sysinfo(UserVAddr::new_nonnull(a1)?),
             // ARM64-specific *at syscalls (also available on x86_64)
@@ -1287,7 +1291,9 @@ impl<'a> SyscallHandler<'a> {
                 if a4 != 0 {
                     self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?)?;
                 }
-                // new_rlim (a3): accept and ignore — we don't enforce rlimits yet.
+                if a3 != 0 {
+                    self.sys_setrlimit(a2 as c_int, UserVAddr::new_nonnull(a3)?)?;
+                }
                 Ok(0)
             }
             // M2: Dynamic linking
@@ -1670,6 +1676,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_CHOWN => "chown",
         SYS_UMASK => "umask",
         SYS_GETTIMEOFDAY => "gettimeofday",
+        SYS_SETRLIMIT => "setrlimit",
         SYS_GETRLIMIT => "getrlimit",
         SYS_SYSINFO => "sysinfo",
         SYS_GETUID => "getuid",

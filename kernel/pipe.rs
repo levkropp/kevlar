@@ -12,6 +12,7 @@ use crate::{
         inode::{FileLike, PollStatus},
         opened_file::OpenOptions,
     },
+    poll::POLL_WAIT_QUEUE,
     prelude::*,
     process::WaitQueue,
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
@@ -126,6 +127,7 @@ impl FileLike for PipeWriter {
                         self.0.state_gen.fetch_add(1, Ordering::Relaxed);
                     }
                     self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
                     return Ok(written_len);
                 }
             }
@@ -158,6 +160,7 @@ impl FileLike for PipeWriter {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
         self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
         ret_value
     }
 
@@ -214,6 +217,7 @@ impl Drop for PipeWriter {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
         self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
     }
 }
 
@@ -257,6 +261,7 @@ impl FileLike for PipeReader {
                     self.0.state_gen.fetch_add(1, Ordering::Relaxed);
                 }
                 self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
                 return Ok(writer.written_len());
             }
 
@@ -291,6 +296,7 @@ impl FileLike for PipeReader {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
         self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
         ret_value
     }
 
@@ -324,6 +330,7 @@ impl Drop for PipeReader {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
         self.0.waitq.wake_all();
+        POLL_WAIT_QUEUE.wake_all();
     }
 }
 

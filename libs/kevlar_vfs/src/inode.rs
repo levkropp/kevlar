@@ -223,6 +223,12 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         Ok(()) // silently succeed for filesystems that don't support it
     }
 
+    /// Set file timestamps (seconds since epoch).
+    /// `None` means "don't change this timestamp".
+    fn set_times(&self, _atime_secs: Option<isize>, _mtime_secs: Option<isize>) -> Result<()> {
+        Ok(()) // silently succeed for filesystems that don't support it
+    }
+
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -380,6 +386,10 @@ pub trait Directory: Debug + Send + Sync + Downcastable {
     fn chown(&self, _uid: UId, _gid: GId) -> Result<()> {
         Ok(()) // silently succeed for filesystems that don't support it
     }
+    /// Set directory timestamps (seconds since epoch).
+    fn set_times(&self, _atime_secs: Option<isize>, _mtime_secs: Option<isize>) -> Result<()> {
+        Ok(())
+    }
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -397,6 +407,10 @@ pub trait Symlink: Debug + Send + Sync + Downcastable {
     fn stat(&self) -> Result<Stat>;
     /// The path linked to.
     fn linked_to(&self) -> Result<Cow<'_, str>>;
+    /// Set symlink timestamps (seconds since epoch).
+    fn set_times(&self, _atime_secs: Option<isize>, _mtime_secs: Option<isize>) -> Result<()> {
+        Ok(())
+    }
     /// `fsync(2)`.
     fn fsync(&self) -> Result<()> {
         Ok(())
@@ -489,6 +503,15 @@ impl INode {
             INode::FileLike(file) => file.chmod(mode),
             INode::Directory(dir) => dir.chmod(mode),
             INode::Symlink(_) => Ok(()), // symlink chmod is a no-op on Linux too
+        }
+    }
+
+    /// `utimes(2)` / `utimensat(2)`
+    pub fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        match self {
+            INode::FileLike(file) => file.set_times(atime_secs, mtime_secs),
+            INode::Directory(dir) => dir.set_times(atime_secs, mtime_secs),
+            INode::Symlink(sym) => sym.set_times(atime_secs, mtime_secs),
         }
     }
 

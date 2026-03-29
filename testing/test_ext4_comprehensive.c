@@ -20,6 +20,8 @@
 #include <stdarg.h>
 #include <time.h>
 #include <dirent.h>
+#include <dlfcn.h>
+#include <sys/file.h>
 
 static int PASS = 0, FAIL = 0;
 static void msg(const char *s) { write(2, s, strlen(s)); }
@@ -275,6 +277,77 @@ static void test_chmod(void) {
     else { char r[32]; snprintf(r,32,"mode=%o",st.st_mode&0777); fail("chmod_444",r); }
 }
 
+static void test_utimes(void) {
+    char p[256]; snprintf(p, sizeof(p), "%s/t_utimes", TD);
+    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    write(fd, "utimes", 6); close(fd);
+
+    // Set specific timestamps via utimensat
+    struct timespec ts[2];
+    ts[0].tv_sec = 1700000000; ts[0].tv_nsec = 0;  // atime
+    ts[1].tv_sec = 1700000000; ts[1].tv_nsec = 0;  // mtime
+    int rc = utimensat(AT_FDCWD, p, ts, 0);
+    if (rc != 0) { char r[64]; snprintf(r,64,"utimensat: errno=%d",errno); fail("utimes_set",r); return; }
+
+    struct stat st; stat(p, &st);
+    if (st.st_mtime == 1700000000 && st.st_atime == 1700000000)
+        pass("utimes_set");
+    else {
+        char r[96]; snprintf(r,96,"atime=%ld mtime=%ld (expected 1700000000)",
+                             (long)st.st_atime, (long)st.st_mtime);
+        fail("utimes_set", r);
+    }
+
+    // Test touch -like behavior: set both to current time
+    rc = utimensat(AT_FDCWD, p, NULL, 0);
+    if (rc != 0) { char r[64]; snprintf(r,64,"utimensat(NULL): errno=%d",errno); fail("utimes_now",r); return; }
+
+    stat(p, &st);
+    // Current time should be > 1700000000 (2023+)
+    if (st.st_mtime > 1700000000)
+        pass("utimes_now");
+    else {
+        char r[64]; snprintf(r,64,"mtime=%ld (expected > 1700000000)", (long)st.st_mtime);
+        fail("utimes_now", r);
+    }
+}
+
+static void test_flock(void) {
+    char p[256]; snprintf(p, sizeof(p), "%s/t_flock", TD);
+    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    write(fd, "lock", 4);
+
+    // Acquire exclusive lock
+    int rc = flock(fd, LOCK_EX);
+    if (rc != 0) { char r[64]; snprintf(r,64,"LOCK_EX: errno=%d",errno); fail("flock_ex",r); close(fd); return; }
+    pass("flock_ex");
+
+    // Exclusive → shared downgrade
+    rc = flock(fd, LOCK_SH);
+    if (rc != 0) { char r[64]; snprintf(r,64,"LOCK_SH: errno=%d",errno); fail("flock_downgrade",r); close(fd); return; }
+    pass("flock_downgrade");
+
+    // Unlock
+    rc = flock(fd, LOCK_UN);
+    if (rc != 0) { char r[64]; snprintf(r,64,"LOCK_UN: errno=%d",errno); fail("flock_unlock",r); close(fd); return; }
+    pass("flock_unlock");
+
+    // Test contention: parent holds EX, child tries NB EX → should get EWOULDBLOCK
+    flock(fd, LOCK_EX);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fd2 = open(p, O_RDONLY);
+        int rc2 = flock(fd2, LOCK_EX | LOCK_NB);
+        if (rc2 == -1 && errno == EWOULDBLOCK) _exit(0); // expected
+        _exit(1); // unexpected success or wrong error
+    }
+    int st; waitpid(pid, &st, 0);
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0) pass("flock_contention");
+    else { char r[32]; snprintf(r,32,"exit=%d",WEXITSTATUS(st)); fail("flock_contention",r); }
+
+    close(fd);
+}
+
 static void test_hardlink(void) {
     char src[256], dst[256];
     snprintf(src, sizeof(src), "%s/t_hardlink_src", TD);
@@ -386,6 +459,112 @@ static void test_symlink(void) {
     else fail("symlink", buf);
 }
 
+static void test_symlink_long(void) {
+    // Test block-based symlinks with targets > 60 bytes (ext4 inline limit).
+    // update-ca-certificates creates symlinks like:
+    //   12345678.0 -> ../../usr/share/ca-certificates/mozilla/Some_Long_CA_Name.crt
+    // which exceed the 60-byte inline threshold.
+    char target[256], link[256], readbuf[256];
+
+    // Create a target file with a long path (>60 bytes)
+    snprintf(target, sizeof(target),
+        "%s/this_is_a_really_long_subdirectory_name_to_exceed_sixty_bytes/cert.crt", TD);
+    // Create the intermediate directory
+    char dir[256];
+    snprintf(dir, sizeof(dir),
+        "%s/this_is_a_really_long_subdirectory_name_to_exceed_sixty_bytes", TD);
+    mkdir(dir, 0755);
+    int fd = open(target, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) { fail("symlink_long", "create target"); return; }
+    write(fd, "cert_data", 9); close(fd);
+
+    // Create a symlink with a long target path (>60 bytes)
+    // This should use block-based storage on ext4, not inline.
+    char long_target[128];
+    snprintf(long_target, sizeof(long_target),
+        "this_is_a_really_long_subdirectory_name_to_exceed_sixty_bytes/cert.crt");
+    // long_target is ~70 bytes (relative path)
+    snprintf(link, sizeof(link), "%s/long_symlink", TD);
+
+    int rc = symlink(long_target, link);
+    if (rc != 0) {
+        char err[64]; snprintf(err, sizeof(err), "symlink errno=%d", errno);
+        fail("symlink_long_create", err); return;
+    }
+    pass("symlink_long_create");
+
+    // Read the symlink target back via readlink
+    ssize_t rlen = readlink(link, readbuf, sizeof(readbuf) - 1);
+    if (rlen < 0) {
+        char err[64]; snprintf(err, sizeof(err), "readlink errno=%d", errno);
+        fail("symlink_long_readlink", err); return;
+    }
+    readbuf[rlen] = '\0';
+    if (strcmp(readbuf, long_target) == 0) pass("symlink_long_readlink");
+    else {
+        char err[128]; snprintf(err, sizeof(err), "got '%s' expected '%s'", readbuf, long_target);
+        fail("symlink_long_readlink", err);
+    }
+
+    // Follow the symlink by opening it (tests VFS symlink resolution)
+    char linkpath[256];
+    snprintf(linkpath, sizeof(linkpath), "%s/long_symlink", TD);
+    fd = open(linkpath, O_RDONLY);
+    if (fd < 0) {
+        char err[64]; snprintf(err, sizeof(err), "open errno=%d", errno);
+        fail("symlink_long_follow", err); return;
+    }
+    char data[32]; int n = read(fd, data, 31); close(fd);
+    data[n > 0 ? n : 0] = '\0';
+    if (strcmp(data, "cert_data") == 0) pass("symlink_long_follow");
+    else fail("symlink_long_follow", data);
+
+    // Test with absolute path > 60 bytes (like update-ca-certificates)
+    char abs_target[256];
+    snprintf(abs_target, sizeof(abs_target),
+        "/var/ext4test/this_is_a_really_long_subdirectory_name_to_exceed_sixty_bytes/cert.crt");
+    snprintf(link, sizeof(link), "%s/long_abs_symlink", TD);
+    rc = symlink(abs_target, link);
+    if (rc != 0) {
+        char err[64]; snprintf(err, sizeof(err), "symlink errno=%d", errno);
+        fail("symlink_long_abs", err); return;
+    }
+    rlen = readlink(link, readbuf, sizeof(readbuf) - 1);
+    if (rlen < 0) {
+        char err[64]; snprintf(err, sizeof(err), "readlink errno=%d", errno);
+        fail("symlink_long_abs", err); return;
+    }
+    readbuf[rlen] = '\0';
+    if (strcmp(readbuf, abs_target) != 0) {
+        fail("symlink_long_abs", "readlink mismatch"); return;
+    }
+    fd = open(link, O_RDONLY);
+    if (fd < 0) {
+        char err[64]; snprintf(err, sizeof(err), "follow errno=%d", errno);
+        fail("symlink_long_abs", err); return;
+    }
+    n = read(fd, data, 31); close(fd);
+    data[n > 0 ? n : 0] = '\0';
+    if (strcmp(data, "cert_data") == 0) pass("symlink_long_abs");
+    else fail("symlink_long_abs", data);
+}
+
+// ── DLOPEN TEST (runtime library loading) ──────────────────────────
+
+static void test_dlopen(void) {
+    // Note: this binary is statically linked, so dlopen always returns
+    // "Dynamic loading not supported". Real dlopen testing is done by
+    // test_dlopen.c (dynamically linked). Skip gracefully here.
+    void *handle = dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
+    if (handle) {
+        pass("dlopen_libcrypto");
+        dlclose(handle);
+    } else {
+        // Expected for static binary — not a failure
+        msgf("DIAG: dlopen: %s (expected for static binary)\n", dlerror());
+    }
+}
+
 // ── DYNAMIC LINKING TESTS ──────────────────────────────────────────
 
 static void test_dynamic_exec(const char *name, const char *path, const char *expected) {
@@ -481,6 +660,179 @@ static void bench_seq_read(void) {
     unlink(p);
 }
 
+// Test mmap data integrity: verify that mmap'd file data matches read() data.
+// This is a regression test for the dlopen crash (Python C extensions).
+static void test_mmap_read_integrity(void) {
+    // Create a large file (>64KB to trigger multi-level extents on ext4)
+    char p[256]; snprintf(p, sizeof(p), "%s/t_mmap_integrity", TD);
+    int fd = open(p, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+    if (fd < 0) { fail("mmap_integrity", "create"); return; }
+
+    // Write 1MB of pseudo-random data (exercises extent trees on ext4)
+    const int FILE_SIZE = 1024 * 1024;
+    unsigned char *wbuf = malloc(FILE_SIZE);
+    for (int i = 0; i < FILE_SIZE; i++)
+        wbuf[i] = (unsigned char)((i * 7 + 13) ^ (i >> 8));
+    write(fd, wbuf, FILE_SIZE);
+    close(fd);
+
+    // Now open the file and compare read() vs mmap()
+    fd = open(p, O_RDONLY);
+    if (fd < 0) { fail("mmap_integrity", "open"); free(wbuf); return; }
+
+    // Read entire file via read()
+    unsigned char *rbuf = malloc(FILE_SIZE);
+    int total = 0, n;
+    while (total < FILE_SIZE && (n = read(fd, rbuf + total, FILE_SIZE - total)) > 0)
+        total += n;
+
+    // mmap the same file
+    void *mapped = mmap(NULL, FILE_SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) {
+        fail("mmap_integrity", "mmap failed");
+        free(wbuf); free(rbuf); return;
+    }
+
+    // Compare: written data vs read data vs mmap data
+    int write_vs_read_ok = (memcmp(wbuf, rbuf, FILE_SIZE) == 0);
+    int write_vs_mmap_ok = (memcmp(wbuf, mapped, FILE_SIZE) == 0);
+    int read_vs_mmap_ok = (memcmp(rbuf, mapped, FILE_SIZE) == 0);
+
+    munmap(mapped, FILE_SIZE);
+    free(wbuf); free(rbuf);
+
+    if (write_vs_read_ok && write_vs_mmap_ok && read_vs_mmap_ok) {
+        pass("mmap_integrity_256k");
+    } else {
+        char err[128];
+        snprintf(err, sizeof(err), "wr=%d wm=%d rm=%d",
+                 write_vs_read_ok, write_vs_mmap_ok, read_vs_mmap_ok);
+        fail("mmap_integrity_256k", err);
+
+        // Find first mismatch between mmap and read
+        unsigned char *mp = (unsigned char *)mapped;
+        // Re-mmap for diagnostics
+        fd = open(p, O_RDONLY);
+        mapped = mmap(NULL, FILE_SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+        close(fd);
+        if (mapped != MAP_FAILED) {
+            mp = (unsigned char *)mapped;
+            unsigned char *rp = malloc(FILE_SIZE);
+            fd = open(p, O_RDONLY);
+            read(fd, rp, FILE_SIZE);
+            close(fd);
+            for (int i = 0; i < FILE_SIZE; i++) {
+                if (mp[i] != rp[i]) {
+                    msgf("  first mismatch at offset %d: mmap=%02x read=%02x\n",
+                         i, mp[i], rp[i]);
+                    break;
+                }
+            }
+            free(rp);
+            munmap(mapped, FILE_SIZE);
+        }
+    }
+    unlink(p);
+
+    // Test existing binary files from ext4 — verify mmap matches read.
+    // Test both small (/usr/bin/curl) and large (/usr/lib/libcrypto.so.3) files.
+    const char *test_binaries[] = {
+        "/usr/bin/curl",
+        "/usr/lib/libcrypto.so.3",
+        "/usr/lib/libssl.so.3",
+        NULL
+    };
+    // Test Python extension .so files specifically (dlopen crash investigation)
+    {
+        DIR *dp = opendir("/usr/lib/python3.12/lib-dynload");
+        if (dp) {
+            struct dirent *ep;
+            while ((ep = readdir(dp))) {
+                char *name = ep->d_name;
+                int nlen = strlen(name);
+                if (nlen > 3 && strcmp(name + nlen - 3, ".so") == 0) {
+                    char fpath[512];
+                    snprintf(fpath, sizeof(fpath), "/usr/lib/python3.12/lib-dynload/%s", name);
+                    struct stat fst2;
+                    if (stat(fpath, &fst2) == 0 && fst2.st_size > 0) {
+                        int check = fst2.st_size > 512*1024 ? 512*1024 : fst2.st_size;
+                        int bfd = open(fpath, O_RDONLY);
+                        if (bfd >= 0) {
+                            unsigned char *rd = malloc(check);
+                            int tr2 = 0;
+                            while (tr2 < check && (n = read(bfd, rd + tr2, check - tr2)) > 0) tr2 += n;
+                            void *mm = mmap(NULL, fst2.st_size, PROT_READ, MAP_PRIVATE, bfd, 0);
+                            close(bfd);
+                            if (mm != MAP_FAILED) {
+                                if (memcmp(rd, mm, tr2) == 0) {
+                                    // OK — just check first few .so files
+                                } else {
+                                    for (int i = 0; i < tr2; i++) {
+                                        if (rd[i] != ((unsigned char*)mm)[i]) {
+                                            char err[256];
+                                            snprintf(err, sizeof(err), "%s off=%d read=%02x mmap=%02x",
+                                                     name, i, rd[i], ((unsigned char*)mm)[i]);
+                                            fail("mmap_integrity_pyso", err);
+                                            break;
+                                        }
+                                    }
+                                }
+                                munmap(mm, fst2.st_size);
+                            }
+                            free(rd);
+                        }
+                    }
+                    break; // check first .so only to save time
+                }
+            }
+            closedir(dp);
+            pass("mmap_integrity_pyso");
+        }
+    }
+    for (int bi = 0; test_binaries[bi]; bi++) {
+        const char *test_binary = test_binaries[bi];
+        struct stat bst;
+        if (stat(test_binary, &bst) == 0 && bst.st_size > 0) {
+            int bfd = open(test_binary, O_RDONLY);
+            if (bfd >= 0) {
+                int bsz = bst.st_size;
+                // Limit to 512KB to avoid OOM
+                int check_sz = bsz > 512*1024 ? 512*1024 : bsz;
+                unsigned char *br = malloc(check_sz);
+                int tr = 0;
+                while (tr < check_sz && (n = read(bfd, br + tr, check_sz - tr)) > 0) tr += n;
+
+                void *bm = mmap(NULL, bsz, PROT_READ, MAP_PRIVATE, bfd, 0);
+                close(bfd);
+                if (bm != MAP_FAILED) {
+                    if (memcmp(br, bm, tr) == 0) {
+                        char ok[128];
+                        snprintf(ok, sizeof(ok), "mmap_binary_%s", test_binary);
+                        pass(ok);
+                    } else {
+                        for (int i = 0; i < tr; i++) {
+                            if (br[i] != ((unsigned char*)bm)[i]) {
+                                char err[128];
+                                snprintf(err, sizeof(err), "%s off=%d read=%02x mmap=%02x",
+                                         test_binary, i, br[i], ((unsigned char*)bm)[i]);
+                                fail("mmap_integrity_binary", err);
+                                break;
+                            }
+                        }
+                    }
+                    munmap(bm, bsz);
+                } else {
+                    char err[128];
+                    snprintf(err, sizeof(err), "%s mmap failed", test_binary);
+                    fail("mmap_integrity_binary", err);
+                }
+                free(br);
+            }
+        }
+    }
+}
+
 static void bench_create_delete(void) {
     // Measure create and delete separately
     int count = 100;
@@ -570,7 +922,12 @@ int main(int argc, char **argv) {
     test_rename();
     test_unlink();
     test_chmod();
+    test_utimes();
+    test_flock();
     test_symlink();
+    test_symlink_long();
+    test_mmap_read_integrity();
+    test_dlopen();
     test_hardlink();
     test_sparse_file();
     test_many_files();

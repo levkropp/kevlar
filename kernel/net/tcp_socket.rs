@@ -153,9 +153,16 @@ impl FileLike for TcpSocket {
     }
 
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
-        // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
-        //       does not check that.
-        self.local_endpoint.store(Some(super::sockaddr_to_endpoint(sockaddr)?));
+        let endpoint = super::sockaddr_to_endpoint(sockaddr)?;
+        // Reject if the port is already bound (EADDRINUSE).
+        if endpoint.port != 0 {
+            let mut inuse = INUSE_ENDPOINTS.lock();
+            if inuse.contains(&endpoint.port) {
+                return Err(Errno::EADDRINUSE.into());
+            }
+            inuse.insert(endpoint.port);
+        }
+        self.local_endpoint.store(Some(endpoint));
         Ok(())
     }
 
@@ -429,6 +436,12 @@ impl FileLike for TcpSocket {
 
 impl Drop for TcpSocket {
     fn drop(&mut self) {
+        // Release the bound port from the in-use set.
+        if let Some(ep) = self.local_endpoint.load() {
+            if ep.port != 0 {
+                INUSE_ENDPOINTS.lock().remove(&ep.port);
+            }
+        }
         SOCKETS.lock().remove(self.handle);
     }
 }

@@ -4,6 +4,7 @@
 use super::CwdOrFd;
 use crate::fs::{path::Path, stat::FileMode};
 use crate::prelude::*;
+use crate::timer::read_wall_clock;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use kevlar_vfs::stat::{GId, UId};
 
@@ -18,7 +19,9 @@ impl<'a> SyscallHandler<'a> {
         let (parent_inode, name) = root_fs.lookup_parent_inode_at(
             &opened_files, &dirfd, path, true,
         )?;
-        parent_inode.as_dir()?.create_dir(name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
+        let inode = parent_inode.as_dir()?.create_dir(name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
+        let now = read_wall_clock().secs_from_epoch() as isize;
+        let _ = inode.set_times(Some(now), Some(now));
         Ok(0)
     }
 }

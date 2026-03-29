@@ -241,14 +241,50 @@ int main(void) {
         step_ok(7, msg7);
     }
 
-    // Step 8: Move self back to root cgroup and rmdir
-    msg("STEP 8: cleanup ...\n");
+    // Step 8: Verify dead PIDs are cleaned from cgroup.procs
+    msg("STEP 8: fork 5 children, wait, check cgroup.procs is clean ...\n");
+    {
+        for (int i = 0; i < 5; i++) {
+            pid_t child = fork();
+            if (child == 0) _exit(0);
+            int wstatus;
+            waitpid(child, &wstatus, 0);
+        }
+        // Read cgroup.procs — should contain only our PID (or be empty if
+        // we moved self out). Dead child PIDs must NOT appear.
+        rc = read_file("/sys/fs/cgroup/openrc.test/cgroup.procs", buf, sizeof(buf));
+        if (rc < 0) {
+            step_fail(8, "read cgroup.procs after children exit", errno);
+        } else {
+            // Count PIDs listed (one per line).
+            int pid_count = 0;
+            char *p = buf;
+            while (*p) {
+                while (*p == ' ' || *p == '\n') p++;
+                if (*p >= '0' && *p <= '9') { pid_count++; while (*p >= '0' && *p <= '9') p++; }
+                else break;
+            }
+            // Should be exactly 1 (ourselves) — NOT 6 (us + 5 dead children).
+            if (pid_count <= 1) {
+                char msg8[64];
+                snprintf(msg8, sizeof(msg8), "cgroup.procs has %d PIDs (expected <=1)", pid_count);
+                step_ok(8, msg8);
+            } else {
+                char msg8[64];
+                snprintf(msg8, sizeof(msg8), "cgroup.procs has %d PIDs (dead PIDs leaked!)", pid_count);
+                step_fail(8, msg8, 0);
+            }
+        }
+    }
+
+    // Step 9: Move self back to root cgroup and rmdir
+    msg("STEP 9: cleanup ...\n");
     write_file("/sys/fs/cgroup/cgroup.procs", "0");
     rc = rmdir("/sys/fs/cgroup/openrc.test");
     if (rc != 0) {
-        step_fail(8, "rmdir openrc.test", errno);
+        step_fail(9, "rmdir openrc.test", errno);
     } else {
-        step_ok(8, "rmdir openrc.test");
+        step_ok(9, "rmdir openrc.test");
     }
 
     msg("=== All steps completed ===\n");

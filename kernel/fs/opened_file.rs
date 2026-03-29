@@ -137,6 +137,14 @@ pub struct OpenedFile {
     seekable: bool,
 }
 
+impl Drop for OpenedFile {
+    fn drop(&mut self) {
+        // Release any flock locks held by this open file description.
+        let ofd = self as *const OpenedFile as usize;
+        crate::syscalls::flock::release_all_flocks(ofd);
+    }
+}
+
 impl OpenedFile {
     pub fn new(path: Arc<PathComponent>, options: OpenOptions, pos: usize) -> OpenedFile {
         let seekable = path.inode.is_seekable();

@@ -110,6 +110,26 @@ impl Directory for ProcPidDir {
                     Arc::new(ProcPidExeLink(exe)) as Arc<dyn Symlink>
                 ))
             }
+            "cwd" => {
+                let cwd = Process::find_by_pid(self.pid)
+                    .map(|p| {
+                        let fs = p.root_fs();
+                        let path = fs.lock().cwd_path().resolve_absolute_path();
+                        path.as_str().to_string()
+                    })
+                    .unwrap_or_else(|| String::from("/"));
+                Ok(INode::Symlink(
+                    Arc::new(ProcPidExeLink(cwd)) as Arc<dyn Symlink>
+                ))
+            }
+            "root" => {
+                Ok(INode::Symlink(
+                    Arc::new(ProcPidExeLink(String::from("/"))) as Arc<dyn Symlink>
+                ))
+            }
+            "limits" => Ok(INode::FileLike(
+                Arc::new(ProcPidLimits { pid: self.pid }) as Arc<dyn FileLike>
+            )),
             _ => Err(Error::new(Errno::ENOENT)),
         }
     }
@@ -197,6 +217,12 @@ impl FileLike for ProcPidStat {
         let starttime = proc.as_ref().map(|p| p.start_ticks()).unwrap_or(0);
         let vsize = proc.as_ref().map(|p| p.vm_size_bytes()).unwrap_or(0);
         let rss = vsize / PAGE_SIZE;
+        let pgid = proc.as_ref()
+            .map(|p| p.process_group().lock().pgid().as_i32())
+            .unwrap_or(pid);
+        let sid = proc.as_ref()
+            .map(|p| p.session_id())
+            .unwrap_or(pid);
 
         // /proc/[pid]/stat format (fields 1-52, most zeroed).
         // Fields: pid comm state ppid pgrp session tty_nr tpgid flags
@@ -204,7 +230,7 @@ impl FileLike for ProcPidStat {
         //   priority nice num_threads itrealvalue starttime vsize rss ...
         let _ = write!(
             s,
-            "{pid} ({comm}) {state_char} {ppid} {pid} {pid} 0 -1 0 \
+            "{pid} ({comm}) {state_char} {ppid} {pgid} {sid} 0 -1 0 \
              0 0 0 0 {utime} {stime} 0 0 \
              20 0 {num_threads} 0 {starttime} {vsize} {rss} \
              0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
@@ -615,6 +641,58 @@ impl Symlink for ProcPidExeLink {
 
     fn linked_to(&self) -> Result<Cow<'_, str>> {
         Ok(Cow::Borrowed(&self.0))
+    }
+}
+
+// ── /proc/<pid>/limits ──────────────────────────────────────────────
+
+struct ProcPidLimits {
+    pid: PId,
+}
+
+impl fmt::Debug for ProcPidLimits {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcPidLimits({})", self.pid.as_i32())
+    }
+}
+
+impl FileLike for ProcPidLimits {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 {
+            return Ok(0);
+        }
+
+        let content = "\
+Limit                     Soft Limit           Hard Limit           Units     \n\
+Max cpu time              unlimited            unlimited            seconds   \n\
+Max file size             unlimited            unlimited            bytes     \n\
+Max data size             unlimited            unlimited            bytes     \n\
+Max stack size            8388608              unlimited            bytes     \n\
+Max core file size        0                    unlimited            bytes     \n\
+Max resident set          unlimited            unlimited            bytes     \n\
+Max processes             unlimited            unlimited            processes \n\
+Max open files            1024                 1024                 files     \n\
+Max locked memory         unlimited            unlimited            bytes     \n\
+Max address space         unlimited            unlimited            bytes     \n\
+Max file locks            unlimited            unlimited            locks     \n\
+Max pending signals       unlimited            unlimited            signals   \n\
+Max msgqueue size         unlimited            unlimited            bytes     \n\
+Max nice priority         0                    0                    \n\
+Max realtime priority     0                    0                    \n\
+Max realtime timeout      unlimited            unlimited            us        \n";
+
+        let bytes = content.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
     }
 }
 
