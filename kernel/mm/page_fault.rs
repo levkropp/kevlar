@@ -349,25 +349,55 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         Some(vma) => vma,
         None => {
             let pid = current.pid().as_i32();
-            // Debug: always dump VMAs on fault miss for Alpine investigation
-            if unaligned_vaddr.value() >= 0xa00130000 && unaligned_vaddr.value() < 0xa00170000 {
-                warn!("PAGE FAULT NO VMA: pid={} addr={:#x} ip={:#x}", pid, unaligned_vaddr.value(), ip);
+            // Always dump VMAs on SIGSEGV for dlopen/Alpine investigation.
+            {
+                warn!("PAGE FAULT NO VMA: pid={} addr={:#x} ip={:#x} reason={:?}",
+                      pid, unaligned_vaddr.value(), ip, _reason);
+                let vma_count = vm.vm_areas().len();
+                // Find the highest and nearest VMAs to the fault address
+                let fault_val = unaligned_vaddr.value();
+                let mut nearest_below: Option<(usize, usize)> = None; // (idx, end)
+                let mut nearest_above: Option<(usize, usize)> = None; // (idx, start)
                 for (i, vma) in vm.vm_areas().iter().enumerate() {
-                    let vt = match vma.area_type() {
-                        VmAreaType::Anonymous => "anon",
-                        VmAreaType::File { .. } => "file",
-                    };
-                    warn!("  VMA[{}]: [{:#x}-{:#x}] {}", i, vma.start().value(), vma.end().value(), vt);
+                    let vs = vma.start().value();
+                    let ve = vs + vma.len();
+                    if ve <= fault_val {
+                        if nearest_below.is_none() || ve > nearest_below.unwrap().1 {
+                            nearest_below = Some((i, ve));
+                        }
+                    }
+                    if vs > fault_val {
+                        if nearest_above.is_none() || vs < nearest_above.unwrap().1 {
+                            nearest_above = Some((i, vs));
+                        }
+                    }
                 }
-            }
-            if pid == 1 {
-                warn!("PAGE FAULT NO VMA: addr={:#x} ip={:#x}", unaligned_vaddr.value(), ip);
-                for (i, vma) in vm.vm_areas().iter().enumerate() {
-                    let vt = match vma.area_type() {
-                        VmAreaType::Anonymous => "anon",
-                        VmAreaType::File { .. } => "file",
-                    };
-                    warn!("  VMA[{}]: [{:#x}-{:#x}] {}", i, vma.start().value(), vma.end().value(), vt);
+                warn!("  VMA count={} fault={:#x}", vma_count, fault_val);
+                if let Some((idx, end)) = nearest_below {
+                    let vma = &vm.vm_areas()[idx];
+                    warn!("  nearest_below[{}]: [{:#x}-{:#x}] gap={:#x}",
+                          idx, vma.start().value(), end, fault_val - end);
+                }
+                if let Some((idx, start)) = nearest_above {
+                    let vma = &vm.vm_areas()[idx];
+                    warn!("  nearest_above[{}]: [{:#x}-{:#x}] gap={:#x}",
+                          idx, start, start + vma.len(), start - fault_val);
+                }
+                // Show the last 15 VMAs (highest addresses) with file offsets for dlopen debug
+                let start_idx = if vma_count > 15 { vma_count - 15 } else { 0 };
+                for (i, vma) in vm.vm_areas().iter().enumerate().skip(start_idx) {
+                    match vma.area_type() {
+                        VmAreaType::Anonymous => {
+                            warn!("  VMA[{}]: [{:#x}-{:#x}] prot={:#x} anon",
+                                  i, vma.start().value(), vma.end().value(), vma.prot().bits());
+                        }
+                        VmAreaType::File { file, offset, file_size } => {
+                            let fp = alloc::sync::Arc::as_ptr(file) as *const () as usize;
+                            warn!("  VMA[{}]: [{:#x}-{:#x}] prot={:#x} file off={:#x} fsz={:#x} fp={:#x}",
+                                  i, vma.start().value(), vma.end().value(), vma.prot().bits(),
+                                  offset, file_size, fp);
+                        }
+                    }
                 }
             }
             debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
@@ -608,9 +638,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     }
 
     // CRITICAL: Use try_map to detect if the page is already mapped.
-    // Two cases:
-    //   1. Permission upgrade (ld.so reservation → MAP_FIXED overlay): just update flags
-    //   2. CoW write fault (fork shared page): copy the page, map the copy writable
     if !vm.page_table_mut()
         .try_map_user_page_with_prot(aligned_vaddr, paddr, prot_flags)
     {

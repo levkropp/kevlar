@@ -87,12 +87,8 @@ impl ProcFs {
         let net_dir = static_root.add_dir("net");
         net_dir.add_file("dev", Arc::new(ProcNetDevFile) as Arc<dyn FileLike>);
         net_dir.add_file("if_inet6", Arc::new(ProcSysStaticFile("")) as Arc<dyn FileLike>);
-        net_dir.add_file("tcp", Arc::new(ProcSysStaticFile(
-            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-        )) as Arc<dyn FileLike>);
-        net_dir.add_file("udp", Arc::new(ProcSysStaticFile(
-            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
-        )) as Arc<dyn FileLike>);
+        net_dir.add_file("tcp", Arc::new(ProcNetTcpFile) as Arc<dyn FileLike>);
+        net_dir.add_file("udp", Arc::new(ProcNetUdpFile) as Arc<dyn FileLike>);
         net_dir.add_file("tcp6", Arc::new(ProcSysStaticFile(
             "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
         )) as Arc<dyn FileLike>);

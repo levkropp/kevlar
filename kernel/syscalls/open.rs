@@ -2,6 +2,7 @@
 use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{inotify, opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
+use crate::timer::read_wall_clock;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use kevlar_vfs::stat::{GId, UId};
 
@@ -26,6 +27,8 @@ impl<'a> SyscallHandler<'a> {
                 let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
                 match parent_inode.as_dir()?.create_file(name, effective_mode, UId::new(current.euid()), GId::new(current.egid())) {
                     Ok(inode) => {
+                        let now = read_wall_clock().secs_from_epoch() as isize;
+                        let _ = inode.set_times(Some(now), Some(now));
                         if let Some((parent, fname)) = path.parent_and_basename() {
                             inotify::notify(parent.as_str(), fname, inotify::IN_CREATE);
                         }

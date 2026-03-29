@@ -276,6 +276,14 @@ impl Vm {
         self.heap_bottom
     }
 
+    pub fn valloc_next(&self) -> UserVAddr {
+        self.valloc_next
+    }
+
+    pub fn set_valloc_next(&mut self, addr: UserVAddr) {
+        self.valloc_next = addr;
+    }
+
     pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<()> {
         if new_heap_end < self.heap_bottom {
             return Err(Errno::EINVAL.into());
@@ -568,14 +576,37 @@ impl Vm {
                 return Err(Errno::ENOMEM.into());
             }
             if self.is_free_vaddr_range(next, aligned_len) {
+                // Clear any stale PTEs in the allocated range.
+                let num_pages = aligned_len / PAGE_SIZE;
+                let mut cleared = 0usize;
+                for i in 0..num_pages {
+                    let page_addr = next.add(i * PAGE_SIZE);
+                    if self.page_table.is_huge_mapped(page_addr).is_some() {
+                        self.page_table.split_huge_page(page_addr);
+                    }
+                    if let Some(stale) = self.page_table.unmap_user_page(page_addr) {
+                        self.page_table.flush_tlb_local(page_addr);
+                        if kevlar_platform::page_refcount::page_ref_dec(stale) {
+                            kevlar_platform::page_allocator::free_pages(stale, 1);
+                        }
+                        cleared += 1;
+                    }
+                }
+                if cleared > 0 {
+                    log::warn!("alloc_vaddr_range: cleared {} stale PTEs at {:#x}+{:#x}",
+                               cleared, next.value(), aligned_len);
+                }
                 self.valloc_next = end;
                 return Ok(next);
             }
-            // Advance past the conflicting VMA.
+            // Advance past the conflicting VMA (page-aligned, since pages at
+            // the VMA's page-aligned end may have been prefaulted).
             let mut advanced = false;
             for area in &self.vm_areas {
                 if area.overlaps(next, aligned_len) {
-                    self.valloc_next = area.end();
+                    self.valloc_next = UserVAddr::new(
+                        align_up(area.end().value(), PAGE_SIZE)
+                    ).unwrap_or(area.end());
                     advanced = true;
                     break;
                 }

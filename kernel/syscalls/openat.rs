@@ -4,6 +4,7 @@ use super::CwdOrFd;
 use crate::fs::stat::{O_RDWR, O_WRONLY};
 use crate::fs::{opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
+use crate::timer::read_wall_clock;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use kevlar_vfs::stat::{GId, UId};
 
@@ -54,7 +55,8 @@ impl<'a> SyscallHandler<'a> {
                     Ok((parent_inode, name)) => {
                         match parent_inode.as_dir()?.create_file(name, effective_mode, UId::new(current.euid()), GId::new(current.egid())) {
                             Ok(inode) => {
-                                // Created — build flat PathComponent, skip re-lookup.
+                                let now = read_wall_clock().secs_from_epoch() as isize;
+                                let _ = inode.set_times(Some(now), Some(now));
                                 root_fs.make_flat_path_component(path, inode)
                             }
                             Err(err)

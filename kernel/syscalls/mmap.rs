@@ -69,9 +69,19 @@ impl<'a> SyscallHandler<'a> {
                     // MAP_FIXED: unmap any existing mappings in the range first.
                     if !vm.is_free_vaddr_range(addr, len) {
                         vm.remove_vma_range(addr, len)?;
+                    }
+                    // Always clear page table entries in the range, even if VMAs
+                    // were free — a huge page from prefault_cached_pages may span
+                    // beyond its VMA into this range.
+                    {
                         let num_pages = len / PAGE_SIZE;
                         for i in 0..num_pages {
                             let page_addr = addr.add(i * PAGE_SIZE);
+                            // Split any 2MB huge page that covers this address.
+                            if vm.page_table().is_huge_mapped(page_addr).is_some() {
+                                vm.page_table_mut().split_huge_page(page_addr);
+                                vm.page_table().flush_tlb_local(page_addr);
+                            }
                             if let Some(paddr) = vm.page_table_mut().unmap_user_page(page_addr) {
                                 vm.page_table().flush_tlb(page_addr);
                                 if kevlar_platform::page_refcount::page_ref_dec(paddr) {
@@ -87,7 +97,14 @@ impl<'a> SyscallHandler<'a> {
             }
         } else {
             match addr_hint {
-                Some(addr) if vm.is_free_vaddr_range(addr, len) => addr,
+                // Only honor the hint if the address is in a reasonable range.
+                // musl passes addr_min (the library's lowest p_vaddr, e.g. 0xaa50)
+                // as a hint. On Linux, mmap_min_addr and the mmap base prevent
+                // mapping at such low addresses. We reject hints below the valloc
+                // region to avoid mapping shared libraries at tiny addresses where
+                // the dynamic linker computes base = map - addr_min ≈ 0.
+                Some(addr) if addr.value() >= 0x10000
+                    && vm.is_free_vaddr_range(addr, len) => addr,
                 _ => {
                     // Align large anonymous mappings to 2MB for transparent huge pages.
                     if matches!(area_type, VmAreaType::Anonymous) && len >= HUGE_PAGE_SIZE {
@@ -100,7 +117,13 @@ impl<'a> SyscallHandler<'a> {
         };
 
         let shared = flags.contains(MMapFlags::MAP_SHARED);
-        vm.add_vm_area_with_prot(mapped_uaddr, len, area_type, prot, shared)?;
-        Ok(mapped_uaddr.value() as isize)
+        match vm.add_vm_area_with_prot(mapped_uaddr, len, area_type, prot, shared) {
+            Ok(()) => Ok(mapped_uaddr.value() as isize),
+            Err(e) => {
+                warn!("mmap FAIL pid={} addr={:#x} len={:#x} prot={:#x} flags={:#x}: {:?}",
+                      current.pid().as_i32(), mapped_uaddr.value(), len, prot.bits(), flags.bits(), e);
+                Err(e)
+            }
+        }
     }
 }

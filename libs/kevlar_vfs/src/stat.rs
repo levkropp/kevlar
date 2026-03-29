@@ -8,6 +8,7 @@ pub struct DevId(usize);
 
 impl DevId {
     pub const fn new(v: usize) -> Self { Self(v) }
+    pub const fn as_usize(self) -> usize { self.0 }
 }
 
 /// The number of hard links.
@@ -17,6 +18,7 @@ pub struct NLink(usize);
 
 impl NLink {
     pub const fn new(v: usize) -> Self { Self(v) }
+    pub const fn as_usize(self) -> usize { self.0 }
 }
 
 /// The file size in bytes.
@@ -60,6 +62,7 @@ pub struct BlockCount(isize);
 
 impl BlockCount {
     pub const fn new(v: isize) -> Self { Self(v) }
+    pub const fn as_isize(self) -> isize { self.0 }
 }
 
 /// The file size in bytes.
@@ -69,6 +72,7 @@ pub struct Time(isize);
 
 impl Time {
     pub const fn new(v: isize) -> Self { Self(v) }
+    pub const fn as_isize(self) -> isize { self.0 }
 }
 
 // File type bits

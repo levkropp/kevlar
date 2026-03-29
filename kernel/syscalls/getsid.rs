@@ -8,15 +8,13 @@ use crate::syscalls::SyscallHandler;
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_getsid(&mut self, pid: PId) -> Result<isize> {
-        // Simplified: return the process group leader's PID as the session ID.
-        // A proper implementation would track sessions separately.
-        let pgid = if pid.as_i32() == 0 {
-            current_process().process_group().lock().pgid().as_i32()
+        let sid = if pid.as_i32() == 0 {
+            current_process().session_id()
         } else {
             let proc = Process::find_by_pid(pid)
                 .ok_or_else(|| Error::new(Errno::ESRCH))?;
-            proc.process_group().lock().pgid().as_i32()
+            proc.session_id()
         };
-        Ok(pgid as isize)
+        Ok(sid as isize)
     }
 }

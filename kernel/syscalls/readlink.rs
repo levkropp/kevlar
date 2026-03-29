@@ -22,13 +22,12 @@ impl<'a> SyscallHandler<'a> {
                 .path()
                 .resolve_absolute_path();
             let bytes = resolved_path.as_str().as_bytes();
-            if buf_size < bytes.len() {
-                return Err(Errno::ERANGE.into());
-            }
+            // POSIX: readlink truncates if buf_size is too small (no error).
+            let copy_len = core::cmp::min(bytes.len(), buf_size);
             let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
-            writer.write_bytes(bytes)?;
+            writer.write_bytes(&bytes[..copy_len])?;
             // POSIX: readlink does NOT write a NUL terminator.
-            return Ok(bytes.len() as isize);
+            return Ok(copy_len as isize);
         }
 
         let root_fs = current_process().root_fs();
@@ -37,13 +36,11 @@ impl<'a> SyscallHandler<'a> {
             .lookup_no_symlink_follow(path)?;
         let resolved = inode.readlink()?;
         let bytes = resolved.as_bytes();
-        if buf_size < bytes.len() {
-            return Err(Errno::ERANGE.into());
-        }
-
+        // POSIX: readlink truncates if buf_size is too small (no error).
+        let copy_len = core::cmp::min(bytes.len(), buf_size);
         let mut writer = UserBufWriter::from_uaddr(buf, buf_size);
-        writer.write_bytes(bytes)?;
+        writer.write_bytes(&bytes[..copy_len])?;
         // POSIX: readlink does NOT write a NUL terminator.
-        Ok(bytes.len() as isize)
+        Ok(copy_len as isize)
     }
 }

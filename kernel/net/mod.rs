@@ -273,6 +273,93 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
     process_packets();
 }
 
+/// Format /proc/net/tcp — enumerate all TCP sockets.
+pub fn format_proc_net_tcp() -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let _ = writeln!(s, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode");
+
+    let sockets = SOCKETS.lock();
+    let mut sl = 0u32;
+    for (_handle, socket) in sockets.iter() {
+        if let smoltcp::socket::Socket::Tcp(tcp) = socket {
+            let state: u8 = match tcp.state() {
+                smoltcp::socket::tcp::State::Closed => 7,
+                smoltcp::socket::tcp::State::Listen => 10,
+                smoltcp::socket::tcp::State::SynSent => 2,
+                smoltcp::socket::tcp::State::SynReceived => 3,
+                smoltcp::socket::tcp::State::Established => 1,
+                smoltcp::socket::tcp::State::FinWait1 => 4,
+                smoltcp::socket::tcp::State::FinWait2 => 5,
+                smoltcp::socket::tcp::State::CloseWait => 8,
+                smoltcp::socket::tcp::State::Closing => 11,
+                smoltcp::socket::tcp::State::LastAck => 9,
+                smoltcp::socket::tcp::State::TimeWait => 6,
+            };
+            let local_str = match tcp.local_endpoint() {
+                Some(ep) => ip_endpoint_to_hex(&ep),
+                None => alloc::format!("00000000:0000"),
+            };
+            let remote_str = match tcp.remote_endpoint() {
+                Some(ep) => ip_endpoint_to_hex(&ep),
+                None => alloc::format!("00000000:0000"),
+            };
+            let _ = writeln!(s, "{:4}: {} {} {:02X} 00000000:00000000 00:00000000 00000000     0        0 0",
+                sl, local_str, remote_str, state);
+            sl += 1;
+        }
+    }
+    s
+}
+
+/// Format /proc/net/udp — enumerate all UDP sockets.
+pub fn format_proc_net_udp() -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let _ = writeln!(s, "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode");
+
+    let sockets = SOCKETS.lock();
+    let mut sl = 0u32;
+    for (_handle, socket) in sockets.iter() {
+        if let smoltcp::socket::Socket::Udp(udp) = socket {
+            let ep = udp.endpoint();
+            let local_str = listen_endpoint_to_hex(ep.addr, ep.port);
+            let remote_str = "00000000:0000";
+            let state: u8 = if udp.is_open() { 7 } else { 10 };
+            let _ = writeln!(s, "{:4}: {} {} {:02X} 00000000:00000000 00:00000000 00000000     0        0 0",
+                sl, local_str, remote_str, state);
+            sl += 1;
+        }
+    }
+    s
+}
+
+/// Format an IP address + port to hex "AABBCCDD:PORT".
+fn ip_addr_to_hex(addr: &wire::IpAddress, port: u16) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    match addr {
+        wire::IpAddress::Ipv4(v4) => {
+            let b = v4.octets();
+            let _ = write!(s, "{:02X}{:02X}{:02X}{:02X}:{:04X}", b[0], b[1], b[2], b[3], port);
+        }
+    }
+    s
+}
+
+/// Format an IpEndpoint to hex.
+fn ip_endpoint_to_hex(ep: &wire::IpEndpoint) -> alloc::string::String {
+    ip_addr_to_hex(&ep.addr, ep.port)
+}
+
+/// Format a listen endpoint (addr is optional) to hex.
+fn listen_endpoint_to_hex(addr: Option<wire::IpAddress>, port: u16) -> alloc::string::String {
+    match addr {
+        Some(a) => ip_addr_to_hex(&a, port),
+        None => alloc::format!("00000000:{:04X}", port),
+    }
+}
+
 /// The smoltcp-based network stack, implementing `NetworkStackService`.
 pub struct SmoltcpNetworkStack;
 

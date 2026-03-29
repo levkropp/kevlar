@@ -37,22 +37,20 @@ impl UdpSocket {
 impl FileLike for UdpSocket {
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
         let mut endpoint: IpEndpoint = super::sockaddr_to_endpoint(sockaddr)?;
-        // TODO: Reject if the endpoint is already in use -- IIUC smoltcp
-        //       does not check that.
         let mut inuse_endpoints = INUSE_ENDPOINTS.lock();
 
         if endpoint.port == 0 {
-            // Assign a unused port.
-            // TODO: Assign a *random* port instead.
+            // Assign an unused port.
             let mut port = 50000;
             while inuse_endpoints.contains(&port) {
                 if port == u16::MAX {
                     return Err(Errno::EAGAIN.into());
                 }
-
                 port += 1;
             }
             endpoint.port = port;
+        } else if inuse_endpoints.contains(&endpoint.port) {
+            return Err(Errno::EADDRINUSE.into());
         }
 
         SOCKETS
@@ -229,6 +227,20 @@ impl FileLike for UdpSocket {
         }
 
         Ok(status)
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        // Release the bound port from the in-use set.
+        let sockets = SOCKETS.lock();
+        let smol_socket: &udp::Socket = sockets.get(self.handle);
+        let port = smol_socket.endpoint().port;
+        drop(sockets);
+        if port != 0 {
+            INUSE_ENDPOINTS.lock().remove(&port);
+        }
+        SOCKETS.lock().remove(self.handle);
     }
 }
 

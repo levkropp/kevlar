@@ -758,6 +758,10 @@ impl PageTable {
     /// Map a 2MB huge page at `vaddr` (must be 2MB-aligned).
     #[inline(always)]
     pub fn map_huge_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        let hv = vaddr.value();
+        if hv <= 0xa000ad000 && hv + HUGE_PAGE_SIZE > 0xa000ad000 {
+            log::warn!("MAP_HUGE {:#x}-{:#x} pa={:#x} COVERS 0xa000ad000!", hv, hv + HUGE_PAGE_SIZE, paddr.value());
+        }
         debug_assert!(is_aligned(vaddr.value(), HUGE_PAGE_SIZE));
         debug_assert!(is_aligned(paddr.value(), HUGE_PAGE_SIZE));
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::HUGE_PAGE;

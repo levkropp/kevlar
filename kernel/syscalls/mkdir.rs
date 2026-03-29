@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use crate::fs::{inotify, path::Path, stat::FileMode};
 use crate::prelude::*;
+use crate::timer::read_wall_clock;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use kevlar_vfs::stat::{GId, UId};
 
@@ -13,10 +14,12 @@ impl<'a> SyscallHandler<'a> {
         let current = current_process();
         let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
         let root_fs = current.root_fs();
-        root_fs
+        let inode = root_fs
             .lock()
             .lookup_dir(parent_dir)?
             .create_dir(name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
+        let now = read_wall_clock().secs_from_epoch() as isize;
+        let _ = inode.set_times(Some(now), Some(now));
 
         inotify::notify(parent_dir.as_str(), name, inotify::IN_CREATE);
         Ok(0)

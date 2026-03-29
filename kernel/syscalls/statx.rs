@@ -81,24 +81,23 @@ impl<'a> SyscallHandler<'a> {
             path_comp.inode.stat()?
         };
 
-        let ts_zero = StatxTimestamp { tv_sec: 0, tv_nsec: 0, _pad: 0 };
         let stx = StatxBuf {
             stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
             stx_blksize: 4096,
             stx_attributes: 0,
-            stx_nlink: 1,
-            stx_uid: 0,
-            stx_gid: 0,
+            stx_nlink: stat.nlink.as_usize() as u32,
+            stx_uid: stat.uid.as_u32(),
+            stx_gid: stat.gid.as_u32(),
             stx_mode: stat.mode.as_u32() as u16,
             _spare0: 0,
             stx_ino: stat.inode_no.as_u64(),
             stx_size: stat.size.0 as u64,
-            stx_blocks: 0,
+            stx_blocks: stat.blocks.as_isize() as u64,
             stx_attributes_mask: 0,
-            stx_atime: ts_zero,
+            stx_atime: StatxTimestamp { tv_sec: stat.atime.as_isize() as i64, tv_nsec: stat.atime_nsec.as_isize() as u32, _pad: 0 },
             stx_btime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, _pad: 0 },
-            stx_ctime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, _pad: 0 },
-            stx_mtime: StatxTimestamp { tv_sec: 0, tv_nsec: 0, _pad: 0 },
+            stx_ctime: StatxTimestamp { tv_sec: stat.ctime.as_isize() as i64, tv_nsec: stat.ctime_nsec.as_isize() as u32, _pad: 0 },
+            stx_mtime: StatxTimestamp { tv_sec: stat.mtime.as_isize() as i64, tv_nsec: stat.mtime_nsec.as_isize() as u32, _pad: 0 },
             stx_rdev_major: 0,
             stx_rdev_minor: 0,
             stx_dev_major: 0,

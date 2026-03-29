@@ -140,9 +140,15 @@ impl FileLike for Tty {
                     .set_foreground_process_group(Arc::downgrade(&pg));
             }
             TIOCSCTTY => {
-                // Set controlling terminal. For now, accept silently —
-                // we don't track session/controlling-tty associations yet.
-                // getty needs this to succeed.
+                // Set controlling terminal for the calling session.
+                // Per POSIX, only the session leader can set a controlling terminal.
+                // We accept the request and set the foreground process group to
+                // the caller's process group.
+                use crate::process::current_process;
+                let proc = current_process();
+                let pg = proc.process_group();
+                self.discipline
+                    .set_foreground_process_group(Arc::downgrade(&pg));
             }
             TIOCMGET => {
                 // Virtual serial port: always report carrier detect + DSR present.
@@ -157,9 +163,8 @@ impl FileLike for Tty {
             }
             TIOCGSID => {
                 // Return the session ID (= the session leader's PID).
-                // We don't track sessions yet, so return the caller's PID.
                 use crate::process::current_process;
-                let sid = current_process().pid().as_i32();
+                let sid = current_process().session_id();
                 let arg = UserVAddr::new_nonnull(arg)?;
                 arg.write::<c_int>(&sid)?;
             }

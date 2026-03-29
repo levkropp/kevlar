@@ -248,6 +248,8 @@ pub struct Process {
     /// Thread group ID. For single-threaded processes and group leaders this
     /// equals `pid`. All threads in the same thread group share the same TGID.
     tgid: PId,
+    /// Session ID — PID of the session leader. Set by setsid(), inherited by fork().
+    session_id: AtomicI32,
     state: AtomicCell<ProcessState>,
     parent: Weak<Process>,
     cmdline: AtomicRefCell<Cmdline>,
@@ -330,6 +332,9 @@ pub struct Process {
     /// Raw pointer to OpenedFile for the cached fd (null = invalid).
     #[cfg(not(feature = "profile-fortress"))]
     file_hot_ptr: AtomicPtr<u8>,
+    /// Per-process resource limits (16 resources × [cur, max]).
+    /// Indexed by RLIMIT_* constants (0..16). Each entry is [rlim_cur, rlim_max].
+    rlimits: SpinLock<[[u64; 2]; 16]>,
     /// Pre-built `struct utsname` (390 bytes) for fast sys_uname response.
     /// Built at init/fork from UTS namespace data. TODO: rebuild on sethostname/setdomainname.
     cached_utsname: SpinLock<[u8; 390]>,
@@ -337,6 +342,18 @@ pub struct Process {
     /// 0 = not yet allocated (before vdso::init() runs).
     #[cfg(target_arch = "x86_64")]
     vdso_data_paddr: AtomicU64,
+}
+
+/// Default resource limits (RLIMIT_* indexed, 16 entries × [cur, max]).
+fn default_rlimits() -> [[u64; 2]; 16] {
+    const INF: u64 = !0u64;
+    let mut rl = [[INF; 2]; 16];
+    rl[3] = [8 * 1024 * 1024, INF]; // RLIMIT_STACK: 8MB soft, unlimited hard
+    rl[4] = [0, INF];               // RLIMIT_CORE: 0 soft (no core dumps)
+    rl[7] = [1024, 4096];           // RLIMIT_NOFILE: 1024 soft, 4096 hard
+    rl[13] = [0, 0];                // RLIMIT_NICE: 0
+    rl[14] = [0, 0];                // RLIMIT_RTPRIO: 0
+    rl
 }
 
 impl Process {
@@ -357,6 +374,7 @@ impl Process {
             vm: AtomicRefCell::new(None),
             pid: PId::new(0),
             tgid: PId::new(0),
+            session_id: AtomicI32::new(0),
             root_fs: AtomicRefCell::new(INITIAL_ROOT_FS.clone()),
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
@@ -398,6 +416,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: SpinLock::new(default_rlimits()),
             cached_utsname: SpinLock::new([0u8; 390]),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(0),
@@ -471,6 +490,7 @@ impl Process {
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
             tgid: pid,
+            session_id: AtomicI32::new(1), // PID 1 is its own session leader
             parent: Weak::new(),
             children: SpinLock::new(Vec::new()),
             state: AtomicCell::new(ProcessState::Runnable),
@@ -518,6 +538,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: SpinLock::new(default_rlimits()),
             cached_utsname: SpinLock::new(init_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(init_vdso_paddr),
@@ -558,6 +579,29 @@ impl Process {
     #[allow(dead_code)]
     pub fn tgid(&self) -> PId {
         self.tgid
+    }
+
+    /// Session ID — PID of the session leader.
+    pub fn session_id(&self) -> i32 {
+        self.session_id.load(Ordering::Relaxed)
+    }
+
+    /// Set session ID (called by setsid).
+    pub fn set_session_id(&self, sid: i32) {
+        self.session_id.store(sid, Ordering::Relaxed);
+    }
+
+    /// Get resource limits table.
+    pub fn rlimits(&self) -> [[u64; 2]; 16] {
+        *self.rlimits.lock_no_irq()
+    }
+
+    /// Set a single resource limit.
+    pub fn set_rlimit(&self, resource: usize, cur: u64, max: u64) {
+        if resource < 16 {
+            let mut rl = self.rlimits.lock_no_irq();
+            rl[resource] = [cur, max];
+        }
     }
 
     /// Monotonic tick count when this process was created.
@@ -1077,6 +1121,15 @@ impl Process {
             by_signal: false,
         });
 
+
+        // Remove from cgroup member list so dead PIDs don't accumulate.
+        {
+            let cg = current.cgroup();
+            cg.member_pids.lock().retain(|p| *p != current.pid);
+        }
+
+        // Release all POSIX record locks held by this process.
+        crate::syscalls::fcntl::release_all_record_locks(current.pid().as_i32());
 
         current.set_state(ProcessState::ExitedWith(status));
 
@@ -1726,6 +1779,7 @@ impl Process {
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
             tgid: pid, // fork creates a new thread group; child becomes its own leader
+            session_id: AtomicI32::new(parent.session_id()),
             state: AtomicCell::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
@@ -1779,6 +1833,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: SpinLock::new(parent.rlimits()),
             cached_utsname: SpinLock::new(child_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
@@ -1846,6 +1901,7 @@ impl Process {
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
             tgid: pid,
+            session_id: AtomicI32::new(parent.session_id()),
             state: AtomicCell::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
@@ -1897,6 +1953,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: SpinLock::new(parent.rlimits()),
             cached_utsname: SpinLock::new(child_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
@@ -1960,6 +2017,7 @@ impl Process {
             process_group: AtomicRefCell::new(parent.process_group.borrow().clone()),
             pid,
             tgid: if is_thread { parent.tgid } else { pid },
+            session_id: AtomicI32::new(parent.session_id()),
             state: AtomicCell::new(ProcessState::Runnable),
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
@@ -2018,6 +2076,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: SpinLock::new(parent.rlimits()),
             cached_utsname: SpinLock::new(*parent.cached_utsname.lock_no_irq()),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new({
@@ -2398,6 +2457,14 @@ fn prefault_writable_segments(
                 if vm.page_table().lookup_paddr(vaddr).is_some() {
                     continue;
                 }
+                // Only map pages that are within an actual VMA. Don't map
+                // pages in the page-aligned padding beyond the segment end,
+                // as alloc_vaddr_range may later assign those addresses to
+                // different mmap'd files (e.g., shared libraries via dlopen).
+                let in_vma = vm.vm_areas().iter().any(|a| a.contains(vaddr));
+                if !in_vma {
+                    continue;
+                }
                 let paddr = kevlar_platform::page_allocator::alloc_page(
                     kevlar_platform::page_allocator::AllocPageFlags::USER)?;
                 let offset_in_page = if page_addr < seg_start { seg_start - page_addr } else { 0 };
@@ -2546,6 +2613,7 @@ fn load_elf_segments(
 ///           to use 2MB EPT entries, eliminating costly 2D page walks.
 ///   Pass 2: Map remaining 4KB cached pages, skipping huge-page-covered regions.
 fn prefault_cached_pages(vm: &mut Vm) {
+    // Page cache prefaulting re-enabled
     use crate::mm::page_fault::{PAGE_CACHE, huge_page_cache_lookup, huge_page_cache_insert};
     use crate::mm::vm::VmAreaType;
     use alloc::sync::Arc;
@@ -2586,6 +2654,7 @@ fn prefault_cached_pages(vm: &mut Vm) {
     }
 
     // --- Pass 1: Huge page prefaulting ---
+    {
     const PAGES_PER_HUGE: usize = HUGE_PAGE_SIZE / PAGE_SIZE; // 512
     const ASSEMBLE_THRESHOLD: usize = 128;
     {
@@ -2619,6 +2688,38 @@ fn prefault_cached_pages(vm: &mut Vm) {
                 Err(_) => continue,
             };
             if !vm.page_table().is_pde_empty(huge_uaddr) {
+                continue;
+            }
+
+            // Safety check: only map a 2MB huge page if the ENTIRE range is
+            // covered by immutable file VMAs. If the huge page extends beyond
+            // the VMA into address space that will be used by mmap (e.g., for
+            // dlopen of ext4 files), the stale initramfs data in the huge page
+            // would corrupt the demand-faulted ext4 data.
+            let huge_end = cand.huge_vaddr + HUGE_PAGE_SIZE;
+            let range_fully_covered = {
+                let mut covered = true;
+                let mut check_addr = cand.huge_vaddr;
+                while check_addr < huge_end {
+                    let found = vma_infos.iter().any(|info| {
+                        info.vma_start <= check_addr && check_addr < info.vma_end
+                    });
+                    if !found {
+                        covered = false;
+                        break;
+                    }
+                    check_addr += PAGE_SIZE;
+                    // Fast skip: jump to the end of the covering VMA
+                    for info in &vma_infos {
+                        if info.vma_start <= check_addr && check_addr < info.vma_end {
+                            check_addr = info.vma_end;
+                            break;
+                        }
+                    }
+                }
+                covered
+            };
+            if !range_fully_covered {
                 continue;
             }
 
@@ -2782,6 +2883,8 @@ fn prefault_cached_pages(vm: &mut Vm) {
             // (correct for BSS/gap). Write faults trigger split → CoW.
             vm.page_table_mut().map_huge_user_page(huge_uaddr, huge_paddr, 5);
         }
+    }
+
     }
 
     // --- Pass 2: 4KB page prefaulting ---
@@ -3064,9 +3167,6 @@ fn do_elf_binfmt(
 
         load_elf_segments(&mut vm, elf.program_headers(), main_base_offset, executable)?;
 
-        // Eagerly pre-fault writable data segment pages so the dynamic linker
-        // can apply PIE relocations to ALL data pages. Without this, fork
-        // children demand-fault raw file data with unpatched pointers.
         prefault_writable_segments(&mut vm, elf.program_headers(), main_base_offset, executable)?;
 
         // Allocate address range for interpreter and load its segments.
@@ -3095,14 +3195,24 @@ fn do_elf_binfmt(
         auxv.push(Auxv::Entry(main_entry));
         auxv.push(Auxv::Base(interp_base_uaddr.value()));
 
-        // Update heap bottom to be after all loaded images.
-        // For PIE, both the main exe and interpreter are in the valloc region.
+        // Update heap bottom to be after all loaded images and reserve space
+        // so brk doesn't overlap with library mmap allocations.
         let final_top = core::cmp::max(
             main_base_offset + main_hi,
             interp_base_offset + interp_hi,
         );
         let new_heap_bottom = align_up(final_top, PAGE_SIZE);
         vm.set_heap_bottom(UserVAddr::new_nonnull(new_heap_bottom)?);
+        // Reserve 256MB for the heap so alloc_vaddr_range skips past it.
+        // Without this, mmap returns addresses that overlap with brk,
+        // causing the dynamic linker's library pages to be overwritten
+        // by malloc's heap allocations (via CoW on read-only pages).
+        {
+            let heap_reserve_end = align_up(new_heap_bottom + 256 * 1024 * 1024, PAGE_SIZE);
+            if heap_reserve_end > vm.valloc_next().value() {
+                vm.set_valloc_next(UserVAddr::new(heap_reserve_end).unwrap());
+            }
+        }
 
         let phdr_val = match &auxv[0] {
             Auxv::Phdr(v) => v.value(),
@@ -3184,6 +3294,23 @@ fn do_elf_binfmt(
             }
         }
         prefault_small_anonymous(&mut vm);
+    }
+
+    // Advance valloc_next past all existing VMAs (including gap-fill and
+    // page-aligned extents). This ensures that mmap calls from the dynamic
+    // linker (during process startup) don't get addresses that overlap with
+    // prefaulted interpreter/binary pages.
+    {
+        let mut max_end = vm.valloc_next().value();
+        for vma in vm.vm_areas() {
+            let vma_page_end = align_up(vma.end().value(), PAGE_SIZE);
+            if vma_page_end > max_end {
+                max_end = vma_page_end;
+            }
+        }
+        if max_end > vm.valloc_next().value() {
+            vm.set_valloc_next(UserVAddr::new(max_end).unwrap_or(vm.valloc_next()));
+        }
     }
 
     // Map vDSO page (read + execute, no write) into the new address space.

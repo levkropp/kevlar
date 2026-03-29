@@ -114,12 +114,13 @@ impl CgroupNode {
     }
 
     /// Count total PIDs in this cgroup subtree (recursively).
+    /// Collects children under lock then releases before recursing to avoid
+    /// holding the children spinlock across recursive calls.
     pub fn count_pids_recursive(&self) -> usize {
-        let mut count = self.member_pids.lock().len();
-        for child in self.children.lock().values() {
-            count += child.count_pids_recursive();
-        }
-        count
+        let count = self.member_pids.lock().len();
+        let children: alloc::vec::Vec<Arc<CgroupNode>> =
+            self.children.lock().values().cloned().collect();
+        children.iter().fold(count, |acc, child| acc + child.count_pids_recursive())
     }
 }
 
