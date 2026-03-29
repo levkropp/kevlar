@@ -785,6 +785,7 @@ impl<'a> SyscallHandler<'a> {
         a6: usize,
         n: usize,
     ) -> Result<isize> {
+        #[cfg(debug_assertions)]
         CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
 
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
