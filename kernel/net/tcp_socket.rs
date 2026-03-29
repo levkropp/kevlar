@@ -60,6 +60,12 @@ pub struct TcpSocket {
     local_endpoint: AtomicCell<Option<IpEndpoint>>,
     backlogs: SpinLock<Vec<Arc<TcpSocket>>>,
     num_backlogs: AtomicCell<usize>,
+    // Per-socket options.
+    reuseaddr: AtomicCell<bool>,
+    keepalive: AtomicCell<bool>,
+    nodelay: AtomicCell<bool>,
+    rcvtimeo_us: AtomicCell<u64>,
+    sndtimeo_us: AtomicCell<u64>,
 }
 
 impl TcpSocket {
@@ -73,8 +79,41 @@ impl TcpSocket {
             local_endpoint: AtomicCell::new(None),
             backlogs: SpinLock::new(Vec::new()),
             num_backlogs: AtomicCell::new(0),
+            reuseaddr: AtomicCell::new(false),
+            keepalive: AtomicCell::new(false),
+            nodelay: AtomicCell::new(false),
+            rcvtimeo_us: AtomicCell::new(0),
+            sndtimeo_us: AtomicCell::new(0),
         })
     }
+
+    // ── Socket option accessors ──
+
+    pub fn reuseaddr(&self) -> bool { self.reuseaddr.load() }
+    pub fn set_reuseaddr(&self, val: bool) { self.reuseaddr.store(val); }
+
+    pub fn keepalive(&self) -> bool { self.keepalive.load() }
+    pub fn set_keepalive(&self, val: bool) {
+        self.keepalive.store(val);
+        let interval = if val {
+            Some(smoltcp::time::Duration::from_secs(75))
+        } else {
+            None
+        };
+        SOCKETS.lock().get_mut::<tcp::Socket>(self.handle).set_keep_alive(interval);
+    }
+
+    pub fn nodelay(&self) -> bool { self.nodelay.load() }
+    pub fn set_nodelay(&self, val: bool) {
+        self.nodelay.store(val);
+        SOCKETS.lock().get_mut::<tcp::Socket>(self.handle).set_nagle_enabled(!val);
+    }
+
+    pub fn rcvtimeo_us(&self) -> u64 { self.rcvtimeo_us.load() }
+    pub fn set_rcvtimeo(&self, us: u64) { self.rcvtimeo_us.store(us); }
+
+    pub fn sndtimeo_us(&self) -> u64 { self.sndtimeo_us.load() }
+    pub fn set_sndtimeo(&self, us: u64) { self.sndtimeo_us.store(us); }
 
     fn refill_backlog_sockets(
         &self,
@@ -154,10 +193,10 @@ impl FileLike for TcpSocket {
 
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
         let endpoint = super::sockaddr_to_endpoint(sockaddr)?;
-        // Reject if the port is already bound (EADDRINUSE).
+        // Reject if the port is already bound (EADDRINUSE), unless SO_REUSEADDR is set.
         if endpoint.port != 0 {
             let mut inuse = INUSE_ENDPOINTS.lock();
-            if inuse.contains(&endpoint.port) {
+            if inuse.contains(&endpoint.port) && !self.reuseaddr.load() {
                 return Err(Errno::EADDRINUSE.into());
             }
             inuse.insert(endpoint.port);
@@ -286,6 +325,12 @@ impl FileLike for TcpSocket {
     fn write(&self, _offset: usize, buf: UserBuffer<'_>, options: &OpenOptions) -> Result<usize> {
         let mut total_len = 0;
         let mut reader = UserBufReader::from(buf);
+        let timeout_us = self.sndtimeo_us.load();
+        let started_at = if timeout_us > 0 {
+            Some(crate::timer::read_monotonic_clock())
+        } else {
+            None
+        };
         loop {
             let copied_len = SOCKETS
                 .lock()
@@ -298,7 +343,6 @@ impl FileLike for TcpSocket {
             process_packets();
             match copied_len {
                 Ok(0) if total_len > 0 || options.nonblock => {
-                    // We already wrote something, or nonblocking — return.
                     WRITTEN_BYTES_TOTAL.fetch_add(total_len, Ordering::SeqCst);
                     #[cfg(feature = "ktrace-net")]
                     crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_SEND,
@@ -306,9 +350,19 @@ impl FileLike for TcpSocket {
                     return Ok(total_len);
                 }
                 Ok(0) => {
-                    // Send buffer full, blocking mode, nothing written yet.
-                    // Wait for buffer space to become available.
+                    // Check SO_SNDTIMEO deadline.
+                    if let Some(start) = started_at {
+                        if (start.elapsed_msecs() as u64) * 1000 >= timeout_us {
+                            if total_len > 0 { return Ok(total_len); }
+                            return Err(Errno::EAGAIN.into());
+                        }
+                    }
                     SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
+                        if let Some(start) = started_at {
+                            if (start.elapsed_msecs() as u64) * 1000 >= timeout_us {
+                                return Err(Errno::EAGAIN.into());
+                            }
+                        }
                         process_packets();
                         let sockets = SOCKETS.lock();
                         let socket: &tcp::Socket = sockets.get(self.handle);
@@ -320,10 +374,8 @@ impl FileLike for TcpSocket {
                             Ok(None)
                         }
                     })?;
-                    // Buffer space available — retry the send loop.
                 }
                 Ok(copied_len) => {
-                    // Continue writing.
                     total_len += copied_len;
                 }
                 Err(_) => return Err(Errno::ECONNRESET.into()),
@@ -333,11 +385,20 @@ impl FileLike for TcpSocket {
 
     fn read(&self, _offset: usize, buf: UserBufferMut<'_>, options: &OpenOptions) -> Result<usize> {
         let mut writer = UserBufWriter::from(buf);
+        let timeout_us = self.rcvtimeo_us.load();
+        let started_at = if timeout_us > 0 {
+            Some(crate::timer::read_monotonic_clock())
+        } else {
+            None
+        };
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
-            // Pump any pending network packets into socket buffers before
-            // checking if data is available. Without this, a race exists:
-            // packets may have arrived (queued in RX_PACKET_QUEUE) but not
-            // yet processed by smoltcp into the TCP receive buffer.
+            // Check SO_RCVTIMEO deadline.
+            if let Some(start) = started_at {
+                if (start.elapsed_msecs() as u64) * 1000 >= timeout_us {
+                    return Err(Errno::EAGAIN.into());
+                }
+            }
+
             process_packets();
 
             let copied_len = SOCKETS
@@ -353,16 +414,11 @@ impl FileLike for TcpSocket {
                     if options.nonblock {
                         Err(Errno::EAGAIN.into())
                     } else {
-                        // The receive buffer is empty. Sleep on the wait queue...
                         Ok(None)
                     }
                 }
-                Err(tcp::RecvError::Finished) => {
-                    // Remote sent FIN — return EOF (0 bytes read).
-                    Ok(Some(0))
-                }
+                Err(tcp::RecvError::Finished) => Ok(Some(0)),
                 Ok(copied_len) => {
-                    // Continue reading.
                     READ_BYTES_TOTAL.fetch_add(copied_len, Ordering::SeqCst);
                     #[cfg(feature = "ktrace-net")]
                     crate::debug::ktrace::trace(crate::debug::ktrace::event::NET_RECV,
