@@ -29,6 +29,8 @@
 #include <sys/resource.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <sys/file.h>
+#include <sys/socket.h>
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
@@ -790,6 +792,121 @@ static void bench_tar_extract(void) {
     waitpid(pid, NULL, 0);
 }
 
+/* ── Phase 1/2 benchmarks (9): new POSIX features ──────────────────── */
+
+static void bench_statx(void) {
+    struct statx stx;
+    int iters = ITERS(200000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        syscall(SYS_statx, AT_FDCWD, "/tmp", 0, 0x7ff, &stx);
+    }
+    report("statx", iters, now_ns() - start);
+}
+
+static void bench_getsid(void) {
+    int iters = ITERS(1000000, 10000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        syscall(SYS_getsid, 0);
+    }
+    report("getsid", iters, now_ns() - start);
+}
+
+static void bench_getrlimit(void) {
+    struct rlimit rl;
+    int iters = ITERS(1000000, 10000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        getrlimit(RLIMIT_NOFILE, &rl);
+    }
+    report("getrlimit", iters, now_ns() - start);
+}
+
+static void bench_prlimit64(void) {
+    struct rlimit old;
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        /* prlimit64(0, RLIMIT_NOFILE, NULL, &old) — get only */
+        syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, NULL, &old);
+    }
+    report("prlimit64", iters, now_ns() - start);
+}
+
+static void bench_fcntl_lock(void) {
+    int fd = open("/tmp/bench_lockfile", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) { printf("BENCH_SKIP fcntl_lock\n"); return; }
+    struct flock fl;
+    int iters = ITERS(200000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        fl.l_type = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start = 0;
+        fl.l_len = 0;
+        fl.l_pid = 0;
+        fcntl(fd, F_SETLK, &fl);
+        fl.l_type = F_UNLCK;
+        fcntl(fd, F_SETLK, &fl);
+    }
+    report("fcntl_lock", iters, now_ns() - start);
+    close(fd);
+    unlink("/tmp/bench_lockfile");
+}
+
+static void bench_setsockopt(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { printf("BENCH_SKIP setsockopt\n"); return; }
+    int val = 1;
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+    }
+    report("setsockopt", iters, now_ns() - start);
+    close(fd);
+}
+
+static void bench_getsockopt(void) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { printf("BENCH_SKIP getsockopt\n"); return; }
+    int val;
+    socklen_t len = sizeof(val);
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        getsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, &len);
+    }
+    report("getsockopt", iters, now_ns() - start);
+    close(fd);
+}
+
+static void bench_flock(void) {
+    int fd = open("/tmp/bench_flockfile", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) { printf("BENCH_SKIP flock\n"); return; }
+    int iters = ITERS(200000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        flock(fd, LOCK_EX);
+        flock(fd, LOCK_UN);
+    }
+    report("flock", iters, now_ns() - start);
+    close(fd);
+    unlink("/tmp/bench_flockfile");
+}
+
+static void bench_setrlimit(void) {
+    struct rlimit rl;
+    getrlimit(RLIMIT_CORE, &rl);
+    int iters = ITERS(500000, 5000);
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        setrlimit(RLIMIT_CORE, &rl);
+    }
+    report("setrlimit", iters, now_ns() - start);
+}
+
 /* ── Benchmark registry ─────────────────────────────────────────────── */
 
 typedef struct {
@@ -852,6 +969,17 @@ static bench_entry benchmarks[] = {
     {"sed_pipeline", bench_sed_pipeline,   0},
     {"sort_uniq",    bench_sort_uniq,      0},
     {"tar_extract",  bench_tar_extract,    0},
+
+    /* Phase 1/2 benchmarks (9) */
+    {"statx",        bench_statx,          0},
+    {"getsid",       bench_getsid,         0},
+    {"getrlimit",    bench_getrlimit,      0},
+    {"prlimit64",    bench_prlimit64,      0},
+    {"setrlimit",    bench_setrlimit,      0},
+    {"fcntl_lock",   bench_fcntl_lock,     0},
+    {"flock",        bench_flock,          0},
+    {"setsockopt",   bench_setsockopt,     0},
+    {"getsockopt",   bench_getsockopt,     0},
 
     {NULL, NULL, 0}
 };
