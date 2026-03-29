@@ -1,16 +1,27 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use crate::{ctypes::c_int, fs::opened_file::Fd, prelude::*};
+use crate::{
+    ctypes::c_int,
+    fs::opened_file::Fd,
+    net::{TcpSocket, UdpSocket},
+    prelude::*,
+    process::current_process,
+};
 use core::mem::size_of;
 use kevlar_platform::address::UserVAddr;
 
 use super::SyscallHandler;
 
 const SOL_SOCKET: c_int = 1;
+const IPPROTO_TCP: c_int = 6;
+const SO_REUSEADDR: c_int = 2;
 const SO_TYPE: c_int = 3;
 const SO_ERROR: c_int = 4;
-const SO_KEEPALIVE: c_int = 9;
-const SO_RCVBUF: c_int = 8;
 const SO_SNDBUF: c_int = 7;
+const SO_RCVBUF: c_int = 8;
+const SO_KEEPALIVE: c_int = 9;
+const SO_RCVTIMEO: c_int = 20;
+const SO_SNDTIMEO: c_int = 21;
+const TCP_NODELAY: c_int = 1;
 
 fn write_int_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, value: c_int) -> Result<()> {
     if let (Some(val), Some(len)) = (optval, optlen) {
@@ -20,13 +31,21 @@ fn write_int_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, value: c_
     Ok(())
 }
 
+fn write_timeval_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, us: u64) -> Result<()> {
+    if let (Some(val), Some(len)) = (optval, optlen) {
+        len.write::<c_int>(&(16 as c_int))?; // sizeof(struct timeval) = 16
+        let tv_sec = (us / 1_000_000) as i64;
+        let tv_usec = (us % 1_000_000) as i64;
+        val.write::<i64>(&tv_sec)?;
+        let val2 = UserVAddr::new_nonnull(val.as_isize() as usize + 8)?;
+        val2.write::<i64>(&tv_usec)?;
+    }
+    Ok(())
+}
+
 /// Check whether the fd refers to a socket that has a pending error.
-/// Returns the errno value (e.g. ECONNREFUSED=111) or 0 if no error.
-/// Per POSIX, reading SO_ERROR clears the error (we don't track per-socket
-/// errors yet, so we just check whether the socket is in an error state).
 fn socket_error(fd: Fd) -> c_int {
     use crate::fs::inode::PollStatus;
-    use crate::process::current_process;
     let proc = current_process();
     let table = proc.opened_files().lock();
     let Ok(opened_file) = table.get(fd) else {
@@ -39,10 +58,6 @@ fn socket_error(fd: Fd) -> c_int {
     };
     if let Ok(status) = file.poll() {
         if status.contains(PollStatus::POLLERR) {
-            // The socket is in an error state.  For TCP, this could be
-            // ECONNREFUSED (connect failed) or ECONNRESET (peer reset).
-            // Check POLLHUP to distinguish: POLLHUP without prior data
-            // exchange typically means ECONNREFUSED.
             if status.contains(PollStatus::POLLHUP) {
                 return 104; // ECONNRESET
             }
@@ -68,22 +83,18 @@ impl<'a> SyscallHandler<'a> {
                 Ok(0)
             }
             (SOL_SOCKET, SO_TYPE) => {
-                use crate::process::current_process;
                 let proc = current_process();
                 let table = proc.opened_files().lock();
                 let stype = if let Ok(of) = table.get(fd) {
                     if let Ok(file) = of.inode().as_file() {
                         let t = file.socket_type();
-                        if t != 0 { t } else { 1 } // default SOCK_STREAM
+                        if t != 0 { t } else { 1 }
                     } else { 1 }
                 } else { 1 };
                 write_int_opt(optval, optlen, stype)?;
                 Ok(0)
             }
             (SOL_SOCKET, SO_RCVBUF) => {
-                // Linux doubles the value set via setsockopt when returning
-                // it via getsockopt (to account for kernel bookkeeping).
-                // The default rmem_default is 212992.
                 write_int_opt(optval, optlen, 212992)?;
                 Ok(0)
             }
@@ -91,8 +102,29 @@ impl<'a> SyscallHandler<'a> {
                 write_int_opt(optval, optlen, 16384)?;
                 Ok(0)
             }
+            (SOL_SOCKET, SO_REUSEADDR) => {
+                let val = self.get_socket_bool(fd, |tcp| tcp.reuseaddr(), |udp| udp.reuseaddr());
+                write_int_opt(optval, optlen, val as c_int)?;
+                Ok(0)
+            }
             (SOL_SOCKET, SO_KEEPALIVE) => {
-                write_int_opt(optval, optlen, 0)?;
+                let val = self.get_socket_bool(fd, |tcp| tcp.keepalive(), |_udp| false);
+                write_int_opt(optval, optlen, val as c_int)?;
+                Ok(0)
+            }
+            (SOL_SOCKET, SO_RCVTIMEO) => {
+                let us = self.get_socket_u64(fd, |tcp| tcp.rcvtimeo_us(), |udp| udp.rcvtimeo_us());
+                write_timeval_opt(optval, optlen, us)?;
+                Ok(0)
+            }
+            (SOL_SOCKET, SO_SNDTIMEO) => {
+                let us = self.get_socket_u64(fd, |tcp| tcp.sndtimeo_us(), |_udp| 0);
+                write_timeval_opt(optval, optlen, us)?;
+                Ok(0)
+            }
+            (IPPROTO_TCP, TCP_NODELAY) => {
+                let val = self.get_socket_bool(fd, |tcp| tcp.nodelay(), |_udp| false);
+                write_int_opt(optval, optlen, val as c_int)?;
                 Ok(0)
             }
             _ => {
@@ -104,5 +136,45 @@ impl<'a> SyscallHandler<'a> {
                 Ok(0)
             }
         }
+    }
+
+    /// Helper: read a bool from TcpSocket or UdpSocket via downcast.
+    fn get_socket_bool(
+        &self,
+        fd: Fd,
+        tcp_fn: impl Fn(&TcpSocket) -> bool,
+        udp_fn: impl Fn(&UdpSocket) -> bool,
+    ) -> bool {
+        let Ok(opened_file) = current_process().get_opened_file_by_fd(fd) else { return false };
+        let inode = opened_file.inode();
+        if let Ok(f) = inode.as_file() {
+            if let Some(tcp) = (**f).as_any().downcast_ref::<TcpSocket>() {
+                return tcp_fn(tcp);
+            }
+            if let Some(udp) = (**f).as_any().downcast_ref::<UdpSocket>() {
+                return udp_fn(udp);
+            }
+        }
+        false
+    }
+
+    /// Helper: read a u64 from TcpSocket or UdpSocket via downcast.
+    fn get_socket_u64(
+        &self,
+        fd: Fd,
+        tcp_fn: impl Fn(&TcpSocket) -> u64,
+        udp_fn: impl Fn(&UdpSocket) -> u64,
+    ) -> u64 {
+        let Ok(opened_file) = current_process().get_opened_file_by_fd(fd) else { return 0 };
+        let inode = opened_file.inode();
+        if let Ok(f) = inode.as_file() {
+            if let Some(tcp) = (**f).as_any().downcast_ref::<TcpSocket>() {
+                return tcp_fn(tcp);
+            }
+            if let Some(udp) = (**f).as_any().downcast_ref::<UdpSocket>() {
+                return udp_fn(udp);
+            }
+        }
+        0
     }
 }

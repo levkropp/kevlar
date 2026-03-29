@@ -15,6 +15,8 @@ use smoltcp::iface::SocketHandle;
 use smoltcp::socket::udp;
 use smoltcp::wire::IpEndpoint;
 
+use crossbeam::atomic::AtomicCell;
+
 use super::{process_packets, socket::*, SOCKETS, SOCKET_WAIT_QUEUE};
 
 static INUSE_ENDPOINTS: SpinLock<BTreeSet<u16>> = SpinLock::new(BTreeSet::new());
@@ -22,6 +24,8 @@ static INUSE_ENDPOINTS: SpinLock<BTreeSet<u16>> = SpinLock::new(BTreeSet::new())
 pub struct UdpSocket {
     handle: SocketHandle,
     peer: SpinLock<Option<IpEndpoint>>,
+    reuseaddr: AtomicCell<bool>,
+    rcvtimeo_us: AtomicCell<u64>,
 }
 
 impl UdpSocket {
@@ -30,8 +34,19 @@ impl UdpSocket {
         let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 64], vec![0; 4096]);
         let inner = udp::Socket::new(rx_buffer, tx_buffer);
         let handle = SOCKETS.lock().add(inner);
-        Arc::new(UdpSocket { handle, peer: SpinLock::new(None) })
+        Arc::new(UdpSocket {
+            handle,
+            peer: SpinLock::new(None),
+            reuseaddr: AtomicCell::new(false),
+            rcvtimeo_us: AtomicCell::new(0),
+        })
     }
+
+    pub fn reuseaddr(&self) -> bool { self.reuseaddr.load() }
+    pub fn set_reuseaddr(&self, val: bool) { self.reuseaddr.store(val); }
+
+    pub fn rcvtimeo_us(&self) -> u64 { self.rcvtimeo_us.load() }
+    pub fn set_rcvtimeo(&self, us: u64) { self.rcvtimeo_us.store(us); }
 }
 
 impl FileLike for UdpSocket {
@@ -49,7 +64,7 @@ impl FileLike for UdpSocket {
                 port += 1;
             }
             endpoint.port = port;
-        } else if inuse_endpoints.contains(&endpoint.port) {
+        } else if inuse_endpoints.contains(&endpoint.port) && !self.reuseaddr.load() {
             return Err(Errno::EADDRINUSE.into());
         }
 
@@ -179,7 +194,18 @@ impl FileLike for UdpSocket {
         options: &OpenOptions,
     ) -> Result<(usize, SockAddr)> {
         let mut writer = UserBufWriter::from(buf);
+        let timeout_us = self.rcvtimeo_us.load();
+        let started_at = if timeout_us > 0 {
+            Some(crate::timer::read_monotonic_clock())
+        } else {
+            None
+        };
         SOCKET_WAIT_QUEUE.sleep_signalable_until(|| {
+            if let Some(start) = started_at {
+                if (start.elapsed_msecs() as u64) * 1000 >= timeout_us {
+                    return Err(Errno::EAGAIN.into());
+                }
+            }
             process_packets();
             let mut sockets = SOCKETS.lock();
             let socket = sockets.get_mut::<udp::Socket>(self.handle);
@@ -189,10 +215,7 @@ impl FileLike for UdpSocket {
                     Ok(Some((writer.written_len(), super::socket::endpoint_to_sockaddr(meta.endpoint))))
                 }
                 Err(udp::RecvError::Exhausted) if options.nonblock => Err(Errno::EAGAIN.into()),
-                Err(udp::RecvError::Exhausted) => {
-                    // The receive buffer is empty. Try again later...
-                    Ok(None)
-                }
+                Err(udp::RecvError::Exhausted) => Ok(None),
                 Err(_) => Err(Errno::EINVAL.into()),
             }
         })
