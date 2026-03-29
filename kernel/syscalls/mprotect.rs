@@ -36,23 +36,24 @@ impl<'a> SyscallHandler<'a> {
         while cursor < end_value {
             let page_addr = UserVAddr::new(cursor).unwrap();
 
-            // Check for 2MB huge page: if the entire huge page is in range,
-            // update PDE flags directly; otherwise split first.
-            if vm.page_table().is_huge_mapped(page_addr).is_some() {
-                if is_aligned(cursor, HUGE_PAGE_SIZE)
-                    && cursor + HUGE_PAGE_SIZE <= end_value
-                {
-                    // Full huge page in range — update PDE flags directly.
-                    if vm.page_table_mut().update_huge_page_flags(page_addr, prot_flags) {
-                        vm.page_table().flush_tlb_local(page_addr);
-                        any_flushed = true;
+            // Check for 2MB huge page only at 2MB-aligned boundaries.
+            // Skip the expensive is_huge_mapped() page table walk for
+            // non-aligned addresses (the common case for 4KB operations).
+            if is_aligned(cursor, HUGE_PAGE_SIZE) {
+                if let Some(_) = vm.page_table().is_huge_mapped(page_addr) {
+                    if cursor + HUGE_PAGE_SIZE <= end_value {
+                        // Full huge page in range — update PDE flags directly.
+                        if vm.page_table_mut().update_huge_page_flags(page_addr, prot_flags) {
+                            vm.page_table().flush_tlb_local(page_addr);
+                            any_flushed = true;
+                        }
+                        cursor += HUGE_PAGE_SIZE;
+                        continue;
                     }
-                    cursor += HUGE_PAGE_SIZE;
-                    continue;
+                    // Partial huge page — split into 4KB first.
+                    vm.page_table_mut().split_huge_page(page_addr);
+                    vm.page_table().flush_tlb_local(page_addr);
                 }
-                // Partial huge page — split into 4KB first.
-                vm.page_table_mut().split_huge_page(page_addr);
-                vm.page_table().flush_tlb_local(page_addr);
             }
 
             if vm.page_table_mut().update_page_flags(page_addr, prot_flags) {
