@@ -188,6 +188,9 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
+    // Update VFS clock (second-level granularity for filesystem timestamps).
+    kevlar_vfs::set_vfs_clock(read_wall_clock().secs_from_epoch() as u32);
+
     crate::debug::htrace::exit(crate::debug::htrace::id::TIMER_IRQ, 0);
 
     if ticks % PREEMPT_PER_TICKS == 0 && !kevlar_platform::arch::in_preempt() {

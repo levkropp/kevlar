@@ -46,6 +46,12 @@ pub fn current_process() -> &'static Arc<Process> {
     CURRENT.get()
 }
 
+/// Returns the current process if initialized, else None.
+/// Safe to call during early boot before any process exists.
+pub fn current_process_option() -> Option<&'static Arc<Process>> {
+    CURRENT.get().try_get()
+}
+
 /// Returns the current PID if the process subsystem is initialized, else 0.
 /// Used by ktrace to safely record events during early boot before any
 /// process exists.

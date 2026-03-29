@@ -16,3 +16,17 @@ pub mod result;
 pub mod socket_types;
 pub mod stat;
 pub mod user_buffer;
+
+/// Global wall-clock seconds since epoch, updated by the kernel timer.
+/// Filesystem services read this to stamp mtime/ctime on writes.
+static VFS_CLOCK_SECS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Set the VFS clock (called by the kernel timer subsystem).
+pub fn set_vfs_clock(epoch_secs: u32) {
+    VFS_CLOCK_SECS.store(epoch_secs, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Get current wall-clock seconds since epoch.
+pub fn vfs_clock_secs() -> u32 {
+    VFS_CLOCK_SECS.load(core::sync::atomic::Ordering::Relaxed)
+}

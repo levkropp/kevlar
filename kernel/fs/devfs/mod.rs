@@ -15,7 +15,7 @@ use kevlar_utils::once::Once;
 use super::tmpfs::TmpFs;
 
 mod null;
-mod tty;
+pub mod tty;
 mod zero;
 
 pub static DEV_FS: Once<Arc<DevFs>> = Once::new();

@@ -546,14 +546,23 @@ impl OpenedFileTable {
     /// Allocates an unused fd. Note that this method does not any reservations
     /// for the fd: the caller must register it before unlocking this table.
     fn alloc_fd(&mut self, gte: Option<i32>) -> Result<Fd> {
+        // Use per-process RLIMIT_NOFILE if available, else fall back to FD_MAX.
+        let limit = crate::process::current_process_option()
+            .map(|p| {
+                let rl = p.rlimits();
+                rl[7][0] as i32 // RLIMIT_NOFILE soft limit
+            })
+            .unwrap_or(FD_MAX);
+        let limit = limit.min(FD_MAX); // Never exceed the hard table max
+
         // POSIX: open() must return the lowest available fd number.
         let start = gte.unwrap_or(0);
-        for i in start..FD_MAX {
+        for i in start..limit {
             if matches!(self.files.get(i as usize), Some(None) | None) {
                 return Ok(Fd::new(i));
             }
         }
-        Err(Error::new(Errno::ENFILE))
+        Err(Error::new(Errno::EMFILE))
     }
 }
 
