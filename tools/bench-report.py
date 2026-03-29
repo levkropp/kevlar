@@ -242,11 +242,14 @@ def print_bar_charts(data):
     kevlar = data.get('balanced', data.get('performance', {}))
 
     categories = {
-        'Fast syscalls (ns)': ['getpid', 'gettid', 'getuid', 'clock_gettime', 'brk'],
-        'File ops (ns)': ['open_close', 'stat', 'fstat', 'read_null', 'write_null'],
+        'Fast syscalls (ns)': ['getpid', 'gettid', 'getuid', 'clock_gettime', 'brk', 'getsid'],
+        'File ops (ns)': ['open_close', 'stat', 'fstat', 'statx', 'read_null', 'write_null'],
         'Memory (ns)': ['mmap_munmap', 'mmap_fault', 'mprotect', 'brk'],
         'IPC (ns)': ['pipe', 'pipe_pingpong', 'socketpair', 'eventfd'],
         'Signals (ns)': ['sigaction', 'sigprocmask', 'signal_delivery'],
+        'Locking (ns)': ['fcntl_lock', 'flock', 'fcntl_getfl'],
+        'Resource limits (ns)': ['getrlimit', 'setrlimit', 'prlimit64'],
+        'Socket opts (ns)': ['setsockopt', 'getsockopt'],
     }
 
     for cat_name, benches in categories.items():
