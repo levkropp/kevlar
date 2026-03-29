@@ -81,6 +81,8 @@ pub fn process_packets() {
                 }
             });
             info!("DHCP: got a IPv4 address: {}", cidr);
+            let oct = cidr.address().octets();
+            set_own_ip(oct[0], oct[1], oct[2], oct[3]);
 
             if let Some(router) = config.router {
                 iface
@@ -141,11 +143,62 @@ impl TxToken for OurTxToken {
                 ARP_SENT.store(true, AtomicOrdering::Relaxed);
             }
 
-            use_ethernet_driver(|driver| driver.transmit(&buffer));
+            // Loopback: if the destination IP is 127.0.0.0/8 or the interface's
+            // own address, inject the frame back into the RX queue instead of
+            // sending it out the wire. This enables same-host TCP connections.
+            let is_loopback_ipv4 = buffer.len() >= 34
+                && buffer[12] == 0x08 && buffer[13] == 0x00
+                && (buffer[30] == 127 || is_own_ip(&buffer[30..34]));
+            let is_loopback_arp = buffer.len() >= 42
+                && buffer[12] == 0x08 && buffer[13] == 0x06
+                && (buffer[38] == 127 || is_own_ip(&buffer[38..42]));
+
+            if is_loopback_ipv4 || is_loopback_arp {
+                // Swap src/dst MAC so smoltcp accepts the looped-back frame.
+                let mut src_mac = [0u8; 6];
+                src_mac.copy_from_slice(&buffer[6..12]);
+                buffer.copy_within(0..6, 6);  // dst → src
+                buffer[0..6].copy_from_slice(&src_mac);  // old src → dst
+
+                if is_loopback_arp {
+                    // Convert ARP request (opcode=1) to ARP reply (opcode=2)
+                    // so smoltcp learns the MAC for the loopback address.
+                    if buffer.len() >= 42 && buffer[21] == 1 {
+                        buffer[21] = 2; // opcode = reply
+                        // Swap sender/target in ARP payload:
+                        // sender MAC+IP (bytes 22-31) ↔ target MAC+IP (bytes 32-41)
+                        let mut tmp = [0u8; 10];
+                        tmp.copy_from_slice(&buffer[22..32]);
+                        buffer.copy_within(32..42, 22);
+                        buffer[32..42].copy_from_slice(&tmp);
+                    }
+                }
+
+                let _ = RX_PACKET_QUEUE.lock().push(buffer);
+            } else {
+                use_ethernet_driver(|driver| driver.transmit(&buffer));
+            }
         }
 
         return_value
     }
+}
+
+/// Cached own IPv4 address bytes (set when DHCP or static IP is configured).
+static OWN_IPV4: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Check if an IP address (4 bytes) matches the interface's configured address.
+fn is_own_ip(ip: &[u8]) -> bool {
+    let own = OWN_IPV4.load(core::sync::atomic::Ordering::Relaxed);
+    if own == 0 { return false; }
+    let own_bytes = own.to_be_bytes();
+    ip == own_bytes
+}
+
+/// Update the cached own IP address.
+pub(crate) fn set_own_ip(a: u8, b: u8, c: u8, d: u8) {
+    let v = u32::from_be_bytes([a, b, c, d]);
+    OWN_IPV4.store(v, core::sync::atomic::Ordering::Relaxed);
 }
 
 struct OurDevice;
@@ -230,6 +283,8 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
             let (ip4, prefix_len) = parse_ipv4_addr_with_prefix_len(ip4_str)
                 .expect("bootinfo.ip4 should be formed as 10.0.0.1/24");
             info!("net: using a static IPv4 address: {}/{}", ip4, prefix_len);
+            let oct = ip4.octets();
+            set_own_ip(oct[0], oct[1], oct[2], oct[3]);
             [IpCidr::new(ip4.into(), prefix_len)]
         }
         None => [IpCidr::new(wire::Ipv4Address::UNSPECIFIED.into(), 0)],
@@ -245,6 +300,8 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
         for cidr in &ip_addrs {
             addrs.push(*cidr).unwrap();
         }
+        // Add loopback address after the real IP so ipv4_addr() returns the real one.
+        addrs.push(IpCidr::new(wire::Ipv4Address::new(127, 0, 0, 1).into(), 8)).unwrap();
     });
 
     if let Some(gateway_ip4_str) = &bootinfo.gateway_ip4 {

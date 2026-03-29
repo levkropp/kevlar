@@ -212,11 +212,17 @@ impl NetlinkSocket {
             let ipv4 = Ipv4Address::from(addr);
             let cidr = Ipv4Cidr::new(ipv4, prefix_len);
             INTERFACE.lock().update_ip_addrs(|addrs| {
-                // Set the first address slot to the new address.
-                if let Some(slot) = addrs.iter_mut().next() {
+                // Find first non-loopback slot and update it.
+                for slot in addrs.iter_mut() {
+                    if let IpCidr::Ipv4(existing) = slot {
+                        if existing.address().octets()[0] == 127 { continue; }
+                    }
                     *slot = IpCidr::Ipv4(cidr);
+                    break;
                 }
             });
+            let oct = ipv4.octets();
+            super::set_own_ip(oct[0], oct[1], oct[2], oct[3]);
             info!("netlink: configured {}/{}", ipv4, prefix_len);
         }
 
