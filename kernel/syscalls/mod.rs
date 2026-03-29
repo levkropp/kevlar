@@ -302,7 +302,7 @@ mod syscall_numbers {
     pub const SYS_CHOWN: usize = 92;
     pub const SYS_UMASK: usize = 95;
     pub const SYS_GETTIMEOFDAY: usize = 96;
-    pub const SYS_GETRLIMIT: usize = 97;
+    // Note: __NR_getrlimit=97 is the old 16-bit version; we use 163 (defined below).
     pub const SYS_SYSINFO: usize = 99;
     pub const SYS_GETUID: usize = 102;
     pub const SYS_SYSLOG: usize = 103;
@@ -448,6 +448,9 @@ mod syscall_numbers {
     pub const SYS_FSCONFIG: usize = 431;
     pub const SYS_FSMOUNT: usize = 432;
     pub const SYS_FSPICK: usize = 433;
+    // rlimit syscalls (x86_64 has standalone setrlimit/getrlimit)
+    pub const SYS_SETRLIMIT: usize = 160;
+    pub const SYS_GETRLIMIT: usize = 163;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -505,8 +508,6 @@ mod syscall_numbers {
     pub const SYS_SCHED_YIELD: usize = 124;
     pub const SYS_NANOSLEEP: usize = 101;
     pub const SYS_GETTIMEOFDAY: usize = 169;
-    pub const SYS_SETRLIMIT: usize = 160;
-    pub const SYS_GETRLIMIT: usize = 163;  // prlimit64 is 261
     pub const SYS_SYSINFO: usize = 179;
     pub const SYS_GETPID: usize = 172;
     pub const SYS_GETPPID: usize = 173;
@@ -675,6 +676,14 @@ use syscall_numbers::*;
 
 use core::sync::atomic::{AtomicUsize, Ordering as AtomOrd};
 
+/// Current syscall number being dispatched (for crash diagnostics).
+static CURRENT_SYSCALL_NR: AtomicUsize = AtomicUsize::new(0);
+
+/// Read the current syscall number (called from page fault handler).
+pub fn current_syscall_nr() -> usize {
+    CURRENT_SYSCALL_NR.load(AtomOrd::Relaxed)
+}
+
 const TRACE_LEN: usize = 512;
 
 struct TraceEntry {
@@ -776,6 +785,8 @@ impl<'a> SyscallHandler<'a> {
         a6: usize,
         n: usize,
     ) -> Result<isize> {
+        CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
+
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
         // Saves ~5ns/call by eliding tick_stime, record_syscall, profiler, htrace.
         if is_lean_syscall(n) && !debug::get_filter().intersects(DebugFilter::SYSCALL | DebugFilter::CANARY) {
@@ -1287,7 +1298,7 @@ impl<'a> SyscallHandler<'a> {
             }
             SYS_PRLIMIT64 => {
                 // prlimit64(pid, resource, new_rlim, old_rlim)
-                // a3 = new_rlim (set), a4 = old_rlim (get) — either can be NULL.
+                // a1=pid, a2=resource, a3=new_rlim, a4=old_rlim
                 if a4 != 0 {
                     self.sys_getrlimit(a2 as c_int, UserVAddr::new_nonnull(a4)?)?;
                 }
