@@ -1136,13 +1136,33 @@ impl<'a> SyscallHandler<'a> {
             SYS_GETPRIORITY => self.sys_getpriority(a1 as i32, a2 as i32),
             SYS_SETPRIORITY => self.sys_setpriority(a1 as i32, a2 as i32, a3 as i32),
             SYS_SETUID => {
-                current_process().set_uid(a1 as u32);
-                current_process().set_euid(a1 as u32);
+                let uid = a1 as u32;
+                let cur = current_process();
+                if cur.euid() == 0 {
+                    // Root: set all three (real, effective, saved).
+                    cur.set_uid(uid);
+                    cur.set_euid(uid);
+                    cur.set_suid(uid);
+                } else if uid == cur.uid() || uid == cur.suid() {
+                    // Non-root: can only set euid to real or saved uid.
+                    cur.set_euid(uid);
+                } else {
+                    return Err(Errno::EPERM.into());
+                }
                 Ok(0)
             }
             SYS_SETGID => {
-                current_process().set_gid(a1 as u32);
-                current_process().set_egid(a1 as u32);
+                let gid = a1 as u32;
+                let cur = current_process();
+                if cur.euid() == 0 {
+                    cur.set_gid(gid);
+                    cur.set_egid(gid);
+                    cur.set_sgid(gid);
+                } else if gid == cur.gid() || gid == cur.sgid() {
+                    cur.set_egid(gid);
+                } else {
+                    return Err(Errno::EPERM.into());
+                }
                 Ok(0)
             }
             SYS_SETRESUID => self.sys_setresuid(a1 as u32, a2 as u32, a3 as u32),
