@@ -115,6 +115,52 @@ const EXT4_EXT_MAGIC: u16 = 0xF30A;
 /// Maximum extent tree depth (prevents runaway recursion on corrupt images).
 const EXT4_MAX_EXTENT_DEPTH: u16 = 5;
 
+/// RO_COMPAT feature: metadata checksums (crc32c).
+const RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
+
+/// INCOMPAT feature: checksum seed stored in superblock (instead of UUID hash).
+// (Already defined above as INCOMPAT_CSUM_SEED = 0x2000.)
+
+/// Superblock offset for s_checksum_seed (4 bytes, at 0x270 in ext4 superblock).
+const SB_CHECKSUM_SEED_OFFSET: usize = 0x270;
+
+/// Superblock offset for s_checksum (4 bytes, last field).
+const SB_CHECKSUM_OFFSET: usize = 0x3FC;
+
+// ── CRC32C (Castagnoli) ──────────────────────────────────────────
+
+/// CRC32C lookup table (polynomial 0x82F63B78, reflected).
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0x82F63B78;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// Compute CRC32C over a byte slice with a given initial value.
+/// Uses the Linux kernel convention: NO pre/post inversion.
+/// Caller passes `~0` (0xFFFFFFFF) as init for the first call.
+fn crc32c(init: u32, data: &[u8]) -> u32 {
+    let mut crc = init;
+    for &byte in data {
+        crc = CRC32C_TABLE[((crc ^ byte as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc
+}
+
 // ── On-disk structures ─────────────────────────────────────────────
 
 /// On-disk ext2/ext4 superblock fields we care about.
@@ -136,6 +182,8 @@ struct Ext2Superblock {
     feature_incompat: u32,
     feature_ro_compat: u32,
     desc_size: u16,
+    /// CRC32C seed for metadata checksums (offset 0x110, or crc32c of UUID).
+    checksum_seed: u32,
 }
 
 impl Ext2Superblock {
@@ -143,6 +191,24 @@ impl Ext2Superblock {
         if data.len() < 256 {
             return None;
         }
+        let feature_incompat = read_u32(data, 96);
+        let feature_ro_compat = read_u32(data, 100);
+
+        // Read checksum seed: if INCOMPAT_CSUM_SEED is set, use s_checksum_seed
+        // from offset 0x110; otherwise compute crc32c of the UUID at offset 0x68.
+        let checksum_seed = if feature_ro_compat & RO_COMPAT_METADATA_CSUM != 0 {
+            if feature_incompat & INCOMPAT_CSUM_SEED != 0 && data.len() > SB_CHECKSUM_SEED_OFFSET + 4 {
+                read_u32(data, SB_CHECKSUM_SEED_OFFSET)
+            } else if data.len() >= 0x78 {
+                // crc32c of the 16-byte UUID at offset 0x68
+                crc32c(0xFFFFFFFF, &data[0x68..0x78])
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         let sb = Ext2Superblock {
             inodes_count: read_u32(data, 0),
             blocks_count: read_u32(data, 4),
@@ -156,9 +222,10 @@ impl Ext2Superblock {
             first_ino: read_u32(data, 84),
             inode_size: read_u16(data, 88),
             feature_compat: read_u32(data, 92),
-            feature_incompat: read_u32(data, 96),
-            feature_ro_compat: read_u32(data, 100),
+            feature_incompat,
+            feature_ro_compat,
             desc_size: read_u16(data, 254),
+            checksum_seed,
         };
         if sb.magic != EXT2_SUPER_MAGIC {
             return None;
@@ -186,6 +253,10 @@ impl Ext2Superblock {
         self.feature_incompat & INCOMPAT_EXTENTS != 0
     }
 
+    fn has_metadata_csum(&self) -> bool {
+        self.feature_ro_compat & RO_COMPAT_METADATA_CSUM != 0
+    }
+
     fn label(&self) -> &'static str {
         if self.has_extents() {
             "ext4"
@@ -201,6 +272,40 @@ impl Ext2Superblock {
         write_u32(buf, 12, self.free_blocks_count);
         write_u32(buf, 16, self.free_inodes_count);
     }
+
+    /// Compute and write the superblock checksum (offset 0x3FC).
+    /// The checksum covers bytes 0..0x3FC (1020 bytes), excluding the
+    /// 4-byte checksum field itself at the end of the superblock.
+    fn update_checksum(&self, buf: &mut [u8]) {
+        if !self.has_metadata_csum() || buf.len() < SB_CHECKSUM_OFFSET + 4 {
+            return;
+        }
+        let csum = crc32c(0xFFFFFFFF, &buf[..SB_CHECKSUM_OFFSET]);
+        write_u32(buf, SB_CHECKSUM_OFFSET, csum);
+    }
+
+    /// Compute group descriptor checksum for a single group.
+    /// GDT checksum = crc32c(seed, le32(group_num) || gdt_bytes_with_csum_zeroed).
+    /// For 64-byte GDT with METADATA_CSUM, checksum is at offset 0x1E (2 bytes).
+    fn compute_gdt_checksum(&self, group_num: u32, gdt_buf: &[u8], gdt_size: usize) -> u16 {
+        if !self.has_metadata_csum() {
+            return 0;
+        }
+        // Start with seed, feed group number.
+        let mut crc = crc32c(self.checksum_seed, &group_num.to_le_bytes());
+        // Feed in the GDT bytes with checksum field zeroed.
+        // Checksum field is at offset 0x1E (2 bytes) in the group descriptor.
+        let csum_offset = 0x1E;
+        let len = core::cmp::min(gdt_size, gdt_buf.len());
+        if len > csum_offset + 2 {
+            crc = crc32c(crc, &gdt_buf[..csum_offset]);
+            crc = crc32c(crc, &[0u8; 2]); // zeroed checksum field
+            crc = crc32c(crc, &gdt_buf[csum_offset + 2..len]);
+        } else {
+            crc = crc32c(crc, &gdt_buf[..len]);
+        }
+        (crc & 0xFFFF) as u16
+    }
 }
 
 /// On-disk ext2/ext4 block group descriptor (extended for write support).
@@ -212,6 +317,10 @@ struct Ext2GroupDesc {
     free_blocks_count: u16,
     free_inodes_count: u16,
     used_dirs_count: u16,
+    /// Block bitmap checksum (full crc32c, truncated to 16 bits in GDT).
+    block_bitmap_csum: u32,
+    /// Inode bitmap checksum (full crc32c, truncated to 16 bits in GDT).
+    inode_bitmap_csum: u32,
 }
 
 impl Ext2GroupDesc {
@@ -233,6 +342,17 @@ impl Ext2GroupDesc {
             (0, 0, 0)
         };
 
+        // Bitmap checksums: bg_block_bitmap_csum_lo at offset 0x18,
+        // bg_inode_bitmap_csum_lo at offset 0x1A.
+        let bb_csum_lo = if data.len() >= 0x1A { read_u16(data, 0x18) as u32 } else { 0 };
+        let ib_csum_lo = if data.len() >= 0x1C { read_u16(data, 0x1A) as u32 } else { 0 };
+        // High 16 bits at offsets 0x2C and 0x2E in 64-byte descriptors.
+        let (bb_csum_hi, ib_csum_hi) = if is_64bit && data.len() >= 0x30 {
+            ((read_u16(data, 0x2C) as u32) << 16, (read_u16(data, 0x2E) as u32) << 16)
+        } else {
+            (0, 0)
+        };
+
         Ext2GroupDesc {
             block_bitmap: bb_lo | (bb_hi << 32),
             inode_bitmap: ib_lo | (ib_hi << 32),
@@ -240,6 +360,8 @@ impl Ext2GroupDesc {
             free_blocks_count: fb,
             free_inodes_count: fi,
             used_dirs_count: ud,
+            block_bitmap_csum: bb_csum_lo | bb_csum_hi,
+            inode_bitmap_csum: ib_csum_lo | ib_csum_hi,
         }
     }
 
@@ -251,10 +373,18 @@ impl Ext2GroupDesc {
         write_u16(buf, 12, self.free_blocks_count);
         write_u16(buf, 14, self.free_inodes_count);
         write_u16(buf, 16, self.used_dirs_count);
-        if is_64bit && buf.len() >= 44 {
+        // Bitmap checksums (lo 16 bits).
+        if buf.len() >= 0x1C {
+            write_u16(buf, 0x18, (self.block_bitmap_csum & 0xFFFF) as u16);
+            write_u16(buf, 0x1A, (self.inode_bitmap_csum & 0xFFFF) as u16);
+        }
+        if is_64bit && buf.len() >= 0x30 {
             write_u32(buf, 32, (self.block_bitmap >> 32) as u32);
             write_u32(buf, 36, (self.inode_bitmap >> 32) as u32);
             write_u32(buf, 40, (self.inode_table >> 32) as u32);
+            // Bitmap checksums (hi 16 bits).
+            write_u16(buf, 0x2C, ((self.block_bitmap_csum >> 16) & 0xFFFF) as u16);
+            write_u16(buf, 0x2E, ((self.inode_bitmap_csum >> 16) & 0xFFFF) as u16);
         }
     }
 }
@@ -735,6 +865,9 @@ impl Ext2Inner {
         };
 
         if dirty {
+            // Recompute bitmap checksums before flushing GDT.
+            self.update_bitmap_checksums()?;
+
             let state = self.state.lock_no_irq();
             let groups_clone = state.groups.clone();
             let free_blocks = state.free_blocks_count;
@@ -1459,6 +1592,31 @@ impl Ext2Inner {
         Ok(())
     }
 
+    /// Recompute bitmap checksums for all groups and update the in-memory GDT.
+    /// Called before flush_metadata to ensure GDT checksums match current bitmaps.
+    fn update_bitmap_checksums(&self) -> Result<()> {
+        if !self.superblock.has_metadata_csum() {
+            return Ok(());
+        }
+        let seed = self.superblock.checksum_seed;
+        let state = self.state.lock_no_irq();
+        let num_groups = state.groups.len();
+        let bb_blocks: Vec<u64> = state.groups.iter().map(|g| g.block_bitmap).collect();
+        let ib_blocks: Vec<u64> = state.groups.iter().map(|g| g.inode_bitmap).collect();
+        drop(state);
+
+        for i in 0..num_groups {
+            let bb_data = self.read_block(bb_blocks[i])?;
+            let ib_data = self.read_block(ib_blocks[i])?;
+            let bb_csum = crc32c(seed, &bb_data);
+            let ib_csum = crc32c(seed, &ib_data);
+            let mut state = self.state.lock_no_irq();
+            state.groups[i].block_bitmap_csum = bb_csum;
+            state.groups[i].inode_bitmap_csum = ib_csum;
+        }
+        Ok(())
+    }
+
     // ── Block/Inode bitmap allocation ──────────────────────────────
 
     /// Allocate a free block near `goal` for extent contiguity.
@@ -1705,6 +1863,7 @@ impl Ext2Inner {
             .read_sectors(sb_sector, &mut sb_buf)
             .map_err(|_| Error::new(Errno::EIO))?;
         write_u16(&mut sb_buf, 58, state);
+        self.superblock.update_checksum(&mut sb_buf);
         self.device
             .write_sectors(sb_sector, &sb_buf)
             .map_err(|_| Error::new(Errno::EIO))?;
@@ -1731,6 +1890,7 @@ impl Ext2Inner {
         sb_copy.free_blocks_count = free_blocks;
         sb_copy.free_inodes_count = free_inodes;
         sb_copy.serialize_free_counts(&mut sb_buf);
+        self.superblock.update_checksum(&mut sb_buf);
 
         self.device
             .write_sectors(sb_sector, &sb_buf)
@@ -1755,6 +1915,19 @@ impl Ext2Inner {
         for (i, g) in groups.iter().enumerate() {
             let offset = i * self.group_desc_size;
             g.serialize(&mut gdt_buf[offset..], self.is_64bit);
+            // Compute and write group descriptor checksum.
+            if self.superblock.has_metadata_csum() {
+                let end = min(offset + self.group_desc_size, gdt_buf.len());
+                let csum = self.superblock.compute_gdt_checksum(
+                    i as u32,
+                    &gdt_buf[offset..end],
+                    self.group_desc_size,
+                );
+                // Checksum field at offset 0x1E within the group descriptor.
+                if offset + 0x1E + 2 <= gdt_buf.len() {
+                    write_u16(&mut gdt_buf, offset + 0x1E, csum);
+                }
+            }
         }
 
         // Write back in block-sized chunks.
