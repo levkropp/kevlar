@@ -42,6 +42,11 @@ use kevlar_vfs::{
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 
+/// Current timestamp for filesystem operations (seconds since epoch).
+fn now_secs() -> u32 {
+    kevlar_vfs::vfs_clock_secs()
+}
+
 // ext2/ext4 magic number (shared).
 const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 
@@ -100,6 +105,9 @@ const EXT4_EXTENTS_FL: u32 = 0x0008_0000;
 
 /// Compatible feature: filesystem has a journal.
 const COMPAT_HAS_JOURNAL: u32 = 0x0004;
+
+/// Filesystem state constants (superblock offset 58).
+const EXT2_VALID_FS: u16 = 1;
 
 /// Extent tree header magic.
 const EXT4_EXT_MAGIC: u16 = 0xF30A;
@@ -583,8 +591,43 @@ impl Ext2Inner {
         Ok(())
     }
 
-    /// Flush all dirty blocks to the block device.
-    /// BTreeMap is already sorted by block number for sequential I/O throughput.
+    /// Check if a block number is a metadata block (bitmap, inode table, SB, GDT).
+    fn is_metadata_block(&self, block_num: u64) -> bool {
+        // Superblock block (block 0 for 4K blocks, block 1 for 1K blocks).
+        let sb_block = if self.block_size == 1024 { 1 } else { 0 };
+        if block_num == sb_block {
+            return true;
+        }
+        // GDT blocks (immediately after superblock).
+        let gdt_block = if self.block_size == 1024 { 2 } else { 1 };
+        let state = self.state.lock_no_irq();
+        let num_groups = state.groups.len();
+        let gdt_bytes = num_groups * self.group_desc_size;
+        let gdt_blocks = ((gdt_bytes + self.block_size - 1) / self.block_size) as u64;
+        if block_num >= gdt_block && block_num < gdt_block + gdt_blocks {
+            return true;
+        }
+        // Per-group metadata: block bitmap, inode bitmap, inode table blocks.
+        let inode_table_blocks =
+            ((self.inodes_per_group as usize * self.inode_size + self.block_size - 1)
+                / self.block_size) as u64;
+        for group in &state.groups {
+            if block_num == group.block_bitmap || block_num == group.inode_bitmap {
+                return true;
+            }
+            if block_num >= group.inode_table
+                && block_num < group.inode_table + inode_table_blocks
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Flush all dirty blocks to the block device with ordered-mode barriers.
+    /// Data blocks are written first, then a device flush barrier, then metadata
+    /// blocks. This provides ext3 "ordered" mode crash consistency: metadata
+    /// never points to blocks containing stale/wrong data.
     fn flush_dirty(&self) -> Result<()> {
         let entries: BTreeMap<u64, Vec<u8>> = {
             let mut cache = self.dirty_cache.lock_no_irq();
@@ -601,15 +644,39 @@ impl Ext2Inner {
             rcache.retain(|e| !entries.contains_key(&e.block_num));
         }
         let sectors_per_block = self.block_size as u64 / 512;
-        // Collect (sector, data) pairs for batch write.
-        // BTreeMap is already sorted by block number → sequential I/O.
-        let batch: Vec<(u64, &[u8])> = entries
-            .iter()
-            .map(|(blk, data)| (blk * sectors_per_block, data.as_slice()))
-            .collect();
-        self.device
-            .write_sectors_batch(&batch)
-            .map_err(|_| Error::new(Errno::EIO))?;
+
+        // Partition into data blocks and metadata blocks.
+        let mut data_batch: Vec<(u64, &[u8])> = Vec::new();
+        let mut meta_batch: Vec<(u64, &[u8])> = Vec::new();
+        for (blk, data) in &entries {
+            let pair = (*blk * sectors_per_block, data.as_slice());
+            if self.is_metadata_block(*blk) {
+                meta_batch.push(pair);
+            } else {
+                data_batch.push(pair);
+            }
+        }
+
+        // Pass 1: flush data blocks.
+        if !data_batch.is_empty() {
+            self.device
+                .write_sectors_batch(&data_batch)
+                .map_err(|_| Error::new(Errno::EIO))?;
+        }
+
+        // Barrier: ensure data is persisted before metadata.
+        if !data_batch.is_empty() && !meta_batch.is_empty() {
+            let _ = self.device.flush();
+        }
+
+        // Pass 2: flush metadata blocks.
+        if !meta_batch.is_empty() {
+            self.device
+                .write_sectors_batch(&meta_batch)
+                .map_err(|_| Error::new(Errno::EIO))?;
+            let _ = self.device.flush();
+        }
+
         Ok(())
     }
 
@@ -676,6 +743,9 @@ impl Ext2Inner {
 
             self.flush_metadata(&groups_clone, free_blocks, free_inodes)?;
         }
+
+        // Mark filesystem as cleanly synced.
+        self.write_superblock_state(EXT2_VALID_FS)?;
 
         Ok(())
     }
@@ -1242,6 +1312,109 @@ impl Ext2Inner {
         Err(Error::new(Errno::ENOSPC))
     }
 
+    /// Truncate an extent tree: remove/shrink extents past `new_block_count`.
+    /// Frees the physical blocks and prunes the tree entries. Does NOT free
+    /// the blocks — the caller has already freed them via free_block().
+    fn truncate_extent_tree(
+        &self,
+        inode: &mut Ext2Inode,
+        new_block_count: usize,
+    ) -> Result<()> {
+        let mut root = Self::extent_root_data(inode);
+        let header = ExtentHeader::parse(&root);
+        if header.magic != EXT4_EXT_MAGIC {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        if header.depth == 0 {
+            // Prune leaf extents in the root node.
+            let new_entries =
+                Self::prune_leaf_extents(&mut root, header.entries, new_block_count as u32);
+            // Update header entries count.
+            write_u16(&mut root, 2, new_entries);
+            Self::set_extent_root_data(inode, &root);
+        } else {
+            // Multi-level tree: walk index entries and prune each leaf.
+            let mut new_idx_count = 0u16;
+            for i in 0..header.entries as usize {
+                let off = 12 + i * 12;
+                if off + 12 > root.len() {
+                    break;
+                }
+                let idx = ExtentIdx::parse(&root[off..]);
+                let leaf_block = idx.leaf_block();
+                let mut leaf_data = self.read_block(leaf_block)?;
+                let leaf_header = ExtentHeader::parse(&leaf_data);
+                if leaf_header.magic != EXT4_EXT_MAGIC {
+                    continue;
+                }
+
+                let new_entries = Self::prune_leaf_extents(
+                    &mut leaf_data,
+                    leaf_header.entries,
+                    new_block_count as u32,
+                );
+
+                if new_entries == 0 {
+                    // Leaf is now empty — free the leaf block.
+                    self.free_block(leaf_block)?;
+                    inode.blocks = inode.blocks.saturating_sub(
+                        (self.block_size / 512) as u32,
+                    );
+                } else {
+                    // Update leaf header and write back.
+                    write_u16(&mut leaf_data, 2, new_entries);
+                    self.write_block(leaf_block, &leaf_data)?;
+                    // Keep this index entry — copy it to the compacted position.
+                    if new_idx_count as usize != i {
+                        let dst_off = 12 + new_idx_count as usize * 12;
+                        let mut tmp = [0u8; 12];
+                        tmp.copy_from_slice(&root[off..off + 12]);
+                        root[dst_off..dst_off + 12].copy_from_slice(&tmp);
+                    }
+                    new_idx_count += 1;
+                }
+            }
+
+            // Update root header with compacted index count.
+            write_u16(&mut root, 2, new_idx_count);
+
+            // If only one (or zero) index entries remain and depth > 0,
+            // we could collapse back to depth-0, but that's complex and
+            // rare. Just update the root.
+            Self::set_extent_root_data(inode, &root);
+        }
+
+        Ok(())
+    }
+
+    /// Prune leaf extents in a node buffer past `new_block_count`.
+    /// Returns the new number of valid entries.
+    fn prune_leaf_extents(node_data: &mut [u8], entries: u16, new_block_count: u32) -> u16 {
+        let mut new_entries = 0u16;
+        for i in 0..entries as usize {
+            let off = 12 + i * 12;
+            if off + 12 > node_data.len() {
+                break;
+            }
+            let ext = Extent::parse(&node_data[off..]);
+            let ext_start = ext.logical_block;
+            let ext_end = ext_start + ext.block_count();
+
+            if ext_end <= new_block_count {
+                // Entirely before the cut — keep as-is.
+                new_entries += 1;
+            } else if ext_start < new_block_count {
+                // Partially past the cut — shrink the extent.
+                let new_len = new_block_count - ext_start;
+                write_u16(node_data, off + 4, new_len as u16);
+                new_entries += 1;
+            }
+            // else: entirely past the cut — drop it (don't increment new_entries).
+        }
+        new_entries
+    }
+
     /// Free all data blocks in an extent tree (recursive).
     fn free_extent_blocks(&self, inode: &Ext2Inode) -> Result<()> {
         let root = Self::extent_root_data(inode);
@@ -1522,6 +1695,22 @@ impl Ext2Inner {
     }
 
     // ── Metadata flush ─────────────────────────────────────────────
+
+    /// Write s_state field (offset 58) to the on-disk superblock.
+    fn write_superblock_state(&self, state: u16) -> Result<()> {
+        let sb_sector = SUPERBLOCK_OFFSET / 512;
+        let sb_sectors = (SUPERBLOCK_SIZE + 511) / 512;
+        let mut sb_buf = vec![0u8; sb_sectors * 512];
+        self.device
+            .read_sectors(sb_sector, &mut sb_buf)
+            .map_err(|_| Error::new(Errno::EIO))?;
+        write_u16(&mut sb_buf, 58, state);
+        self.device
+            .write_sectors(sb_sector, &sb_buf)
+            .map_err(|_| Error::new(Errno::EIO))?;
+        let _ = self.device.flush();
+        Ok(())
+    }
 
     /// Write superblock free counts + all group descriptors to disk.
     fn flush_metadata(
@@ -1826,6 +2015,44 @@ impl Ext2Inner {
         Err(Error::new(Errno::ENOENT))
     }
 
+    /// Update the ".." entry in a directory to point to a new parent inode.
+    fn update_dotdot(&self, dir_ino: u32, new_parent_ino: u32) -> Result<()> {
+        let inode = self.read_inode(dir_ino)?;
+        let ptrs_per_block = self.block_size / 4;
+
+        // ".." is always in the first block.
+        let block_num = if inode.uses_extents() {
+            self.resolve_extent(&inode, 0)?
+        } else {
+            self.resolve_block_ptr(&inode, 0, ptrs_per_block)? as u64
+        };
+
+        if block_num == 0 {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        let mut data = self.read_block(block_num)?;
+
+        // First entry is "." — skip it using its rec_len.
+        let dot_rec_len = read_u16(&data, 4) as usize;
+        if dot_rec_len == 0 || dot_rec_len + 8 > data.len() {
+            return Err(Error::new(Errno::EIO));
+        }
+
+        // Second entry should be "..".
+        let dotdot_name_len = data[dot_rec_len + 6] as usize;
+        if dotdot_name_len == 2
+            && data[dot_rec_len + 8] == b'.'
+            && data[dot_rec_len + 9] == b'.'
+        {
+            write_u32(&mut data, dot_rec_len, new_parent_ino);
+            self.write_block(block_num, &data)?;
+            Ok(())
+        } else {
+            Err(Error::new(Errno::EIO))
+        }
+    }
+
     // ── INode construction ─────────────────────────────────────────
 
     fn make_inode(self: &Arc<Self>, ino: u32, inode: Ext2Inode) -> INode {
@@ -1936,7 +2163,7 @@ impl Ext2Filesystem {
         let blocks_per_group = superblock.blocks_per_group;
         let first_data_block = superblock.first_data_block;
 
-        Ok(Arc::new(Ext2Filesystem {
+        let fs = Arc::new(Ext2Filesystem {
             inner: Arc::new(Ext2Inner {
                 device,
                 superblock,
@@ -1960,7 +2187,15 @@ impl Ext2Filesystem {
                 dentry_cache: SpinLock::new(BTreeMap::new()),
                 inode_cache: SpinLock::new(BTreeMap::new()),
             }),
-        }))
+        });
+
+        // Mark filesystem as dirty (not cleanly unmounted) so e2fsck knows
+        // to check it if we crash before a clean sync.
+        if let Err(e) = fs.inner.write_superblock_state(0) {
+            log::warn!("ext4: failed to mark superblock dirty on mount: {:?}", e);
+        }
+
+        Ok(fs)
     }
 }
 
@@ -2029,9 +2264,9 @@ impl Directory for Ext2Dir {
             mode: EXT2_S_IFREG | (mode.as_u32() as u16 & 0o7777),
             uid: uid.as_u32() as u16,
             size: 0,
-            atime: 0,
-            ctime: 0,
-            mtime: 0,
+            atime: now_secs(),
+            ctime: now_secs(),
+            mtime: now_secs(),
             gid: gid.as_u32() as u16,
             links_count: 1,
             blocks: 0,
@@ -2074,9 +2309,9 @@ impl Directory for Ext2Dir {
             mode: EXT2_S_IFDIR | (mode.as_u32() as u16 & 0o7777),
             uid: uid.as_u32() as u16,
             size: 0,
-            atime: 0,
-            ctime: 0,
-            mtime: 0,
+            atime: now_secs(),
+            ctime: now_secs(),
+            mtime: now_secs(),
             gid: gid.as_u32() as u16,
             links_count: 2, // . and parent's entry
             blocks: 0,
@@ -2142,6 +2377,14 @@ impl Directory for Ext2Dir {
         let type_bits = inode.mode & 0xF000;
         let new_perm = mode.bits() as u16 & 0o7777;
         inode.mode = type_bits | new_perm;
+        self.fs.write_inode(self.inode_num, &inode)?;
+        Ok(())
+    }
+
+    fn chown(&self, uid: UId, gid: GId) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        inode.uid = uid.as_u32() as u16;
+        inode.gid = gid.as_u32() as u16;
         self.fs.write_inode(self.inode_num, &inode)?;
         Ok(())
     }
@@ -2239,9 +2482,9 @@ impl Directory for Ext2Dir {
             mode: EXT2_S_IFLNK | 0o777,
             uid: 0,
             size: target_len as u32,
-            atime: 0,
-            ctime: 0,
-            mtime: 0,
+            atime: now_secs(),
+            ctime: now_secs(),
+            mtime: now_secs(),
             gid: 0,
             links_count: 1,
             blocks: 0,
@@ -2387,11 +2630,24 @@ impl Directory for Ext2Dir {
     }
 
     fn rename(&self, old_name: &str, new_dir: &Arc<dyn Directory>, new_name: &str) -> Result<()> {
-        // Same-dir rename only for MVP.
         let new_dir_ino = new_dir.inode_no()?;
-        if new_dir_ino.as_u64() != self.inode_num as u64 {
-            return Err(Error::new(Errno::EXDEV));
-        }
+        let same_dir = new_dir_ino.as_u64() == self.inode_num as u64;
+
+        // For cross-directory renames, downcast to Ext2Dir and verify same fs.
+        // IMPORTANT: deref through Arc to dispatch via dyn Directory vtable,
+        // not the blanket Downcastable impl on Arc<dyn Directory> itself.
+        let cross_dir: Option<&Ext2Dir> = if same_dir {
+            None
+        } else {
+            let ext2_dir = (**new_dir)
+                .as_any()
+                .downcast_ref::<Ext2Dir>()
+                .ok_or_else(|| Error::new(Errno::EXDEV))?;
+            if !Arc::ptr_eq(&self.fs, &ext2_dir.fs) {
+                return Err(Error::new(Errno::EXDEV));
+            }
+            Some(ext2_dir)
+        };
 
         // Find the old entry.
         let (target_ino, file_type);
@@ -2406,55 +2662,114 @@ impl Directory for Ext2Dir {
             file_type = entry.file_type;
         }
 
-        // If new_name already exists, unlink it first.
+        // Destination directory inode_num for dir entry operations.
+        let dst_ino = if let Some(d) = cross_dir {
+            d.inode_num
+        } else {
+            self.inode_num
+        };
+
+        // If new_name already exists in the destination, remove it first.
         {
-            let inode = self.inode.lock_no_irq();
-            let entries = self.fs.read_dir_entries(&inode)?;
-            if let Some(existing) = entries.iter().find(|e| e.name == new_name) {
-                if existing.file_type == EXT2_FT_DIR {
+            let dst_lock;
+            let inode = if let Some(d) = cross_dir {
+                dst_lock = d.inode.lock_no_irq();
+                &*dst_lock
+            } else {
+                dst_lock = self.inode.lock_no_irq();
+                &*dst_lock
+            };
+            let entries = self.fs.read_dir_entries(inode)?;
+            let existing_ft = entries.iter().find(|e| e.name == new_name).map(|e| e.file_type);
+            drop(dst_lock);
+
+            if let Some(ft) = existing_ft {
+                if ft == EXT2_FT_DIR {
                     // Check empty before removing.
-                    let existing_inode = self.fs.read_inode(existing.inode)?;
-                    let sub_entries = self.fs.read_dir_entries(&existing_inode)?;
-                    for e in &sub_entries {
-                        if e.name != "." && e.name != ".." {
-                            return Err(Error::new(Errno::ENOTEMPTY));
+                    let existing_ino = {
+                        let lock = if let Some(d) = cross_dir {
+                            d.inode.lock_no_irq()
+                        } else {
+                            self.inode.lock_no_irq()
+                        };
+                        let entries = self.fs.read_dir_entries(&lock)?;
+                        entries.iter().find(|e| e.name == new_name).map(|e| e.inode)
+                    };
+                    if let Some(eino) = existing_ino {
+                        let existing_inode = self.fs.read_inode(eino)?;
+                        let sub_entries = self.fs.read_dir_entries(&existing_inode)?;
+                        for e in &sub_entries {
+                            if e.name != "." && e.name != ".." {
+                                return Err(Error::new(Errno::ENOTEMPTY));
+                            }
                         }
                     }
                 }
-                drop(inode);
-                // Remove old destination.
-                if file_type == EXT2_FT_DIR {
-                    // Use internal removal (don't go through rmdir which re-checks).
-                    let dir_inode = self.inode.lock_no_irq();
-                    self.fs.remove_dir_entry(&dir_inode, new_name)?;
+                // Remove the existing destination entry.
+                let dir_inode = if let Some(d) = cross_dir {
+                    d.inode.lock_no_irq()
                 } else {
-                    let dir_inode = self.inode.lock_no_irq();
-                    self.fs.remove_dir_entry(&dir_inode, new_name)?;
-                }
+                    self.inode.lock_no_irq()
+                };
+                self.fs.remove_dir_entry(&dir_inode, new_name)?;
             }
         }
 
-        // Remove old entry.
+        // Remove old entry from source directory.
         {
             let dir_inode = self.inode.lock_no_irq();
             self.fs.remove_dir_entry(&dir_inode, old_name)?;
         }
 
-        // Add new entry.
+        // Add new entry to destination directory.
         {
-            let mut dir_inode = self.inode.lock_no_irq();
-            self.fs.add_dir_entry(
-                self.inode_num,
-                &mut dir_inode,
-                target_ino,
-                new_name,
-                file_type,
-            )?;
+            if let Some(d) = cross_dir {
+                let mut dir_inode = d.inode.lock_no_irq();
+                self.fs.add_dir_entry(
+                    d.inode_num,
+                    &mut dir_inode,
+                    target_ino,
+                    new_name,
+                    file_type,
+                )?;
+            } else {
+                let mut dir_inode = self.inode.lock_no_irq();
+                self.fs.add_dir_entry(
+                    self.inode_num,
+                    &mut dir_inode,
+                    target_ino,
+                    new_name,
+                    file_type,
+                )?;
+            }
         }
 
-        // Update dentry cache.
+        // For cross-dir directory renames: update ".." and adjust link counts.
+        if file_type == EXT2_FT_DIR {
+            if let Some(d) = cross_dir {
+                self.fs.update_dotdot(target_ino, d.inode_num)?;
+
+                // Old parent loses a link (child's ".." no longer points here).
+                {
+                    let mut old_inode = self.inode.lock_no_irq();
+                    if old_inode.links_count > 0 {
+                        old_inode.links_count -= 1;
+                    }
+                    self.fs.write_inode(self.inode_num, &old_inode)?;
+                }
+
+                // New parent gains a link (child's ".." now points here).
+                {
+                    let mut new_inode = d.inode.lock_no_irq();
+                    new_inode.links_count += 1;
+                    self.fs.write_inode(d.inode_num, &new_inode)?;
+                }
+            }
+        }
+
+        // Update dentry caches.
         self.fs.dcache_remove(self.inode_num, old_name);
-        self.fs.dcache_insert(self.inode_num, new_name, target_ino);
+        self.fs.dcache_insert(dst_ino, new_name, target_ino);
 
         Ok(())
     }
@@ -2585,6 +2900,14 @@ impl FileLike for Ext2File {
         Ok(())
     }
 
+    fn chown(&self, uid: UId, gid: GId) -> Result<()> {
+        let mut inode = self.inode.lock_no_irq();
+        inode.uid = uid.as_u32() as u16;
+        inode.gid = gid.as_u32() as u16;
+        self.fs.write_inode(self.inode_num, &inode)?;
+        Ok(())
+    }
+
     fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
         let mut inode = self.inode.lock_no_irq();
         if let Some(a) = atime_secs { inode.atime = a as u32; }
@@ -2666,6 +2989,7 @@ impl FileLike for Ext2File {
             let old_block_count = (old_size + bs - 1) / bs;
             let ptrs_per_block = bs / 4;
 
+            // Free the physical blocks.
             for blk_idx in new_block_count..old_block_count {
                 let block_num = if inode.uses_extents() {
                     self.fs.resolve_extent(&inode, blk_idx)?
@@ -2675,11 +2999,16 @@ impl FileLike for Ext2File {
                 if block_num != 0 {
                     self.fs.free_block(block_num)?;
                     inode.blocks = inode.blocks.saturating_sub((bs / 512) as u32);
-                    // Clear the block pointer.
                     if !inode.uses_extents() {
                         self.fs.set_block_ptr(&mut inode, blk_idx, 0)?;
                     }
                 }
+            }
+
+            // For extent-based files, prune the extent tree entries so they
+            // don't reference the now-freed blocks.
+            if inode.uses_extents() && new_block_count < old_block_count {
+                self.fs.truncate_extent_tree(&mut inode, new_block_count)?;
             }
 
             // Zero the partial last block if needed.
@@ -2780,10 +3109,23 @@ impl fmt::Debug for Ext2Symlink {
 
 // ── Public mount function ──────────────────────────────────────────
 
+/// Global reference to the mounted ext2 filesystem (for sync(2)).
+static MOUNTED_FS: SpinLock<Option<Arc<Ext2Filesystem>>> = SpinLock::new(None);
+
 /// Mount an ext2/ext3/ext4 filesystem from the global block device.
 pub fn mount_ext2() -> Result<Arc<Ext2Filesystem>> {
     let device = block_device().ok_or_else(|| Error::new(Errno::ENODEV))?;
-    Ext2Filesystem::mount(device)
+    let fs = Ext2Filesystem::mount(device)?;
+    *MOUNTED_FS.lock_no_irq() = Some(fs.clone());
+    Ok(fs)
+}
+
+/// Flush all dirty data and metadata to disk. Called by sync(2).
+pub fn sync_all() -> Result<()> {
+    if let Some(fs) = MOUNTED_FS.lock_no_irq().as_ref() {
+        fs.inner.flush_all()?;
+    }
+    Ok(())
 }
 
 // ── Helper functions ───────────────────────────────────────────────

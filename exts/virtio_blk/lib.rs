@@ -36,6 +36,7 @@ const SECTOR_SIZE: usize = 512;
 // VirtIO block request types.
 const VIRTIO_BLK_T_IN: u32 = 0; // Read
 const VIRTIO_BLK_T_OUT: u32 = 1; // Write
+const VIRTIO_BLK_T_FLUSH: u32 = 4; // Flush volatile write cache
 
 // VirtIO block status codes.
 const VIRTIO_BLK_S_OK: u8 = 0;
@@ -286,6 +287,60 @@ impl VirtioBlk {
         self.do_request(VIRTIO_BLK_T_IN, sector, count)
     }
 
+    /// Issue a flush command to ensure all previous writes are persisted.
+    /// Uses a 2-descriptor chain (header + status, no data).
+    fn flush_impl(&mut self) -> Result<(), BlockError> {
+        let header_ptr = self.req_buf.as_mut_ptr::<VirtioBlkReqHeader>();
+        unsafe {
+            (*header_ptr).type_ = VIRTIO_BLK_T_FLUSH;
+            (*header_ptr).reserved = 0;
+            (*header_ptr).sector = 0;
+        }
+
+        let status_ptr = self.req_buf.add(16).as_mut_ptr::<u8>();
+        unsafe {
+            *status_ptr = 0xFF;
+        }
+
+        let header_paddr = self.req_buf.as_paddr();
+        let status_paddr = self.req_buf.add(16).as_paddr();
+
+        let chain = &[
+            VirtqDescBuffer::ReadOnlyFromDevice {
+                addr: header_paddr,
+                len: 16,
+            },
+            VirtqDescBuffer::WritableFromDevice {
+                addr: status_paddr,
+                len: 1,
+            },
+        ];
+
+        let virtq = self.virtio.virtq_mut(VIRTIO_BLK_QUEUE);
+        virtq.enqueue(chain);
+        virtq.notify();
+
+        loop {
+            if self
+                .virtio
+                .virtq_mut(VIRTIO_BLK_QUEUE)
+                .pop_used()
+                .is_some()
+            {
+                break;
+            }
+            hint::spin_loop();
+        }
+
+        let status = unsafe { *status_ptr };
+        if status != VIRTIO_BLK_S_OK {
+            warn!("virtio-blk: flush failed with status {}", status);
+            return Err(BlockError::IoError);
+        }
+
+        Ok(())
+    }
+
     fn read_sectors_impl(&mut self, start_sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
         let num_sectors = buf.len() / SECTOR_SIZE;
         let mut i = 0;
@@ -525,8 +580,7 @@ impl BlockDevice for VirtioBlockDriver {
     }
 
     fn flush(&self) -> Result<(), BlockError> {
-        // Write-through cache, nothing to flush.
-        Ok(())
+        self.device.lock().flush_impl()
     }
 
     fn capacity_bytes(&self) -> u64 {
