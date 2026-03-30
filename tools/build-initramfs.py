@@ -138,6 +138,7 @@ def compile_all_local():
         ("testing/test_alpine.c",        "test-alpine",      []),
         ("testing/fork_exec_stress.c",   "fork-exec-stress", []),
         ("testing/disk_hello.c",         "disk_hello",       []),
+        ("testing/test_clock.c",         "test-clock",       []),
     ]
     for src_rel, name, extra in musl_bins:
         src = ROOT / src_rel
