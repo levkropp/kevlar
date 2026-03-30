@@ -204,6 +204,8 @@ mod rt_sigtimedwait;
 
 // M10 Phase D: Multi-user security
 mod setresuid;
+// Phase 3: Extended attributes
+mod xattr;
 
 pub enum CwdOrFd {
     /// `AT_FDCWD`
@@ -451,6 +453,19 @@ mod syscall_numbers {
     // rlimit syscalls (x86_64 has standalone setrlimit/getrlimit)
     pub const SYS_SETRLIMIT: usize = 160;
     pub const SYS_GETRLIMIT: usize = 163;
+    // xattr syscalls
+    pub const SYS_SETXATTR: usize = 188;
+    pub const SYS_LSETXATTR: usize = 189;
+    pub const SYS_FSETXATTR: usize = 190;
+    pub const SYS_GETXATTR: usize = 191;
+    pub const SYS_LGETXATTR: usize = 192;
+    pub const SYS_FGETXATTR: usize = 193;
+    pub const SYS_LISTXATTR: usize = 194;
+    pub const SYS_LLISTXATTR: usize = 195;
+    pub const SYS_FLISTXATTR: usize = 196;
+    pub const SYS_REMOVEXATTR: usize = 197;
+    pub const SYS_LREMOVEXATTR: usize = 198;
+    pub const SYS_FREMOVEXATTR: usize = 199;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -668,6 +683,19 @@ mod syscall_numbers {
     pub const SYS_FSCONFIG: usize = 431;
     pub const SYS_FSMOUNT: usize = 432;
     pub const SYS_FSPICK: usize = 433;
+    // xattr syscalls (asm-generic, same on ARM64)
+    pub const SYS_SETXATTR: usize = 5;
+    pub const SYS_LSETXATTR: usize = 6;
+    pub const SYS_FSETXATTR: usize = 7;
+    pub const SYS_GETXATTR: usize = 8;
+    pub const SYS_LGETXATTR: usize = 9;
+    pub const SYS_FGETXATTR: usize = 10;
+    pub const SYS_LISTXATTR: usize = 11;
+    pub const SYS_LLISTXATTR: usize = 12;
+    pub const SYS_FLISTXATTR: usize = 13;
+    pub const SYS_REMOVEXATTR: usize = 14;
+    pub const SYS_LREMOVEXATTR: usize = 15;
+    pub const SYS_FREMOVEXATTR: usize = 16;
 }
 
 use syscall_numbers::*;
@@ -1591,6 +1619,19 @@ impl<'a> SyscallHandler<'a> {
             ),
             SYS_PIDFD_OPEN => self.sys_pidfd_open(a1 as i32, a2 as u32),
             SYS_CLOSE_RANGE => self.sys_close_range(a1 as u32, a2 as u32, a3 as u32),
+            // Phase 3: Extended attributes
+            SYS_SETXATTR => self.sys_setxattr(a1, a2, a3, a4, a5 as i32, true),
+            SYS_LSETXATTR => self.sys_setxattr(a1, a2, a3, a4, a5 as i32, false),
+            SYS_FSETXATTR => self.sys_fsetxattr(Fd::new(a1 as i32), a2, a3, a4, a5 as i32),
+            SYS_GETXATTR => self.sys_getxattr(a1, a2, a3, a4, true),
+            SYS_LGETXATTR => self.sys_getxattr(a1, a2, a3, a4, false),
+            SYS_FGETXATTR => self.sys_fgetxattr(Fd::new(a1 as i32), a2, a3, a4),
+            SYS_LISTXATTR => self.sys_listxattr(a1, a2, a3, true),
+            SYS_LLISTXATTR => self.sys_listxattr(a1, a2, a3, false),
+            SYS_FLISTXATTR => self.sys_flistxattr(Fd::new(a1 as i32), a2, a3),
+            SYS_REMOVEXATTR => self.sys_removexattr(a1, a2, true),
+            SYS_LREMOVEXATTR => self.sys_removexattr(a1, a2, false),
+            SYS_FREMOVEXATTR => self.sys_fremovexattr(Fd::new(a1 as i32), a2),
             // M9.8: missing syscalls for systemd
             SYS_CLOCK_NANOSLEEP => self.sys_clock_nanosleep(
                 a1 as c_clockid,
@@ -1825,6 +1866,18 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FSCONFIG => "fsconfig",
         SYS_FSMOUNT => "fsmount",
         SYS_FSPICK => "fspick",
+        SYS_SETXATTR => "setxattr",
+        SYS_LSETXATTR => "lsetxattr",
+        SYS_FSETXATTR => "fsetxattr",
+        SYS_GETXATTR => "getxattr",
+        SYS_LGETXATTR => "lgetxattr",
+        SYS_FGETXATTR => "fgetxattr",
+        SYS_LISTXATTR => "listxattr",
+        SYS_LLISTXATTR => "llistxattr",
+        SYS_FLISTXATTR => "flistxattr",
+        SYS_REMOVEXATTR => "removexattr",
+        SYS_LREMOVEXATTR => "lremovexattr",
+        SYS_FREMOVEXATTR => "fremovexattr",
         _ => "(unknown)",
     }
 }
