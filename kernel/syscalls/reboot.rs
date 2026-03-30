@@ -26,6 +26,9 @@ impl<'a> SyscallHandler<'a> {
                 if crate::debug::tracer::is_enabled() {
                     crate::debug::tracer::dump_span_profile();
                 }
+                // Sync all filesystems before halting to prevent data loss.
+                info!("Syncing filesystems before halt...");
+                let _ = kevlar_ext2::sync_all();
                 info!("Halting the system by reboot(2) cmd={:#x}", cmd);
                 halt();
             }
