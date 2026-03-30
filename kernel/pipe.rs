@@ -11,6 +11,7 @@ use crate::{
     fs::{
         inode::{FileLike, PollStatus},
         opened_file::OpenOptions,
+        stat::{FileMode, Stat, S_IFIFO},
     },
     poll::POLL_WAIT_QUEUE,
     prelude::*,
@@ -102,6 +103,12 @@ fn copy_user_to_pipe(
 pub struct PipeWriter(Arc<PipeShared>);
 
 impl FileLike for PipeWriter {
+    fn stat(&self) -> Result<Stat> {
+        let mut st = Stat::zeroed();
+        st.mode = FileMode::new(S_IFIFO | 0o600);
+        Ok(st)
+    }
+
     fn is_seekable(&self) -> bool {
         false
     }
@@ -224,6 +231,12 @@ impl Drop for PipeWriter {
 pub struct PipeReader(Arc<PipeShared>);
 
 impl FileLike for PipeReader {
+    fn stat(&self) -> Result<Stat> {
+        let mut st = Stat::zeroed();
+        st.mode = FileMode::new(S_IFIFO | 0o600);
+        Ok(st)
+    }
+
     fn is_seekable(&self) -> bool {
         false
     }
