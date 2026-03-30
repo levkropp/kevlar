@@ -140,6 +140,7 @@ def compile_all_local():
         ("testing/disk_hello.c",         "disk_hello",       []),
         ("testing/test_clock.c",         "test-clock",       []),
         ("testing/test_persistence.c",   "test-persist",     []),
+        ("testing/test_python3.c",       "test-python3",     []),
     ]
     for src_rel, name, extra in musl_bins:
         src = ROOT / src_rel
