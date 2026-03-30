@@ -134,6 +134,7 @@ def compile_all_local():
         ("testing/test_net.c",           "test-net",         []),
         ("testing/test_ssh_dropbear.c",  "test-ssh-dropbear", []),
         ("testing/test_nginx.c",         "test-nginx",        []),
+        ("testing/test_build_tools.c",   "test-build-tools",  []),
         ("testing/test_alpine.c",        "test-alpine",      []),
         ("testing/fork_exec_stress.c",   "fork-exec-stress", []),
         ("testing/disk_hello.c",         "disk_hello",       []),

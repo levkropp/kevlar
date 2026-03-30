@@ -520,6 +520,25 @@ test-nginx: build/alpine.img
 		echo "ALL NGINX TESTS PASSED"; \
 	fi
 
+# Phase 3: Build tools integration test (git, sqlite, perl, gcc/make)
+.PHONY: test-build-tools
+test-build-tools: build/alpine.img
+	$(PROGRESS) "TEST" "Build tools: git + sqlite + perl + gcc/make"
+	@cp build/alpine.img build/alpine-build-test.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-build-tools"
+	timeout 600 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-build-test.img \
+		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
+		| tee /tmp/kevlar-test-build-tools-$(PROFILE).log; true
+	@rm -f build/alpine-build-test.img
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL BUILD|DIAG:)' \
+		/tmp/kevlar-test-build-tools-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-build-tools-$(PROFILE).log; then \
+		echo "BUILD TOOL TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-build-tools-$(PROFILE).log; then \
+		echo "ALL BUILD TOOL TESTS PASSED"; \
+	fi
+
 .PHONY: bochs
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc
