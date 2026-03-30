@@ -1246,7 +1246,7 @@ impl<'a> SyscallHandler<'a> {
                 bitflags_from_user!(GetRandomFlags, a3 as c_uint)?,
             ),
             SYS_SYSLOG => self.sys_syslog(a1 as c_int, UserVAddr::new(a2), a3 as c_int),
-            SYS_SYNC => Ok(0), // no-op: we write through on every operation
+            SYS_SYNC => { kevlar_ext2::sync_all()?; Ok(0) }
             SYS_REBOOT => self.sys_reboot(a1 as c_int, a2 as c_int, a3),
             SYS_GETTID => self.sys_gettid(),
             SYS_RT_SIGPROCMASK => {
