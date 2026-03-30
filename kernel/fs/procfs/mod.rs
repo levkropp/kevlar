@@ -67,12 +67,14 @@ impl ProcFs {
         sys_kernel_dir.add_file("ostype", Arc::new(ProcSysStaticFile("Linux\n")) as Arc<dyn FileLike>);
         let sys_random_dir = sys_kernel_dir.add_dir("random");
         sys_random_dir.add_file("boot_id", Arc::new(ProcSysBootId) as Arc<dyn FileLike>);
+        sys_random_dir.add_file("uuid", Arc::new(ProcSysRandomUuid) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("cap_last_cap", Arc::new(ProcSysStaticFile("40\n")) as Arc<dyn FileLike>);
-        sys_kernel_dir.add_file("pid_max", Arc::new(ProcSysStaticFile("32768\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("pid_max", ProcSysMutableFile::new("32768\n") as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("threads-max", ProcSysMutableFile::new("32768\n") as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("overflowuid", Arc::new(ProcSysStaticFile("65534\n")) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("overflowgid", Arc::new(ProcSysStaticFile("65534\n")) as Arc<dyn FileLike>);
-        sys_kernel_dir.add_file("kptr_restrict", Arc::new(ProcSysStaticFile("1\n")) as Arc<dyn FileLike>);
-        sys_kernel_dir.add_file("dmesg_restrict", Arc::new(ProcSysStaticFile("0\n")) as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("kptr_restrict", ProcSysMutableFile::new("1\n") as Arc<dyn FileLike>);
+        sys_kernel_dir.add_file("dmesg_restrict", ProcSysMutableFile::new("0\n") as Arc<dyn FileLike>);
         let sys_vm_dir = sys_dir.add_dir("vm");
         sys_vm_dir.add_file("overcommit_memory", ProcSysMutableFile::new("0\n") as Arc<dyn FileLike>);
         sys_vm_dir.add_file("max_map_count", ProcSysMutableFile::new("65530\n") as Arc<dyn FileLike>);
@@ -83,6 +85,11 @@ impl ProcFs {
         let sys_net_ipv4_dir = sys_net_dir.add_dir("ipv4");
         sys_net_ipv4_dir.add_file("ip_forward", ProcSysMutableFile::new("0\n") as Arc<dyn FileLike>);
         sys_net_ipv4_dir.add_file("tcp_syncookies", ProcSysMutableFile::new("1\n") as Arc<dyn FileLike>);
+        sys_net_ipv4_dir.add_file("ip_local_port_range", ProcSysMutableFile::new("32768\t60999\n") as Arc<dyn FileLike>);
+        let sys_net_core_dir = sys_net_dir.add_dir("core");
+        sys_net_core_dir.add_file("somaxconn", ProcSysMutableFile::new("4096\n") as Arc<dyn FileLike>);
+        sys_net_core_dir.add_file("rmem_default", ProcSysMutableFile::new("212992\n") as Arc<dyn FileLike>);
+        sys_net_core_dir.add_file("wmem_default", ProcSysMutableFile::new("212992\n") as Arc<dyn FileLike>);
         let sys_net_unix_dir = sys_net_dir.add_dir("unix");
         sys_net_unix_dir.add_file("max_dgram_qlen", Arc::new(ProcSysStaticFile("512\n")) as Arc<dyn FileLike>);
 
@@ -395,6 +402,42 @@ impl FileLike for ProcSysBootId {
         let len = core::cmp::min(id_bytes.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
         writer.write_bytes(&id_bytes[..len])?;
+        Ok(len)
+    }
+}
+
+/// /proc/sys/kernel/random/uuid — generates a fresh UUID v4 on each read.
+/// Used by systemd and other programs that need unique identifiers.
+struct ProcSysRandomUuid;
+
+impl fmt::Debug for ProcSysRandomUuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcSysRandomUuid")
+    }
+}
+
+impl FileLike for ProcSysRandomUuid {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o444), ..Stat::zeroed() })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 { return Ok(0); }
+        let mut bytes = [0u8; 16];
+        kevlar_platform::random::rdrand_fill(&mut bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+        let s = alloc::format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}\n",
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15],
+        );
+        let sb = s.as_bytes();
+        let len = core::cmp::min(sb.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&sb[..len])?;
         Ok(len)
     }
 }

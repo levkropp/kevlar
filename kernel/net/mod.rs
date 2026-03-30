@@ -22,6 +22,7 @@ pub mod service;
 pub mod socket;
 mod icmp_socket;
 pub mod netlink;
+pub(crate) mod packet_socket;
 mod tcp_socket;
 mod udp_socket;
 pub(crate) mod unix_socket;
