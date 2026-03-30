@@ -95,23 +95,42 @@ them to the ext4 root filesystem. Only a busybox trigger warning (non-fatal).
 | OpenRC boot (14 services) | PASS (0 failures, 0 clock skew) |
 | ext4 read/write + checksums | PASS (e2fsck clean) |
 | DNS resolution (UDP) | PASS |
-| TCP connect (apk, non-blocking) | PASS |
+| TCP connect (blocking + non-blocking) | PASS |
 | `apk update` | PASS |
 | `apk add <package>` | PASS |
+| BusyBox wget (HTTP download) | PASS |
+| DHCP auto-configuration | PASS |
 | Clock tests (13/13) | PASS (Linux parity) |
 | Shell prompt (getty) | PASS |
+
+## Root cause 3: virtio-net IRQs stop after boot
+
+After the initial DHCP exchange (5 IRQs), the virtio-net device stopped
+delivering interrupts entirely. TCP SYN-ACK packets arrived at the device
+but no IRQ was generated to trigger `receive_ethernet_frame`. This left
+incoming packets unprocessed indefinitely.
+
+**Fix:** Poll the network stack (`process_packets()`) on every LAPIC preempt
+timer tick (~30ms) via `net::poll_if_ready()` in `handle_ap_preempt`. This
+guarantees incoming packets are processed within 30ms regardless of IRQ
+delivery. Combined with the deferred job fix, both blocking and non-blocking
+TCP connect now work to any remote host.
+
+**Result:** BusyBox `wget` downloads files from the Alpine CDN. Blocking
+`connect()` to `151.101.126.132:80` returns in under 100ms. HTTP GET
+returns `200 OK`.
 
 ## Known remaining gaps
 
 | Issue | Impact | Notes |
 |-------|--------|-------|
-| BusyBox wget (blocking TCP to remote) | Medium | apk works; wget uses different I/O model |
-| DHCP auto-configuration | Low | Static IP in inittab works |
 | `/proc/sys` fchdir | Low | sysctl removed from boot runlevel |
+| Virtio-net IRQ investigation | Low | Polling workaround in place; root cause TBD |
 
 ## Files changed
 
 - `kernel/deferred_job.rs` — Replace SegQueue with Vec, release lock per callback
-- `kernel/main.rs` — Add run_deferred_jobs to handle_ap_preempt
-- `kernel/net/mod.rs` — Remove debug logging (clean up)
-- `kernel/net/tcp_socket.rs` — Remove debug logging (clean up)
+- `kernel/main.rs` — Add run_deferred_jobs + process_packets to handle_ap_preempt
+- `kernel/net/mod.rs` — Add poll_if_ready(), NET_INITIALIZED flag
+- `kernel/net/tcp_socket.rs` — Clean up debug logging
+- `kernel/interrupt.rs` — Clean up debug logging
