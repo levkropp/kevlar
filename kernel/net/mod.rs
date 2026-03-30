@@ -63,6 +63,15 @@ static DHCP_HANDLE: Once<SocketHandle> = Once::new();
 static DHCP_ENABLED: Once<bool> = Once::new();
 static SOCKET_WAIT_QUEUE: Once<WaitQueue> = Once::new();
 
+static NET_INITIALIZED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Poll the network stack from the LAPIC timer. Safe to call before init.
+pub fn poll_if_ready() {
+    if NET_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed) {
+        process_packets();
+    }
+}
+
 pub fn process_packets() {
     let mut sockets = SOCKETS.lock();
     let mut iface = INTERFACE.lock();
@@ -327,6 +336,7 @@ pub fn init_and_start_dhcp_discover(bootinfo: &BootInfo) {
     SOCKET_WAIT_QUEUE.init(WaitQueue::new);
     INTERFACE.init(|| SpinLock::new(iface));
     SOCKETS.init(|| SpinLock::new(sockets));
+    NET_INITIALIZED.store(true, core::sync::atomic::Ordering::Relaxed);
 
     process_packets();
 }

@@ -109,6 +109,11 @@ impl kevlar_platform::Handler for Handler {
         // after the LAPIC timer takes over for preemption.
         crate::deferred_job::run_deferred_jobs();
 
+        // Poll the network stack directly on every preempt tick. This handles
+        // the case where virtio-net doesn't deliver an IRQ for incoming packets
+        // (e.g., after SYN-ACK arrives in response to a connect()).
+        crate::net::poll_if_ready();
+
         // Tick interval timers (setitimer/alarm → SIGALRM) on every
         // LAPIC preempt tick, not just PIC timer IRQ.  The PIC timer
         // may not fire with pci=off or on AP CPUs.
