@@ -296,6 +296,8 @@ pub struct Process {
     utime: AtomicU64,
     /// Accumulated kernel-mode ticks (incremented per syscall).
     stime: AtomicU64,
+    /// Supplementary group IDs (set by setgroups, inherited on fork).
+    groups: SpinLock<Vec<u32>>,
     /// cgroup v2 membership (None only for idle threads created before cgroups::init).
     cgroup: atomic_refcell::AtomicRefCell<Option<Arc<crate::cgroups::CgroupNode>>>,
     /// Namespace set (UTS, PID, mount).
@@ -397,6 +399,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            groups: SpinLock::new(Vec::new()),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(0),
@@ -519,6 +522,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            groups: SpinLock::new(Vec::new()),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
@@ -589,6 +593,16 @@ impl Process {
     /// Set session ID (called by setsid).
     pub fn set_session_id(&self, sid: i32) {
         self.session_id.store(sid, Ordering::Relaxed);
+    }
+
+    /// Get supplementary group IDs.
+    pub fn groups(&self) -> Vec<u32> {
+        self.groups.lock_no_irq().clone()
+    }
+
+    /// Set supplementary group IDs.
+    pub fn set_groups(&self, gids: Vec<u32>) {
+        *self.groups.lock_no_irq() = gids;
     }
 
     /// Get resource limits table.
@@ -1814,6 +1828,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            groups: SpinLock::new(parent.groups()),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
@@ -1934,6 +1949,7 @@ impl Process {
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
+            groups: SpinLock::new(parent.groups()),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
@@ -2056,6 +2072,7 @@ impl Process {
             vfork_parent: if is_vfork { Some(parent.pid()) } else { None },
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
+            groups: SpinLock::new(parent.groups()),
             stime: AtomicU64::new(0),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),

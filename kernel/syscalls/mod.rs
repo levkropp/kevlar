@@ -1155,7 +1155,19 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new_nonnull(a2)?,
                 UserVAddr::new_nonnull(a3)?,
             ),
-            SYS_SETGROUPS => Ok(0), // TODO:
+            SYS_SETGROUPS => {
+                let size = a1;
+                let mut gids = alloc::vec::Vec::new();
+                if size > 0 {
+                    let ptr = UserVAddr::new_nonnull(a2)?;
+                    for i in 0..size {
+                        let gid: u32 = ptr.add(i * 4).read().map_err(|_| Error::new(Errno::EFAULT))?;
+                        gids.push(gid);
+                    }
+                }
+                current_process().set_groups(gids);
+                Ok(0)
+            }
             SYS_SETPGID => self.sys_setpgid(PId::new(a1 as i32), PgId::new(a2 as i32)),
             SYS_GETPPID => self.sys_getppid(),
             SYS_SET_TID_ADDRESS => self.sys_set_tid_address(UserVAddr::new_nonnull(a1)?),
