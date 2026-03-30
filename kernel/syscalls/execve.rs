@@ -23,6 +23,14 @@ impl<'a> SyscallHandler<'a> {
         let root_fs = current.root_fs();
         let executable = root_fs.lock().lookup_path(path, true)?;
 
+        // DAC permission check: require execute permission on the file.
+        {
+            let stat = executable.inode.stat()?;
+            crate::fs::permission::check_access(
+                &stat, current.euid(), current.egid(), crate::fs::permission::X_OK,
+            )?;
+        }
+
         let mut argv = Vec::new();
         for i in 0..ARG_MAX {
             let ptr = argv_uaddr.add(i * size_of::<usize>());

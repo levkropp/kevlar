@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use crate::fs::stat::{O_RDWR, O_WRONLY};
+use crate::fs::permission::{R_OK, W_OK};
+use crate::fs::stat::{O_RDONLY, O_RDWR, O_WRONLY};
 use crate::fs::{inotify, opened_file::OpenFlags, path::Path, stat::FileMode};
 use crate::prelude::*;
 use crate::timer::read_wall_clock;
@@ -57,6 +58,21 @@ impl<'a> SyscallHandler<'a> {
         let access_mode = mode.access_mode();
         if path_comp.inode.is_dir() && (access_mode == O_WRONLY || access_mode == O_RDWR) {
             return Err(Error::new(Errno::EISDIR));
+        }
+
+        // DAC permission check on existing files (O_CREAT of new files skips
+        // this since the owner is the creating process).
+        if !flags.contains(OpenFlags::O_CREAT) || flags.contains(OpenFlags::O_EXCL) {
+            let want = match flags.bits() & 0o3 {
+                x if x == O_RDONLY as i32 => R_OK,
+                x if x == O_WRONLY as i32 => W_OK,
+                x if x == O_RDWR as i32 => R_OK | W_OK,
+                _ => 0,
+            };
+            if want != 0 {
+                let stat = path_comp.inode.stat()?;
+                crate::fs::permission::check_access(&stat, current.euid(), current.egid(), want)?;
+            }
         }
 
         let mut opened_files = current.opened_files_no_irq();
