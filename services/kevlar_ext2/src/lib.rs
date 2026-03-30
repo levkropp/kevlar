@@ -2071,7 +2071,8 @@ impl Ext2Inner {
     // ── Directory entry helpers ────────────────────────────────────
 
     fn read_dir_entries(&self, inode: &Ext2Inode) -> Result<Vec<Ext2DirEntryInfo>> {
-        let data = self.read_file_data(inode, 0, inode.file_size() as usize)?;
+        let file_size = inode.file_size() as usize;
+        let data = self.read_file_data(inode, 0, file_size)?;
         let mut entries = Vec::new();
         let mut pos = 0;
 
@@ -2081,7 +2082,7 @@ impl Ext2Inner {
             let name_len = data[pos + 6] as usize;
             let file_type = data[pos + 7];
 
-            if rec_len == 0 {
+            if rec_len == 0 || rec_len < 8 {
                 break;
             }
             if ino != 0 && name_len > 0 && pos + 8 + name_len <= data.len() {
