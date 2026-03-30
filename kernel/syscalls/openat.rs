@@ -19,10 +19,25 @@ impl<'a> SyscallHandler<'a> {
     ) -> Result<isize> {
         let current = current_process();
 
-        // O_TMPFILE: return EOPNOTSUPP so callers fall back to regular temp files.
-        // Full O_TMPFILE requires linkat(AT_EMPTY_PATH) which we don't support yet.
+        // O_TMPFILE: create an anonymous temporary file (not linked to any directory).
+        // Can be linked later via linkat(fd, "", ..., AT_EMPTY_PATH).
         if flags.contains(OpenFlags::O_TMPFILE) {
-            return Err(Error::new(Errno::ENOSYS));
+            let effective_mode = FileMode::new(mode.as_u32() & !current.umask());
+            let root_fs_arc = current.root_fs();
+            let root_fs = root_fs_arc.lock_no_irq();
+            // Create in /tmp (tmpfs) — ignore the dirfd/path hint.
+            let tmp_dir = root_fs.lookup_dir(crate::fs::path::Path::new("/tmp"))?;
+            // Use a unique hidden name that won't collide.
+            let name = alloc::format!(".tmpfile.{}.{}", current.pid().as_i32(), crate::timer::monotonic_ticks());
+            let inode = tmp_dir.create_file(&name, effective_mode, UId::new(current.euid()), GId::new(current.egid()))?;
+            let path_comp = root_fs.make_flat_path_component(
+                crate::fs::path::Path::new("/tmp"),
+                inode,
+            );
+            drop(root_fs);
+            let mut opened_files = current.opened_files_no_irq();
+            let fd = opened_files.open(path_comp, flags.into())?;
+            return Ok(fd.as_usize() as isize);
         }
 
         // Reject writes to read-only mounts (MS_RDONLY).
