@@ -143,6 +143,151 @@ def main():
                 if not target.exists():
                     target.symlink_to(f"/usr/lib/{f.name}")
 
+        # ── Install OpenRC from cached packages ────────────────────
+        pkgs = ROOT / "build" / "native-cache" / "alpine-pkgs"
+        openrc_pkg = pkgs / "openrc"
+        if openrc_pkg.exists():
+            print("  OPENRC  installing from cached packages", file=sys.stderr)
+            # Binaries: /sbin/openrc, openrc-run, rc-service, etc.
+            sbin_src = openrc_pkg / "sbin"
+            sbin_dst = alpine_root / "sbin"
+            if sbin_src.exists():
+                for f in sbin_src.iterdir():
+                    dst = sbin_dst / f.name
+                    if f.is_symlink():
+                        dst.symlink_to(os.readlink(f))
+                    elif not dst.exists():
+                        shutil.copy2(f, dst)
+
+            # Shared libraries: librc.so.1, libeinfo.so.1
+            for lib in ["librc.so.1", "libeinfo.so.1"]:
+                src = openrc_pkg / "usr" / "lib" / lib
+                if src.exists():
+                    dst = alpine_root / "usr" / "lib" / lib
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+                    # Symlink into /lib for runtime linker
+                    (alpine_root / "lib" / lib).symlink_to(f"/usr/lib/{lib}")
+
+            # OpenRC shell functions and helpers
+            for subdir in ["bin", "sbin", "sh", "version"]:
+                src = openrc_pkg / "usr" / "libexec" / "rc" / subdir
+                dst = alpine_root / "usr" / "libexec" / "rc" / subdir
+                if src.exists():
+                    if src.is_dir():
+                        shutil.copytree(src, dst, dirs_exist_ok=True,
+                                        copy_function=shutil.copy2)
+                    else:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+
+            # Config files
+            for cfg in ["rc.conf"]:
+                src = openrc_pkg / "etc" / cfg
+                if src.exists():
+                    shutil.copy2(src, alpine_root / "etc" / cfg)
+
+            # conf.d directory
+            confd_src = openrc_pkg / "etc" / "conf.d"
+            confd_dst = alpine_root / "etc" / "conf.d"
+            if confd_src.exists():
+                confd_dst.mkdir(exist_ok=True)
+                for f in confd_src.iterdir():
+                    shutil.copy2(f, confd_dst / f.name)
+
+            # init.d scripts
+            initd_src = openrc_pkg / "etc" / "init.d"
+            initd_dst = alpine_root / "etc" / "init.d"
+            if initd_src.exists():
+                initd_dst.mkdir(exist_ok=True)
+                for f in initd_src.iterdir():
+                    dst = initd_dst / f.name
+                    if f.is_symlink():
+                        if dst.exists() or dst.is_symlink():
+                            dst.unlink()
+                        dst.symlink_to(os.readlink(f))
+                    else:
+                        shutil.copy2(f, dst)
+
+            # lib/rc directory
+            librc_src = openrc_pkg / "lib" / "rc"
+            librc_dst = alpine_root / "lib" / "rc"
+            if librc_src.exists():
+                shutil.copytree(librc_src, librc_dst, dirs_exist_ok=True,
+                                copy_function=shutil.copy2)
+
+        # OpenRC rc.conf tuning for Kevlar
+        rcconf = alpine_root / "etc" / "rc.conf"
+        rcconf.write_text(
+            "# OpenRC configuration for Kevlar\n"
+            'rc_parallel="NO"\n'
+            'rc_logger="NO"\n'
+            'rc_depend_strict="NO"\n'
+            'unicode="NO"\n'
+            "rc_tty_number=0\n"
+        )
+
+        # Set up OpenRC runlevels
+        for lvl in ["sysinit", "boot", "default", "shutdown", "nonetwork"]:
+            (alpine_root / "etc" / "runlevels" / lvl).mkdir(parents=True, exist_ok=True)
+
+        sysinit_svcs = ["devfs", "dmesg"]
+        boot_svcs = ["bootmisc", "hostname", "localmount", "loopback",
+                      "networking", "seedrng", "syslog"]
+        default_svcs = ["local"]
+        shutdown_svcs = ["killprocs", "mount-ro", "savecache"]
+
+        for svc in sysinit_svcs:
+            link = alpine_root / "etc" / "runlevels" / "sysinit" / svc
+            if not link.exists():
+                link.symlink_to(f"/etc/init.d/{svc}")
+        for svc in boot_svcs:
+            link = alpine_root / "etc" / "runlevels" / "boot" / svc
+            if not link.exists():
+                link.symlink_to(f"/etc/init.d/{svc}")
+        for svc in default_svcs:
+            link = alpine_root / "etc" / "runlevels" / "default" / svc
+            if not link.exists():
+                link.symlink_to(f"/etc/init.d/{svc}")
+        for svc in shutdown_svcs:
+            link = alpine_root / "etc" / "runlevels" / "shutdown" / svc
+            if not link.exists():
+                link.symlink_to(f"/etc/init.d/{svc}")
+
+        # Fix /var/lock and /var/run — OpenRC's bootmisc checks readlink
+        # and expects exactly "/run/lock" and "/run", not relative paths.
+        var = alpine_root / "var"
+        for name, target in [("lock", "/run/lock"), ("run", "/run")]:
+            p = var / name
+            if p.is_symlink():
+                p.unlink()
+            elif p.exists():
+                shutil.rmtree(p) if p.is_dir() else p.unlink()
+            p.symlink_to(target)
+
+        # Create /run directory
+        (alpine_root / "run").mkdir(exist_ok=True)
+
+        # Touch all OpenRC config files to epoch 0 to prevent clock skew
+        # detection loops (OpenRC compares deptree mtime against config).
+        import time
+        epoch = 0
+        for dirpath in ["etc/init.d", "etc/conf.d", "usr/libexec/rc",
+                         "lib/rc"]:
+            d = alpine_root / dirpath
+            if d.exists():
+                for root_d, dirs, files in os.walk(d):
+                    for f in files:
+                        try:
+                            os.utime(os.path.join(root_d, f),
+                                     (epoch, epoch), follow_symlinks=False)
+                        except OSError:
+                            pass
+        for f in ["etc/rc.conf"]:
+            p = alpine_root / f
+            if p.exists():
+                os.utime(p, (epoch, epoch))
+
         # Create 1GB ext4 disk image (GCC + curl + python3 need ~300MB)
         print("  MKDISK  1GB ext4", file=sys.stderr)
         subprocess.run(
