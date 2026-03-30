@@ -59,7 +59,9 @@ impl<'a> SyscallHandler<'a> {
                 (AF_NETLINK, _, _) => {
                     Ok(crate::net::netlink::NetlinkSocket::new() as Arc<dyn FileLike>)
                 }
-                (AF_PACKET, _, _) => {
+                (AF_INET6, _, _) | (AF_PACKET, _, _) => {
+                    // IPv6 not implemented — return EAFNOSUPPORT so programs
+                    // gracefully fall back to IPv4 (musl, curl, etc. handle this).
                     Err(Errno::EAFNOSUPPORT.into())
                 }
                 (_, _, _) => {

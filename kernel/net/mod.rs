@@ -355,7 +355,12 @@ pub fn format_proc_net_tcp() -> alloc::string::String {
             };
             let local_str = match tcp.local_endpoint() {
                 Some(ep) => ip_endpoint_to_hex(&ep),
-                None => alloc::format!("00000000:0000"),
+                None => {
+                    // For listening sockets, local_endpoint() returns None.
+                    // Use listen_endpoint() to get the bound port.
+                    let lep = tcp.listen_endpoint();
+                    listen_endpoint_to_hex(lep.addr, lep.port)
+                }
             };
             let remote_str = match tcp.remote_endpoint() {
                 Some(ep) => ip_endpoint_to_hex(&ep),

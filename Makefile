@@ -501,6 +501,25 @@ test-ssh:
 		echo "ALL SSH TESTS PASSED"; \
 	fi
 
+# M10 Phase B: nginx integration test (needs Alpine disk for apk install)
+.PHONY: test-nginx
+test-nginx: build/alpine.img
+	$(PROGRESS) "TEST" "nginx: install via apk + start + listen"
+	@cp build/alpine.img build/alpine-nginx-test.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-nginx"
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-nginx-test.img \
+		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
+		| tee /tmp/kevlar-test-nginx-$(PROFILE).log; true
+	@rm -f build/alpine-nginx-test.img
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|ALL NGINX|DIAG:)' \
+		/tmp/kevlar-test-nginx-$(PROFILE).log || echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-nginx-$(PROFILE).log; then \
+		echo "NGINX TESTS: some failures"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-nginx-$(PROFILE).log; then \
+		echo "ALL NGINX TESTS PASSED"; \
+	fi
+
 .PHONY: bochs
 bochs: iso
 	$(BOCHS) -qf boot/bochsrc

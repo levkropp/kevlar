@@ -74,12 +74,15 @@ impl ProcFs {
         sys_kernel_dir.add_file("kptr_restrict", Arc::new(ProcSysStaticFile("1\n")) as Arc<dyn FileLike>);
         sys_kernel_dir.add_file("dmesg_restrict", Arc::new(ProcSysStaticFile("0\n")) as Arc<dyn FileLike>);
         let sys_vm_dir = sys_dir.add_dir("vm");
-        sys_vm_dir.add_file("overcommit_memory", Arc::new(ProcSysStaticFile("0\n")) as Arc<dyn FileLike>);
-        sys_vm_dir.add_file("max_map_count", Arc::new(ProcSysStaticFile("65530\n")) as Arc<dyn FileLike>);
+        sys_vm_dir.add_file("overcommit_memory", ProcSysMutableFile::new("0\n") as Arc<dyn FileLike>);
+        sys_vm_dir.add_file("max_map_count", ProcSysMutableFile::new("65530\n") as Arc<dyn FileLike>);
         let sys_fs_dir = sys_dir.add_dir("fs");
         sys_fs_dir.add_file("nr_open", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
         sys_fs_dir.add_file("file-max", Arc::new(ProcSysStaticFile("1048576\n")) as Arc<dyn FileLike>);
         let sys_net_dir = sys_dir.add_dir("net");
+        let sys_net_ipv4_dir = sys_net_dir.add_dir("ipv4");
+        sys_net_ipv4_dir.add_file("ip_forward", ProcSysMutableFile::new("0\n") as Arc<dyn FileLike>);
+        sys_net_ipv4_dir.add_file("tcp_syncookies", ProcSysMutableFile::new("1\n") as Arc<dyn FileLike>);
         let sys_net_unix_dir = sys_net_dir.add_dir("unix");
         sys_net_unix_dir.add_file("max_dgram_qlen", Arc::new(ProcSysStaticFile("512\n")) as Arc<dyn FileLike>);
 
@@ -260,6 +263,56 @@ impl FileLike for ProcSysStaticFile {
 
     fn poll(&self) -> Result<PollStatus> {
         // Proc files always have data available for reading.
+        Ok(PollStatus::POLLIN)
+    }
+}
+
+/// A /proc/sys file that remembers writes (read-after-write consistent).
+/// Used for tunables like overcommit_memory, ip_forward, etc.
+struct ProcSysMutableFile {
+    value: kevlar_platform::spinlock::SpinLock<alloc::string::String>,
+}
+
+impl ProcSysMutableFile {
+    fn new(initial: &str) -> Arc<Self> {
+        Arc::new(ProcSysMutableFile {
+            value: kevlar_platform::spinlock::SpinLock::new(alloc::string::String::from(initial)),
+        })
+    }
+}
+
+impl fmt::Debug for ProcSysMutableFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ProcSysMutableFile")
+    }
+}
+
+impl FileLike for ProcSysMutableFile {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat { mode: FileMode::new(S_IFREG | 0o644), ..Stat::zeroed() })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset > 0 { return Ok(0); }
+        let val = self.value.lock_no_irq();
+        let bytes = val.as_bytes();
+        let len = core::cmp::min(bytes.len(), buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&bytes[..len])?;
+        Ok(len)
+    }
+
+    fn write(&self, _offset: usize, buf: UserBuffer<'_>, _options: &OpenOptions) -> Result<usize> {
+        use kevlar_vfs::user_buffer::UserBufReader;
+        let mut data = [0u8; 256];
+        let mut reader = UserBufReader::from(buf);
+        let n = reader.read_bytes(&mut data)?;
+        let s = core::str::from_utf8(&data[..n]).unwrap_or("0\n");
+        *self.value.lock_no_irq() = alloc::string::String::from(s);
+        Ok(n)
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
         Ok(PollStatus::POLLIN)
     }
 }

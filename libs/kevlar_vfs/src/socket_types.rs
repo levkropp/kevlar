@@ -23,6 +23,7 @@ bitflags! {
 
 pub const AF_UNIX: i32 = 1;
 pub const AF_INET: i32 = 2;
+pub const AF_INET6: i32 = 10;
 pub const AF_NETLINK: i32 = 16;
 pub const AF_PACKET: i32 = 17;
 pub const SOCK_STREAM: i32 = 1;
