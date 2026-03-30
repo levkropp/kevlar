@@ -329,12 +329,24 @@ impl OpenedFile {
     }
 
     pub fn readdir(&self) -> Result<Option<DirEntry>> {
-        // Avoid holding self.pos lock by copying.
         let pos = self.pos();
-
         let entry = self.as_dir()?.readdir(pos)?;
-        self.pos.fetch_add(1);
+        if entry.is_some() {
+            self.pos.fetch_add(1);
+        }
         Ok(entry)
+    }
+
+    /// Peek at the next directory entry WITHOUT advancing the position.
+    /// Used by getdents64 to check if an entry fits before committing.
+    pub fn readdir_peek(&self) -> Result<Option<DirEntry>> {
+        let pos = self.pos();
+        self.as_dir()?.readdir(pos)
+    }
+
+    /// Advance the directory position by one (after a successful peek+write).
+    pub fn readdir_advance(&self) {
+        self.pos.fetch_add(1);
     }
 }
 

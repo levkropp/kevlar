@@ -17,7 +17,13 @@ impl<'a> SyscallHandler<'a> {
         let dir = current_process().get_opened_file_by_fd(fd)?;
         debug::usercopy::set_context("sys_getdents64");
         let mut writer = UserBufWriter::from_uaddr(dirp, len);
-        while let Some(entry) = dir.readdir()? {
+        loop {
+            // Peek at the next entry without advancing the position.
+            let entry = match dir.readdir_peek()? {
+                Some(e) => e,
+                None => break,
+            };
+
             let alignment = size_of::<u64>();
             let reclen = align_up(
                 size_of::<u64>() * 2 + size_of::<u16>() + 1 + entry.name.len() + 1,
@@ -25,21 +31,20 @@ impl<'a> SyscallHandler<'a> {
             );
 
             if writer.pos() + reclen > len {
+                // Entry doesn't fit — stop WITHOUT advancing position.
+                // The next getdents64 call will start from this entry.
                 break;
             }
 
+            // Entry fits — advance position and write it.
+            dir.readdir_advance();
+
             // Fill a `struct linux_dirent64`.
-            // d_ino
             writer.write::<u64>(entry.inode_no.as_u64())?;
-            // d_off
-            writer.write::<u64>(dir.pos() as u64)?;
-            // d_reclen
+            writer.write::<u64>(dir.pos() as u64)?; // d_off = position AFTER advance
             writer.write::<u16>(reclen as u16)?;
-            // d_type
             writer.write::<u8>(entry.file_type as u8)?;
-            // d_name
             writer.write_bytes(entry.name.as_bytes())?;
-            // d_name (null character)
             writer.write::<u8>(0)?;
 
             writer.skip_until_alignment(alignment)?;
