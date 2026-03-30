@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::{borrow::Cow, string::String, sync::Arc, vec::Vec};
 use core::{
     fmt,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 use hashbrown::HashMap;
 use kevlar_platform::spinlock::SpinLock;
@@ -30,6 +30,11 @@ use kevlar_vfs::{
 };
 
 pub static TMP_FS: Once<Arc<TmpFs>> = Once::new();
+
+/// Current wall-clock seconds since epoch (from VFS clock).
+fn now_secs() -> u32 {
+    kevlar_vfs::vfs_clock_secs()
+}
 
 fn alloc_inode_no() -> INodeNo {
     // Inode #1 is reserved for the root dir.
@@ -108,11 +113,14 @@ pub struct Dir {
     uid: SpinLock<UId>,
     gid: SpinLock<GId>,
     inner: SpinLock<DirInner>,
+    mtime: AtomicU32,
+    ctime: AtomicU32,
 }
 
 impl Dir {
     pub fn new(inode_no: INodeNo, dev_id: usize) -> Dir {
         let mode = FileMode::new(S_IFDIR | 0o755);
+        let now = now_secs();
         Dir {
             inode_no,
             dev_id,
@@ -128,7 +136,16 @@ impl Dir {
                 files: HashMap::new(),
                 order: Vec::new(),
             }),
+            mtime: AtomicU32::new(now),
+            ctime: AtomicU32::new(now),
         }
+    }
+
+    /// Update mtime/ctime to current time (called on directory modifications).
+    fn touch(&self) {
+        let now = now_secs();
+        self.mtime.store(now, Ordering::Relaxed);
+        self.ctime.store(now, Ordering::Relaxed);
     }
 
     pub fn add_dir(&self, name: &str) -> Arc<Dir> {
@@ -207,15 +224,19 @@ impl Directory for Dir {
     }
 
     fn stat(&self) -> Result<Stat> {
+        use kevlar_vfs::stat::Time;
         let mut st = self.stat;
         st.mode = *self.mode.lock_no_irq();
         st.uid = *self.uid.lock_no_irq();
         st.gid = *self.gid.lock_no_irq();
+        let mt = self.mtime.load(Ordering::Relaxed) as isize;
+        st.atime = Time::new(mt); // atime tracks mtime for simplicity
+        st.mtime = Time::new(mt);
+        st.ctime = Time::new(self.ctime.load(Ordering::Relaxed) as isize);
         Ok(st)
     }
 
     fn chmod(&self, mode: FileMode) -> Result<()> {
-        // Preserve file type bits (S_IFDIR), update permission bits only
         let mut m = self.mode.lock_no_irq();
         let type_bits = m.as_u32() & 0o170000;
         *m = FileMode::new(type_bits | (mode.as_u32() & 0o7777));
@@ -225,6 +246,14 @@ impl Directory for Dir {
     fn chown(&self, uid: UId, gid: GId) -> Result<()> {
         *self.uid.lock_no_irq() = uid;
         *self.gid.lock_no_irq() = gid;
+        Ok(())
+    }
+
+    fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        if let Some(m) = mtime_secs {
+            self.mtime.store(m as u32, Ordering::Relaxed);
+            self.ctime.store(m as u32, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -275,6 +304,8 @@ impl Directory for Dir {
         *inode.uid.lock_no_irq() = uid;
         *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::File(inode.clone()));
+        drop(dir_lock);
+        self.touch();
 
         Ok((inode as Arc<dyn FileLike>).into())
     }
@@ -294,6 +325,8 @@ impl Directory for Dir {
             },
         });
         dir_lock.insert(name.into(), TmpFsINode::Symlink(inode.clone()));
+        drop(dir_lock);
+        self.touch();
         Ok((inode as Arc<dyn SymlinkTrait>).into())
     }
 
@@ -308,6 +341,8 @@ impl Directory for Dir {
         *inode.uid.lock_no_irq() = uid;
         *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::Directory(inode.clone()));
+        drop(dir_lock);
+        self.touch();
         Ok((inode as Arc<dyn Directory>).into())
     }
 
@@ -318,13 +353,14 @@ impl Directory for Dir {
             Some(TmpFsINode::File(_)) | Some(TmpFsINode::Symlink(_)) => {}
             None => return Err(Errno::ENOENT.into()),
         }
-        // Decrement nlink for tmpfs files.
         if let Some(TmpFsINode::File(file_like)) = dir_lock.files.get(name) {
             if let Some(file) = (**file_like).as_any().downcast_ref::<File>() {
                 file.nlink.fetch_sub(1, Ordering::Relaxed);
             }
         }
         dir_lock.remove(name);
+        drop(dir_lock);
+        self.touch();
         Ok(())
     }
 
@@ -342,6 +378,8 @@ impl Directory for Dir {
             None => return Err(Errno::ENOENT.into()),
         }
         dir_lock.remove(name);
+        drop(dir_lock);
+        self.touch();
         Ok(())
     }
 
@@ -392,11 +430,15 @@ struct File {
     uid: SpinLock<UId>,
     gid: SpinLock<GId>,
     nlink: AtomicUsize,
+    atime: AtomicU32,
+    mtime: AtomicU32,
+    ctime: AtomicU32,
 }
 
 impl File {
     pub fn new(inode_no: INodeNo) -> File {
         let mode = FileMode::new(S_IFREG | 0o644);
+        let now = now_secs();
         File {
             data: SpinLock::new(Vec::new()),
             stat: Stat {
@@ -408,20 +450,37 @@ impl File {
             uid: SpinLock::new(UId::new(0)),
             gid: SpinLock::new(GId::new(0)),
             nlink: AtomicUsize::new(1),
+            atime: AtomicU32::new(now),
+            mtime: AtomicU32::new(now),
+            ctime: AtomicU32::new(now),
         }
     }
 }
 
 impl FileLike for File {
     fn stat(&self) -> Result<Stat> {
-        use kevlar_vfs::stat::{FileSize, NLink};
+        use kevlar_vfs::stat::{FileSize, NLink, Time};
         let mut stat = self.stat;
         stat.mode = *self.mode.lock_no_irq();
         stat.uid = *self.uid.lock_no_irq();
         stat.gid = *self.gid.lock_no_irq();
         stat.size = FileSize(self.data.lock_no_irq().len() as isize);
         stat.nlink = NLink::new(self.nlink.load(Ordering::Relaxed));
+        stat.atime = Time::new(self.atime.load(Ordering::Relaxed) as isize);
+        stat.mtime = Time::new(self.mtime.load(Ordering::Relaxed) as isize);
+        stat.ctime = Time::new(self.ctime.load(Ordering::Relaxed) as isize);
         Ok(stat)
+    }
+
+    fn set_times(&self, atime_secs: Option<isize>, mtime_secs: Option<isize>) -> Result<()> {
+        if let Some(a) = atime_secs {
+            self.atime.store(a as u32, Ordering::Relaxed);
+        }
+        if let Some(m) = mtime_secs {
+            self.mtime.store(m as u32, Ordering::Relaxed);
+            self.ctime.store(m as u32, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     fn chmod(&self, mode: FileMode) -> Result<()> {
@@ -471,15 +530,18 @@ impl FileLike for File {
         let mut reader = UserBufReader::from(buf);
         let new_len = offset + reader.remaining_len();
         if new_len > data.len() {
-            // Use exact capacity to avoid Vec's doubling strategy which
-            // can exceed the kernel heap chunk size limit.
             let cap = data.capacity();
             if new_len > cap {
                 data.reserve_exact(new_len - cap);
             }
             data.resize(new_len, 0);
         }
-        reader.read_bytes(&mut data[offset..])
+        let written = reader.read_bytes(&mut data[offset..])?;
+        // Update mtime/ctime on successful write.
+        let now = now_secs();
+        self.mtime.store(now, Ordering::Relaxed);
+        self.ctime.store(now, Ordering::Relaxed);
+        Ok(written)
     }
 
     fn truncate(&self, length: usize) -> Result<()> {
