@@ -31,6 +31,11 @@ use kevlar_vfs::{
 
 pub static TMP_FS: Once<Arc<TmpFs>> = Once::new();
 
+/// Current wall-clock as (seconds, nanoseconds) from VFS clock.
+fn now_ts() -> (u32, u32) {
+    kevlar_vfs::vfs_clock_ts()
+}
+
 /// Current wall-clock seconds since epoch (from VFS clock).
 fn now_secs() -> u32 {
     kevlar_vfs::vfs_clock_secs()
@@ -433,12 +438,13 @@ struct File {
     atime: AtomicU32,
     mtime: AtomicU32,
     ctime: AtomicU32,
+    mtime_nsec: AtomicU32,
 }
 
 impl File {
     pub fn new(inode_no: INodeNo) -> File {
         let mode = FileMode::new(S_IFREG | 0o644);
-        let now = now_secs();
+        let (secs, nsec) = now_ts();
         File {
             data: SpinLock::new(Vec::new()),
             stat: Stat {
@@ -450,9 +456,10 @@ impl File {
             uid: SpinLock::new(UId::new(0)),
             gid: SpinLock::new(GId::new(0)),
             nlink: AtomicUsize::new(1),
-            atime: AtomicU32::new(now),
-            mtime: AtomicU32::new(now),
-            ctime: AtomicU32::new(now),
+            atime: AtomicU32::new(secs),
+            mtime: AtomicU32::new(secs),
+            ctime: AtomicU32::new(secs),
+            mtime_nsec: AtomicU32::new(nsec),
         }
     }
 }
@@ -469,6 +476,10 @@ impl FileLike for File {
         stat.atime = Time::new(self.atime.load(Ordering::Relaxed) as isize);
         stat.mtime = Time::new(self.mtime.load(Ordering::Relaxed) as isize);
         stat.ctime = Time::new(self.ctime.load(Ordering::Relaxed) as isize);
+        let nsec = self.mtime_nsec.load(Ordering::Relaxed) as isize;
+        stat.atime_nsec = Time::new(nsec);
+        stat.mtime_nsec = Time::new(nsec);
+        stat.ctime_nsec = Time::new(nsec);
         Ok(stat)
     }
 
@@ -538,9 +549,10 @@ impl FileLike for File {
         }
         let written = reader.read_bytes(&mut data[offset..])?;
         // Update mtime/ctime on successful write.
-        let now = now_secs();
-        self.mtime.store(now, Ordering::Relaxed);
-        self.ctime.store(now, Ordering::Relaxed);
+        let (secs, nsec) = now_ts();
+        self.mtime.store(secs, Ordering::Relaxed);
+        self.ctime.store(secs, Ordering::Relaxed);
+        self.mtime_nsec.store(nsec, Ordering::Relaxed);
         Ok(written)
     }
 

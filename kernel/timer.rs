@@ -188,8 +188,11 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // Update VFS clock (second-level granularity for filesystem timestamps).
-    kevlar_vfs::set_vfs_clock(read_wall_clock().secs_from_epoch() as u32);
+    // Update VFS clock with nanosecond precision for filesystem timestamps.
+    let wall_ns = read_wall_clock().nanosecs_from_epoch();
+    let secs = (wall_ns / 1_000_000_000) as u32;
+    let nsec = (wall_ns % 1_000_000_000) as u32;
+    kevlar_vfs::set_vfs_clock_ns(secs, nsec);
 
     crate::debug::htrace::exit(crate::debug::htrace::id::TIMER_IRQ, 0);
 
