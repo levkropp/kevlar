@@ -53,6 +53,8 @@ pub enum Errno {
     ENOTEMPTY = 39,
     ELOOP = 40,
 
+    ENODATA = 61,
+
     EAFNOSUPPORT = 97,
     EADDRINUSE = 98,
     EADDRNOTAVAIL = 99,
@@ -110,6 +112,7 @@ impl Errno {
             Errno::ENOSYS => "ENOSYS",
             Errno::ENOTEMPTY => "ENOTEMPTY",
             Errno::ELOOP => "ELOOP",
+            Errno::ENODATA => "ENODATA",
             Errno::EAFNOSUPPORT => "EAFNOSUPPORT",
             Errno::EADDRINUSE => "EADDRINUSE",
             Errno::EADDRNOTAVAIL => "EADDRNOTAVAIL",
