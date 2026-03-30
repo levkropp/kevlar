@@ -6,6 +6,7 @@ use crate::user_buffer::UserCStr;
 use crate::{process::current_process, syscalls::SyscallHandler};
 use core::mem::size_of;
 use kevlar_platform::address::UserVAddr;
+use kevlar_vfs::stat::{S_ISUID, S_ISGID};
 
 const ARG_MAX: usize = 512;
 const ARG_LEN_MAX: usize = 4096;
@@ -24,11 +25,23 @@ impl<'a> SyscallHandler<'a> {
         let executable = root_fs.lock().lookup_path(path, true)?;
 
         // DAC permission check: require execute permission on the file.
-        {
-            let stat = executable.inode.stat()?;
-            crate::fs::permission::check_access(
-                &stat, current.euid(), current.egid(), crate::fs::permission::X_OK,
-            )?;
+        let stat = executable.inode.stat()?;
+        crate::fs::permission::check_access(
+            &stat, current.euid(), current.egid(), crate::fs::permission::X_OK,
+        )?;
+
+        // S_ISUID: set effective UID to the file's owner.
+        // S_ISGID: set effective GID to the file's group.
+        let mode = stat.mode.as_u32();
+        if mode & S_ISUID != 0 {
+            let owner = stat.uid.as_u32();
+            current.set_euid(owner);
+            current.set_suid(owner);
+        }
+        if mode & S_ISGID != 0 {
+            let group = stat.gid.as_u32();
+            current.set_egid(group);
+            current.set_sgid(group);
         }
 
         let mut argv = Vec::new();
