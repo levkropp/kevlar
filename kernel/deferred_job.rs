@@ -4,14 +4,13 @@
 //! When you want to run some time-consuming work, please consider using this
 //! mechanism.
 use alloc::boxed::Box;
-use crossbeam::queue::SegQueue;
+use alloc::vec::Vec;
 use kevlar_api::sync::SpinLock;
 
 pub trait JobCallback = FnOnce() + Send + 'static;
-static GLOBAL_QUEUE: SpinLock<SegQueue<Box<dyn JobCallback>>> = SpinLock::new(SegQueue::new());
+static GLOBAL_QUEUE: SpinLock<Vec<Box<dyn JobCallback>>> = SpinLock::new(Vec::new());
 
 pub struct DeferredJob {
-    // Will be useful for debugging.
     #[allow(unused)]
     name: &'static str,
 }
@@ -33,11 +32,14 @@ impl DeferredJob {
 
 /// Run pending deferred jobs.
 pub fn run_deferred_jobs() {
-    // TODO: The current user process is still blocked until we leave the
-    //       interrupt handler. Should we have a limit of the maximum number of jobs?
-    //
-    // TODO: Re-enable interrupts here since this may take long.
-    while let Some(callback) = GLOBAL_QUEUE.lock().pop() {
+    loop {
+        let callback = {
+            let mut queue = GLOBAL_QUEUE.lock();
+            if queue.is_empty() {
+                break;
+            }
+            queue.remove(0)
+        };
         callback();
     }
 }
