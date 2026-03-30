@@ -104,6 +104,11 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_ap_preempt(&self) -> bool {
+        // Process deferred jobs (network packet processing, etc.) on every
+        // LAPIC preempt tick. Required because the PIT timer may stop firing
+        // after the LAPIC timer takes over for preemption.
+        crate::deferred_job::run_deferred_jobs();
+
         // Tick interval timers (setitimer/alarm → SIGALRM) on every
         // LAPIC preempt tick, not just PIC timer IRQ.  The PIC timer
         // may not fire with pci=off or on AP CPUs.
