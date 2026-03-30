@@ -292,6 +292,7 @@ mod syscall_numbers {
     pub const SYS_UNAME: usize = 63;
     pub const SYS_FCNTL: usize = 72;
     pub const SYS_FSYNC: usize = 74;
+    pub const SYS_FDATASYNC: usize = 75;
     pub const SYS_GETCWD: usize = 79;
     pub const SYS_CHDIR: usize = 80;
     pub const SYS_RENAME: usize = 82;
@@ -498,6 +499,7 @@ mod syscall_numbers {
     pub const SYS_RENAMEAT: usize = 38;
     pub const SYS_UMASK: usize = 166;
     pub const SYS_FSYNC: usize = 82;
+    pub const SYS_FDATASYNC: usize = 83;
     pub const SYS_CHDIR: usize = 49;
     pub const SYS_FSTAT: usize = 80;
     pub const SYS_NEWFSTATAT: usize = 79;
@@ -1096,7 +1098,7 @@ impl<'a> SyscallHandler<'a> {
                 let p = resolve_path(a1)?;
                 self.sys_chown(p.as_path(), a2 as u32, a3 as u32)
             }
-            SYS_FSYNC => self.sys_fsync(Fd::new(a1 as i32)),
+            SYS_FSYNC | SYS_FDATASYNC => self.sys_fsync(Fd::new(a1 as i32)),
             SYS_UTIMES => self.sys_utimes(&resolve_path(a1)?, UserVAddr::new(a2)),
             SYS_GETDENTS64 => {
                 self.sys_getdents64(Fd::new(a1 as i32), UserVAddr::new_nonnull(a2)?, a3)
@@ -1729,6 +1731,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_UNAME => "uname",
         SYS_FCNTL => "fcntl",
         SYS_FSYNC => "fsync",
+        SYS_FDATASYNC => "fdatasync",
         SYS_GETCWD => "getcwd",
         SYS_CHDIR => "chdir",
         SYS_RENAME => "rename",
