@@ -1,0 +1,422 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>The mmap_fault Investigation - Kevlar Documentation</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-fb42b9c8.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-f2e7b624.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Kevlar Documentation</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/levkropp/kevlar" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/levkropp/kevlar/edit/main/Documentation/./blog/043-mmap-fault-investigation.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="the-mmap_fault-investigation-closing-the-last-15-gap"><a class="header" href="#the-mmap_fault-investigation-closing-the-last-15-gap">The mmap_fault Investigation: Closing the Last 15% Gap</a></h1>
+<p>27 of 28 syscall benchmarks are within 10% of Linux on KVM.  The
+holdout is <code>mmap_fault</code> — demand paging of anonymous pages — where
+Kevlar is ~15% slower.  This post documents every optimization
+attempted, why each failed, and the experimental approaches we’re
+considering next.</p>
+<hr>
+<h2 id="the-benchmark"><a class="header" href="#the-benchmark">The benchmark</a></h2>
+<p><code>mmap_fault</code> allocates 16MB anonymous memory, touches all 4096 pages
+sequentially.  With fault-around of 16, this triggers ~256 page fault
+handler invocations, each allocating and mapping 17 pages (1 primary +
+16 prefault).</p>
+<p><strong>CPU-pinned, -mem-prealloc, 5 runs each:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Kernel</th><th>Best</th><th>Median</th><th>Worst</th></tr>
+</thead>
+<tbody>
+<tr><td>Linux KVM</td><td>1,600ns</td><td>1,692ns</td><td>1,988ns</td></tr>
+<tr><td>Kevlar KVM</td><td>1,833ns</td><td>1,942ns</td><td>2,175ns</td></tr>
+<tr><td><strong>Median ratio</strong></td><td></td><td><strong>1.15x</strong></td><td></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="what-we-tried-and-why-it-failed"><a class="header" href="#what-we-tried-and-why-it-failed">What we tried and why it failed</a></h2>
+<h3 id="1-buddy-allocator-replaces-bitmap--neutral"><a class="header" href="#1-buddy-allocator-replaces-bitmap--neutral">1. Buddy allocator (replaces bitmap) — NEUTRAL</a></h3>
+<p>Replaced the O(N) bitmap byte-scanning allocator with an intrusive
+free-list buddy allocator.  O(1) alloc/free for single pages via list
+pop/push.</p>
+<p><strong>Why it didn’t help:</strong> The 64-entry <code>PAGE_CACHE</code> sits between the
+allocator and the caller.  The allocator is only touched during refill
+(every 64 pages).  The cache hit ratio is &gt;95%, so the allocator’s
+complexity doesn’t matter.  Both bitmap and buddy produce the same
+cache-hit-rate performance.</p>
+<p><strong>Kept anyway:</strong> Better for multi-page boot allocations (O(log N)
+splitting vs O(N) bitmap scan) and structural foundation for future
+per-CPU lists.</p>
+<h3 id="2-per-cpu-page-cache--slower"><a class="header" href="#2-per-cpu-page-cache--slower">2. Per-CPU page cache — SLOWER</a></h3>
+<p>Each CPU gets a 32-entry page cache accessed with <code>preempt_disable()</code>
+instead of a global spinlock.  Eliminates lock contention.</p>
+<p><strong>Why it failed:</strong> <code>preempt_disable() + cpu_id() + preempt_enable()</code>
+costs ~8ns.  The global <code>lock_no_irq()</code> spinlock costs ~5ns when
+uncontended (single atomic cmpxchg).  Per-CPU is 3ns slower per alloc.
+With 17 allocs per fault, that’s 51ns overhead per fault.</p>
+<p>Per-CPU caches only win under multi-CPU contention.  The benchmark
+runs single-CPU.</p>
+<h3 id="3-batch-pte-writes-traverse-once--neutral"><a class="header" href="#3-batch-pte-writes-traverse-once--neutral">3. Batch PTE writes (traverse once) — NEUTRAL</a></h3>
+<p>Traverse the page table hierarchy once to get the leaf PT base, then
+write 16 PTEs by direct indexing instead of calling <code>traverse()</code> 16
+times.</p>
+<p><strong>Why it didn’t help:</strong> The “redundant” traversals hit L1 data cache.
+The 3 intermediate page table entries (PML4, PDPT, PD) are the same
+for all 16 pages — they stay in L1 after the first traverse (~5ns per
+subsequent traverse, not ~30ns).  The batch function added its own loop
+overhead that canceled the savings.</p>
+<h3 id="4-pre-zeroed-page-cache--broken"><a class="header" href="#4-pre-zeroed-page-cache--broken">4. Pre-zeroed page cache — BROKEN</a></h3>
+<p>Zero pages during cache refill so <code>alloc_page()</code> returns ready-to-use
+pages.</p>
+<p><strong>Why it broke:</strong> <code>free_pages()</code> pushes dirty pages back into the
+cache.  Without tracking clean/dirty state per cache entry, the cache
+becomes a mix of zeroed and dirty pages.  Would need a two-list design
+(clean list + dirty list) which adds complexity to the hot path.</p>
+<h3 id="5-zero-hoisting-zero-all-then-map-all--worse"><a class="header" href="#5-zero-hoisting-zero-all-then-map-all--worse">5. Zero hoisting (zero all, then map all) — WORSE</a></h3>
+<p>Zero all 16 prefault pages upfront before touching page tables.</p>
+<p><strong>Why it was worse:</strong> 16 × 4KB = 64KB of zeroing thrashes the 32KB L1
+data cache.  When the PTE writes follow, they’re all L1 misses.  The
+original interleaved pattern (zero one page, map it, repeat) keeps the
+PT entries warm in L1.</p>
+<h3 id="6-unconditional-pte-writes--worse"><a class="header" href="#6-unconditional-pte-writes--worse">6. Unconditional PTE writes — WORSE</a></h3>
+<p>Skip the read-compare-branch on intermediate page table entries in
+<code>traverse()</code>.  Just write unconditionally since the value is idempotent.</p>
+<p><strong>Why it was worse:</strong> Writing to an already-correct PTE dirties the
+cache line, triggering a cache line write-back.  The branch (load →
+compare → conditional skip) is cheaper because the branch predictor
+handles the common case (entry already correct) with zero-cost
+prediction.</p>
+<h3 id="7-signal-fast-path-on-interrupt-return--small-win"><a class="header" href="#7-signal-fast-path-on-interrupt-return--small-win">7. Signal fast-path on interrupt return — SMALL WIN</a></h3>
+<p>Skip the 20-field PtRegs struct construction on interrupt return when
+no signals are pending (the common case for page faults).</p>
+<p><strong>Impact:</strong> ~30ns savings per fault.  Small but consistent.  Kept.</p>
+<h3 id="8-traverse-inlining--neutral"><a class="header" href="#8-traverse-inlining--neutral">8. traverse() inlining — NEUTRAL</a></h3>
+<p>Added <code>#[inline(always)]</code> to <code>traverse()</code>.  The compiler already
+inlined it at opt-level 2.</p>
+<h2 id="where-the-15-actually-comes-from"><a class="header" href="#where-the-15-actually-comes-from">Where the 15% actually comes from</a></h2>
+<p>After eliminating all the easy targets, the remaining gap is structural:</p>
+<p><strong>~50%: zero_page under EPT (~110ns/page)</strong></p>
+<p>Every demand-paged anonymous page must be zero-filled (POSIX
+requirement).  Our <code>rep stosq</code> over 4KB is the same instruction Linux
+uses.  But under KVM, every store goes through EPT translations.  The
+first write to a guest physical page that hasn’t been touched since EPT
+entry creation triggers an EPT TLB miss, adding ~10-20ns per page.
+Linux running natively doesn’t pay this cost; Linux under KVM pays the
+same cost we do — so our zero_page is NOT slower than Linux KVM’s, but
+it’s a large fixed cost that amplifies other overheads.</p>
+<p><strong>~30%: Rust codegen overhead (~65ns/page)</strong></p>
+<p>The page fault handler in Rust generates larger function bodies than
+equivalent C.  <code>Option</code> unwrapping, <code>Result</code> propagation, <code>match</code> on
+<code>VmAreaType</code>, bounds-checked array access in the VMA vector — each
+adds a few instructions.  The cumulative effect is ~40% more icache
+pressure in the fault handler compared to Linux’s C implementation.
+This shows up as ~2-3 extra icache misses per fault.</p>
+<p><strong>~20%: exception handler setup (~45ns/page)</strong></p>
+<p>Our ISR (trap.S) pushes all 16 GPRs + constructs a full InterruptFrame.
+Linux’s page fault entry pushes only the 6 callee-saved registers (the
+C handler saves the rest as needed).  The extra 10 push/pop pairs cost
+~20ns per exception entry/exit.</p>
+<h2 id="experimental-optimizations--risk-spectrum"><a class="header" href="#experimental-optimizations--risk-spectrum">Experimental optimizations — risk spectrum</a></h2>
+<p>From safest to most aggressive, all maintaining Linux ABI compatibility:</p>
+<h3 id="tier-1-safe-refactors-no-unsafe-no-abi-change"><a class="header" href="#tier-1-safe-refactors-no-unsafe-no-abi-change">Tier 1: Safe refactors (no <code>unsafe</code>, no ABI change)</a></h3>
+<p><strong>A. Copy-on-write zero page</strong> — Instead of zeroing every demand-paged
+anonymous page, map all pages to a single shared zero page (read-only).
+On first write, CoW triggers: allocate a real page, copy the zero page
+(all zeros), mark writable.  This defers the zero_page cost to the
+first write and avoids zeroing pages that are only read.</p>
+<p>Risk: Zero.  This is exactly how Linux works.  The zero page is a fixed
+kernel page that’s always mapped.</p>
+<p>Expected savings: ~50% of zero_page cost for pages that are read before
+written (common in BSS segments, large arrays).  For the mmap_fault
+benchmark (which writes every page), savings are minimal — the CoW
+fault replaces the demand fault, same total cost.</p>
+<p><strong>B. Reduce exception handler register saves</strong> — Push only callee-saved
+registers (rbx, rbp, r12-r15) in the page fault ISR, not all 16 GPRs.
+The Rust handler follows the C ABI and will save any caller-saved
+registers it uses.</p>
+<p>Risk: Zero for correctness.  The Rust compiler already assumes the C
+ABI for extern functions.  Minor risk: if we ever need to inspect the
+full register state for debugging, we’d need to add the saves back.</p>
+<p>Expected savings: ~20ns per fault = ~1.3ns/page.</p>
+<p><strong>C. Eliminate VMA vector bounds checks</strong> — The VMA lookup does
+<code>self.vm_areas[idx]</code> which Rust bounds-checks.  Since <code>idx</code> comes from
+<code>find_vma_cached()</code> which already validated the index, the bounds check
+is redundant.</p>
+<p>Risk: Very low.  Use <code>get_unchecked()</code> in the platform crate (already
+<code>#[allow(unsafe_code)]</code>).</p>
+<p>Expected savings: ~5ns per fault = ~0.3ns/page.</p>
+<h3 id="tier-2-profile-gated-optimizations-safe-for-balanced-unsafe-for-perfludicrous"><a class="header" href="#tier-2-profile-gated-optimizations-safe-for-balanced-unsafe-for-perfludicrous">Tier 2: Profile-gated optimizations (safe for balanced, <code>unsafe</code> for perf/ludicrous)</a></h3>
+<p><strong>D. Assembly page fault fast path</strong> — Write the page fault handler’s
+hot path (alloc + zero + traverse + map) in inline assembly for
+performance and ludicrous profiles.  This eliminates Rust codegen
+overhead (enum checks, Option unwrapping, Result propagation).</p>
+<p>Risk: Medium.  Assembly is harder to audit and maintain.  Bugs in the
+assembly handler could corrupt page tables.  Mitigated by keeping the
+Rust handler for balanced/fortress profiles and running the contract
+test suite against both.</p>
+<p>Expected savings: ~30% of Rust codegen overhead = ~20ns/page.</p>
+<p><strong>E. Combined alloc+zero</strong> — Merge <code>alloc_page()</code> and <code>zero_page()</code>
+into a single function that allocates a page and zeros it with a single
+<code>rep stosq</code> without returning to the caller in between.  Saves one
+function call + one pointer dereference.</p>
+<p>Risk: Very low.  Pure optimization, no semantic change.</p>
+<p>Expected savings: ~3-5ns per page.</p>
+<h3 id="tier-3-architectural-changes-significant-effort-highest-impact"><a class="header" href="#tier-3-architectural-changes-significant-effort-highest-impact">Tier 3: Architectural changes (significant effort, highest impact)</a></h3>
+<p><strong>F. Background page zeroing thread</strong> — A kernel thread that
+proactively zeros free pages during idle time.  <code>alloc_page()</code> can
+request a pre-zeroed page from a separate “clean” free list.</p>
+<p>Risk: Low.  Linux does this (<code>kzerod</code>).  Adds a background thread and
+split free lists (clean/dirty).  The thread runs at idle priority and
+never contends with the fault handler.</p>
+<p>Expected savings: Eliminates ~240ns of zero_page from the fault handler
+hot path.  The zeroing still happens but is done during idle, not during
+the page fault.  For the benchmark this might not help (continuous page
+faults leave no idle time), but for real workloads with idle gaps it’s
+a significant win.</p>
+<p><strong>G. Huge page support (2MB pages)</strong> — For large anonymous mappings
+(≥2MB), map 2MB huge pages instead of 4KB pages.  Eliminates 512 page
+faults per huge page.</p>
+<p>Risk: Medium.  Requires 2MB-aligned physical memory allocation, huge
+page TLB support, and transparent fallback to 4KB when 2MB pages aren’t
+available.  Significant implementation effort.</p>
+<p>Expected savings: ~500x fewer page faults for large mappings.  The
+mmap_fault benchmark would complete in ~15 faults instead of ~256.</p>
+<p><strong>H. Deferred zeroing with write-tracking</strong> — Map demand-paged pages
+as present but read-only (pointing to a zero page).  On first write,
+CoW-fault allocates a real page, zeros it, and marks writable.  But
+instead of copying from the zero page, just zero the new page directly.</p>
+<p>This is a refinement of option A that combines the CoW zero page with
+lazy allocation.  Pages that are never written are never allocated.</p>
+<p>Risk: Low.  Standard optimization in modern kernels.</p>
+<p>Expected savings: For the benchmark (writes every page): zero, since
+every page triggers a CoW fault.  For real workloads: huge savings
+for programs that mmap large regions but only touch a fraction.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../blog/042-m6.6-benchmarks.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../blog/044-m7-phase1-proc-enumeration.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../blog/042-m6.6-benchmarks.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../blog/044-m7-phase1-proc-enumeration.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
