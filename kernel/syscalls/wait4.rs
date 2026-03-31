@@ -71,6 +71,11 @@ impl<'a> SyscallHandler<'a> {
                         let ws = (exit_code & 0xff) << 8;
                         return Ok(Some((child.pid(), ws)));
                     }
+                    ProcessState::ExitedBySignal(signal) => {
+                        // Signal death: low 7 bits = signal number.
+                        let ws = signal & 0x7f;
+                        return Ok(Some((child.pid(), ws)));
+                    }
                     ProcessState::Stopped(stop_sig) => {
                         if options.contains(WaitOptions::WUNTRACED) {
                             let ws = ((stop_sig & 0xff) << 8) | 0x7f;
@@ -93,7 +98,7 @@ impl<'a> SyscallHandler<'a> {
             let current = current_process();
             let mut children = current.children();
             if let Some(pos) = children.iter().position(|p| {
-                p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_))
+                p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_))
             }) {
                 let reaped = children.swap_remove(pos);
                 // Move reaped process to EXITED_PROCESSES for deferred kernel

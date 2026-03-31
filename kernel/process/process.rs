@@ -213,8 +213,10 @@ pub enum ProcessState {
     BlockedSignalable,
     /// The process has been stopped by a signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU).
     Stopped(Signal),
-    /// The process has exited.
+    /// The process has exited normally (via exit(2) or _exit(2)).
     ExitedWith(c_int),
+    /// The process was killed by a signal (default Terminate disposition).
+    ExitedBySignal(c_int),
 }
 
 /// Build a pre-computed `struct utsname` (390 bytes) from a UTS namespace.
@@ -960,7 +962,8 @@ impl Process {
             ProcessState::Runnable => {}
             ProcessState::BlockedSignalable
             | ProcessState::Stopped(_)
-            | ProcessState::ExitedWith(_) => {
+            | ProcessState::ExitedWith(_)
+            | ProcessState::ExitedBySignal(_) => {
                 scheduler.remove(self.pid);
             }
         }
@@ -975,7 +978,7 @@ impl Process {
         // calls resume() on such a thread, we must not enqueue it — doing so
         // would schedule an exiting thread, corrupting kernel state.
         // Undo the state swap and bail out; the thread is no longer schedulable.
-        if matches!(old_state, ProcessState::ExitedWith(_)) {
+        if matches!(old_state, ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_)) {
             self.state.store(old_state);
             return;
         }
@@ -1145,7 +1148,10 @@ impl Process {
         // Release all POSIX record locks held by this process.
         crate::syscalls::fcntl::release_all_record_locks(current.pid().as_i32());
 
-        current.set_state(ProcessState::ExitedWith(status));
+        // Preserve ExitedBySignal if already set (from exit_by_signal).
+        if !matches!(current.state(), ProcessState::ExitedBySignal(_)) {
+            current.set_state(ProcessState::ExitedWith(status));
+        }
 
         // Reparent children to the nearest subreaper ancestor, or init (PID 1).
         {
@@ -1331,7 +1337,9 @@ impl Process {
             by_signal: true,
         });
         drop(cmdline);
-        Process::exit(128 + signal);
+        // Set signal-death state BEFORE exit() so wait4 sees WIFSIGNALED.
+        current_process().set_state(ProcessState::ExitedBySignal(signal as c_int));
+        Process::exit(signal as c_int);
     }
 
     /// Sends a signal.
@@ -1459,7 +1467,7 @@ impl Process {
                             ip: 0,
                         });
                         trace!("terminating {:?} by {:?}", current.pid, signal,);
-                        Process::exit(1 /* FIXME: */);
+                        Process::exit_by_signal(signal);
                     }
                     SigAction::Stop => {
                         debug::emit(DebugFilter::SIGNAL, &DebugEvent::Signal {

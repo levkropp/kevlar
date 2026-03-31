@@ -60,10 +60,14 @@ impl<'a> SyscallHandler<'a> {
                     _ => {}
                 }
 
-                if let ProcessState::ExitedWith(exit_code) = child.state() {
-                    if want_exited {
+                match child.state() {
+                    ProcessState::ExitedWith(exit_code) if want_exited => {
                         return Ok(Some((child.pid(), exit_code, CLD_EXITED, child.uid())));
                     }
+                    ProcessState::ExitedBySignal(signal) if want_exited => {
+                        return Ok(Some((child.pid(), signal, CLD_KILLED, child.uid())));
+                    }
+                    _ => {}
                 }
             }
 
@@ -82,7 +86,7 @@ impl<'a> SyscallHandler<'a> {
             let should_evict = current
                 .children()
                 .iter()
-                .any(|p| p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_)));
+                .any(|p| p.pid() == got_pid && matches!(p.state(), ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_)));
             if should_evict {
                 current.children().retain(|p| p.pid() != got_pid);
             }

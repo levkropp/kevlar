@@ -131,7 +131,7 @@ pub fn switch() -> bool {
     // switch_thread, prev's stacks are no longer in use on any CPU.
     // This matches Linux's finish_task_switch() → put_task_stack() and
     // prevents OOM under heavy fork/exit (zombies held stacks until GC).
-    if matches!(prev_state, ProcessState::ExitedWith(_)) {
+    if matches!(prev_state, ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_)) {
         #[allow(unsafe_code)]
         unsafe { prev.arch().release_stacks(); }
     }
