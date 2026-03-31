@@ -62,7 +62,13 @@ impl IoApic {
 pub fn enable_irq(irq: u8) {
     let ioapic = IO_APIC.lock();
     unsafe {
-        let entry = (VECTOR_IRQ_BASE as u64) + (irq as u64);
+        let mut entry = (VECTOR_IRQ_BASE as u64) + (irq as u64);
+        // PCI interrupts (IRQ >= 9) are level-triggered, active-low.
+        // Without these bits, the IOAPIC treats the line as edge-triggered
+        // and only delivers one interrupt per assertion cycle.
+        if irq >= 9 {
+            entry |= (1 << 13) | (1 << 15); // active-low | level-triggered
+        }
         ioapic.write_iored_tbl(irq as u32, entry);
     }
 }
