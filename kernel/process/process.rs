@@ -18,7 +18,7 @@ use crate::{
         elf::{Elf, ProgramHeader},
         init_stack::{estimate_user_init_stack_size, init_user_stack, Auxv},
         process_group::{PgId, ProcessGroup},
-        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL},
+        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP},
         switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER, SchedulerPolicy, WaitQueue,
     },
     random::read_secure_random,
@@ -1360,7 +1360,8 @@ impl Process {
         // Signals with Ignore disposition (default SIGCHLD, SIGURG, SIGWINCH)
         // should NOT be queued or interrupt sleep — matching POSIX/Linux behavior.
         // If the user installs a handler (SigAction::Handler), we do queue it.
-        if matches!(action, SigAction::Ignore) {
+        // SIGKILL and SIGSTOP can NEVER be ignored (POSIX).
+        if matches!(action, SigAction::Ignore) && signal != SIGKILL && signal != SIGSTOP {
             crate::debug::htrace::exit(crate::debug::htrace::id::SIGNAL_SEND, 0);
             return;
         }
