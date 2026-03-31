@@ -835,7 +835,7 @@ fn process_state_char(state: ProcessState) -> char {
         ProcessState::Runnable => 'R',
         ProcessState::BlockedSignalable => 'S',
         ProcessState::Stopped(_) => 'T',
-        ProcessState::ExitedWith(_) => 'Z',
+        ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_) => 'Z',
     }
 }
 
@@ -845,6 +845,6 @@ fn process_state_str(state: ProcessState) -> &'static str {
         ProcessState::Runnable => "R (running)",
         ProcessState::BlockedSignalable => "S (sleeping)",
         ProcessState::Stopped(_) => "T (stopped)",
-        ProcessState::ExitedWith(_) => "Z (zombie)",
+        ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_) => "Z (zombie)",
     }
 }
