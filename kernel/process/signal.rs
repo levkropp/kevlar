@@ -158,6 +158,10 @@ impl SignalDelivery {
         if signal <= 0 || signal >= SIGMAX {
             return Err(Errno::EINVAL.into());
         }
+        // SIGKILL and SIGSTOP cannot be caught, blocked, or ignored (POSIX).
+        if signal == SIGKILL || signal == SIGSTOP {
+            return Err(Errno::EINVAL.into());
+        }
 
         self.actions[signal as usize] = action;
         Ok(())
@@ -192,7 +196,9 @@ impl SignalDelivery {
     /// Blocked signals remain in the pending set for later delivery
     /// (or for signalfd to consume).
     pub fn pop_pending_unblocked(&mut self, blocked: SigSet) -> Option<(Signal, SigAction)> {
-        let blocked_bits = blocked.bits() as u32;
+        let mut blocked_bits = blocked.bits() as u32;
+        // SIGKILL (9) and SIGSTOP (19) can NEVER be blocked (POSIX).
+        blocked_bits &= !((1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1)));
         let deliverable = self.pending & !blocked_bits;
         if deliverable == 0 {
             return None;
