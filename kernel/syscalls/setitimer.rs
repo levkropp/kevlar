@@ -80,6 +80,37 @@ fn timeval_to_ns(sec: i64, usec: i64) -> u64 {
 }
 
 impl<'a> SyscallHandler<'a> {
+    pub fn sys_getitimer(&mut self, which: i32, curr_value: Option<UserVAddr>) -> Result<isize> {
+        if which != ITIMER_REAL {
+            return Err(Errno::ENOSYS.into());
+        }
+
+        let Some(out_ptr) = curr_value else {
+            return Err(Errno::EFAULT.into());
+        };
+
+        let pid = current_process().pid();
+        let now = now_ns();
+
+        let remaining_ns = {
+            let timers = REAL_TIMERS.lock_no_irq();
+            timers.iter()
+                .find(|t| t.pid == pid)
+                .map(|t| t.deadline_ns.saturating_sub(now))
+                .unwrap_or(0)
+        };
+
+        let us = remaining_ns / 1_000;
+        let itv = ITimerVal {
+            it_interval_sec: 0,
+            it_interval_usec: 0,
+            it_value_sec: (us / 1_000_000) as i64,
+            it_value_usec: (us % 1_000_000) as i64,
+        };
+        out_ptr.write::<ITimerVal>(&itv)?;
+        Ok(0)
+    }
+
     pub fn sys_setitimer(
         &mut self,
         which: i32,

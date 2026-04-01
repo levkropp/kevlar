@@ -372,6 +372,7 @@ mod syscall_numbers {
     pub const SYS_FCHMOD: usize = 91;
     pub const SYS_FCHOWN: usize = 93;
     pub const SYS_PAUSE: usize = 34;
+    pub const SYS_GETITIMER: usize = 36;
     pub const SYS_SETITIMER: usize = 38;
     pub const SYS_ALARM: usize = 37;
     pub const SYS_GETGROUPS: usize = 115;
@@ -606,6 +607,7 @@ mod syscall_numbers {
     pub const SYS_FCHOWN: usize = 55;
     // ARM64 doesn't have pause/alarm natively.
     pub const SYS_PAUSE: usize = 0xF012;
+    pub const SYS_GETITIMER: usize = 102;
     pub const SYS_SETITIMER: usize = 103;
     pub const SYS_ALARM: usize = 0xF013;
     pub const SYS_GETGROUPS: usize = 158;
@@ -1463,6 +1465,7 @@ impl<'a> SyscallHandler<'a> {
                 a5 as i32,
             ),
             SYS_PAUSE => self.sys_pause(),
+            SYS_GETITIMER => self.sys_getitimer(a1 as i32, UserVAddr::new(a2)),
             SYS_SETITIMER => self.sys_setitimer(
                 a1 as i32,
                 UserVAddr::new(a2),
@@ -1690,6 +1693,18 @@ impl<'a> SyscallHandler<'a> {
             // New mount API stubs — systemd v259 probes these and falls back to mount(2).
             SYS_OPEN_TREE | SYS_MOVE_MOUNT | SYS_FSOPEN | SYS_FSCONFIG |
             SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
+            // XFCE/GTK stubs — return harmless defaults so desktop components start.
+            142 /* sched_getparam */ => {
+                // Return default sched_param { sched_priority: 0 }
+                if a2 != 0 { UserVAddr::new_nonnull(a2)?.write::<i32>(&0)?; }
+                Ok(0)
+            }
+            149 /* mlock */ | 150 /* munlock */ | 151 /* mlockall */ | 152 /* munlockall */ => Ok(0),
+            251 /* ioprio_set */ => Ok(0),
+            252 /* ioprio_get */ => Ok(0),
+            27  /* mincore */ => Err(Error::new(Errno::ENOSYS)),
+            299 /* recvmmsg */ => Err(Error::new(Errno::ENOSYS)), // D-Bus falls back to recvmsg
+            307 /* sendmmsg */ => Err(Error::new(Errno::ENOSYS)), // D-Bus falls back to sendmsg
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -1843,6 +1858,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FCHMODAT => "fchmodat",
         SYS_FCHOWNAT => "fchownat",
         SYS_PAUSE => "pause",
+        SYS_GETITIMER => "getitimer",
         SYS_SETITIMER => "setitimer",
         SYS_ALARM => "alarm",
         SYS_GETGROUPS => "getgroups",
