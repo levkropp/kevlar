@@ -174,30 +174,37 @@ forked_child_entry:
 ///
 .global do_switch_thread
 do_switch_thread:
-    /* Save callee-saved registers. */
-    push rbp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
+    /* Save callee-saved registers.
+       IMPORTANT: push order must match fork()'s initial stack layout
+       in task.rs (RFLAGS first, then R15-R12, RBX, RBP, then RIP for ret). */
     pushfq
+    push r15
+    push r14
+    push r13
+    push r12
+    push rbx
+    push rbp
 
     /* Save prev's RSP, then mark its context as saved (rdx = ctx_saved ptr). */
     mov [rdi], rsp
     mov byte ptr [rdx], 1
 
+    /* Disable interrupts before loading the new stack to prevent a timer
+       IRQ from pushing a frame during the restore sequence. */
+    cli
+
     /* Load next's RSP. */
     mov rsp, [rsi]
 
-    /* Restore callee-saved registers. */
-    popfq
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
+    /* (canary check removed — done in Rust instead) */
+    /* Restore callee-saved registers (reverse of push order). */
     pop rbp
+    pop rbx
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    popfq       /* Restores IF — re-enables interrupts if they were on. */
 
     /* Resume the next thread. */
     ret

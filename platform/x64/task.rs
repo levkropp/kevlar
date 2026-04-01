@@ -6,7 +6,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::address::{AccessError, UserVAddr, VAddr};
+use crate::address::{AccessError, PAddr, UserVAddr, VAddr};
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::arch::PAGE_SIZE;
 use crate::arch::x64_specific::{cpu_local_head, TSS, USER_CS64, USER_DS, USER_RPL};
@@ -55,6 +55,11 @@ pub struct ArchTask {
 }
 
 impl ArchTask {
+    /// Physical base address of this task's syscall stack (for debugging).
+    pub fn syscall_stack_paddr(&self) -> Option<PAddr> {
+        self.syscall_stack.as_ref().map(|s| **s)
+    }
+
     /// Eagerly release kernel stacks back to the allocator.
     ///
     /// Called from `switch()` after context-switching away from an exiting task.
@@ -150,14 +155,15 @@ impl ArchTask {
             rsp = push_stack(rsp, ip.value() as u64); // The entry point.
 
             // Registers to be restored in do_switch_thread().
+            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
             rsp = push_stack(rsp, kthread_entry as *const u8 as u64); // RIP.
-            rsp = push_stack(rsp, 0); // Initial RBP.
-            rsp = push_stack(rsp, 0); // Initial RBX.
-            rsp = push_stack(rsp, 0); // Initial R12.
-            rsp = push_stack(rsp, 0); // Initial R13.
-            rsp = push_stack(rsp, 0); // Initial R14.
-            rsp = push_stack(rsp, 0); // Initial R15.
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled).
+            rsp = push_stack(rsp, 0); // Initial R15.
+            rsp = push_stack(rsp, 0); // Initial R14.
+            rsp = push_stack(rsp, 0); // Initial R13.
+            rsp = push_stack(rsp, 0); // Initial R12.
+            rsp = push_stack(rsp, 0); // Initial RBX.
+            rsp = push_stack(rsp, 0); // Initial RBP.
 
             rsp
         };
@@ -193,14 +199,15 @@ impl ArchTask {
             rsp = push_stack(rsp, ip.value() as u64); // RIP
 
             // Registers to be restored in do_switch_thread().
+            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
             rsp = push_stack(rsp, userland_entry as *const u8 as u64); // RIP.
-            rsp = push_stack(rsp, 0); // Initial RBP.
-            rsp = push_stack(rsp, 0); // Initial RBX.
-            rsp = push_stack(rsp, 0); // Initial R12.
-            rsp = push_stack(rsp, 0); // Initial R13.
-            rsp = push_stack(rsp, 0); // Initial R14.
-            rsp = push_stack(rsp, 0); // Initial R15.
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled).
+            rsp = push_stack(rsp, 0); // Initial R15.
+            rsp = push_stack(rsp, 0); // Initial R14.
+            rsp = push_stack(rsp, 0); // Initial R13.
+            rsp = push_stack(rsp, 0); // Initial R12.
+            rsp = push_stack(rsp, 0); // Initial RBX.
+            rsp = push_stack(rsp, 0); // Initial RBP.
 
             rsp
         };
@@ -269,14 +276,16 @@ impl ArchTask {
             rsp = push_stack(rsp, frame.rdx);
 
             // Registers to be restored in do_switch_thread().
-            rsp = push_stack(rsp, forked_child_entry as *const u8 as u64); // RIP.
-            rsp = push_stack(rsp, frame.rbp); // UserRBP.
-            rsp = push_stack(rsp, frame.rbx); // UserRBX.
-            rsp = push_stack(rsp, frame.r12); // UserR12.
-            rsp = push_stack(rsp, frame.r13); // UserR13.
-            rsp = push_stack(rsp, frame.r14); // UserR14.
-            rsp = push_stack(rsp, frame.r15); // UserR15.
-            rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled).
+            // Order must match do_switch_thread's pop sequence:
+            //   pop rbp, rbx, r12, r13, r14, r15, popfq, ret
+            rsp = push_stack(rsp, forked_child_entry as *const u8 as u64); // RIP (popped by ret).
+            rsp = push_stack(rsp, 0x02); // RFLAGS (popped by popfq, IF=0).
+            rsp = push_stack(rsp, frame.r15);
+            rsp = push_stack(rsp, frame.r14);
+            rsp = push_stack(rsp, frame.r13);
+            rsp = push_stack(rsp, frame.r12);
+            rsp = push_stack(rsp, frame.rbx);
+            rsp = push_stack(rsp, frame.rbp);
 
             rsp
         };
@@ -336,14 +345,15 @@ impl ArchTask {
             rsp = push_stack(rsp, frame.rdx);
 
             // do_switch_thread context frame.
+            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
             rsp = push_stack(rsp, forked_child_entry as *const u8 as u64);
-            rsp = push_stack(rsp, frame.rbp);
-            rsp = push_stack(rsp, frame.rbx);
-            rsp = push_stack(rsp, frame.r12);
-            rsp = push_stack(rsp, frame.r13);
-            rsp = push_stack(rsp, frame.r14);
-            rsp = push_stack(rsp, frame.r15);
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled)
+            rsp = push_stack(rsp, frame.r15);
+            rsp = push_stack(rsp, frame.r14);
+            rsp = push_stack(rsp, frame.r13);
+            rsp = push_stack(rsp, frame.r12);
+            rsp = push_stack(rsp, frame.rbx);
+            rsp = push_stack(rsp, frame.rbp);
             rsp
         };
 
@@ -539,6 +549,19 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     // Fill an invalid value for now: must be initialized in interrupt handlers.
     head.rsp3 = 0xbaad_5a5a_5b5b_baad;
 
+    // Sanity check: verify the return address on next's saved stack is valid.
+    let next_rsp_val = unsafe { *next.rsp.get() };
+    if next_rsp_val != 0 && next_rsp_val >= 0xffff_8000_0000_0000 {
+        let ret_addr = unsafe { *((next_rsp_val + 56) as *const u64) };
+        if ret_addr == 0 || (ret_addr > 0 && ret_addr < 0xffff_8000_0000_0000) {
+            let rsp_paddr = next_rsp_val - 0xffff_8000_0000_0000;
+            panic!(
+                "switch_thread BUG: cpu={} rsp_pa={:#x} ret={:#x}",
+                crate::arch::cpu_id(), rsp_paddr, ret_addr,
+            );
+        }
+    }
+
     unsafe {
         wrfsbase(next.fsbase.load());
         // Signal that prev's RSP is about to be overwritten.  The assembly
@@ -550,6 +573,11 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
             next.rsp.get(),
             prev.context_saved.as_ptr() as *mut u8,
         );
+        // CRITICAL: prevent the compiler from tail-calling do_switch_thread.
+        // do_switch_thread is a context switch — it returns in a DIFFERENT
+        // thread's context.  A tail call tears down this frame first, but the
+        // returning thread needs this frame intact to clean up correctly.
+        core::arch::asm!("", options(nomem, nostack));
     }
 }
 
