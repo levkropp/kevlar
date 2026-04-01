@@ -51,6 +51,7 @@ unwinding = { version = "0.2", default-features = false, features = ["unwinder",
 # Kernel Extensions.
 virtio_blk = { path = "../exts/virtio_blk" }
 virtio_net = { path = "../exts/virtio_net" }
+bochs_fb = { path = "../exts/bochs_fb" }
 
 # Arch-specific dependencies.
 [target.'cfg(target_arch = "x86_64")'.dependencies]

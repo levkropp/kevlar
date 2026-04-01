@@ -35,6 +35,9 @@ pub mod task;
 #[cfg(feature = "ktrace")]
 pub mod debugcon;
 mod vga;
+pub mod fbcon;
+pub(crate) mod ps2kbd;
+pub mod ps2mouse;
 
 pub use backtrace::Backtrace;
 pub use idle::{halt, idle};

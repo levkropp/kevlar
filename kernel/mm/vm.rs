@@ -21,6 +21,11 @@ pub enum VmAreaType {
         offset: usize,
         file_size: usize,
     },
+    /// Device memory mapped directly into userspace (e.g., framebuffer BAR).
+    /// Pages are identity-mapped from the physical base address.
+    DeviceMemory {
+        phys_base: usize,
+    },
 }
 
 impl VmAreaType {
@@ -34,6 +39,11 @@ impl VmAreaType {
                     file: file.clone(),
                     offset: offset + shift,
                     file_size: file_size.saturating_sub(shift),
+                }
+            }
+            VmAreaType::DeviceMemory { phys_base } => {
+                VmAreaType::DeviceMemory {
+                    phys_base: phys_base + shift,
                 }
             }
         }
@@ -189,6 +199,13 @@ impl Vm {
 
         self.last_fault_vma_idx = None;
         None
+    }
+
+    /// Returns the length of the VMA starting at the given address, if any.
+    pub fn vma_len_at(&self, vaddr: UserVAddr) -> Option<usize> {
+        self.vm_areas.iter()
+            .find(|vma| vma.start() == vaddr)
+            .map(|vma| vma.len())
     }
 
     pub fn last_fault_vma_idx(&self) -> Option<usize> {

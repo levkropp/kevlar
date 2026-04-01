@@ -156,4 +156,10 @@ pub fn init(use_second_serialport: bool) {
         SERIAL1.initialize();
         set_debug_printer(&Serial1Printer);
     }
+
+    // Initialize PS/2 keyboard (IRQ1) and mouse (IRQ12)
+    super::ps2kbd::init();
+    enable_irq(1);
+    super::ps2mouse::init();
+    enable_irq(12);
 }

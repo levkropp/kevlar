@@ -14,6 +14,8 @@ use kevlar_utils::once::Once;
 
 use super::tmpfs::TmpFs;
 
+pub mod fb;
+pub mod mice;
 mod null;
 pub mod tty;
 mod zero;
@@ -51,6 +53,20 @@ impl DevFs {
         root_dir.add_file("urandom", Arc::new(UrandomFile) as Arc<dyn FileLike>);
         root_dir.add_file("random", Arc::new(UrandomFile) as Arc<dyn FileLike>);
         root_dir.add_file("full", Arc::new(FullFile) as Arc<dyn FileLike>);
+        // Virtual terminal devices (all map to the serial console for now)
+        root_dir.add_file("tty0", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty1", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty2", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty3", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty4", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty5", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty6", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("tty7", SERIAL_TTY.clone() as Arc<dyn FileLike>);
+        root_dir.add_file("fb0", Arc::new(fb::FramebufferFile::new()) as Arc<dyn FileLike>);
+        // /dev/input/ directory for input devices
+        let input_dir = root_dir.add_dir("input");
+        input_dir.add_file("mice", Arc::new(mice::MiceFile::new()) as Arc<dyn FileLike>);
+        input_dir.add_file("event0", Arc::new(mice::MiceFile::new()) as Arc<dyn FileLike>);
         // /dev/shm directory for POSIX shared memory.
         root_dir.add_dir("shm");
 
@@ -77,8 +93,11 @@ pub fn lookup_device(major: u32, minor: u32) -> Option<Arc<dyn FileLike>> {
         (1, 7) => Some(Arc::new(FullFile) as Arc<dyn FileLike>),
         (1, 8) | (1, 9) => Some(Arc::new(UrandomFile) as Arc<dyn FileLike>),
         (1, 11) => Some(Arc::new(KmsgFile) as Arc<dyn FileLike>),
+        (4, 0..=7) |  // /dev/tty0-tty7 (major=4, minor=0-7)
         (4, 64) | (5, 0) | (5, 1) => Some(SERIAL_TTY.clone() as Arc<dyn FileLike>),
         (5, 2) => Some(PTMX.clone() as Arc<dyn FileLike>),
+        (29, 0) => Some(Arc::new(fb::FramebufferFile::new()) as Arc<dyn FileLike>),
+        (13, 63) => Some(Arc::new(mice::MiceFile::new()) as Arc<dyn FileLike>),
         _ => None,
     }
 }

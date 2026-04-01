@@ -122,6 +122,7 @@ fn emit_crash_and_exit(signal: Signal, fault_addr: usize, ip: usize) -> ! {
                 let vt = match vma.area_type() {
                     VmAreaType::Anonymous => "anon",
                     VmAreaType::File { .. } => "file",
+                    VmAreaType::DeviceMemory { .. } => "device",
                 };
                 vma_buf[vma_count] = (vma.start().value(), vma.end().value(), vt);
                 vma_count += 1;
@@ -391,6 +392,11 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                             warn!("  VMA[{}]: [{:#x}-{:#x}] prot={:#x} anon",
                                   i, vma.start().value(), vma.end().value(), vma.prot().bits());
                         }
+                        VmAreaType::DeviceMemory { phys_base } => {
+                            warn!("  VMA[{}]: [{:#x}-{:#x}] prot={:#x} device phys={:#x}",
+                                  i, vma.start().value(), vma.end().value(), vma.prot().bits(),
+                                  phys_base);
+                        }
                         VmAreaType::File { file, offset, file_size } => {
                             let fp = alloc::sync::Arc::as_ptr(file) as *const () as usize;
                             warn!("  VMA[{}]: [{:#x}-{:#x}] prot={:#x} file off={:#x} fsz={:#x} fp={:#x}",
@@ -442,6 +448,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
 
     match vma.area_type() {
         VmAreaType::Anonymous => { /* Zero-filled by zero_page above. */ }
+        VmAreaType::DeviceMemory { phys_base } => {
+            // Device memory (e.g., framebuffer): map the physical device page
+            // directly instead of allocating kernel memory and copying.
+            // Free the pre-allocated page — we'll use the device's physical page.
+            kevlar_platform::page_allocator::free_pages(paddr, 1);
+            let offset_in_vma = aligned_vaddr.value() - vma.start().value();
+            let device_paddr = PAddr::new(phys_base + offset_in_vma);
+
+            // prot_flags: bit 1 = writable
+            let prot = if vma.prot().bits() & 2 != 0 { 2 } else { 0 };
+            vm.page_table_mut()
+                .map_user_page_with_prot(aligned_vaddr, device_paddr, prot);
+
+            drop(vm);
+            drop(vm_ref);
+            return;
+        }
         VmAreaType::File {
             file,
             offset,
@@ -589,6 +612,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         let vma_type_str = match vma.area_type() {
             VmAreaType::Anonymous => "anonymous",
             VmAreaType::File { .. } => "file",
+            VmAreaType::DeviceMemory { .. } => "device",
         };
         debug::emit(DebugFilter::FAULT, &DebugEvent::PageFault {
             pid: current.pid().as_i32(),

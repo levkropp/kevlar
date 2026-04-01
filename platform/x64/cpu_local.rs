@@ -103,6 +103,28 @@ pub fn cpu_local_head() -> &'static mut CpuLocalHead {
     unsafe { &mut *(rdgsbase() as *mut CpuLocalHead) }
 }
 
+/// Expected GS base per CPU, set during init. Used for SMP debugging.
+static EXPECTED_GSBASE: [core::sync::atomic::AtomicU64; 8] = {
+    const ZERO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [ZERO; 8]
+};
+
+/// Verify that the current CPU's GS base matches what was set during init.
+/// Panics if GS was clobbered (SMP bug diagnostic).
+pub fn verify_gsbase(context: &str) {
+    let cpu = super::cpu_id() as usize;
+    if cpu >= 8 { return; }
+    let expected = EXPECTED_GSBASE[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    if expected == 0 { return; } // not initialized yet
+    let actual = unsafe { rdgsbase() };
+    if actual != expected {
+        panic!(
+            "GS base mismatch on CPU {} ({}): expected {:#x}, got {:#x}",
+            cpu, context, expected, actual
+        );
+    }
+}
+
 pub unsafe fn init(cpu_local_area: VAddr) {
     unsafe extern "C" {
         static __cpu_local: u8;
@@ -114,4 +136,14 @@ pub unsafe fn init(cpu_local_area: VAddr) {
     ptr::copy_nonoverlapping::<u8>(template.as_ptr(), cpu_local_area.as_mut_ptr(), len);
 
     wrgsbase(cpu_local_area.value() as u64);
+}
+
+/// Record the current GS base for later verification.
+/// Must be called AFTER cpu_id has been set (i.e. after `CPU_ID.set()`).
+pub fn record_gsbase() {
+    let cpu = super::cpu_id() as usize;
+    if cpu < 8 {
+        let gs = unsafe { rdgsbase() };
+        EXPECTED_GSBASE[cpu].store(gs, core::sync::atomic::Ordering::Relaxed);
+    }
 }

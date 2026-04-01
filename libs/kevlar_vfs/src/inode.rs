@@ -254,6 +254,13 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         None
     }
 
+    /// Returns the physical base address for device-backed mmap.
+    /// When set, mmap maps device memory (e.g., framebuffer BAR) directly
+    /// into userspace using uncached/write-combining page table entries.
+    fn mmap_phys_base(&self) -> Option<usize> {
+        None
+    }
+
     // --- Socket-specific methods (Phase 3: move to SocketOps trait) ---
 
     /// `bind(2)`.

@@ -78,6 +78,7 @@ pub mod arch {
         start_ap_preemption_timer, x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
+        fbcon, ps2mouse,
     };
 
     #[cfg(target_arch = "aarch64")]
@@ -139,6 +140,10 @@ pub trait Handler: Sync {
     /// The kernel may modify the frame to deliver a pending signal.
     /// Default implementation is a no-op.
     fn handle_interrupt_return(&self, _frame: *mut arch::PtRegs) {}
+
+    /// Called when a complete PS/2 mouse packet is received.
+    /// Wakes any process waiting on /dev/input/mice.
+    fn handle_mouse_event(&self) {}
 
     #[cfg(debug_assertions)]
     fn usercopy_hook(&self) {}
