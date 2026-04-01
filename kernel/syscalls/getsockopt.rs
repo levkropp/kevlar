@@ -19,8 +19,10 @@ const SO_ERROR: c_int = 4;
 const SO_SNDBUF: c_int = 7;
 const SO_RCVBUF: c_int = 8;
 const SO_KEEPALIVE: c_int = 9;
+const SO_PEERCRED: c_int = 17;
 const SO_RCVTIMEO: c_int = 20;
 const SO_SNDTIMEO: c_int = 21;
+const SO_PASSCRED: c_int = 16;
 const TCP_NODELAY: c_int = 1;
 
 fn write_int_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, value: c_int) -> Result<()> {
@@ -120,6 +122,30 @@ impl<'a> SyscallHandler<'a> {
             (SOL_SOCKET, SO_SNDTIMEO) => {
                 let us = self.get_socket_u64(fd, |tcp| tcp.sndtimeo_us(), |_udp| 0);
                 write_timeval_opt(optval, optlen, us)?;
+                Ok(0)
+            }
+            (SOL_SOCKET, SO_PEERCRED) => {
+                // struct ucred { pid_t pid; uid_t uid; gid_t gid; } = 12 bytes
+                // For local Unix sockets, return the current process's credentials.
+                // Remote TCP sockets: return current process (simplification).
+                let proc = current_process();
+                let pid = proc.pid().as_i32();
+                let ucred: [u8; 12] = {
+                    let mut buf = [0u8; 12];
+                    buf[0..4].copy_from_slice(&pid.to_le_bytes());
+                    buf[4..8].copy_from_slice(&0u32.to_le_bytes()); // uid=0 (root)
+                    buf[8..12].copy_from_slice(&0u32.to_le_bytes()); // gid=0 (root)
+                    buf
+                };
+                if let (Some(val), Some(len)) = (optval, optlen) {
+                    len.write::<c_int>(&12)?;
+                    val.write_bytes(&ucred)?;
+                }
+                Ok(0)
+            }
+            (SOL_SOCKET, SO_PASSCRED) => {
+                // Report that SCM_CREDENTIALS passing is enabled
+                write_int_opt(optval, optlen, 1)?;
                 Ok(0)
             }
             (IPPROTO_TCP, TCP_NODELAY) => {

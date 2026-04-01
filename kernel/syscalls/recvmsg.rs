@@ -19,6 +19,7 @@ use kevlar_platform::address::UserVAddr;
 // Linux cmsg constants.
 const SOL_SOCKET: i32 = 1;
 const SCM_RIGHTS: i32 = 1;
+const SCM_CREDENTIALS: i32 = 2;
 
 /// `struct msghdr` layout (x86_64 / aarch64).
 #[repr(C)]
@@ -200,6 +201,33 @@ impl<'a> SyscallHandler<'a> {
 
                     offset += aligned_len;
                 }
+            }
+        }
+
+        // If this is a Unix socket, always append SCM_CREDENTIALS with sender info.
+        // X11 and D-Bus expect this for authentication.
+        if offset == 0 && control_len >= CMSG_HDR_SIZE + 12 {
+            // Only send credentials if we have a Unix stream
+            if (**file).as_any().downcast_ref::<UnixStream>().is_some()
+                || owned_stream.is_some()
+            {
+                let proc = current_process();
+                let pid = proc.pid().as_i32();
+                let cmsg = CmsgHdr {
+                    cmsg_len: CMSG_HDR_SIZE + 12,
+                    cmsg_level: SOL_SOCKET,
+                    cmsg_type: SCM_CREDENTIALS,
+                };
+                let cmsg_ptr = UserVAddr::new_nonnull(control_addr + offset)?;
+                cmsg_ptr.write::<CmsgHdr>(&cmsg)?;
+                // struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+                let data_ptr = UserVAddr::new_nonnull(control_addr + offset + CMSG_HDR_SIZE)?;
+                data_ptr.write::<i32>(&pid)?;
+                let uid_ptr = UserVAddr::new_nonnull(control_addr + offset + CMSG_HDR_SIZE + 4)?;
+                uid_ptr.write::<u32>(&0)?; // uid=0 (root)
+                let gid_ptr = UserVAddr::new_nonnull(control_addr + offset + CMSG_HDR_SIZE + 8)?;
+                gid_ptr.write::<u32>(&0)?; // gid=0 (root)
+                offset += cmsg_align(CMSG_HDR_SIZE + 12);
             }
         }
 

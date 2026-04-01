@@ -192,15 +192,22 @@ impl FileLike for TcpSocket {
     }
 
     fn bind(&self, sockaddr: SockAddr) -> Result<()> {
-        let endpoint = super::sockaddr_to_endpoint(sockaddr)?;
-        // Reject if the port is already bound (EADDRINUSE), unless SO_REUSEADDR is set.
-        if endpoint.port != 0 {
-            let mut inuse = INUSE_ENDPOINTS.lock();
-            if inuse.contains(&endpoint.port) && !self.reuseaddr.load() {
-                return Err(Errno::EADDRINUSE.into());
+        let mut endpoint = super::sockaddr_to_endpoint(sockaddr)?;
+        let mut inuse = INUSE_ENDPOINTS.lock();
+        if endpoint.port == 0 {
+            // Assign an ephemeral port from the dynamic range (49152-65535).
+            let mut port: u16 = 49152;
+            while inuse.contains(&port) {
+                if port == u16::MAX {
+                    return Err(Errno::EAGAIN.into());
+                }
+                port += 1;
             }
-            inuse.insert(endpoint.port);
+            endpoint.port = port;
+        } else if inuse.contains(&endpoint.port) && !self.reuseaddr.load() {
+            return Err(Errno::EADDRINUSE.into());
         }
+        inuse.insert(endpoint.port);
         self.local_endpoint.store(Some(endpoint));
         Ok(())
     }

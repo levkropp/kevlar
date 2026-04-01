@@ -55,6 +55,7 @@ mod listen;
 mod lstat;
 mod mkdir;
 mod mmap;
+mod shm;
 mod msync;
 mod open;
 mod pipe;
@@ -261,6 +262,10 @@ mod syscall_numbers {
     pub const SYS_IOCTL: usize = 16;
     pub const SYS_WRITEV: usize = 20;
     pub const SYS_MADVISE: usize = 28;
+    pub const SYS_SHMGET: usize = 29;
+    pub const SYS_SHMAT: usize = 30;
+    pub const SYS_SHMCTL: usize = 31;
+    pub const SYS_SHMDT: usize = 67;
     pub const SYS_ACCESS: usize = 21;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_SELECT: usize = 23;
@@ -1326,6 +1331,11 @@ impl<'a> SyscallHandler<'a> {
                 a4 as c_int,
             ),
             SYS_MSYNC => self.sys_msync(UserVAddr::new_nonnull(a1)?, a2, a3 as i32),
+            // SysV shared memory (used by X11 MIT-SHM)
+            SYS_SHMGET => self.sys_shmget(a1 as c_int, a2, a3 as c_int),
+            SYS_SHMAT => self.sys_shmat(a1 as c_int, a2, a3 as c_int),
+            SYS_SHMCTL => self.sys_shmctl(a1 as c_int, a2 as c_int, a3),
+            SYS_SHMDT => self.sys_shmdt(a1),
             // M1 Phase 4: Filesystem mutations
             SYS_UNLINK => self.sys_unlink(&resolve_path(a1)?),
             SYS_RMDIR => self.sys_rmdir(&resolve_path(a1)?),
