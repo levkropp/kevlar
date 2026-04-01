@@ -463,7 +463,7 @@ impl FileLike for ProcPidMaps {
                         VmAreaType::File { offset, .. } => {
                             (*offset, String::new())
                         }
-                        VmAreaType::Anonymous => {
+                        VmAreaType::Anonymous | VmAreaType::DeviceMemory { .. } => {
                             // vm_areas[0] = stack, vm_areas[1] = heap (see Vm::new).
                             let label = if i == 0 {
                                 "[stack]"
