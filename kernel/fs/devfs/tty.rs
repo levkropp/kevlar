@@ -203,6 +203,91 @@ impl FileLike for Tty {
                 debug::usercopy::clear_context();
                 self.discipline.set_winsize(ws?);
             }
+            // ─── VT (Virtual Terminal) ioctls ──────────────────────────
+            // Used by Xorg, startx, and console programs. We have a single
+            // virtual terminal, so these return sensible defaults.
+            // Reference: Linux console_ioctl(4), FreeBSD sys/consio.h.
+
+            // VT_GETMODE: get VT switching mode
+            0x5601 => {
+                // struct vt_mode { char mode; char waitv; short relsig; short acqsig; short frsig; }
+                let vt_mode = [0u8; 8]; // VT_AUTO=0, all signals 0
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write_bytes(&vt_mode)?;
+            }
+            // VT_SETMODE: set VT switching mode
+            0x5602 => {
+                // Accept silently — we don't support VT switching yet
+            }
+            // VT_GETSTATE: get active/open VT bitmask
+            0x5603 => {
+                // struct vt_stat { unsigned short v_active; unsigned short v_signal; unsigned short v_state; }
+                let vt_stat: [u8; 6] = [
+                    1, 0,    // v_active = 1 (VT1)
+                    0, 0,    // v_signal = 0
+                    0x03, 0, // v_state = 0x0003 (VT1+VT2 open)
+                ];
+                let arg = UserVAddr::new_nonnull(arg)?;
+                arg.write_bytes(&vt_stat)?;
+            }
+            // VT_OPENQRY: find first free VT
+            0x5600 => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let free_vt: c_int = 2; // Report VT2 as free
+                arg.write::<c_int>(&free_vt)?;
+            }
+            // VT_ACTIVATE: switch to VT N
+            0x5606 => {
+                // Accept silently — single VT
+            }
+            // VT_WAITACTIVE: wait until VT N is active
+            0x5607 => {
+                // Return immediately — VT is always "active"
+            }
+            // VT_RELDISP: release VT display
+            0x5605 => {}
+            // VT_SETACTIVATE: set and activate VT
+            0x560F => {}
+
+            // ─── KD (Keyboard/Display) ioctls ───────────────────────────
+
+            // KDGETMODE: get current text/graphics mode
+            0x4B3B => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let mode: c_int = 0; // KD_TEXT
+                arg.write::<c_int>(&mode)?;
+            }
+            // KDSETMODE: set text/graphics mode
+            0x4B3A => {
+                // Accept silently (KD_TEXT=0, KD_GRAPHICS=1)
+            }
+            // KDGKBMODE: get keyboard mode
+            0x4B44 => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let mode: c_int = 0; // K_XLATE
+                arg.write::<c_int>(&mode)?;
+            }
+            // KDSKBMODE: set keyboard mode
+            0x4B45 => {
+                // Accept silently
+            }
+            // KDGKBTYPE: get keyboard type
+            0x4B33 => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let kb_type: c_int = 0x02; // KB_101 (standard keyboard)
+                arg.write::<c_int>(&kb_type)?;
+            }
+            // KDGKBLED: get LED state
+            0x4B64 => {
+                let arg = UserVAddr::new_nonnull(arg)?;
+                let leds: c_int = 0;
+                arg.write::<c_int>(&leds)?;
+            }
+            // KDSKBLED: set LED state
+            0x4B65 => {}
+            // KDENABIO / KDDISABIO: enable/disable I/O port access
+            0x4B36 | 0x4B37 => {}
+
             _ => return Err(Errno::ENOSYS.into()),
         }
 

@@ -681,14 +681,27 @@ impl UnixSocket {
     }
 }
 
-/// Extract a NUL-terminated path from a SockAddrUn.
+/// Extract a path from a SockAddrUn.
+/// Supports both filesystem paths (NUL-terminated) and abstract namespace
+/// (first byte is \0, remaining bytes are the name — used by D-Bus, X11).
 fn sockaddr_un_path(sa: &SockAddrUn) -> Result<&str> {
-    // Find NUL terminator in the path field.
-    let nul_pos = sa.path.iter().position(|&b| b == 0).unwrap_or(sa.path.len());
-    if nul_pos == 0 {
-        return Err(Errno::EINVAL.into());
+    if sa.path[0] == 0 {
+        // Abstract namespace: "\0<name>" — use bytes 1..nul as the key.
+        // We prefix with "@" internally to distinguish from filesystem paths.
+        // The name is everything after the leading \0 up to the next \0.
+        let end = sa.path[1..].iter().position(|&b| b == 0).map(|p| p + 1).unwrap_or(sa.path.len());
+        if end <= 1 {
+            return Err(Errno::EINVAL.into());
+        }
+        core::str::from_utf8(&sa.path[1..end]).map_err(|_| Error::new(Errno::EINVAL))
+    } else {
+        // Filesystem path: NUL-terminated
+        let nul_pos = sa.path.iter().position(|&b| b == 0).unwrap_or(sa.path.len());
+        if nul_pos == 0 {
+            return Err(Errno::EINVAL.into());
+        }
+        core::str::from_utf8(&sa.path[..nul_pos]).map_err(|_| Error::new(Errno::EINVAL))
     }
-    core::str::from_utf8(&sa.path[..nul_pos]).map_err(|_| Error::new(Errno::EINVAL))
 }
 
 impl FileLike for UnixSocket {
