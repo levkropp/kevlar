@@ -38,20 +38,27 @@ impl<'a> SyscallHandler<'a> {
                 .clone();
             let file = opened_file.as_file()?.clone();
 
-            // Compute the actual file size remaining from offset, so the page
-            // fault handler knows where file data ends and zero-fill begins
-            // (important for BSS-like regions where p_filesz < p_memsz).
-            let file_size = opened_file.inode().stat()
-                .map(|st| {
-                    let remaining = (st.size.0 as usize).saturating_sub(offset as usize);
-                    core::cmp::min(len, remaining)
-                })
-                .unwrap_or(len);
+            // Check if the file provides device memory for mmap (e.g., /dev/fb0).
+            if let Some(phys_base) = file.mmap_phys_base() {
+                VmAreaType::DeviceMemory {
+                    phys_base: phys_base + offset as usize,
+                }
+            } else {
+                // Compute the actual file size remaining from offset, so the page
+                // fault handler knows where file data ends and zero-fill begins
+                // (important for BSS-like regions where p_filesz < p_memsz).
+                let file_size = opened_file.inode().stat()
+                    .map(|st| {
+                        let remaining = (st.size.0 as usize).saturating_sub(offset as usize);
+                        core::cmp::min(len, remaining)
+                    })
+                    .unwrap_or(len);
 
-            VmAreaType::File {
-                file,
-                offset: offset as usize,
-                file_size,
+                VmAreaType::File {
+                    file,
+                    offset: offset as usize,
+                    file_size,
+                }
             }
         };
 

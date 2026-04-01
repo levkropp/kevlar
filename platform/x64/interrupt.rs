@@ -132,8 +132,13 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
 
             let irq = vec - VECTOR_IRQ_BASE;
             match irq {
-                TIMER_IRQ | TIMER_IRQ2 => { handler().handle_timer_irq(); }
+                TIMER_IRQ | TIMER_IRQ2 => {
+                    super::cpu_local::verify_gsbase("timer_irq");
+                    handler().handle_timer_irq();
+                }
+                1 => { super::ps2kbd::ps2_keyboard_irq_handler(); }
                 SERIAL0_IRQ => { super::serial::serial0_irq_handler(); }
+                12 => { super::ps2mouse::ps2_mouse_irq_handler(); }
                 _ => { handler().handle_irq(irq); }
             }
             // Signal delivery is handled by x64_check_signal_on_irq_return

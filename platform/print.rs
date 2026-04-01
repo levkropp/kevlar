@@ -5,6 +5,7 @@ use kevlar_utils::static_cell::StaticCell;
 
 static PRINTER: StaticCell<&dyn Printer> = StaticCell::new(&NopPrinter);
 static DEBUG_PRINTER: StaticCell<&dyn Printer> = StaticCell::new(&NopPrinter);
+static SECONDARY_PRINTER: StaticCell<&dyn Printer> = StaticCell::new(&NopPrinter);
 
 pub fn get_printer() -> &'static dyn Printer {
     PRINTER.load()
@@ -22,6 +23,12 @@ pub fn set_printer(new_printer: &'static dyn Printer) {
 /// Sets the global log printer for log messages.
 pub fn set_debug_printer(new_printer: &'static dyn Printer) {
     DEBUG_PRINTER.store(new_printer);
+}
+
+/// Adds a secondary printer that receives a copy of all debug output
+/// (e.g., framebuffer console alongside serial).
+pub fn add_printer(printer: &'static dyn Printer) {
+    SECONDARY_PRINTER.store(printer);
 }
 
 pub trait Printer: Sync {
@@ -46,7 +53,9 @@ pub struct PrinterWrapper;
 
 impl fmt::Write for PrinterWrapper {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        get_debug_printer().print_bytes(s.as_bytes());
+        let bytes = s.as_bytes();
+        get_debug_printer().print_bytes(bytes);
+        SECONDARY_PRINTER.load().print_bytes(bytes);
         Ok(())
     }
 }

@@ -453,6 +453,58 @@ test-alpine: alpine-disk
 		echo "ALL ALPINE TESTS PASSED"; \
 	fi
 
+# Comprehensive Alpine smoke test: 8 phases, ~60 tests.
+# Validates Kevlar as a drop-in Linux replacement.
+.PHONY: test-smoke-alpine
+test-smoke-alpine: alpine-disk
+	$(PROGRESS) "TEST" "Alpine smoke test (8 phases, ~60 tests)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/smoke-alpine"
+	timeout 600 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-smoke-alpine-$(PROFILE).log; true
+	@echo ""
+	@echo "═══ Smoke Test Results ═══"
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP)' \
+		/tmp/kevlar-smoke-alpine-$(PROFILE).log | sort | uniq -c | sort -rn || true
+	@echo ""
+	@grep -E '^TEST_FAIL' /tmp/kevlar-smoke-alpine-$(PROFILE).log || echo "No failures!"
+	@echo ""
+	@grep -E '^(SMOKE TEST COMPLETE|TEST_END)' \
+		/tmp/kevlar-smoke-alpine-$(PROFILE).log || echo "(no summary)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-smoke-alpine-$(PROFILE).log; then \
+		echo "SMOKE TEST: SOME FAILURES"; exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-smoke-alpine-$(PROFILE).log; then \
+		echo "SMOKE TEST: ALL PASSED"; \
+	fi
+
+# Build Alpine X11 disk image (512MB with Xorg, xterm, twm, fbdev driver)
+build/alpine-xorg.img:
+	$(PROGRESS) "MKDISK" "Alpine X11 (512MB)"
+	$(PYTHON3) tools/build-alpine-xorg.py build/alpine-xorg.img
+
+# Test X11/Xorg on Kevlar with fbdev framebuffer
+.PHONY: test-xorg
+test-xorg: build/alpine-xorg.img
+	$(PROGRESS) "TEST" "X11/Xorg fbdev integration"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xorg"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-xorg-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-xorg-$(PROFILE).log || echo "(no test output)"
+	@echo ""
+	@grep 'TEST_END' /tmp/kevlar-test-xorg-$(PROFILE).log || echo "(no summary)"
+
+# Run Alpine graphical (with QEMU window)
+.PHONY: run-alpine-gui
+run-alpine-gui: build/alpine-xorg.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm --gui --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -mem-prealloc
+
 # M10 Phase A: apk add integration test
 .PHONY: test-m10-apk
 test-m10-apk: alpine-disk

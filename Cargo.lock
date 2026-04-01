@@ -51,6 +51,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bochs_fb"
+version = "0.1.0"
+dependencies = [
+ "kevlar_api",
+]
+
+[[package]]
 name = "buddy_system_allocator"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -243,6 +250,7 @@ dependencies = [
  "arrayvec",
  "atomic_refcell",
  "bitflags 2.11.0",
+ "bochs_fb",
  "crossbeam",
  "goblin",
  "hashbrown",
