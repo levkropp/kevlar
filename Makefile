@@ -505,6 +505,19 @@ run-alpine-gui: build/alpine-xorg.img
 		--arch $(ARCH) --kvm --gui --disk build/alpine-xorg.img \
 		$(kernel_qemu_arg) -- -mem-prealloc
 
+# Build Alpine XFCE disk image (1GB with XFCE4, D-Bus, fonts, icons)
+build/alpine-xfce.img:
+	$(PROGRESS) "MKDISK" "Alpine XFCE (1GB)"
+	$(PYTHON3) tools/build-alpine-xfce.py build/alpine-xfce.img
+
+# Run Alpine XFCE interactively (with QEMU window)
+.PHONY: run-alpine-xfce
+run-alpine-xfce: build/alpine-xfce.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm --gui --disk build/alpine-xfce.img \
+		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
+
 # M10 Phase A: apk add integration test
 .PHONY: test-m10-apk
 test-m10-apk: alpine-disk
