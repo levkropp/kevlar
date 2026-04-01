@@ -1129,6 +1129,20 @@ impl Process {
             warn!("PID 1 exiting with status {}", status);
             crate::syscalls::dump_pid1_trace();
             info!("init exited with status {}, halting system", status);
+
+            // Kill all remaining processes before halting to prevent GPF from
+            // orphaned processes running with stale page tables after halt.
+            {
+                let all_pids: Vec<PId> = PROCESSES.lock().keys().cloned().collect();
+                for pid in all_pids {
+                    if pid != PId::new(1) {
+                        if let Some(proc) = PROCESSES.lock().get(&pid).cloned() {
+                            proc.send_signal(SIGKILL);
+                        }
+                    }
+                }
+            }
+
             kevlar_platform::arch::halt();
         }
 
@@ -1302,6 +1316,7 @@ impl Process {
                     let vt = match vma.area_type() {
                         VmAreaType::Anonymous => "anon",
                         VmAreaType::File { .. } => "file",
+                        VmAreaType::DeviceMemory { .. } => "device",
                     };
                     vma_buf[vma_count] = (vma.start().value(), vma.end().value(), vt);
                     vma_count += 1;
@@ -1390,9 +1405,13 @@ impl Process {
     }
 
     /// Returns `true` if there's a deliverable (pending AND unblocked) signal.
+    /// SIGKILL and SIGSTOP can never be blocked (POSIX), so they are always
+    /// deliverable regardless of the signal mask.
     pub fn has_pending_signals(&self) -> bool {
         let pending = self.signal_pending.load(Ordering::Relaxed);
-        let blocked = self.sigset_load().bits() as u32;
+        let mut blocked = self.sigset_load().bits() as u32;
+        // SIGKILL (9) and SIGSTOP (19) can NEVER be blocked (POSIX).
+        blocked &= !((1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1)));
         (pending & !blocked) != 0
     }
 
@@ -2299,7 +2318,7 @@ fn save_vma_template(file_ptr: usize, vm: &Vm, vma_start_idx: usize) {
         .map(|vma| {
             let (is_file, file_offset, file_size) = match vma.area_type() {
                 VmAreaType::File { offset, file_size, .. } => (true, *offset, *file_size),
-                VmAreaType::Anonymous => (false, 0, 0),
+                VmAreaType::Anonymous | VmAreaType::DeviceMemory { .. } => (false, 0, 0),
             };
             VmaTemplateEntry {
                 start: vma.start().value(),
@@ -2969,7 +2988,7 @@ fn prefault_small_anonymous(vm: &mut Vm) {
         let vma_end = vma.end().value();
 
         let prefault_start = match vma.area_type() {
-            VmAreaType::Anonymous => {
+            VmAreaType::Anonymous | VmAreaType::DeviceMemory { .. } => {
                 // Small anonymous VMAs (gaps, padding).
                 let num_pages = (vma_end - vma_start) / PAGE_SIZE;
                 if num_pages == 0 || num_pages > MAX_PREFAULT_PAGES {

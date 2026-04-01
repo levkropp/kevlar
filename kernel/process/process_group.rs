@@ -79,10 +79,19 @@ impl ProcessGroup {
         }
     }
 
-    /// Sends a signal to all processes in the proces group.
+    /// Sends a signal to all processes in the process group.
+    /// Gracefully skips processes that have already been dropped.
     pub fn signal(&mut self, signal: Signal) {
-        for proc in &self.processes {
-            proc.upgrade().unwrap().send_signal(signal);
+        self.processes.retain(|proc| {
+            if let Some(p) = proc.upgrade() {
+                p.send_signal(signal);
+                true
+            } else {
+                false // Remove dead weak refs
+            }
+        });
+        if self.processes.is_empty() {
+            PROCESS_GROUPS.lock().remove(&self.pgid);
         }
     }
 }
