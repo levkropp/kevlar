@@ -1362,7 +1362,7 @@ impl<'a> SyscallHandler<'a> {
                         -1
                     } else {
                         let ts = UserVAddr::new_nonnull(a3)?.read::<[i64; 2]>()?;
-                        let ms = ts[0] * 1000 + ts[1] / 1_000_000;
+                        let ms = ts[0].saturating_mul(1000).saturating_add(ts[1] / 1_000_000);
                         if ms > (c_int::MAX as i64) { c_int::MAX } else { ms as c_int }
                     };
                     // sigmask (a4) is ignored for now.
