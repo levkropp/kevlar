@@ -1703,8 +1703,10 @@ impl<'a> SyscallHandler<'a> {
             251 /* ioprio_set */ => Ok(0),
             252 /* ioprio_get */ => Ok(0),
             27  /* mincore */ => Err(Error::new(Errno::ENOSYS)),
-            299 /* recvmmsg */ => Err(Error::new(Errno::ENOSYS)), // D-Bus falls back to recvmsg
-            307 /* sendmmsg */ => Err(Error::new(Errno::ENOSYS)), // D-Bus falls back to sendmsg
+            239 /* get_mempolicy */ => Err(Error::new(Errno::ENOSYS)), // glib probes, has fallback
+            299 /* recvmmsg */ => Err(Error::new(Errno::ENOSYS)),
+            307 /* sendmmsg */ => Err(Error::new(Errno::ENOSYS)),
+            324 /* membarrier */ => Ok(0), // glib uses for RCU, safe to stub as success
             _ => {
                 let pid = current_process().pid().as_i32();
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {

@@ -510,6 +510,19 @@ build/alpine-xfce.img:
 	$(PROGRESS) "MKDISK" "Alpine XFCE (1GB)"
 	$(PYTHON3) tools/build-alpine-xfce.py build/alpine-xfce.img
 
+# Test XFCE desktop startup (batch mode, single CPU for stability)
+.PHONY: test-xfce
+test-xfce: build/alpine-xfce.img
+	$(PROGRESS) "TEST" "XFCE desktop startup"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xfce"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-xfce.img \
+		$(kernel_qemu_arg) -- -smp 1 -m 1024 2>&1 \
+		| tee /tmp/kevlar-test-xfce-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-xfce-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-xfce-$(PROFILE).log || echo "(no summary)"
+
 # Run Alpine XFCE interactively (with QEMU window)
 .PHONY: run-alpine-xfce
 run-alpine-xfce: build/alpine-xfce.img

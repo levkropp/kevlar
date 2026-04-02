@@ -163,15 +163,11 @@ def main():
         )
         os.chmod(home / ".xinitrc", 0o755)
 
-        # --- inittab: boot services + serial login + auto-start X ---
+        # --- inittab: minimal boot + shell (D-Bus started manually) ---
         (root / "etc" / "inittab").write_text(
             "# Kevlar XFCE inittab\n"
             "::sysinit:/bin/mkdir -p /run/dbus /tmp/.X11-unix\n"
             "::sysinit:/bin/hostname kevlar\n"
-            "::sysinit:/sbin/ip link set lo up\n"
-            "::sysinit:/sbin/ip link set eth0 up\n"
-            "::sysinit:/sbin/ip addr add 10.0.2.15/24 dev eth0\n"
-            "::sysinit:/sbin/ip route add default via 10.0.2.2\n"
             "::sysinit:/usr/bin/dbus-daemon --system 2>/dev/null\n"
             "ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100\n"
             "::shutdown:/bin/sync\n"

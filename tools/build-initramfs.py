@@ -146,6 +146,7 @@ def compile_all_local():
         ("testing/test_readdir_debug.c", "test-readdir-dbg", []),
         ("testing/smoke_alpine.c",       "smoke-alpine",     []),
         ("testing/test_xorg.c",          "test-xorg",        []),
+        ("testing/test_xfce.c",          "test-xfce",        []),
     ]
     for src_rel, name, extra in musl_bins:
         src = ROOT / src_rel
