@@ -286,7 +286,10 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     virtio_net::init();
     profiler.lap_time("virtio_net init");
 
-    // Initialize device drivers.
+    // Register Bochs VGA framebuffer prober (before PCI scan).
+    bochs_fb::init();
+
+    // Initialize device drivers (PCI bus scan invokes registered probers).
     kevlar_api::kernel_ops::init_drivers(
         bootinfo.pci_enabled,
         &bootinfo.pci_allowlist,
