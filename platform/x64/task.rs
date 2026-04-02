@@ -184,7 +184,7 @@ impl ArchTask {
         let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2).expect("user thread IST stack");
         let syscall_stack = crate::stack_cache::alloc_kernel_stack(2).expect("user thread syscall stack");
         let xsave_area =
-            alloc_pages_owned(1, AllocPageFlags::KERNEL).expect("user thread xsave area");
+            alloc_pages_owned(2, AllocPageFlags::KERNEL).expect("user thread xsave area");
         init_xsave_area(&xsave_area);
 
         let rsp = unsafe {
@@ -240,14 +240,14 @@ impl ArchTask {
     }
 
     pub fn fork(&self, frame: &PtRegs) -> Result<ArchTask, PageAllocError> {
-        let xsave_area = alloc_pages_owned(1, AllocPageFlags::KERNEL)?;
+        let xsave_area = alloc_pages_owned(2, AllocPageFlags::KERNEL)?;
         // Copy the parent's FPU/SSE state to the child.
         if let Some(parent_xsave) = self.xsave_area.as_ref() {
             unsafe {
                 core::ptr::copy_nonoverlapping::<u8>(
                     parent_xsave.as_mut_ptr(),
                     xsave_area.as_mut_ptr(),
-                    PAGE_SIZE,
+                    2 * PAGE_SIZE,
                 );
             }
         } else {
@@ -317,7 +317,7 @@ impl ArchTask {
     /// - Uses `fs_base` for the FS segment (TLS).
     /// - RAX = 0 in the child (clone returns 0 in child thread).
     pub fn new_thread(frame: &PtRegs, child_stack: u64, fs_base: u64) -> Result<ArchTask, PageAllocError> {
-        let xsave_area = alloc_pages_owned(1, AllocPageFlags::KERNEL)?;
+        let xsave_area = alloc_pages_owned(2, AllocPageFlags::KERNEL)?;
         init_xsave_area(&xsave_area);
         let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)?;
         let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2)?;
