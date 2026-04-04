@@ -333,8 +333,26 @@ int main(void) {
         }
     }
 
-    // --- Phase 4: Start XFCE ---
-    printf("\n=== Phase 4: XFCE Session ===\n");
+    // --- Phase 4: Font cache + xterm test ---
+    printf("\n=== Phase 4: Font Cache + X11 Rendering ===\n");
+    {
+        // Generate font caches (required by GTK and xterm)
+        printf("  Running fc-cache...\n"); fflush(stdout);
+        sh_run("fc-cache -f 2>/dev/null; mkfontdir /usr/share/fonts/misc 2>/dev/null", 15000);
+        printf("  fc-cache done\n"); fflush(stdout);
+
+        // Start xterm to test basic X11 rendering
+        start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 -e 'echo XTERM_RUNNING; sleep 30' 2>/dev/null");
+        sleep(3);
+
+        if (sh_run("pgrep -x xterm >/dev/null 2>&1", 2000) == 0)
+            pass("xterm_running");
+        else
+            fail("xterm_running", "xterm not found");
+    }
+
+    // --- Phase 5: Start XFCE ---
+    printf("\n=== Phase 5: XFCE Session ===\n");
     {
         // Test: can we exec startxfce4 directly inside the chroot?
         {
@@ -345,9 +363,11 @@ int main(void) {
             printf("  startxfce4 check: %s\n", b);
         }
         // Start session D-Bus manually, then startxfce4
-        // Use dbus-launch which handles session bus + startxfce4
+        // Start XFCE with proper environment
         start_bg("export DISPLAY=:0 HOME=/root "
-                 "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin; "
+                 "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
+                 "XDG_DATA_DIRS=/usr/share "
+                 "GTK_THEME=Adwaita; "
                  "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
                  ">/tmp/xfce-session.log 2>&1");
         printf("  Waiting 20s for XFCE to initialize...\n");
