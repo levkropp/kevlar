@@ -27,7 +27,9 @@ impl fmt::Debug for MiceFile {
 
 impl FileLike for MiceFile {
     fn stat(&self) -> Result<Stat> {
+        use crate::fs::stat::{FileMode, S_IFCHR};
         Ok(Stat {
+            mode: FileMode::new(S_IFCHR | 0o666),
             rdev: crate::fs::stat::DevId::new((13 << 8) | 63), // major=13 minor=63
             ..Stat::zeroed()
         })

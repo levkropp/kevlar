@@ -140,6 +140,14 @@ impl SysFs {
             add_dev_files(&dev_dir, dev.major, dev.minor, dev.devname);
         }
 
+        // Framebuffer device: /sys/class/graphics/fb0
+        // Xorg's fbdev driver probes this path to discover framebuffers.
+        if bochs_fb::is_initialized() {
+            let graphics_dir = self.class_dir.add_dir("graphics");
+            let fb0_dir = graphics_dir.add_dir("fb0");
+            add_dev_files(&fb0_dir, 29, 0, "fb0");
+        }
+
         // Block device: virtio-blk (major 253, minor 0).
         if kevlar_api::driver::block::block_device().is_some() {
             let vda_dir = self.block_dir.add_dir("vda");
