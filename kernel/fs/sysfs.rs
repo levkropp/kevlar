@@ -57,6 +57,40 @@ impl FileLike for SysfsFile {
     }
 }
 
+// ── SysfsBinary — read-only binary file ───────────────────────────
+
+struct SysfsBinary(alloc::vec::Vec<u8>);
+
+impl fmt::Debug for SysfsBinary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SysfsBinary").finish()
+    }
+}
+
+impl FileLike for SysfsBinary {
+    fn stat(&self) -> Result<Stat> {
+        Ok(Stat {
+            mode: FileMode::new(S_IFREG | 0o444),
+            size: kevlar_vfs::stat::FileSize(self.0.len() as isize),
+            ..Stat::zeroed()
+        })
+    }
+
+    fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
+        if offset >= self.0.len() {
+            return Ok(0);
+        }
+        let len = min(self.0.len() - offset, buf.len());
+        let mut writer = UserBufWriter::from(buf);
+        writer.write_bytes(&self.0[offset..offset + len])?;
+        Ok(len)
+    }
+
+    fn poll(&self) -> Result<PollStatus> {
+        Ok(PollStatus::POLLIN)
+    }
+}
+
 // ── Device table ───────────────────────────────────────────────────
 
 struct DeviceEntry {
@@ -101,6 +135,7 @@ pub struct SysFs {
     tmpfs: TmpFs,
     class_dir: Arc<Dir>,
     block_dir: Arc<Dir>,
+    pci_devices: Arc<Dir>,
 }
 
 impl SysFs {
@@ -113,11 +148,14 @@ impl SysFs {
         fs.add_dir("cgroup");
         let class_dir = root.add_dir("class");
         root.add_dir("devices");
-        root.add_dir("bus");
+        let bus_dir = root.add_dir("bus");
+        // /sys/bus/pci/devices/ — Xorg scans this for GPU detection
+        let pci_bus = bus_dir.add_dir("pci");
+        let pci_devices = pci_bus.add_dir("devices");
         root.add_dir("kernel");
         let block_dir = root.add_dir("block");
 
-        SysFs { tmpfs, class_dir, block_dir }
+        SysFs { tmpfs, class_dir, block_dir, pci_devices }
     }
 
     /// Populate sysfs with device entries. Called after drivers are initialized.
@@ -146,6 +184,47 @@ impl SysFs {
             let graphics_dir = self.class_dir.add_dir("graphics");
             let fb0_dir = graphics_dir.add_dir("fb0");
             add_dev_files(&fb0_dir, 29, 0, "fb0");
+
+            // PCI device entry — Xorg scans /sys/bus/pci/devices/ for VGA class.
+            let pci_dev = self.pci_devices.add_dir("0000:00:02.0");
+            pci_dev.add_file("vendor", Arc::new(SysfsFile("0x1234\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("device", Arc::new(SysfsFile("0x1111\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("class", Arc::new(SysfsFile("0x030000\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("subsystem_vendor", Arc::new(SysfsFile("0x1af4\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("subsystem_device", Arc::new(SysfsFile("0x1100\n".into())) as Arc<dyn FileLike>);
+            // resource: BAR0 at the framebuffer physical address
+            let bar0_addr = bochs_fb::phys_addr();
+            let bar0_end = bar0_addr + bochs_fb::size() - 1;
+            let resource_str = alloc::format!(
+                "{:#018x} {:#018x} 0x0000000000040200\n", bar0_addr, bar0_end
+            );
+            pci_dev.add_file("resource", Arc::new(SysfsFile(resource_str)) as Arc<dyn FileLike>);
+            // config: raw 256-byte PCI config space (libpciaccess reads this)
+            let mut config = [0u8; 256];
+            // Vendor ID (0x1234) at offset 0
+            config[0] = 0x34; config[1] = 0x12;
+            // Device ID (0x1111) at offset 2
+            config[2] = 0x11; config[3] = 0x11;
+            // Command: I/O + Memory + Bus Master at offset 4
+            config[4] = 0x07; config[5] = 0x00;
+            // Status at offset 6
+            config[6] = 0x00; config[7] = 0x00;
+            // Revision at offset 8
+            config[8] = 0x05;
+            // Class code: VGA (0x030000) at offsets 9-11
+            config[9] = 0x00;  // prog_if
+            config[10] = 0x00; // subclass (VGA)
+            config[11] = 0x03; // class (Display)
+            // BAR0 at offset 0x10 (framebuffer physical address)
+            let bar0_bytes = (bar0_addr as u32).to_le_bytes();
+            config[0x10..0x14].copy_from_slice(&bar0_bytes);
+            // BAR2 at offset 0x18 (Bochs VBE MMIO)
+            config[0x18] = 0x00; config[0x19] = 0x00;
+            config[0x1a] = 0x00; config[0x1b] = 0x00;
+            // Subsystem vendor/device at offsets 0x2c-0x2f
+            config[0x2c] = 0xf4; config[0x2d] = 0x1a; // 0x1af4
+            config[0x2e] = 0x00; config[0x2f] = 0x11; // 0x1100
+            pci_dev.add_file("config", Arc::new(SysfsBinary(config.to_vec())) as Arc<dyn FileLike>);
         }
 
         // Block device: virtio-blk (major 253, minor 0).

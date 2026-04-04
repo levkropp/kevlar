@@ -136,9 +136,16 @@ def main():
         xorg_conf_dir = root / "etc" / "X11" / "xorg.conf.d"
         xorg_conf_dir.mkdir(parents=True, exist_ok=True)
         (xorg_conf_dir / "10-fbdev.conf").write_text(
+            '# Kevlar: disable udev auto-detect, use explicit fbdev config\n'
+            'Section "ServerFlags"\n'
+            '    Option "AutoAddDevices" "false"\n'
+            '    Option "AutoAddGPU" "false"\n'
+            'EndSection\n'
+            '\n'
             'Section "Device"\n'
             '    Identifier "fbdev"\n'
             '    Driver "fbdev"\n'
+            '#    BusID "PCI:0:2:0"\n'
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'
