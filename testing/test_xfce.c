@@ -205,6 +205,13 @@ int main(void) {
         // Clean stale locks
         sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 1000);
 
+        // Test opening fb0 from the chroot (same as what Xorg does)
+        {
+            char b[256];
+            sh_capture("dd if=/dev/fb0 bs=4 count=1 of=/dev/null 2>&1 && echo 'fb0 open OK'", b, sizeof(b), 3000);
+            printf("  chroot fb0 open: %s\n", b);
+        }
+
         // Start Xorg in background
         start_bg("/usr/libexec/Xorg :0 -noreset -nolisten tcp "
                  "-config /etc/X11/xorg.conf.d/10-fbdev.conf vt1 2>&1");
@@ -222,8 +229,12 @@ int main(void) {
                 int rc2 = sh_run("dd if=/dev/fb0 bs=4 count=1 of=/dev/null 2>/dev/null", 3000);
                 printf("  chroot fb0 read: %s\n", rc2 == 0 ? "OK" : "FAILED");
                 // Check sysfs — Xorg fbdev may need /sys/class/graphics/fb0
-                sh_capture("ls -laR /sys/class/graphics/ 2>&1 || echo 'no sysfs graphics'", b, sizeof(b), 2000);
-                printf("  sysfs graphics: %s\n", b);
+                sh_capture("ls /sys/class/ 2>&1", b, sizeof(b), 2000);
+                printf("  sysfs class: %s", b);
+                sh_capture("ls /sys/class/graphics/ 2>&1", b, sizeof(b), 2000);
+                printf("  sysfs graphics: %s", b);
+                sh_capture("ls /sys/bus/pci/devices/ 2>&1", b, sizeof(b), 2000);
+                printf("  sysfs pci: %s\n", b);
                 // Also check from outside chroot
                 {
                     struct stat sst;
@@ -243,9 +254,9 @@ int main(void) {
             sh_capture("grep '(EE)' /var/log/Xorg.0.log 2>/dev/null", buf, sizeof(buf), 2000);
             printf("  %s", buf);
 
-            // Dump fbdev-related log lines
+            // Dump fbdev-related + probe log lines (what happens after fbdev loads)
             printf("  Xorg fbdev lines:\n");
-            sh_capture("grep -i 'fbdev\\|fb0\\|FBIO\\|framebuffer\\|screen.*added\\|No devices' /var/log/Xorg.0.log 2>/dev/null", buf, sizeof(buf), 2000);
+            sh_capture("grep -iA1 'fbdev\\|fb0\\|FBIO\\|Probe\\|screen.*added\\|No devices\\|open\\|ioctl' /var/log/Xorg.0.log 2>/dev/null | head -25", buf, sizeof(buf), 2000);
             printf("  %s\n", buf);
             fflush(stdout);
         }
