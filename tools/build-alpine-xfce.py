@@ -145,7 +145,7 @@ def main():
             'Section "Device"\n'
             '    Identifier "fbdev"\n'
             '    Driver "fbdev"\n'
-            '#    BusID "PCI:0:2:0"\n'
+            '    BusID "PCI:0:2:0"\n'
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'

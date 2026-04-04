@@ -5,6 +5,13 @@ use crate::{fs::opened_file::Fd, process::current_process};
 
 impl<'a> SyscallHandler<'a> {
     pub fn sys_ioctl(&mut self, fd: Fd, cmd: usize, arg: usize) -> Result<isize> {
+        // Temporary: log all ioctls from PIDs > 5 (Xorg processes) with fb-related cmds
+        {
+            let pid = crate::process::current_process().pid().as_i32();
+            if pid > 5 && (cmd == 0x4600 || cmd == 0x4601 || cmd == 0x4602 || cmd == 0x4611) {
+                warn!("ioctl: pid={} fd={:?} cmd={:#x} arg={:#x} (FBIO)", pid, fd, cmd, arg);
+            }
+        }
         // Network interface ioctls (SIOCGIF*, SIOCSIF*, etc.) operate on the
         // global smoltcp interface, not a specific file descriptor.
         if (cmd & 0xFF00) == 0x8900 {
