@@ -103,7 +103,9 @@ impl fmt::Debug for FramebufferFile {
 
 impl FileLike for FramebufferFile {
     fn stat(&self) -> Result<Stat> {
+        use crate::fs::stat::{FileMode, S_IFCHR};
         Ok(Stat {
+            mode: FileMode::new(S_IFCHR | 0o666),
             rdev: DevId::new((29 << 8) | 0),
             size: FileSize(bochs_fb::size() as isize),
             ..Stat::zeroed()
