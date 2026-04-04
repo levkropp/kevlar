@@ -344,14 +344,15 @@ int main(void) {
                       b, sizeof(b), 3000);
             printf("  startxfce4 check: %s\n", b);
         }
-        // Start XFCE session with explicit paths
+        // Start session D-Bus manually, then startxfce4
+        // Use dbus-launch which handles session bus + startxfce4
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin; "
                  "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
                  ">/tmp/xfce-session.log 2>&1");
-        printf("  Waiting 15s for XFCE to initialize...\n");
+        printf("  Waiting 20s for XFCE to initialize...\n");
         fflush(stdout);
-        sleep(15);
+        sleep(20);
 
         // Dump XFCE session log
         {
