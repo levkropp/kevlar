@@ -204,9 +204,11 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
-        // If this is a Unix socket, always append SCM_CREDENTIALS with sender info.
-        // X11 and D-Bus expect this for authentication.
-        if offset == 0 && control_len >= CMSG_HDR_SIZE + 12 {
+        // Append SCM_CREDENTIALS only when SO_PASSCRED is set (which we don't
+        // track yet). Sending unsolicited credentials confuses D-Bus's cmsg
+        // parsing and can corrupt stack buffers.
+        // TODO: implement SO_PASSCRED socket option properly.
+        if false && offset == 0 && control_len >= CMSG_HDR_SIZE + 12 {
             // Only send credentials if we have a Unix stream
             if (**file).as_any().downcast_ref::<UnixStream>().is_some()
                 || owned_stream.is_some()
