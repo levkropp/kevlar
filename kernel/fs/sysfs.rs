@@ -225,6 +225,13 @@ impl SysFs {
             config[0x2c] = 0xf4; config[0x2d] = 0x1a; // 0x1af4
             config[0x2e] = 0x00; config[0x2f] = 0x11; // 0x1100
             pci_dev.add_file("config", Arc::new(SysfsBinary(config.to_vec())) as Arc<dyn FileLike>);
+            // Additional files libpciaccess/Xorg reads:
+            pci_dev.add_file("irq", Arc::new(SysfsFile("10\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("numa_node", Arc::new(SysfsFile("-1\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("enable", Arc::new(SysfsFile("1\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("broken_parity_status", Arc::new(SysfsFile("0\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("boot_vga", Arc::new(SysfsFile("1\n".into())) as Arc<dyn FileLike>);
+            pci_dev.add_file("revision", Arc::new(SysfsFile("0x05\n".into())) as Arc<dyn FileLike>);
         }
 
         // Block device: virtio-blk (major 253, minor 0).

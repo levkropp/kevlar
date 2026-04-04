@@ -825,6 +825,8 @@ impl<'a> SyscallHandler<'a> {
         #[cfg(debug_assertions)]
         CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
 
+        // (syscall tracing removed)
+
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
         // Saves ~5ns/call by eliding tick_stime, record_syscall, profiler, htrace.
         if is_lean_syscall(n) && !debug::get_filter().intersects(DebugFilter::SYSCALL | DebugFilter::CANARY) {
@@ -1694,6 +1696,16 @@ impl<'a> SyscallHandler<'a> {
             SYS_OPEN_TREE | SYS_MOVE_MOUNT | SYS_FSOPEN | SYS_FSCONFIG |
             SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
             // XFCE/GTK stubs — return harmless defaults so desktop components start.
+            172 /* iopl */ => {
+                // Xorg calls iopl(3) to access VGA I/O ports directly.
+                // Set IOPL bits (12-13) in the saved RFLAGS on the syscall
+                // stack so when we return to usermode, the CPU has IOPL=3.
+                let level = a1 & 3;
+                let old_flags = self.frame.rflags;
+                self.frame.rflags = (old_flags & !(3u64 << 12)) | ((level as u64) << 12);
+                Ok(0)
+            }
+            173 /* ioperm */ => Ok(0), // Accept silently — iopl(3) grants all ports
             142 /* sched_getparam */ => {
                 // Return default sched_param { sched_priority: 0 }
                 if a2 != 0 { UserVAddr::new_nonnull(a2)?.write::<i32>(&0)?; }
@@ -1709,6 +1721,10 @@ impl<'a> SyscallHandler<'a> {
             324 /* membarrier */ => Ok(0), // glib uses for RCU, safe to stub as success
             _ => {
                 let pid = current_process().pid().as_i32();
+                // Always print unimplemented syscalls for processes > 5 (Xorg etc.)
+                if pid > 5 {
+                    println!("UNIMP: pid={} syscall {} (n={})", pid, syscall_name_by_number(n), n);
+                }
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
                     pid,
                     name: syscall_name_by_number(n),

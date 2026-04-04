@@ -70,6 +70,8 @@ static int sh_capture(const char *cmd, char *buf, int bufsz, int timeout_ms) {
         _exit(127);
     }
     close(pipefd[1]);
+    // Make read end non-blocking
+    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
     int total = 0;
     for (int i = 0; i < timeout_ms / 50; i++) {
         char tmp[256];
@@ -77,7 +79,12 @@ static int sh_capture(const char *cmd, char *buf, int bufsz, int timeout_ms) {
         if (n > 0 && total + n < bufsz) { memcpy(buf + total, tmp, n); total += n; }
         int status;
         pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) break;
+        if (r == pid) {
+            // Drain remaining data
+            while ((n = read(pipefd[0], tmp, sizeof(tmp))) > 0)
+                if (total + n < bufsz) { memcpy(buf + total, tmp, n); total += n; }
+            break;
+        }
         usleep(50000);
     }
     close(pipefd[0]);
@@ -205,16 +212,62 @@ int main(void) {
         // Clean stale locks
         sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 1000);
 
-        // Test opening fb0 from the chroot (same as what Xorg does)
+        // Run our fb0_probe binary from OUTSIDE chroot to test directly
         {
-            char b[256];
-            sh_capture("dd if=/dev/fb0 bs=4 count=1 of=/dev/null 2>&1 && echo 'fb0 open OK'", b, sizeof(b), 3000);
-            printf("  chroot fb0 open: %s\n", b);
+            char b[1024];
+            printf("  === fb0_probe (direct) ===\n");
+            // Run fb0_probe directly (not in chroot) — accesses kernel's /dev/fb0
+            pid_t pid = fork();
+            if (pid == 0) {
+                execl("/bin/fb0-probe", "fb0-probe", NULL);
+                _exit(127);
+            }
+            int status;
+            waitpid(pid, &status, 0);
+            // Also run from INSIDE the chroot
+            printf("  === fb0_probe (chroot) ===\n");
+            // Copy the binary into the chroot
+            sh_run("cp /bin/fb0-probe /fb0-probe 2>/dev/null || true", 2000);
+            sh_capture("/fb0-probe 2>&1", b, sizeof(b), 5000);
+            printf("%s\n", b);
+        }
+        // Also run shell-based probe
+        {
+            char b[512];
+            sh_capture(
+                "exec 2>&1; "
+                // First: what fbdevHWProbe does
+                "echo '--- fbdevHWProbe test ---'; "
+                "exec 3</dev/fb0 && echo 'O_RDONLY open: OK (fd 3)' || echo 'O_RDONLY open: FAILED'; "
+                "exec 3>&-; "
+                // Second: what fbdevHWInit does
+                "exec 3<>/dev/fb0 && echo 'O_RDWR open: OK (fd 3)' || echo 'O_RDWR open: FAILED'; "
+                "exec 3>&-; "
+                // Third: check fstat on the fd
+                "ls -la /dev/fb0; "
+                "stat -c '%F %a %t:%T' /dev/fb0 2>/dev/null || stat /dev/fb0 2>&1 | head -3; "
+                // Fourth: check if Xorg binary can see fb0
+                "test -r /dev/fb0 && echo 'fb0 readable' || echo 'fb0 NOT readable'; "
+                "test -w /dev/fb0 && echo 'fb0 writable' || echo 'fb0 NOT writable'; "
+                "test -c /dev/fb0 && echo 'fb0 is char device' || echo 'fb0 NOT char device'; ",
+                b, sizeof(b), 5000);
+            printf("  chroot fb0 probe:\n%s\n", b);
         }
 
-        // Start Xorg in background
-        start_bg("/usr/libexec/Xorg :0 -noreset -nolisten tcp "
-                 "-config /etc/X11/xorg.conf.d/10-fbdev.conf vt1 2>&1");
+        // Start Xorg via sh_run (not sh_capture — avoids pipe/SIGPIPE)
+        {
+            printf("  Starting Xorg...\n");
+            fflush(stdout);
+            int rc = sh_run(
+                "/usr/libexec/Xorg :0 -noreset -nolisten tcp "
+                "-config /etc/X11/xorg.conf.d/10-fbdev.conf "
+                "vt1 >/tmp/xorg-stdout.log 2>&1 &"
+                "sleep 5; "
+                "kill -0 $! 2>/dev/null && echo XORG_ALIVE || echo XORG_DEAD",
+                12000);
+            printf("  Xorg start rc=%d\n", rc);
+            fflush(stdout);
+        }
         sleep(4);
 
         // Dump Xorg diagnostic info
@@ -254,9 +307,12 @@ int main(void) {
             sh_capture("grep '(EE)' /var/log/Xorg.0.log 2>/dev/null", buf, sizeof(buf), 2000);
             printf("  %s", buf);
 
-            // Dump fbdev-related + probe log lines (what happens after fbdev loads)
-            printf("  Xorg fbdev lines:\n");
-            sh_capture("grep -iA1 'fbdev\\|fb0\\|FBIO\\|Probe\\|screen.*added\\|No devices\\|open\\|ioctl' /var/log/Xorg.0.log 2>/dev/null | head -25", buf, sizeof(buf), 2000);
+            // Dump the FULL Xorg log line by line via serial
+            printf("  === FULL Xorg.0.log ===\n");
+            fflush(stdout);
+            sh_run("cat /var/log/Xorg.0.log 2>/dev/null", 10000);
+            printf("  === END Xorg.0.log ===\n");
+            fflush(stdout);
             printf("  %s\n", buf);
             fflush(stdout);
         }
