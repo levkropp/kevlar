@@ -113,18 +113,8 @@ impl FileLike for FramebufferFile {
         })
     }
 
-    fn open(&self, _options: &OpenOptions) -> Result<Option<Arc<dyn FileLike>>> {
-        let init = bochs_fb::is_initialized();
-        let pid = crate::process::current_process().pid().as_i32();
-        info!("fb0: open() pid={} initialized={}", pid, init);
-        Ok(None) // use self as the opened file
-    }
-
     fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
-        let pid = crate::process::current_process().pid().as_i32();
-        info!("fb0: ioctl pid={} cmd={:#x} arg={:#x}", pid, cmd, arg);
         if !bochs_fb::is_initialized() {
-            warn!("fb0: ioctl ENODEV — not initialized!");
             return Err(Errno::ENODEV.into());
         }
 

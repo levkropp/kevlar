@@ -100,8 +100,6 @@ impl fmt::Debug for Tty {
 
 impl FileLike for Tty {
     fn ioctl(&self, cmd: usize, arg: usize) -> Result<isize> {
-        let pid = crate::process::current_process().pid().as_i32();
-        if pid > 10 { info!("tty: ioctl pid={} cmd={:#x}", pid, cmd); }
         match cmd {
             TCGETS | TCGETS2 => {
                 let termios = self.discipline.termios();
