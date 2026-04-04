@@ -163,6 +163,12 @@ impl kevlar_platform::Handler for Handler {
             "USER FAULT: {} pid={} ip={:#x}",
             exception, pid, ip
         );
+        // Dump the process's memory map for diagnosis (shows library load addresses)
+        if let Some(vm) = crate::process::current_process().vm().clone() {
+            let lock = vm.lock_no_irq();
+            warn!("  VMA map for pid={}:", pid);
+            lock.dump_vma_map();
+        }
         crate::process::Process::exit_by_signal(crate::process::signal::SIGSEGV);
     }
 

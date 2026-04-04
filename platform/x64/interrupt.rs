@@ -168,6 +168,13 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                     SIMD_FLOATING_POINT_VECTOR => "SIMD_FLOATING_POINT",
                     _ => unreachable!(),
                 };
+                // Log RSP and return address from stack for crash diagnosis
+                let rsp = frame.rsp;
+                let rbp = frame.rbp;
+                let ret_addr = if rsp > 0 && rsp < 0x7FFF_FFFF_FFFF {
+                    unsafe { *(rsp as *const u64) }
+                } else { 0 };
+                warn!("  user rsp={:#x} rbp={:#x} ret_addr={:#x}", rsp, rbp, ret_addr);
                 handler().handle_user_fault(name, frame.rip as usize);
             } else {
                 // Copy all packed fields to locals before use (packed struct UB).

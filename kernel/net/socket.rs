@@ -66,31 +66,57 @@ pub fn write_sockaddr(
     dst: Option<UserVAddr>,
     socklen: Option<UserVAddr>,
 ) -> Result<()> {
+    // Read the caller's max buffer size from socklen to avoid overflowing
+    // the user buffer. On Linux, sockaddr writes are truncated to the
+    // provided buffer size. We always write back the FULL address length.
+    let max_len = if let Some(sl) = socklen {
+        sl.read::<socklen_t>()? as usize
+    } else {
+        usize::MAX
+    };
+
     match sockaddr {
         SockAddr::In(sockaddr_in) => {
+            let full_len = size_of::<SockAddrIn>();
             if let Some(dst) = dst {
-                dst.write::<SockAddrIn>(sockaddr_in)?;
+                if max_len >= full_len {
+                    dst.write::<SockAddrIn>(sockaddr_in)?;
+                } else if max_len > 0 {
+                    let fam = { sockaddr_in.family };
+                    dst.write::<u16>(&fam)?;
+                }
             }
-
             if let Some(socklen) = socklen {
-                socklen.write::<socklen_t>(&(size_of::<SockAddrIn>() as u32))?;
+                socklen.write::<socklen_t>(&(full_len as u32))?;
             }
         }
         SockAddr::Un(sockaddr_un) => {
+            let full_len = size_of::<SockAddrUn>();
             if let Some(dst) = dst {
-                dst.write::<SockAddrUn>(sockaddr_un)?;
+                if max_len >= full_len {
+                    dst.write::<SockAddrUn>(sockaddr_un)?;
+                } else if max_len >= 2 {
+                    // Truncated: write family + as much path as fits
+                    let fam = { sockaddr_un.family };
+                    dst.write::<u16>(&fam)?;
+                    let path = { sockaddr_un.path };
+                    let copy_len = core::cmp::min(path.len(), max_len - 2);
+                    dst.add(2).write_bytes(&path[..copy_len])?;
+                }
             }
-
             if let Some(socklen) = socklen {
-                socklen.write::<socklen_t>(&(size_of::<SockAddrUn>() as u32))?;
+                socklen.write::<socklen_t>(&(full_len as u32))?;
             }
         }
         SockAddr::Nl(sockaddr_nl) => {
+            let full_len = size_of::<SockAddrNl>();
             if let Some(dst) = dst {
-                dst.write::<SockAddrNl>(sockaddr_nl)?;
+                if max_len >= full_len {
+                    dst.write::<SockAddrNl>(sockaddr_nl)?;
+                }
             }
             if let Some(socklen) = socklen {
-                socklen.write::<socklen_t>(&(size_of::<SockAddrNl>() as u32))?;
+                socklen.write::<socklen_t>(&(full_len as u32))?;
             }
         }
         #[allow(unreachable_patterns)]

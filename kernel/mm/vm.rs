@@ -180,6 +180,23 @@ impl Vm {
         &self.vm_areas
     }
 
+    /// Dump the VMA map to the kernel log for crash diagnosis.
+    pub fn dump_vma_map(&self) {
+        for vma in &self.vm_areas {
+            let end = vma.start().value() + vma.len();
+            let prot = vma.prot();
+            let r = if prot.contains(MMapProt::PROT_READ) { 'r' } else { '-' };
+            let w = if prot.contains(MMapProt::PROT_WRITE) { 'w' } else { '-' };
+            let x = if prot.contains(MMapProt::PROT_EXEC) { 'x' } else { '-' };
+            let ty = match vma.area_type() {
+                VmAreaType::Anonymous => "anon",
+                VmAreaType::File { .. } => "file",
+                VmAreaType::DeviceMemory { .. } => "dev",
+            };
+            warn!("  {:012x}-{:012x} {}{}{} {}", vma.start().value(), end, r, w, x, ty);
+        }
+    }
+
     #[inline(always)]
     pub fn find_vma_cached(&mut self, vaddr: UserVAddr) -> Option<&VmArea> {
         // Try last successful VMA first (temporal locality optimization)
