@@ -336,11 +336,32 @@ int main(void) {
     // --- Phase 4: Start XFCE ---
     printf("\n=== Phase 4: XFCE Session ===\n");
     {
-        start_bg("export DISPLAY=:0 HOME=/root; "
-                 "dbus-launch startxfce4 2>&1");
-        printf("  Waiting 10s for XFCE to initialize...\n");
+        // Test: can we exec startxfce4 directly inside the chroot?
+        {
+            char b[512];
+            sh_capture("which startxfce4 2>&1; ls -la /usr/bin/startxfce4 2>&1; "
+                      "head -2 /usr/bin/startxfce4 2>&1",
+                      b, sizeof(b), 3000);
+            printf("  startxfce4 check: %s\n", b);
+        }
+        // Start XFCE session with explicit paths
+        start_bg("export DISPLAY=:0 HOME=/root "
+                 "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin; "
+                 "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
+                 ">/tmp/xfce-session.log 2>&1");
+        printf("  Waiting 15s for XFCE to initialize...\n");
         fflush(stdout);
-        sleep(10);
+        sleep(15);
+
+        // Dump XFCE session log
+        {
+            char b[1024];
+            printf("  === xfce-session.log ===\n");
+            sh_capture("cat /tmp/xfce-session.log 2>/dev/null | head -30", b, sizeof(b), 3000);
+            printf("%s", b);
+            printf("  === end ===\n");
+            fflush(stdout);
+        }
 
         // Check components
         if (sh_run("pgrep -x xfwm4 >/dev/null 2>&1", 2000) == 0)

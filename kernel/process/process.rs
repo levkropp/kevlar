@@ -2238,9 +2238,10 @@ fn do_script_binfmt(
     }
 
     // Push the path to the script file as the first argument to the
-    // interpreter.
-    let executable_pathbuf = executable_path.resolve_absolute_path();
-    argv.push(executable_pathbuf.as_str().as_bytes());
+    // interpreter.  Use the ORIGINAL argv[0] (chroot-relative) rather
+    // than resolve_absolute_path() which returns the host-absolute path
+    // and breaks scripts inside chroots.
+    argv.push(script_argv[0]);
 
     // Push the original arguments to the script on after the new script
     // invocation (leaving out argv[0] of the previous path of invoking the

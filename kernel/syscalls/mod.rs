@@ -1063,10 +1063,6 @@ impl<'a> SyscallHandler<'a> {
         match n {
             SYS_OPEN => {
                 let p = StackPathBuf::from_user(a1)?;
-                let pid = current_process().pid().as_i32();
-                if pid > 10 {
-                    info!("open: pid={} path={:?} flags={:#x}", pid, p.as_path().as_str(), a2);
-                }
                 self.sys_open(
                     p.as_path(),
                     bitflags_from_user!(OpenFlags, a2 as i32)?,
