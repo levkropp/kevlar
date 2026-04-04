@@ -232,6 +232,11 @@ impl SysFs {
             pci_dev.add_file("broken_parity_status", Arc::new(SysfsFile("0\n".into())) as Arc<dyn FileLike>);
             pci_dev.add_file("boot_vga", Arc::new(SysfsFile("1\n".into())) as Arc<dyn FileLike>);
             pci_dev.add_file("revision", Arc::new(SysfsFile("0x05\n".into())) as Arc<dyn FileLike>);
+            // Cross-link: /sys/bus/pci/devices/0000:00:02.0/graphics/fb0
+            // Xorg uses this to map PCI device → framebuffer device.
+            let pci_gfx = pci_dev.add_dir("graphics");
+            let pci_fb0 = pci_gfx.add_dir("fb0");
+            add_dev_files(&pci_fb0, 29, 0, "fb0");
         }
 
         // Block device: virtio-blk (major 253, minor 0).
