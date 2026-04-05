@@ -254,7 +254,12 @@ int main(void) {
             printf("  chroot fb0 probe:\n%s\n", b);
         }
 
-        // Start Xorg via sh_run (not sh_capture — avoids pipe/SIGPIPE)
+        // Generate X11 font dirs BEFORE starting Xorg (no fc-cache — it crashes PID 1)
+        sh_run("mkfontscale /usr/share/fonts/misc 2>/dev/null; "
+               "mkfontdir /usr/share/fonts/misc 2>/dev/null",
+               10000);
+
+        // Start Xorg
         {
             printf("  Starting Xorg...\n");
             fflush(stdout);
@@ -336,14 +341,18 @@ int main(void) {
     // --- Phase 4: Font cache + xterm test ---
     printf("\n=== Phase 4: Font Cache + X11 Rendering ===\n");
     {
-        // Generate font caches (required by GTK and xterm)
-        printf("  Running fc-cache...\n"); fflush(stdout);
-        sh_run("fc-cache -f 2>/dev/null; mkfontdir /usr/share/fonts/misc 2>/dev/null", 15000);
-        printf("  fc-cache done\n"); fflush(stdout);
+        // Generate font directories (required by X11 font loading)
+        printf("  Generating font dirs...\n"); fflush(stdout);
+        sh_run("mkfontscale /usr/share/fonts/misc 2>/dev/null; "
+               "mkfontdir /usr/share/fonts/misc 2>/dev/null; "
+               "mkfontscale /usr/share/fonts/dejavu 2>/dev/null; "
+               "mkfontdir /usr/share/fonts/dejavu 2>/dev/null",
+               10000);
+        printf("  Font dirs done\n"); fflush(stdout);
 
-        // Start xterm to test basic X11 rendering
-        start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 -e 'echo XTERM_RUNNING; sleep 30' 2>/dev/null");
-        sleep(3);
+        // Start xterm with bitmap font (doesn't need fontconfig cache)
+        start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 "
+                 "-e 'echo HELLO_KEVLAR; sleep 30' 2>/dev/null");
 
         if (sh_run("pgrep -x xterm >/dev/null 2>&1", 2000) == 0)
             pass("xterm_running");

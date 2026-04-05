@@ -263,6 +263,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         r.r12, r.r13, r.r14, r.r15);
                     warn!("  RIP={:#x} RFLAGS={:#x} fault_addr={:#x}",
                         r.rip, r.rflags, r.fault_addr);
+                    // Dump user stack to find the call chain leading to ip=0
+                    #[allow(unsafe_code)]
+                    if r.rsp > 0x1000 && r.rsp < 0x7FFF_FFFF_FFFF {
+                        warn!("  user stack at rsp={:#x}:", r.rsp);
+                        for i in 0..8u64 {
+                            let addr = r.rsp + i * 8;
+                            let val = unsafe { *(addr as *const u64) };
+                            warn!("    [rsp+{:#x}] = {:#018x}", i * 8, val);
+                        }
+                    }
                 }
             }
             deliver_sigsegv_fatal();

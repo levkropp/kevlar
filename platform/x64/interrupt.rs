@@ -168,13 +168,32 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                     SIMD_FLOATING_POINT_VECTOR => "SIMD_FLOATING_POINT",
                     _ => unreachable!(),
                 };
-                // Log RSP and return address from stack for crash diagnosis
+                // Rich crash diagnosis: dump registers and stack
+                let rip = frame.rip;
                 let rsp = frame.rsp;
                 let rbp = frame.rbp;
-                let ret_addr = if rsp > 0 && rsp < 0x7FFF_FFFF_FFFF {
-                    unsafe { *(rsp as *const u64) }
-                } else { 0 };
-                warn!("  user rsp={:#x} rbp={:#x} ret_addr={:#x}", rsp, rbp, ret_addr);
+                let rax = frame.rax;
+                let rbx = frame.rbx;
+                let rcx = frame.rcx;
+                let rdx = frame.rdx;
+                let rsi = frame.rsi;
+                let rdi = frame.rdi;
+                let r11 = frame.r11;
+                let rflags = frame.rflags;
+                warn!("  RAX={:#x} RBX={:#x} RCX={:#x} RDX={:#x}",
+                      rax, rbx, rcx, rdx);
+                warn!("  RSI={:#x} RDI={:#x} RBP={:#x} RSP={:#x}",
+                      rsi, rdi, rbp, rsp);
+                warn!("  RIP={:#x} RFLAGS={:#x} fault_addr={:#x}",
+                      rip, rflags, unsafe { x86::controlregs::cr2() });
+                // Dump 8 stack values
+                if rsp > 0x1000 && rsp < 0x7FFF_FFFF_FFFF {
+                    warn!("  stack:");
+                    for i in 0..8u64 {
+                        let val = unsafe { *((rsp + i * 8) as *const u64) };
+                        warn!("    [rsp+{:#x}] = {:#018x}", i * 8, val);
+                    }
+                }
                 handler().handle_user_fault(name, frame.rip as usize);
             } else {
                 // Copy all packed fields to locals before use (packed struct UB).
