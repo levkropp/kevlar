@@ -362,6 +362,8 @@ mod syscall_numbers {
     pub const SYS_FCHOWNAT: usize = 260;
     pub const SYS_FUTEX: usize = 202;
     pub const SYS_SCHED_GETAFFINITY: usize = 204;
+    pub const SYS_SCHED_SETAFFINITY_COMPAT: usize = 122;
+    pub const SYS_SCHED_GETAFFINITY_COMPAT: usize = 123;
     pub const SYS_SET_ROBUST_LIST: usize = 273;
     pub const SYS_GETRANDOM: usize = 318;
     pub const SYS_TKILL: usize = 200;
@@ -1283,7 +1285,7 @@ impl<'a> SyscallHandler<'a> {
             }
             // M1 Phase 1: Trivial syscalls
             SYS_SCHED_YIELD => self.sys_sched_yield(),
-            SYS_SCHED_GETAFFINITY => self.sys_sched_getaffinity(
+            SYS_SCHED_GETAFFINITY | SYS_SCHED_GETAFFINITY_COMPAT => self.sys_sched_getaffinity(
                 a1 as c_int,
                 a2,
                 UserVAddr::new_nonnull(a3)?,
@@ -1628,7 +1630,8 @@ impl<'a> SyscallHandler<'a> {
             // M7 Phase 6: glibc syscall stubs
             SYS_RSEQ => self.sys_rseq(a1, a2 as u32, a3 as i32, a4 as u32),
             SYS_CLONE3 => self.sys_clone3(a1, a2),
-            SYS_SCHED_SETAFFINITY => self.sys_sched_setaffinity(a1 as i32, a2, a3),
+            SYS_SCHED_SETAFFINITY | SYS_SCHED_SETAFFINITY_COMPAT =>
+                self.sys_sched_setaffinity(a1 as i32, a2, a3),
             SYS_SCHED_GETSCHEDULER => self.sys_sched_getscheduler(a1 as i32),
             SYS_SCHED_SETSCHEDULER => self.sys_sched_setscheduler(a1 as i32, a2 as i32, a3),
             // M8 Phase 2: Namespaces
