@@ -219,17 +219,49 @@ def main():
             with open(shadow, "a") as f:
                 f.write("messagebus:!::0:::::\n")
 
-        # --- Pre-generate font directories for X11 ---
-        for fd in [root / "usr" / "share" / "fonts" / d
-                   for d in ("misc", "cursor", "dejavu", "TTF")]:
-            if fd.exists():
-                pcf_files = list(fd.glob("*.pcf.gz"))
-                ttf_files = list(fd.glob("*.ttf"))
-                all_fonts = pcf_files + ttf_files
-                with open(fd / "fonts.dir", "w") as f:
-                    f.write(f"{len(all_fonts)}\n")
-                    for font in sorted(all_fonts):
-                        f.write(f"{font.name} -misc-fixed-medium-r-normal--0-0-0-0-c-0-iso8859-1\n")
+        # --- Pre-generate X11 font directories with proper XLFD names ---
+        # mkfontdir inside QEMU fails to parse PCF properties, so we use
+        # known XLFD mappings for the standard misc-fixed fonts.
+        KNOWN_XLFD = {
+            "6x13.pcf.gz": "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1",
+            "6x13B.pcf.gz": "-misc-fixed-bold-r-semicondensed--13-120-75-75-c-60-iso10646-1",
+            "6x13O.pcf.gz": "-misc-fixed-medium-o-semicondensed--13-120-75-75-c-60-iso10646-1",
+            "7x13.pcf.gz": "-misc-fixed-medium-r-normal--13-120-75-75-c-70-iso10646-1",
+            "7x13B.pcf.gz": "-misc-fixed-bold-r-normal--13-120-75-75-c-70-iso10646-1",
+            "7x14.pcf.gz": "-misc-fixed-medium-r-normal--14-130-75-75-c-70-iso10646-1",
+            "7x14B.pcf.gz": "-misc-fixed-bold-r-normal--14-130-75-75-c-70-iso10646-1",
+            "8x13.pcf.gz": "-misc-fixed-medium-r-normal--13-120-75-75-c-80-iso10646-1",
+            "8x13B.pcf.gz": "-misc-fixed-bold-r-normal--13-120-75-75-c-80-iso10646-1",
+            "8x13O.pcf.gz": "-misc-fixed-medium-o-normal--13-120-75-75-c-80-iso10646-1",
+            "9x15.pcf.gz": "-misc-fixed-medium-r-normal--15-140-75-75-c-90-iso10646-1",
+            "9x15B.pcf.gz": "-misc-fixed-bold-r-normal--15-140-75-75-c-90-iso10646-1",
+            "9x18.pcf.gz": "-misc-fixed-medium-r-normal--18-120-100-100-c-90-iso10646-1",
+            "9x18B.pcf.gz": "-misc-fixed-bold-r-normal--18-120-100-100-c-90-iso10646-1",
+            "10x20.pcf.gz": "-misc-fixed-medium-r-normal--20-200-75-75-c-100-iso10646-1",
+            "5x7.pcf.gz": "-misc-fixed-medium-r-normal--7-70-75-75-c-50-iso10646-1",
+            "5x8.pcf.gz": "-misc-fixed-medium-r-normal--8-80-75-75-c-50-iso10646-1",
+            "4x6.pcf.gz": "-misc-fixed-medium-r-normal--6-60-75-75-c-40-iso10646-1",
+            "6x10.pcf.gz": "-misc-fixed-medium-r-normal--10-100-75-75-c-60-iso10646-1",
+            "6x12.pcf.gz": "-misc-fixed-medium-r-semicondensed--12-110-75-75-c-60-iso10646-1",
+            "6x9.pcf.gz": "-misc-fixed-medium-r-normal--9-90-75-75-c-60-iso10646-1",
+        }
+        misc_dir = root / "usr" / "share" / "fonts" / "misc"
+        if misc_dir.exists():
+            entries = []
+            for pcf in sorted(misc_dir.glob("*.pcf.gz")):
+                xlfd = KNOWN_XLFD.get(pcf.name)
+                if xlfd:
+                    entries.append(f"{pcf.name} {xlfd}")
+                    # Also add ISO-8859-1 alias for each ISO-10646-1 font
+                    if "iso10646-1" in xlfd:
+                        entries.append(f"{pcf.name} {xlfd.replace('iso10646-1', 'iso8859-1')}")
+                else:
+                    entries.append(f"{pcf.name} -misc-fixed-medium-r-normal--0-0-0-0-c-0-iso8859-1")
+            with open(misc_dir / "fonts.dir", "w") as f:
+                f.write(f"{len(entries)}\n")
+                for e in entries:
+                    f.write(e + "\n")
+            print(f"  FONTS  fonts.dir: {len(entries)} entries ({len(KNOWN_XLFD)} with XLFD)", file=sys.stderr)
 
         # --- GDK-Pixbuf loaders cache (critical for GTK rendering) ---
         # Without this, GTK3 can't load ANY images → desktop renders as black.
