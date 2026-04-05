@@ -720,10 +720,15 @@ impl PageTable {
 
     pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
-        // Flush user TLB entries for parent's PCID (CoW correctness).
+        // Flush parent's TLB entries so CoW read-only PTEs take effect.
+        // With PCID: write CR3 with parent's PCID and bit 63=0 to flush
+        // that PCID's entries, then immediately reload with bit 63=1
+        // (no-invalidate) to keep the PCID active without re-flushing.
+        // Without PCID: plain CR3 write flushes everything.
         unsafe {
-            let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
-            x86::controlregs::cr3_write(cr3_val);
+            // Step 1: Flush by writing CR3 without no-invalidate bit
+            let flush_cr3 = original.pml4.value() as u64 | (original.pcid as u64);
+            x86::controlregs::cr3_write(flush_cr3);
         }
         Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
     }

@@ -267,11 +267,38 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     #[allow(unsafe_code)]
                     if r.rsp > 0x1000 && r.rsp < 0x7FFF_FFFF_FFFF {
                         warn!("  user stack at rsp={:#x}:", r.rsp);
-                        for i in 0..8u64 {
+                        for i in 0..16u64 {
                             let addr = r.rsp + i * 8;
                             let val = unsafe { *(addr as *const u64) };
                             warn!("    [rsp+{:#x}] = {:#018x}", i * 8, val);
                         }
+                    }
+                    // Dump the calling instruction by reading [rsp] - 5 bytes
+                    // (typical call *%rax is 2 bytes: ff d0)
+                    #[allow(unsafe_code)]
+                    {
+                        let ret = if r.rsp > 0x1000 && r.rsp < 0x7FFF_FFFF_FFFF {
+                            unsafe { *(r.rsp as *const u64) }
+                        } else { 0 };
+                        if ret > 0x1000 && ret < 0x7FFF_FFFF_FFFF {
+                            let mut bytes = [0u8; 8];
+                            for j in 0..8usize {
+                                bytes[j] = unsafe { *((ret - 8 + j as u64) as *const u8) };
+                            }
+                            warn!("  call site (ret_addr-8..ret_addr): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                  bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+                        }
+                    }
+                }
+            }
+            // Dump executable VMAs to identify which library the return address is in
+            if let Some(vm) = current_process().vm().clone() {
+                let lock = vm.lock_no_irq();
+                warn!("  executable VMAs:");
+                for vma in lock.vm_areas() {
+                    if vma.prot().contains(crate::ctypes::MMapProt::PROT_EXEC) {
+                        let end = vma.start().value() + vma.len();
+                        warn!("    {:012x}-{:012x} r-x", vma.start().value(), end);
                     }
                 }
             }
