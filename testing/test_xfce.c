@@ -254,10 +254,18 @@ int main(void) {
             printf("  chroot fb0 probe:\n%s\n", b);
         }
 
-        // Generate X11 font dirs BEFORE starting Xorg (no fc-cache — it crashes PID 1)
-        sh_run("mkfontscale /usr/share/fonts/misc 2>/dev/null; "
-               "mkfontdir /usr/share/fonts/misc 2>/dev/null",
-               10000);
+        // Generate X11 font dirs BEFORE starting Xorg
+        {
+            char b[512];
+            sh_run("mkfontscale /usr/share/fonts/misc 2>&1; "
+                   "mkfontdir /usr/share/fonts/misc 2>&1",
+                   10000);
+            sh_capture("wc -l /usr/share/fonts/misc/fonts.dir 2>&1; "
+                      "grep -i semicondensed /usr/share/fonts/misc/fonts.dir 2>&1 | head -1; "
+                      "head -5 /usr/share/fonts/misc/fonts.dir 2>&1",
+                      b, sizeof(b), 3000);
+            printf("  fonts.dir:\n%s\n", b);
+        }
 
         // Start Xorg
         {
