@@ -95,9 +95,30 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_timer_irq(&self) -> bool {
-        // Run deferred jobs — this processes network packets queued by
-        // the virtio-net IRQ handler. Safe because SpinLock::lock() disables
-        // interrupts, so the timer can't fire while SCHEDULER is held.
+        // COW debug: check PID 1's stack for "kevlar" corruption on every timer tick
+        #[allow(unsafe_code)]
+        {
+            use crate::process::current_process;
+            let pid = current_process().pid().as_i32();
+            if pid == 1 {
+                if let Some(vm) = current_process().vm().clone() {
+                    {
+                    let lock = vm.lock_no_irq();
+                        if let Some(paddr) = lock.page_table().lookup_paddr(
+                            kevlar_platform::address::UserVAddr::new_nonnull(0x9ffffd000).unwrap()
+                        ) {
+                            let val = unsafe { *((paddr.as_vaddr().value() + 0xbd8) as *const u64) };
+                            if val == 0x6c76656b00000000 {
+                                let rc = kevlar_platform::page_refcount::page_ref_count(paddr);
+                                panic!("COW BUG caught by timer! pid=1 paddr={:#x} refcount={} has 'kevlar'",
+                                       paddr.value(), rc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         crate::deferred_job::run_deferred_jobs();
 
         crate::timer::handle_timer_irq()
