@@ -34,8 +34,8 @@ static void fail(const char *name, const char *detail) {
 
 // Run a command in chroot, return exit code (-2 = timeout)
 static int sh_run(const char *cmd, int timeout_ms) {
-    // Use vfork to block parent until child execs — avoids COW race.
-    pid_t pid = vfork();
+    // Fixed: COW refcount==1 now properly makes page writable.
+    pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
         chroot(ROOT);

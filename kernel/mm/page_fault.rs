@@ -738,7 +738,10 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 }
                 if vma_is_shared {
                     // MAP_SHARED: restore writable without copying.
-                    vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                    let ok = vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                    if !ok {
+                        warn!("COW refcount=1 FAILED to update flags for vaddr={:#x}", aligned_vaddr.value());
+                    }
                     vm.page_table().flush_tlb_local(aligned_vaddr);
                     return;
                 }
@@ -783,6 +786,11 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     return;
                 }
                 // refcount == 1 and not ghost: sole owner, just make writable.
+                // Previously this was a no-op (fell through without making the
+                // page writable), causing infinite fault loops and stack corruption.
+                vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                vm.page_table().flush_tlb_local(aligned_vaddr);
+                return;
             }
         }
 

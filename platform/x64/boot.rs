@@ -94,7 +94,7 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
 
     // Detect PCID support and set the global flag before enabling it.
     let has_pcid = feats.has_pcid();
-    PCID_SUPPORTED.store(false, core::sync::atomic::Ordering::Release);
+    PCID_SUPPORTED.store(has_pcid, core::sync::atomic::Ordering::Release);
 
     let mut cr4 = controlregs::cr4();
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
