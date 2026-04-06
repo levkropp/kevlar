@@ -16,7 +16,10 @@ use core::fmt;
 const FBIOGET_VSCREENINFO: usize = 0x4600;
 const FBIOPUT_VSCREENINFO: usize = 0x4601;
 const FBIOGET_FSCREENINFO: usize = 0x4602;
+const FBIOGETCMAP: usize = 0x4604;
+const FBIOPUTCMAP: usize = 0x4605;
 const FBIOBLANK: usize = 0x4611;
+const FBIOPAN_DISPLAY: usize = 0x4606;
 
 // ─── fb_var_screeninfo (160 bytes on Linux x86_64) ──────────────────────────
 
@@ -165,6 +168,10 @@ impl FileLike for FramebufferFile {
                 Ok(0)
             }
             FBIOBLANK => Ok(0),
+            // CMAP ioctls: no-op for TrueColor (32bpp) framebuffers.
+            // Xorg fbdev calls these repeatedly; returning success silences the error spam.
+            FBIOGETCMAP | FBIOPUTCMAP => Ok(0),
+            FBIOPAN_DISPLAY => Ok(0),
             _ => Err(Errno::ENOTTY.into()),
         }
     }

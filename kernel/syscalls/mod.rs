@@ -827,7 +827,6 @@ impl<'a> SyscallHandler<'a> {
         #[cfg(debug_assertions)]
         CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
 
-        // (syscall tracing removed)
 
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
         // Saves ~5ns/call by eliding tick_stime, record_syscall, profiler, htrace.

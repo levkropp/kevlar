@@ -52,6 +52,8 @@ XFCE_PACKAGES = [
     "hicolor-icon-theme",
     # Utilities
     "xterm",
+    "xsetroot",
+    "xprop",
 ]
 
 
