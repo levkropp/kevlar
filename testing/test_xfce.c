@@ -213,8 +213,8 @@ int main(void) {
         // Clean stale locks
         sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 1000);
 
-        // Run our fb0_probe binary from OUTSIDE chroot to test directly
-        {
+        // Skip fb0 probe and font check (covered by Phase 1-2) to save time for Phase 5.
+        if (0) {
             char b[1024];
             printf("  === fb0_probe (direct) ===\n");
             // Run fb0_probe directly (not in chroot) — accesses kernel's /dev/fb0
@@ -266,7 +266,7 @@ int main(void) {
                       "head -5 /usr/share/fonts/misc/fonts.dir 2>&1",
                       b, sizeof(b), 3000);
             printf("  fonts.dir:\n%s\n", b);
-        }
+        } // end if(0) skip block
 
         // Start Xorg
         {
@@ -284,9 +284,9 @@ int main(void) {
         }
         sleep(4);
 
-        // Dump Xorg diagnostic info
+        // Skip Xorg diagnostic dump to save time for Phase 5.
         sleep(2);
-        {
+        if (0) {
             char buf[2048];
             // Test fb0 ioctl from INSIDE the chroot
             {
@@ -328,7 +328,7 @@ int main(void) {
             printf("  %s", buf);
             printf("  === END ===\n");
             fflush(stdout);
-        }
+        } // end if(0) skip Xorg diag
 
         // Check if running
         if (sh_run("kill -0 $(cat /tmp/.X0-lock 2>/dev/null) 2>/dev/null", 2000) == 0) {

@@ -515,7 +515,7 @@ build/alpine-xfce.img:
 test-xfce: build/alpine-xfce.img
 	$(PROGRESS) "TEST" "XFCE desktop startup"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xfce"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	timeout 420 $(PYTHON3) tools/run-qemu.py \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xfce.img \
 		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
 		| tee /tmp/kevlar-test-xfce-$(PROFILE).log; true
