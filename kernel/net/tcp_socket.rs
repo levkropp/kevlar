@@ -485,7 +485,10 @@ impl FileLike for TcpSocket {
         }
 
         // Report error for failed nonblocking connect or reset.
-        if socket.state() == tcp::State::Closed {
+        // Skip for listening sockets: their self.handle stays in CLOSED
+        // state (only backlog sockets are put in LISTEN state), which is
+        // not an error condition.
+        if socket.state() == tcp::State::Closed && self.num_backlogs.load() == 0 {
             status |= PollStatus::POLLERR;
         }
 
