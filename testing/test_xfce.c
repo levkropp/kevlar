@@ -321,13 +321,12 @@ int main(void) {
             sh_capture("grep '(EE)' /var/log/Xorg.0.log 2>/dev/null", buf, sizeof(buf), 2000);
             printf("  %s", buf);
 
-            // Dump the FULL Xorg log line by line via serial
-            printf("  === FULL Xorg.0.log ===\n");
-            fflush(stdout);
-            sh_run("cat /var/log/Xorg.0.log 2>/dev/null", 10000);
-            printf("  === END Xorg.0.log ===\n");
-            fflush(stdout);
-            printf("  %s\n", buf);
+            // Dump key Xorg log lines (skip full dump to save time)
+            printf("  === Xorg.0.log (key lines) ===\n");
+            sh_capture("grep -E '\\(II\\) Initializing|\\(EE\\)|FBDEV|mode.*1024' /var/log/Xorg.0.log 2>/dev/null | head -20",
+                       buf, sizeof(buf), 3000);
+            printf("  %s", buf);
+            printf("  === END ===\n");
             fflush(stdout);
         }
 
@@ -453,9 +452,9 @@ int main(void) {
                  "GTK_THEME=Adwaita; "
                  "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
                  ">/tmp/xfce-session.log 2>&1");
-        printf("  Waiting 20s for XFCE to initialize...\n");
+        printf("  Waiting 10s for XFCE to initialize...\n");
         fflush(stdout);
-        sleep(20);
+        sleep(10);
 
         // Dump XFCE session log
         {

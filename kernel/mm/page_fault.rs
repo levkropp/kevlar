@@ -386,6 +386,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     let vma = match vm.find_vma_cached(unaligned_vaddr) {
         Some(vma) => vma,
         None => {
+            // Stack auto-growth: if the fault is just below the stack VMA,
+            // grow it downward (Linux does this transparently). This is
+            // critical for programs with deep call stacks (Xorg, GTK).
+            if vm.try_grow_stack(aligned_vaddr) {
+                // Stack grown — the page will be demand-faulted normally.
+                // Re-lookup the VMA (it now covers the faulting address).
+                match vm.find_vma_cached(unaligned_vaddr) {
+                    Some(vma) => vma,
+                    None => {
+                        // Growth succeeded but still no VMA — shouldn't happen.
+                        kevlar_platform::page_allocator::free_pages(paddr, 1);
+                        drop(vm); drop(vm_ref);
+                        deliver_sigsegv_fatal();
+                        return;
+                    }
+                }
+            } else {
             let pid = current.pid().as_i32();
             // Always dump VMAs on SIGSEGV for dlopen/Alpine investigation.
             {
@@ -473,7 +490,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             // If no handler is installed, the default action terminates the process.
             deliver_sigsegv_fatal();
             return;
-        }
+        } // else (no stack growth)
+        } // None
     };
 
     // Page cache state — set inside the File match arm, used after for refcount init.
