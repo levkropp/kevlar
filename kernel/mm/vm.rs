@@ -233,6 +233,37 @@ impl Vm {
         &self.vm_areas[0]
     }
 
+    /// Try to grow the stack VMA downward to cover `fault_addr`.
+    /// Returns true if the stack was grown, false otherwise.
+    /// Linux auto-grows the stack when a fault occurs within a page below
+    /// the current stack VMA, up to the stack size rlimit (default 8MB).
+    pub fn try_grow_stack(&mut self, fault_addr: UserVAddr) -> bool {
+        let stack = &self.vm_areas[0];
+        // Only grow if the fault is just below the stack VMA.
+        let stack_start = stack.start().value();
+        let fault_val = fault_addr.value();
+        // Must be below the stack start (stack grows downward).
+        if fault_val >= stack_start {
+            return false;
+        }
+        // Must be anonymous RW (a real stack VMA).
+        if !matches!(stack.area_type(), VmAreaType::Anonymous) {
+            return false;
+        }
+        // Limit: don't grow more than 8MB below the stack top.
+        const MAX_STACK_SIZE: usize = 8 * 1024 * 1024;
+        let stack_top = stack.start().value() + stack.len();
+        if stack_top - fault_val > MAX_STACK_SIZE {
+            return false;
+        }
+        // Grow the stack VMA down to the fault page (page-aligned).
+        let new_start = kevlar_utils::alignment::align_down(fault_val, PAGE_SIZE);
+        let growth = stack_start - new_start;
+        self.vm_areas[0].start = UserVAddr::new(new_start).unwrap();
+        self.vm_areas[0].len += growth;
+        true
+    }
+
     /// Update the heap base address (used after loading PIE images).
     pub fn set_heap_bottom(&mut self, new_bottom: UserVAddr) {
         self.heap_bottom = new_bottom;
