@@ -400,6 +400,30 @@ int main(void) {
             }
         }
 
+        // Verify framebuffer pixels changed after xsetroot
+        {
+            int fd = open("/dev/fb0", O_RDONLY);
+            if (fd >= 0) {
+                unsigned int *fb = mmap(NULL, 1024*768*4, PROT_READ, MAP_SHARED, fd, 0);
+                if (fb != MAP_FAILED) {
+                    // Sample pixels at center of screen (512, 384)
+                    // xsetroot -solid '#336699' → BGR = 0x996633 in BGRA format
+                    // Bochs VGA is BGRA: blue=byte0, green=byte1, red=byte2
+                    unsigned int center = fb[384 * 1024 + 512];
+                    unsigned int tl = fb[100 * 1024 + 100];  // top-left area
+                    int non_black = (center != 0 && center != 0xFF000000);
+                    printf("  fb pixel check: center=%08x tl=%08x %s\n",
+                           center, tl, non_black ? "VISIBLE" : "BLACK");
+                    if (non_black)
+                        pass("fb_pixels_visible");
+                    else
+                        fail("fb_pixels_visible", "framebuffer still black after xsetroot");
+                    munmap(fb, 1024*768*4);
+                }
+                close(fd);
+            }
+        }
+
         // Also try xterm (might crash, but test it)
         start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 "
                  "-e 'echo HELLO_KEVLAR; sleep 30' 2>/dev/null");
