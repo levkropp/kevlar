@@ -385,7 +385,21 @@ int main(void) {
                 close(fd);
             }
         }
-        // Start xterm (may crash due to library issue — that's OK)
+        // Test X11 rendering without xterm: use xsetroot to change root window color
+        {
+            int rc = sh_run("DISPLAY=:0 xsetroot -solid '#336699' 2>/dev/null", 5000);
+            if (rc == 0) {
+                pass("xsetroot_color");
+                printf("  Root window set to blue (#336699)\n");
+            } else {
+                // xsetroot might not be installed, try with xprop
+                rc = sh_run("DISPLAY=:0 xprop -root -f _TEST 8s -set _TEST ok 2>/dev/null", 5000);
+                if (rc == 0) pass("xsetroot_color");
+                else fail("xsetroot_color", "X11 client failed");
+            }
+        }
+
+        // Also try xterm (might crash, but test it)
         start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 "
                  "-e 'echo HELLO_KEVLAR; sleep 30' 2>/dev/null");
 

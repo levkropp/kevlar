@@ -726,8 +726,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             && (prot_flags & 2 != 0); // VMA has PROT_WRITE
 
         if is_cow_write {
+            let pid = current_process().pid().as_i32();
             // Get the old physical page from the existing PTE.
             if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
+                // Log COW for stack pages
+                if aligned_vaddr.value() >= 0x9FFFDB000 && aligned_vaddr.value() <= 0x9FFFFE000 {
+                    warn!("COW: pid={} vaddr={:#x} paddr={:#x} refcount={} {}",
+                          pid, aligned_vaddr.value(), old_paddr.value(), refcount,
+                          if refcount > 1 { "COPY" } else { "WRITABLE" });
+                }
                 if vma_is_shared {
                     // MAP_SHARED: restore writable without copying.
                     vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
