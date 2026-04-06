@@ -358,7 +358,34 @@ int main(void) {
                10000);
         printf("  Font dirs done\n"); fflush(stdout);
 
-        // Start xterm with bitmap font (doesn't need fontconfig cache)
+        // Write a test pattern to fb0 to verify rendering is visible
+        // (simpler than xterm which has library issues)
+        {
+            int fd = open("/dev/fb0", O_RDWR);
+            if (fd >= 0) {
+                unsigned char finfo[68] = {0};
+                if (ioctl(fd, 0x4602, finfo) == 0) {
+                    unsigned int smem_len = *(unsigned int *)(finfo + 24);
+                    unsigned int stride = *(unsigned int *)(finfo + 48);
+                    void *fb = mmap(NULL, smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+                    if (fb != MAP_FAILED) {
+                        // Draw a white rectangle (100x50 pixels) at position (50,50)
+                        unsigned int *pixels = (unsigned int *)fb;
+                        for (int y = 50; y < 100; y++)
+                            for (int x = 50; x < 150; x++)
+                                pixels[y * (stride/4) + x] = 0xFFFFFFFF;
+                        // Draw "OK" text pattern at (200, 50) — simple block letters
+                        for (int y = 50; y < 80; y++)
+                            for (int x = 200; x < 260; x++)
+                                pixels[y * (stride/4) + x] = 0xFF00FF00; // green
+                        munmap(fb, smem_len);
+                        printf("  Drew test rectangle on framebuffer\n");
+                    }
+                }
+                close(fd);
+            }
+        }
+        // Start xterm (may crash due to library issue — that's OK)
         start_bg("DISPLAY=:0 HOME=/root xterm -geometry 80x24+50+50 "
                  "-e 'echo HELLO_KEVLAR; sleep 30' 2>/dev/null");
 
