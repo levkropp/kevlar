@@ -60,6 +60,11 @@ impl ArchTask {
         self.syscall_stack.as_ref().map(|s| **s)
     }
 
+    /// Returns true if the kernel stack has been freed (release_stacks was called).
+    pub fn kernel_stack_is_none(&self) -> bool {
+        self.kernel_stack.is_none()
+    }
+
     /// Eagerly release kernel stacks back to the allocator.
     ///
     /// Called from `switch()` after context-switching away from an exiting task.
@@ -534,15 +539,32 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
         .set_rsp0((next.interrupt_stack.as_ref().unwrap().as_vaddr().value() + 2 * PAGE_SIZE) as u64);
 
     // Save and restore the XSAVE area (FPU/SSE/AVX registers).
+    // Uses inline asm instead of Rust _xsave64/_xrstor64 intrinsics, which
+    // corrupt the kernel stack under the soft-float target (the intrinsics
+    // generate SSE-using code that clobbers the stack frame).
     unsafe {
-        use core::arch::x86_64::{_xrstor64, _xsave64};
-
         let xsave_mask = x86::controlregs::xcr0().bits();
+        let mask_lo = xsave_mask as u32;
+        let mask_hi = (xsave_mask >> 32) as u32;
         if let Some(xsave_area) = prev.xsave_area.as_ref() {
-            _xsave64(xsave_area.as_mut_ptr(), xsave_mask);
+            let ptr = xsave_area.as_mut_ptr::<u8>();
+            core::arch::asm!(
+                "xsave64 [{}]",
+                in(reg) ptr,
+                in("eax") mask_lo,
+                in("edx") mask_hi,
+                options(nostack, preserves_flags),
+            );
         }
         if let Some(xsave_area) = next.xsave_area.as_ref() {
-            _xrstor64(xsave_area.as_mut_ptr(), xsave_mask);
+            let ptr = xsave_area.as_mut_ptr::<u8>();
+            core::arch::asm!(
+                "xrstor64 [{}]",
+                in(reg) ptr,
+                in("eax") mask_lo,
+                in("edx") mask_hi,
+                options(nostack, preserves_flags),
+            );
         }
     }
 
@@ -554,10 +576,9 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     if next_rsp_val != 0 && next_rsp_val >= 0xffff_8000_0000_0000 {
         let ret_addr = unsafe { *((next_rsp_val + 56) as *const u64) };
         if ret_addr == 0 || (ret_addr > 0 && ret_addr < 0xffff_8000_0000_0000) {
-            let rsp_paddr = next_rsp_val - 0xffff_8000_0000_0000;
             panic!(
-                "switch_thread BUG: cpu={} rsp_pa={:#x} ret={:#x}",
-                crate::arch::cpu_id(), rsp_paddr, ret_addr,
+                "switch_thread BUG: cpu={} rsp={:#x} ret={:#x}",
+                crate::arch::cpu_id(), next_rsp_val, ret_addr,
             );
         }
     }

@@ -443,6 +443,10 @@ phase5:
     printf("\n=== Phase 5: XFCE Session ===\n");
     // In quick mode, start D-Bus and Xorg first
     if (quick_mode) {
+        // Generate machine-id for D-Bus
+        sh_run("dbus-uuidgen > /etc/machine-id 2>/dev/null; "
+               "cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null",
+               2000);
         sh_run("dbus-daemon --system --fork 2>/dev/null", 3000);
         sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 500);
         sh_run("/usr/libexec/Xorg :0 -noreset -nolisten tcp "
@@ -467,14 +471,40 @@ phase5:
                  "GTK_THEME=Adwaita; "
                  "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
                  ">/tmp/xfce-session.log 2>&1");
-        printf("  Waiting 5s for XFCE to initialize...\n");
+        printf("  Waiting 15s for XFCE to initialize...\n");
         fflush(stdout);
-        sleep(5);
+        for (int i = 0; i < 15; i++) {
+            sleep(1);
+            if (i == 4 || i == 9 || i == 14) {
+                printf("  ... %ds\n", i + 1);
+                fflush(stdout);
+            }
+        }
 
-        // Quick process listing first (before timeout hits)
+        // Dump xfce-session.log FIRST (most critical diagnostic)
+        {
+            char b[4096];
+            printf("  === xfce-session.log ===\n");
+            sh_capture("cat /tmp/xfce-session.log 2>&1 | head -80", b, sizeof(b), 3000);
+            printf("%s\n", b);
+            printf("  === END xfce-session.log ===\n");
+            fflush(stdout);
+        }
+
+        // Dump Xorg log errors
         {
             char b[2048];
-            sh_capture("ps -o pid,args 2>/dev/null | head -40", b, sizeof(b), 2000);
+            printf("  === Xorg errors ===\n");
+            sh_capture("grep -E '\\(EE\\)|error|Error' /var/log/Xorg.0.log 2>/dev/null | head -20",
+                      b, sizeof(b), 3000);
+            printf("%s\n", b);
+            fflush(stdout);
+        }
+
+        // Process listing
+        {
+            char b[2048];
+            sh_capture("ps -o pid,ppid,stat,args 2>/dev/null | head -50", b, sizeof(b), 3000);
             printf("  Processes:\n%s\n", b);
             fflush(stdout);
         }

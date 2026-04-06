@@ -1293,59 +1293,10 @@ impl Process {
             crate::syscalls::dump_pid1_trace();
         }
 
-        // ── Crash report ────────────────────────────────────────────
-        // Collect per-process syscall trace.
-        let trace = current.dump_trace();
-        let mut sc_tuples: [(u16, i32, u32, u32); 32] = [(0, 0, 0, 0); 32];
-        let sc_count = core::cmp::min(trace.len(), 32);
-        for (i, e) in trace.iter().enumerate().take(sc_count) {
-            sc_tuples[i] = (e.nr, e.result, e.arg0, e.arg1);
-        }
-
-        // Collect VMA map (up to 64 entries). Skip if the VM lock is
-        // already held to avoid deadlock (best-effort in crash path).
-        let mut vma_buf: [(usize, usize, &str); 64] = [(0, 0, ""); 64];
-        let mut vma_count = 0;
-        if let Some(vm_arc) = current.vm().as_ref() {
-            if !vm_arc.is_locked() {
-                let vm_guard = vm_arc.lock_no_irq();
-                for vma in vm_guard.vm_areas().iter() {
-                    if vma_count >= 64 {
-                        break;
-                    }
-                    let vt = match vma.area_type() {
-                        VmAreaType::Anonymous => "anon",
-                        VmAreaType::File { .. } => "file",
-                        VmAreaType::DeviceMemory { .. } => "device",
-                    };
-                    vma_buf[vma_count] = (vma.start().value(), vma.end().value(), vt);
-                    vma_count += 1;
-                }
-            }
-        }
-
-        // Get fsbase (FS segment base, points to TLS on x86_64).
-        let fsbase = current.arch().fsbase() as usize;
-
-        let signal_name = debug::signal_name(signal);
-
-        debug::emit(DebugFilter::PROCESS, &DebugEvent::CrashReport {
-            pid,
-            signal: signal as i32,
-            signal_name,
-            cmdline: cmdline.as_str(),
-            fault_addr: 0,
-            ip: 0,
-            fsbase,
-            rax: 0, rbx: 0, rcx: 0, rdx: 0,
-            rsi: 0, rdi: 0, rbp: 0, rsp: 0,
-            r8: 0, r9: 0, r10: 0, r11: 0,
-            r12: 0, r13: 0, r14: 0, r15: 0,
-            rflags: 0,
-            syscalls: &sc_tuples[..sc_count],
-            vmas: &vma_buf[..vma_count],
-        });
-
+        // ── Crash report (lightweight) ────────────────────────────────
+        // Skip VMA listing to avoid VM lock deadlock: if a sibling thread
+        // needs the VM lock (e.g. page fault), the crash dump would hold it
+        // forever on single CPU (preempted but never rescheduled).
         debug::emit(DebugFilter::PROCESS, &DebugEvent::ProcessExit {
             pid,
             status: 128 + signal,

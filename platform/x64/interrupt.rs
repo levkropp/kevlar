@@ -292,7 +292,6 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             panic!("unsupported exception: DEVICE_NOT_AVAILABLE\n{:?}", frame);
         }
         DOUBLE_FAULT_VECTOR => {
-            // TODO:
             panic!("unsupported exception: DOUBLE_FAULT\n{:?}", frame);
         }
         COPROCESSOR_SEGMENT_OVERRUN_VECTOR => {
