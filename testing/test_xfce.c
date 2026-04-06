@@ -34,10 +34,11 @@ static void fail(const char *name, const char *detail) {
 
 // Run a command in chroot, return exit code (-2 = timeout)
 static int sh_run(const char *cmd, int timeout_ms) {
-    pid_t pid = fork();
+    // Use vfork to block parent until child execs — avoids COW race.
+    pid_t pid = vfork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        if (chroot(ROOT) != 0) _exit(126);
+        chroot(ROOT);
         chdir("/");
         execl("/bin/sh", "sh", "-c", cmd, NULL);
         _exit(127);
