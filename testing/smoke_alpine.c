@@ -1002,10 +1002,8 @@ static void phase6_network(void) {
         }
     }
 
-    // TCP loopback: SKIPPED — known kernel bug causes poll/accept hang
-    // on 127.0.0.1 connections. TODO: fix TCP loopback in kernel.
-    skip("p6_tcp_loopback", "loopback hang (kernel bug)");
-    if (0) {
+    // TCP loopback: server on 127.0.0.1, client connects, exchange data.
+    {
         int sfd = socket(AF_INET, SOCK_STREAM, 0);
         if (sfd < 0) {
             fail("p6_tcp_loopback", "socket failed");
@@ -1027,15 +1025,8 @@ static void phase6_network(void) {
                 if (pid == 0) {
                     close(sfd);
                     int cfd = socket(AF_INET, SOCK_STREAM, 0);
-                    // Non-blocking connect with 3s timeout
-                    int fl = fcntl(cfd, F_GETFL, 0);
-                    fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
-                    connect(cfd, (struct sockaddr *)&addr, sizeof(addr));
-                    struct pollfd cpfd = { .fd = cfd, .events = POLLOUT };
-                    if (poll(&cpfd, 1, 3000) > 0) {
-                        fcntl(cfd, F_SETFL, fl); // restore blocking
+                    if (connect(cfd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
                         write(cfd, "loopback", 8);
-                    }
                     close(cfd);
                     _exit(0);
                 }

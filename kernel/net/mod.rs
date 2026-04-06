@@ -103,9 +103,18 @@ pub fn process_packets() {
         }
     }
 
+    // Loop until no more work: iface.poll processes RX frames and generates
+    // TX responses. For loopback, TX frames go back into RX queue, requiring
+    // another poll round. Keep going until both poll returns None AND the
+    // RX queue is empty (loopback frames fully drained).
     loop {
         match iface.poll(timestamp, &mut OurDevice, &mut sockets) {
-            smoltcp::iface::PollResult::None => break,
+            smoltcp::iface::PollResult::None => {
+                // Check if loopback injected new frames that need processing.
+                if RX_PACKET_QUEUE.lock().is_empty() {
+                    break;
+                }
+            }
             smoltcp::iface::PollResult::SocketStateChanged => {}
         }
     }
@@ -173,14 +182,19 @@ impl TxToken for OurTxToken {
                 if is_loopback_arp {
                     // Convert ARP request (opcode=1) to ARP reply (opcode=2)
                     // so smoltcp learns the MAC for the loopback address.
+                    // Use a fake locally-administered MAC (02:00:00:7f:00:01)
+                    // because smoltcp ignores ARP replies from its own MAC.
                     if buffer.len() >= 42 && buffer[21] == 1 {
                         buffer[21] = 2; // opcode = reply
-                        // Swap sender/target in ARP payload:
-                        // sender MAC+IP (bytes 22-31) ↔ target MAC+IP (bytes 32-41)
-                        let mut tmp = [0u8; 10];
-                        tmp.copy_from_slice(&buffer[22..32]);
-                        buffer.copy_within(32..42, 22);
-                        buffer[32..42].copy_from_slice(&tmp);
+                        let fake_mac: [u8; 6] = [0x02, 0x00, 0x00, 0x7f, 0x00, 0x01];
+                        let target_ip: [u8; 4] = buffer[38..42].try_into().unwrap_or([0; 4]);
+                        // Move original sender to target position
+                        buffer.copy_within(22..32, 32);
+                        // Set sender = fake loopback MAC + target IP
+                        buffer[22..28].copy_from_slice(&fake_mac);
+                        buffer[28..32].copy_from_slice(&target_ip);
+                        // Also fix the Ethernet source MAC to the fake MAC
+                        buffer[6..12].copy_from_slice(&fake_mac);
                     }
                 }
 
