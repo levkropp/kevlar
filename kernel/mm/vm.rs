@@ -413,9 +413,9 @@ impl Vm {
         self.expand_heap_to(new_end)
     }
 
-    pub fn fork(&self) -> Result<Vm> {
+    pub fn fork(&mut self) -> Result<Vm> {
         Ok(Vm {
-            page_table: PageTable::duplicate_from(&self.page_table)?,
+            page_table: PageTable::duplicate_from(&mut self.page_table)?,
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
             last_fault_vma_idx: self.last_fault_vma_idx,

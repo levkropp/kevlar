@@ -42,7 +42,16 @@ pub unsafe fn init() {
         idt[i].offset1 = (handler & 0xffff) as u16;
         idt[i].seg = KERNEL_CS;
         idt[i].ist = IST_RSP0;
-        idt[i].info = 0x8e;
+        // IDT gate type: 0x8E = Present, DPL=0, 64-bit Interrupt Gate
+        //                0xEE = Present, DPL=3, 64-bit Interrupt Gate
+        // Vectors that userspace must be able to invoke via software
+        // interrupts need DPL=3.  Without it, int3/into from ring 3
+        // causes #GP instead of dispatching to the handler.
+        idt[i].info = match i {
+            3 => 0xee, // #BP (int3) — debuggers, __stack_chk_fail
+            4 => 0xee, // #OF (into) — overflow trap
+            _ => 0x8e, // All others: DPL=0 (kernel only)
+        };
         idt[i].offset2 = ((handler >> 16) & 0xffff) as u16;
         idt[i].offset3 = ((handler >> 32) & 0xffffffff) as u32;
         idt[i].reserved = 0;

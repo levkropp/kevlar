@@ -183,7 +183,12 @@ impl<'a> SyscallHandler<'a> {
         }
 
         // Now safe to free all unmapped physical pages.
+        // Skip device memory pages (PCI BARs, framebuffer) — they are not
+        // managed by the page allocator and have no refcount.
         for (paddr, num) in to_free {
+            if !kevlar_platform::page_allocator::is_managed_page(paddr) {
+                continue;
+            }
             if num == 512 {
                 for sub_i in 0..512usize {
                     let sub = PAddr::new(paddr.value() + sub_i * PAGE_SIZE);

@@ -269,7 +269,7 @@ impl PageTable {
         Ok(PageTable { pgd })
     }
 
-    pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
+    pub fn duplicate_from(original: &mut PageTable) -> Result<PageTable, PageAllocError> {
         Ok(PageTable {
             pgd: duplicate_table(original.pgd, 4)?,
         })

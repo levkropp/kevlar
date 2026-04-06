@@ -460,6 +460,18 @@ pub fn alloc_pages_owned(
     alloc_pages(num_pages, flags).map(|paddr| OwnedPages::new(paddr, num_pages))
 }
 
+/// Returns true if this physical address belongs to a managed memory zone.
+/// Device memory (PCI BARs, framebuffers) returns false.
+pub fn is_managed_page(paddr: PAddr) -> bool {
+    let mut zones = ZONES.lock_no_irq();
+    for zone in zones.iter_mut() {
+        if zone.includes(paddr.value()) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // Single page — try to push to cache.
     if num_pages == 1 {

@@ -184,8 +184,21 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                       rax, rbx, rcx, rdx);
                 warn!("  RSI={:#x} RDI={:#x} RBP={:#x} RSP={:#x}",
                       rsi, rdi, rbp, rsp);
-                warn!("  RIP={:#x} RFLAGS={:#x} fault_addr={:#x}",
-                      rip, rflags, unsafe { x86::controlregs::cr2() });
+                let error = frame.error;
+                warn!("  RIP={:#x} RFLAGS={:#x} ERR={:#x}",
+                      rip, rflags, error);
+                // Dump instruction bytes at faulting IP
+                if rip > 0x1000 && rip < 0x7FFF_FFFF_FFFF {
+                    let mut ibytes = [0u8; 16];
+                    for j in 0..16usize {
+                        ibytes[j] = unsafe { *((rip as usize + j) as *const u8) };
+                    }
+                    warn!("  code: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                          ibytes[0], ibytes[1], ibytes[2], ibytes[3],
+                          ibytes[4], ibytes[5], ibytes[6], ibytes[7],
+                          ibytes[8], ibytes[9], ibytes[10], ibytes[11],
+                          ibytes[12], ibytes[13], ibytes[14], ibytes[15]);
+                }
                 // Dump 8 stack values
                 if rsp > 0x1000 && rsp < 0x7FFF_FFFF_FFFF {
                     warn!("  stack:");
@@ -233,16 +246,46 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             }
         }
         DEBUG_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: DEBUG\n{:?}", frame);
+            // Hardware debug exception (#DB). Triggered by DR0-DR3 watchpoints
+            // or single-step (RFLAGS.TF). Read DR6 for the status.
+            let dr6: u64;
+            unsafe { core::arch::asm!("mov {}, dr6", out(reg) dr6); }
+            let rip = frame.rip;
+            let rsp = frame.rsp;
+            let cs = frame.cs;
+            if dr6 & 0xF != 0 {
+                // Hardware breakpoint/watchpoint hit (DR0-DR3).
+                let dr0: u64;
+                unsafe { core::arch::asm!("mov {}, dr0", out(reg) dr0); }
+                warn!("#DB watchpoint hit: DR6={:#x} DR0={:#x} RIP={:#x} RSP={:#x} CS={:#x}",
+                      dr6, dr0, rip, rsp, cs);
+                // Disable watchpoint to prevent infinite loop.
+                unsafe { core::arch::asm!("mov dr7, {}", in(reg) 0u64); }
+            } else {
+                // Single-step or other debug event.
+                warn!("#DB: DR6={:#x} RIP={:#x} CS={:#x}", dr6, rip, cs);
+            }
+            // Clear DR6 status bits.
+            unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0u64); }
+            // For user-mode #DB: deliver SIGTRAP via the fault handler.
+            if cs & 3 != 0 {
+                handler().handle_user_fault("DEBUG", rip as usize);
+            }
         }
         NONMASKABLE_INTERRUPT_VECTOR => {
             // TODO:
             panic!("unsupported exception: NONMASKABLE_INTERRUPT\n{:?}", frame);
         }
         BREAKPOINT_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: BREAKPOINT\n{:?}", frame);
+            // int3 from userspace: deliver SIGTRAP (debugger breakpoint).
+            // int3 from kernel: panic (shouldn't happen).
+            let cs = frame.cs;
+            let rip = frame.rip;
+            if cs & 3 != 0 {
+                handler().handle_user_fault("BREAKPOINT", rip as usize);
+            } else {
+                panic!("kernel breakpoint at RIP={:#x}", rip);
+            }
         }
         DEVICE_NOT_AVAILABLE_VECTOR => {
             // TODO:

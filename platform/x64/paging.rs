@@ -718,15 +718,30 @@ impl PageTable {
         self.pml4
     }
 
-    pub fn duplicate_from(original: &PageTable) -> Result<PageTable, PageAllocError> {
+    pub fn duplicate_from(original: &mut PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
-        // Flush parent's TLB entries so CoW read-only PTEs take effect.
-        // With PCID: write CR3 with parent's PCID and bit 63=0 to flush
-        // that PCID's entries, then immediately reload with bit 63=1
-        // (no-invalidate) to keep the PCID active without re-flushing.
-        // Without PCID: plain CR3 write flushes everything.
+        // PCID TLB coherency fix for fork:
+        //
+        // duplicate_table_cow cleared WRITABLE on the parent's PTEs. But with
+        // PCID, remote CPUs may still cache stale WRITABLE entries for the
+        // parent's old PCID. A no-invalidate context switch (switch() with
+        // bit 63=1) back to this process on such a CPU would use the stale
+        // entry, allowing writes to bypass COW — the phantom refcount bug.
+        //
+        // Fix: allocate a FRESH PCID for the parent. All stale TLB entries
+        // on remote CPUs are tagged with the OLD PCID, which will never be
+        // loaded again. When the parent is next scheduled on any CPU, the
+        // fresh PCID has zero cached entries, so all accesses walk the page
+        // table and see the correct read-only PTEs.
+        //
+        // Without PCID (pcid==0): every context switch fully flushes the TLB,
+        // so stale entries can't persist across switches. No reallocation needed.
+        if original.pcid != 0 {
+            original.pcid = alloc_pcid();
+        }
+        // Flush the current CPU: load parent's PML4 with the (possibly new)
+        // PCID and bit 63=0 to force-flush entries for this PCID.
         unsafe {
-            // Step 1: Flush by writing CR3 without no-invalidate bit
             let flush_cr3 = original.pml4.value() as u64 | (original.pcid as u64);
             x86::controlregs::cr3_write(flush_cr3);
         }
@@ -856,11 +871,24 @@ impl PageTable {
         crate::page_refcount::page_ref_init(paddr);
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
         if prot_flags & 2 != 0 {
-            // PROT_WRITE
             attrs |= PageAttrs::WRITABLE;
         }
         if prot_flags & 4 == 0 {
-            // No PROT_EXEC → set NX bit
+            attrs |= PageAttrs::NO_EXECUTE;
+        }
+        self.map_page(vaddr, paddr, attrs);
+    }
+
+    /// Maps a device memory page without touching refcounts.
+    /// Used for PCI BAR mappings (framebuffer, etc.) where the physical
+    /// address is not managed by the page allocator.
+    #[inline(always)]
+    pub fn map_device_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
+        if prot_flags & 2 != 0 {
+            attrs |= PageAttrs::WRITABLE;
+        }
+        if prot_flags & 4 == 0 {
             attrs |= PageAttrs::NO_EXECUTE;
         }
         self.map_page(vaddr, paddr, attrs);

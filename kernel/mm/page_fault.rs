@@ -493,10 +493,11 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             let offset_in_vma = aligned_vaddr.value() - vma.start().value();
             let device_paddr = PAddr::new(phys_base + offset_in_vma);
 
-            // prot_flags: bit 1 = writable
+            // Use map_device_page to skip page_ref_init — device addresses
+            // are PCI BARs, not managed by the page allocator.
             let prot = if vma.prot().bits() & 2 != 0 { 2 } else { 0 };
             vm.page_table_mut()
-                .map_user_page_with_prot(aligned_vaddr, device_paddr, prot);
+                .map_device_page(aligned_vaddr, device_paddr, prot);
 
             drop(vm);
             drop(vm_ref);
@@ -726,16 +727,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             && (prot_flags & 2 != 0); // VMA has PROT_WRITE
 
         if is_cow_write {
-            let pid = current_process().pid().as_i32();
             // Get the old physical page from the existing PTE.
             if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
-                let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
-                // Log COW for stack pages
-                if aligned_vaddr.value() >= 0x9FFFDB000 && aligned_vaddr.value() <= 0x9FFFFE000 {
-                    warn!("COW: pid={} vaddr={:#x} paddr={:#x} refcount={} {}",
-                          pid, aligned_vaddr.value(), old_paddr.value(), refcount,
-                          if refcount > 1 { "COPY" } else { "WRITABLE" });
-                }
                 if vma_is_shared {
                     // MAP_SHARED: restore writable without copying.
                     let ok = vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
@@ -786,8 +779,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     return;
                 }
                 // refcount == 1 and not ghost: sole owner, just make writable.
-                // Previously this was a no-op (fell through without making the
-                // page writable), causing infinite fault loops and stack corruption.
                 vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
                 vm.page_table().flush_tlb_local(aligned_vaddr);
                 return;
