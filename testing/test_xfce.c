@@ -144,6 +144,11 @@ int main(void) {
     fflush(stdout);
     setup_rootfs();
 
+    // Quick mode: skip Phases 1-4 (proven working) to focus on Phase 5.
+    // Set to 1 to go straight to XFCE session startup.
+    int quick_mode = 1;
+    if (quick_mode) goto phase5;
+
     // --- Phase 1: Check /dev/fb0 ---
     printf("\n=== Phase 1: Framebuffer ===\n");
     {
@@ -434,7 +439,17 @@ int main(void) {
     }
 
     // --- Phase 5: Start XFCE ---
+phase5:
     printf("\n=== Phase 5: XFCE Session ===\n");
+    // In quick mode, start D-Bus and Xorg first
+    if (quick_mode) {
+        sh_run("dbus-daemon --system --fork 2>/dev/null", 3000);
+        sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 500);
+        sh_run("/usr/libexec/Xorg :0 -noreset -nolisten tcp "
+               "-config /etc/X11/xorg.conf.d/10-fbdev.conf "
+               "vt1 >/dev/null 2>&1 &"
+               "sleep 3", 8000);
+    }
     {
         // Test: can we exec startxfce4 directly inside the chroot?
         {
