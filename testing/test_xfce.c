@@ -452,17 +452,15 @@ int main(void) {
                  "GTK_THEME=Adwaita; "
                  "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
                  ">/tmp/xfce-session.log 2>&1");
-        printf("  Waiting 10s for XFCE to initialize...\n");
+        printf("  Waiting 5s for XFCE to initialize...\n");
         fflush(stdout);
-        sleep(10);
+        sleep(5);
 
-        // Dump XFCE session log
+        // Quick process listing first (before timeout hits)
         {
-            char b[1024];
-            printf("  === xfce-session.log ===\n");
-            sh_capture("cat /tmp/xfce-session.log 2>/dev/null | head -30", b, sizeof(b), 3000);
-            printf("%s", b);
-            printf("  === end ===\n");
+            char b[2048];
+            sh_capture("ps -o pid,args 2>/dev/null | head -40", b, sizeof(b), 2000);
+            printf("  Processes:\n%s\n", b);
             fflush(stdout);
         }
 
