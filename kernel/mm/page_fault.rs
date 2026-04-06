@@ -24,6 +24,15 @@ fn deliver_sigsegv_fatal() {
     if matches!(action, SigAction::Terminate) {
         Process::exit_by_signal(SIGSEGV);
     } else {
+        // If we're already inside a signal handler (signaled_frame_stack is
+        // non-empty), a SIGSEGV here means the handler itself faulted.
+        // Force-kill to prevent infinite recursion. Linux does this via
+        // signal masking during handler execution.
+        let in_handler = current.is_in_signal_handler();
+        if in_handler {
+            warn!("SIGSEGV inside SIGSEGV handler pid={}, force killing", pid);
+            Process::exit_by_signal(SIGSEGV);
+        }
         warn!("SIGSEGV->handler pid={}", pid);
         current.send_signal(SIGSEGV);
     }
@@ -404,6 +413,19 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 }
             } else {
             let pid = current.pid().as_i32();
+            // Dump instruction bytes at the faulting IP for crash investigation.
+            #[allow(unsafe_code)]
+            if ip > 0x1000 && ip < 0x7FFF_FFFF_FFFF {
+                let mut ibytes = [0u8; 16];
+                for j in 0..16usize {
+                    ibytes[j] = unsafe { *((ip + j) as *const u8) };
+                }
+                warn!("  code at ip={:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                      ip, ibytes[0], ibytes[1], ibytes[2], ibytes[3],
+                      ibytes[4], ibytes[5], ibytes[6], ibytes[7],
+                      ibytes[8], ibytes[9], ibytes[10], ibytes[11],
+                      ibytes[12], ibytes[13], ibytes[14], ibytes[15]);
+            }
             // Always dump VMAs on SIGSEGV for dlopen/Alpine investigation.
             {
                 warn!("PAGE FAULT NO VMA: pid={} addr={:#x} ip={:#x} reason={:?}",

@@ -1404,6 +1404,13 @@ impl Process {
         crate::debug::htrace::exit(crate::debug::htrace::id::SIGNAL_SEND, signal as u32);
     }
 
+    /// Returns true if we're inside a signal handler (the signaled frame
+    /// stack has saved contexts). Used to detect nested faults — if SIGSEGV
+    /// fires while already handling a signal, the process must be killed.
+    pub fn is_in_signal_handler(&self) -> bool {
+        !self.signaled_frame_stack.lock_no_irq().is_empty()
+    }
+
     /// Returns `true` if there's a deliverable (pending AND unblocked) signal.
     /// SIGKILL and SIGSTOP can never be blocked (POSIX), so they are always
     /// deliverable regardless of the signal mask.
