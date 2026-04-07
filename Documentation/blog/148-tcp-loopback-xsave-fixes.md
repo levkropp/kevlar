@@ -100,12 +100,44 @@ The Makefile timeout was also reduced from 600s to 180s.
 | XFCE (1 CPU) | xfce4-session runs, xfwm4 needs xfconf fix |
 | XFCE (SMP) | Deadlock in concurrent process exit |
 
-## Remaining: Phase 7-8 Crash
+## Fork COW TLB Flush
 
-The smoke test crashes during Phase 7 (package management, which does
-`apk update`) or Phase 8 (stress test with 50 rapid fork/exit). The crash
-is a kernel page fault in `memcpy` called from `duplicate_table` during
-`fork()`. The source pointer has corrupted upper bits (`7fff...` instead
-of `ffff8000...`), suggesting page table entry corruption.
+`Vm::fork()` calls `duplicate_from()` which marks writable parent PTEs as
+read-only for copy-on-write. But it never flushed the TLB afterward. Stale
+writable TLB entries let the parent silently write through to shared physical
+pages — corrupting data including page tables themselves.
 
-This is the next bug to investigate.
+**Fix:** Added `self.page_table.flush_tlb_all()` in `Vm::fork()` immediately
+after `duplicate_from()`. The ghost-fork path already had a flush (after the
+child exits), but the regular fork path was missing it entirely.
+
+## PTE Address Mask Too Wide
+
+`entry_paddr()` used mask `0x7FFFFFFFFFFFF000` (bits 12-62) to extract the
+physical address from a page table entry. On x86_64, the physical address
+occupies bits 12-51 only (40 bits = 52-bit physical addressing). Bits 52-58
+are available for OS use, and bits 59-62 are reserved/PKEY.
+
+If any software flag happened to set bits 52-62, the extracted "physical
+address" would be enormous and produce a non-canonical virtual address when
+the kernel base was added, causing a GPF.
+
+**Fix:** Narrowed the mask to `0x000FFFFFFFFFF000` (bits 12-51 only).
+Updated `entry_flags()` correspondingly.
+
+## Remaining: Page Table / Stack Double Allocation
+
+The smoke test crashes in Phase 7 during `execve` → `teardown_forked_pages`.
+The crash is a GPF accessing a non-canonical address `7fff80003a9d6000`.
+
+Investigation revealed: the page table page being torn down contains kernel
+stack data (return addresses like `ffff800000XXXXXX`) instead of valid PTEs.
+The RSP at the crash point (`ffff80003a9d6ac8`) shares the same physical
+page base (`3a9d6000`) as the corrupted page table pointer — confirming
+that a single physical page is simultaneously used as both a kernel stack
+and a page table.
+
+This is a page allocator or reference counting bug: a page is freed (or
+never properly claimed) and then allocated to two different subsystems.
+The stack writes naturally overwrite the page table entries, producing
+invalid PTEs that crash the teardown walker.
