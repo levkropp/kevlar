@@ -137,7 +137,31 @@ page base (`3a9d6000`) as the corrupted page table pointer — confirming
 that a single physical page is simultaneously used as both a kernel stack
 and a page table.
 
-This is a page allocator or reference counting bug: a page is freed (or
-never properly claimed) and then allocated to two different subsystems.
-The stack writes naturally overwrite the page table entries, producing
-invalid PTEs that crash the teardown walker.
+### Investigation Results
+
+**Double allocation ruled out.** A runtime bitmap tracker (set bit on
+alloc, clear on free, panic if alloc returns already-set page) confirmed
+the buddy allocator never returns the same page twice. The PT_PAGE_POOL
+was also bypassed with no effect.
+
+**PTE mask fixed.** `entry_paddr()` used mask `0x7FFFFFFFFFFFF000` (bits
+12-62). Narrowed to `0x000FFFFFFFFFF000` (bits 12-51) matching x86_64
+MAXPHYADDR. Two other call sites had the same stale mask.
+
+**Defensive bounds checks added.** Every `paddr` extracted from a PTE is
+now validated against `KERNEL_STRAIGHT_MAP_PADDR_END` before use. Out-of-
+range entries are skipped. However, corrupted values within valid RAM
+range still cause cascading corruption when the teardown walker follows
+them into wrong pages.
+
+**The write source is unknown.** The corrupted page IS allocated (bitmap
+confirms), IS within RAM bounds, but contains stack-like data (`0xffff8000`
+return addresses). The corruption is NOT from:
+- Stack overflow (RSP well within 32KB bounds)
+- Double allocation (bitmap confirms)
+- PT_PAGE_POOL reuse (bypassed, still crashes)
+- Stale TLB (flush added after fork COW)
+
+**Next step:** Mark page table pages as read-only in the kernel's own page
+table. Any write to a PT page would trigger a page fault, catching the
+exact instruction and call stack that corrupts it.
