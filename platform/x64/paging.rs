@@ -468,7 +468,7 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
         let entry = unsafe { *table.offset(i) };
         let paddr = entry_paddr(entry);
 
-        if paddr.is_null() {
+        if paddr.is_null() || paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
             continue;
         }
 
@@ -517,11 +517,7 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
 /// and frees intermediate page table pages. Safe for forked page tables where
 /// data pages may still be referenced by the parent or page cache.
 fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
-    if table_paddr.is_null() {
-        return;
-    }
-    if table_paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
-        warn!("teardown_table_dec_only: bad paddr {:#x} at level {}", table_paddr.value(), level);
+    if table_paddr.is_null() || table_paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
         return;
     }
     let table = table_paddr.as_mut_ptr::<PageTableEntry>();
@@ -530,7 +526,7 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
         let entry = unsafe { *table.offset(i) };
         let paddr = entry_paddr(entry);
 
-        if paddr.is_null() {
+        if paddr.is_null() || paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
             continue;
         }
 
@@ -563,6 +559,10 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
             // Intermediate table: recurse, then free the table page.
             if level == 4 && i >= 0x80 {
                 continue; // Skip kernel page table entries.
+            }
+            // Defensive: skip entries with physical addresses outside RAM.
+            if paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
+                continue;
             }
             teardown_table_dec_only(paddr, level - 1);
             free_pt_page(paddr);
@@ -857,7 +857,7 @@ impl PageTable {
         if !is_huge_page_pde(pde_val) {
             return false;
         }
-        let paddr_bits = pde_val & 0x7ffffffffffff000;
+        let paddr_bits = pde_val & 0x000f_ffff_ffff_f000;
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER | PageAttrs::HUGE_PAGE;
         if prot_flags & 2 != 0 { attrs |= PageAttrs::WRITABLE; }
         if prot_flags & 4 == 0 { attrs |= PageAttrs::NO_EXECUTE; }
@@ -917,7 +917,7 @@ impl PageTable {
         };
 
         let entry = unsafe { *entry_ptr.as_ptr() };
-        let paddr_bits = entry & 0x7ffffffffffff000;
+        let paddr_bits = entry & 0x000f_ffff_ffff_f000;
         if paddr_bits == 0 {
             return false;
         }
