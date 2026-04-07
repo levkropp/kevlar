@@ -445,8 +445,14 @@ impl Vm {
     }
 
     pub fn fork(&mut self) -> Result<Vm> {
+        let new_pt = PageTable::duplicate_from(&mut self.page_table)?;
+        // Flush TLB immediately: duplicate_from marked writable PTEs as
+        // read-only (COW) in the parent. Without a flush, stale writable
+        // TLB entries let the parent silently write through to the now-shared
+        // physical page, corrupting data (including page tables themselves).
+        self.page_table.flush_tlb_all();
         Ok(Vm {
-            page_table: PageTable::duplicate_from(&mut self.page_table)?,
+            page_table: new_pt,
             vm_areas: self.vm_areas.clone(),
             valloc_next: self.valloc_next,
             last_fault_vma_idx: self.last_fault_vma_idx,

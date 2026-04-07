@@ -68,12 +68,16 @@ bitflags! {
 
 #[inline(always)]
 fn entry_paddr(entry: PageTableEntry) -> PAddr {
-    PAddr::new((entry & 0x7ffffffffffff000) as usize)
+    // Mask: bits 12-51 only (40-bit physical address).
+    // Bits 52-58 are available for OS, bits 59-62 are reserved/PKEY,
+    // bit 63 is NX. Including them would produce invalid physical addresses.
+    PAddr::new((entry & 0x000f_ffff_ffff_f000) as usize)
 }
 
 #[inline(always)]
 fn entry_flags(entry: PageTableEntry) -> PageTableEntry {
-    entry & !0x7ffffffffffff000
+    // Extract everything that's NOT the physical address: bits 0-11, 52-63.
+    entry & !0x000f_ffff_ffff_f000
 }
 
 #[inline(always)]
@@ -454,6 +458,10 @@ fn restore_writable_from_list(pml4: PAddr, addrs: &[usize]) {
 /// Recursively walk a page table, decrementing refcounts on user pages
 /// and freeing intermediate page table pages. Called from `teardown_user_pages`.
 fn teardown_table(table_paddr: PAddr, level: usize) {
+    if table_paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
+        warn!("teardown_table: bad paddr {:#x} at level {}", table_paddr.value(), level);
+        return;
+    }
     let table = table_paddr.as_mut_ptr::<PageTableEntry>();
 
     for i in 0..ENTRIES_PER_TABLE {
@@ -510,6 +518,10 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
 /// data pages may still be referenced by the parent or page cache.
 fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
     if table_paddr.is_null() {
+        return;
+    }
+    if table_paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
+        warn!("teardown_table_dec_only: bad paddr {:#x} at level {}", table_paddr.value(), level);
         return;
     }
     let table = table_paddr.as_mut_ptr::<PageTableEntry>();
