@@ -15,6 +15,7 @@ static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NUM_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 
 
+
 /// A simple LIFO cache of single free pages to bypass the buddy allocator.
 /// Sized to absorb large fault-around bursts (64 pages) across multiple
 /// consecutive faults without immediate buddy allocator refills.
@@ -212,6 +213,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }
             NUM_FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
+            mark_pages_allocated(paddr.value(), 1);
             return Ok(paddr);
         }
     }
@@ -225,6 +227,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }
+            mark_pages_allocated(paddr.value(), 1);
             return Ok(paddr);
         }
     }
@@ -303,6 +306,8 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
     for zone in zones.iter_mut() {
         if let Some(paddr) = zone.alloc_pages(order) {
             let paddr = PAddr::new(paddr);
+            drop(zones);
+
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe {
                     paddr.as_mut_ptr::<u8>().write_bytes(0, num_pages * PAGE_SIZE);
@@ -473,6 +478,7 @@ pub fn is_managed_page(paddr: PAddr) -> bool {
 }
 
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
+
     // Single page — try to push to cache.
     if num_pages == 1 {
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
