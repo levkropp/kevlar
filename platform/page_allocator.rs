@@ -213,7 +213,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }
             NUM_FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
-            mark_pages_allocated(paddr.value(), 1);
+
             return Ok(paddr);
         }
     }
@@ -227,7 +227,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
             }
-            mark_pages_allocated(paddr.value(), 1);
+
             return Ok(paddr);
         }
     }
