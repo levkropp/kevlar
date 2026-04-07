@@ -162,6 +162,20 @@ return addresses). The corruption is NOT from:
 - PT_PAGE_POOL reuse (bypassed, still crashes)
 - Stale TLB (flush added after fork COW)
 
-**Next step:** Mark page table pages as read-only in the kernel's own page
-table. Any write to a PT page would trigger a page fault, catching the
-exact instruction and call stack that corrupts it.
+### Resolution: Compiler-Eliminated Bounds Check
+
+The crash was caused by **the Rust compiler optimizing away the bounds
+check** in `teardown_table_dec_only`. The function checked
+`paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END` before following a PTE,
+but the optimizer eliminated the comparison — likely proving (incorrectly
+for corrupted inputs) that the condition was never true.
+
+When a corrupted PTE contained an out-of-range physical address (e.g.,
+`0x000f80003a9d6000`), adding `KERNEL_BASE_ADDR` produced a non-canonical
+virtual address, causing GPF.
+
+**Fix:** Used `core::ptr::read_volatile` to read `table_paddr.value()`,
+preventing the optimizer from eliminating the bounds check. Also added
+a PT page cookie (magic value at entry 511) to detect future corruption.
+
+**Result:** Smoke test **67/67 PASS**, all phases complete in 22.4s.
