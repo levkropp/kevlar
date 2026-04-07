@@ -2405,7 +2405,7 @@ fn build_and_save_prefault_template(vm: &Vm, file_ptr: usize) {
                 if let Ok(huge_uaddr) = UserVAddr::new_nonnull(huge_base) {
                     if let Some(pde_val) = vm.page_table().is_huge_mapped(huge_uaddr) {
                         if !huge_entries.iter().any(|&(va, _, _): &(usize, PAddr, i32)| va == huge_base) {
-                            let paddr = PAddr::new((pde_val & 0x7ffffffffffff000) as usize);
+                            let paddr = PAddr::new((pde_val & 0x000f_ffff_ffff_f000) as usize);
                             huge_entries.push((huge_base, paddr, 5));
                         }
                         addr = huge_base + HUGE_PAGE_SIZE;

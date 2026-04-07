@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-use super::PAGE_SIZE;
+use super::{PAGE_SIZE, KERNEL_STRAIGHT_MAP_PADDR_END};
 use alloc::vec::Vec;
 use crate::address::{PAddr, UserVAddr};
 use crate::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
@@ -17,18 +17,34 @@ use kevlar_utils::alignment::is_aligned;
 const PT_POOL_MAX: usize = 32;
 static PT_PAGE_POOL: SpinLock<Vec<PAddr>> = SpinLock::new(Vec::new());
 
-/// Allocate a page table page, preferring the pool over the global allocator.
-#[inline]
+/// Magic cookie stored at entry 511 of every PT page (offset 0xFF8).
+/// User page tables never use entry 511 (it maps vaddr 0x7FFFFFFFE000+
+/// at level 1, which is inside the kernel half). If a PT page's cookie
+/// is overwritten, another subsystem is writing to this page.
+const PT_PAGE_MAGIC: u64 = 0xBEEF_CA11_DEAD_F00D;
+
 fn alloc_pt_page() -> Result<PAddr, PageAllocError> {
     if let Some(page) = PT_PAGE_POOL.lock_no_irq().pop() {
+        // Verify cookie is intact
+        let ptr = page.as_mut_ptr::<u64>();
+        let cookie = unsafe { *ptr.offset(511) };
+        if cookie != PT_PAGE_MAGIC {
+            panic!("PT page {:#x} cookie corrupted: {:#x} (expected {:#x})",
+                page.value(), cookie, PT_PAGE_MAGIC);
+        }
         return Ok(page);
     }
-    alloc_pages(1, AllocPageFlags::KERNEL)
+    let page = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    // Set cookie on fresh page
+    unsafe { *page.as_mut_ptr::<u64>().offset(511) = PT_PAGE_MAGIC; }
+    Ok(page)
 }
 
 /// Return a page table page to the pool (or free it if pool is full).
 #[inline]
 fn free_pt_page(paddr: PAddr) {
+    // Write cookie before returning to pool
+    unsafe { *paddr.as_mut_ptr::<u64>().offset(511) = PT_PAGE_MAGIC; }
     let mut pool = PT_PAGE_POOL.lock_no_irq();
     if pool.len() < PT_POOL_MAX {
         pool.push(paddr);
@@ -516,13 +532,21 @@ fn teardown_table(table_paddr: PAddr, level: usize) {
 /// Like teardown_table but NEVER frees data pages — only decrements refcounts
 /// and frees intermediate page table pages. Safe for forked page tables where
 /// data pages may still be referenced by the parent or page cache.
+#[inline(never)]
 fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
-    if table_paddr.is_null() || table_paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
+    // CRITICAL: volatile read prevents the compiler from optimizing
+    // away this bounds check.  Without it, the compiler eliminates the
+    // comparison and the function GPFs on non-canonical addresses from
+    // corrupted PTEs.
+    let pv = unsafe { core::ptr::read_volatile(&table_paddr.value()) };
+    if pv == 0 || pv >= KERNEL_STRAIGHT_MAP_PADDR_END {
         return;
     }
-    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+    let table_ptr_val = pv + super::KERNEL_BASE_ADDR;
 
     for i in 0..ENTRIES_PER_TABLE {
+        // Re-derive table pointer each iteration to prevent register clobber.
+        let table = table_ptr_val as *mut PageTableEntry;
         let entry = unsafe { *table.offset(i) };
         let paddr = entry_paddr(entry);
 
@@ -560,9 +584,10 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
             if level == 4 && i >= 0x80 {
                 continue; // Skip kernel page table entries.
             }
-            // Defensive: skip entries with physical addresses outside RAM.
-            if paddr.value() >= KERNEL_STRAIGHT_MAP_PADDR_END {
-                continue;
+            let pv = paddr.value();
+            if pv >= KERNEL_STRAIGHT_MAP_PADDR_END {
+                panic!("teardown: OOB paddr {:#x} at level {} idx {} entry {:#x}",
+                    pv, level, i, entry);
             }
             teardown_table_dec_only(paddr, level - 1);
             free_pt_page(paddr);
