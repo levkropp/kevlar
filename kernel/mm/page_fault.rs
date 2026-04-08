@@ -430,6 +430,55 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             {
                 warn!("PAGE FAULT NO VMA: pid={} addr={:#x} ip={:#x} reason={:?}",
                       pid, unaligned_vaddr.value(), ip, _reason);
+                // Find the VMA containing the IP — if the code page has wrong
+                // data (demand paging bug), this shows the file + offset.
+                for vma in vm.vm_areas().iter() {
+                    let vs = vma.start().value();
+                    let ve = vs + vma.len();
+                    if ip >= vs && ip < ve {
+                        if let VmAreaType::File { file, offset, file_size } = vma.area_type() {
+                            let offset_in_vma = ip - vs;
+                            let file_off = offset + offset_in_vma;
+                            warn!("  IP VMA: [{:#x}-{:#x}] file_off={:#x} (vma_off={:#x} base_off={:#x} fsz={:#x})",
+                                  vs, ve, file_off, offset_in_vma, offset, file_size);
+                            // Verify page content: look up the PTE, read the
+                            // physical page, compare with file content.
+                            let page_vaddr = UserVAddr::new_nonnull(ip & !0xFFF).ok();
+                            if let Some(pv) = page_vaddr {
+                                if let Some(paddr) = vm.page_table().lookup_paddr(pv) {
+                                    // Read 8 bytes from the physical page at the IP offset
+                                    let page_off = ip & 0xFFF;
+                                    #[allow(unsafe_code)]
+                                    let actual = unsafe {
+                                        core::ptr::read_volatile(
+                                            paddr.as_ptr::<u8>().add(page_off) as *const u64
+                                        )
+                                    };
+                                    // Read 8 bytes from the file at the same offset
+                                    let file_page_off = offset + (pv.value() - vs);
+                                    let mut expected = [0u8; 8];
+                                    let _ = file.read(
+                                        file_page_off + page_off,
+                                        (&mut expected[..]).into(),
+                                        &OpenOptions::readwrite(),
+                                    );
+                                    let expected_val = u64::from_ne_bytes(expected);
+                                    if actual != expected_val {
+                                        warn!("  PAGE MISMATCH at ip: paddr={:#x} actual={:#018x} file={:#018x}",
+                                              paddr.value(), actual, expected_val);
+                                    } else {
+                                        warn!("  page content MATCHES file (paddr={:#x})", paddr.value());
+                                    }
+                                } else {
+                                    warn!("  NO PTE for IP page {:#x}", ip & !0xFFF);
+                                }
+                            }
+                        } else {
+                            warn!("  IP VMA: [{:#x}-{:#x}] anonymous/device", vs, ve);
+                        }
+                        break;
+                    }
+                }
                 let vma_count = vm.vm_areas().len();
                 // Find the highest and nearest VMAs to the fault address
                 let fault_val = unaligned_vaddr.value();
@@ -652,12 +701,6 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     );
                     match read_result {
                         Ok(n) => {
-                            // Diagnostic: detect zero-page demand faults.
-                            // If file.read returned fewer bytes than expected,
-                            // the remainder of the page stays zero — which means
-                            // executable pages contain 00 00 (add %al,(%rax))
-                            // instead of real code, causing ip≠0 SIGSEGV at
-                            // fault_addr=0.
                             if n < copy_len {
                                 warn!(
                                     "DEMAND PAGE SHORT READ: pid={} vaddr={:#x} \
@@ -667,6 +710,37 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                     offset_in_file,
                                     copy_len, n, offset_in_page,
                                 );
+                            }
+                            // SMP page corruption detector: for executable pages,
+                            // read back the first 8 bytes and verify they match
+                            // what the file read wrote. If they differ, another
+                            // CPU wrote to this page between our write and now.
+                            if vma.prot().bits() & 4 != 0 && copy_len >= 8 {
+                                #[allow(unsafe_code)]
+                                let verify = unsafe {
+                                    core::ptr::read_volatile(
+                                        (paddr.as_ptr::<u8>() as *const u64)
+                                            .add(offset_in_page / 8)
+                                    )
+                                };
+                                // Re-read the same 8 bytes from the file
+                                let mut expected_buf = [0u8; 8];
+                                let _ = file.read(
+                                    offset_in_file,
+                                    (&mut expected_buf[..]).into(),
+                                    &OpenOptions::readwrite(),
+                                );
+                                let expected = u64::from_ne_bytes(expected_buf);
+                                if verify != expected {
+                                    warn!(
+                                        "PAGE CORRUPTION DETECTED: pid={} vaddr={:#x} \
+                                         file_off={:#x} expected={:#018x} got={:#018x}",
+                                        current.pid().as_i32(),
+                                        aligned_vaddr.value(),
+                                        offset_in_file,
+                                        expected, verify,
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
