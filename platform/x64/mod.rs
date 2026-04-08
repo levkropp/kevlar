@@ -168,9 +168,39 @@ pub fn preempt_disable() {
 }
 
 /// Decrement the per-CPU preemption disable count.
+/// If a reschedule was requested while preemption was disabled (need_resched),
+/// trigger it now.  This matches Linux's preempt_check_resched().
 #[inline(always)]
 pub fn preempt_enable() {
-    cpu_local::cpu_local_head().preempt_count -= 1;
+    let head = cpu_local::cpu_local_head();
+    head.preempt_count -= 1;
+    if head.preempt_count == 0 && head.need_resched != 0 {
+        head.need_resched = 0;
+        // Call switch via the kernel's process module.  This is a function
+        // pointer because the platform crate can't depend on the kernel crate.
+        let f = RESCHED_FN.load(core::sync::atomic::Ordering::Relaxed);
+        if !f.is_null() {
+            let switch_fn: fn() -> bool = unsafe { core::mem::transmute(f) };
+            switch_fn();
+        }
+    }
+}
+
+/// Function pointer for deferred rescheduling from `preempt_enable`.
+/// Set by the kernel during init to `process::switch`.
+static RESCHED_FN: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Register the reschedule function (called from kernel init).
+pub fn set_resched_fn(f: fn() -> bool) {
+    RESCHED_FN.store(f as *mut (), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mark that a reschedule is needed on this CPU (called from timer handler
+/// when preemption is disabled).
+#[inline(always)]
+pub fn set_need_resched() {
+    cpu_local::cpu_local_head().need_resched = 1;
 }
 
 /// Returns true if preemption is currently disabled (preempt_count > 0).

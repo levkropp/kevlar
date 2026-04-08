@@ -472,7 +472,7 @@ phase5:
         sh_run("rm -f /tmp/.dbus-session-sock; "
                "dbus-daemon --session "
                "--address=unix:path=/tmp/.dbus-session-sock "
-               "--fork --print-address >/tmp/dbus-addr 2>/dev/null", 3000);
+               "--fork --print-address >/tmp/dbus-addr 2>/dev/null", 10000);
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
@@ -481,10 +481,24 @@ phase5:
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Wait ~10 seconds for XFCE to start using busy-spin + yield.
-        for (int i = 0; i < 300; i++) {
-            for (volatile int j = 0; j < 3000000; j++) { }
-            sched_yield();
+        // Wait for XFCE to start. Use a pipe: child sleeps then writes,
+        // parent blocks on read. This avoids CPU-burning yield loops that
+        // cause timer starvation on SMP.
+        {
+            int pfd[2];
+            pipe(pfd);
+            pid_t sleeper = fork();
+            if (sleeper == 0) {
+                close(pfd[0]);
+                sleep(10);
+                write(pfd[1], "x", 1);
+                _exit(0);
+            }
+            close(pfd[1]);
+            char buf;
+            read(pfd[0], &buf, 1); // blocks until child writes or pipe closes
+            close(pfd[0]);
+            waitpid(sleeper, NULL, 0);
         }
         printf("  XFCE wait done\n");
         fflush(stdout);

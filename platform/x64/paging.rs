@@ -1145,12 +1145,17 @@ impl PageTable {
             Some(e) => e,
             None => return false,
         };
+        // Atomic compare-and-swap: only write the PTE if it's currently 0.
+        // Without this, two CPUs handling a demand fault on the same virtual
+        // address could both read 0 and both write, with the second write
+        // silently replacing the first CPU's page — leaving the first CPU
+        // executing from a page no longer in the page table.
         unsafe {
-            if *entry.as_ptr() != 0 {
-                return false; // already mapped
-            }
-            *entry.as_mut() = paddr.value() as u64 | attrs.bits();
-            true
+            let entry_ptr = entry.as_ptr() as *const core::sync::atomic::AtomicU64;
+            let new_val = paddr.value() as u64 | attrs.bits();
+            (*entry_ptr)
+                .compare_exchange(0, new_val, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed)
+                .is_ok()
         }
     }
 

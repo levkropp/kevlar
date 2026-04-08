@@ -884,9 +884,20 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 // the blocked parent. Normal fork: copy only if refcount > 1.
                 if refcount > 1 || is_ghost {
                     // Shared page: allocate new page, copy content, map writable.
+                    //
+                    // Pin the source page by incrementing its refcount BEFORE
+                    // copying. Without this, another CPU doing a concurrent COW
+                    // on the same page could decrement the refcount to 0 and
+                    // free it while we're still reading from it.
+                    if !is_ghost {
+                        kevlar_platform::page_refcount::page_ref_inc(old_paddr);
+                    }
                     let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
                         Ok(p) => p,
                         Err(_) => {
+                            if !is_ghost {
+                                kevlar_platform::page_refcount::page_ref_dec(old_paddr);
+                            }
                             debug_warn!("OOM during CoW fault");
                             Process::exit_by_signal(SIGKILL);
                         }
@@ -907,7 +918,9 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     }
                     kevlar_platform::page_refcount::page_ref_init(new_paddr);
                     if !is_ghost {
-                        // Normal fork: decrement old page's refcount.
+                        // Decrement twice: once for our pin, once for the PTE removal.
+                        // The first dec undoes our pin. The second removes our reference.
+                        kevlar_platform::page_refcount::page_ref_dec(old_paddr);
                         if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
                             kevlar_platform::page_allocator::free_pages(old_paddr, 1);
                         }

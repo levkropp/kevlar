@@ -465,6 +465,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("root fs init");
 
     process::init();
+    // Register the switch function for deferred rescheduling from preempt_enable().
+    kevlar_platform::arch::set_resched_fn(process::switch);
     // Signal to waiting APs that the kernel and scheduler are ready.
     KERNEL_READY.store(true, Ordering::Release);
     profiler.lap_time("process init");
