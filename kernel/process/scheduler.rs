@@ -22,8 +22,14 @@ pub fn runqueue_len() -> usize {
 /// accesses the scheduler exclusively through this trait, making the
 /// scheduling policy pluggable (e.g., round-robin, CFS).
 pub trait SchedulerPolicy: Send + Sync {
-    /// Enqueue a process into the run queue.
+    /// Enqueue a process into the run queue (back of queue).
     fn enqueue(&self, pid: PId);
+
+    /// Enqueue a process at the FRONT of the run queue (priority boost).
+    /// Used when a sleeping/blocked process wakes up — gives interactive
+    /// processes priority over CPU-bound threads, similar to CFS sleep
+    /// credit. Prevents starvation of I/O-bound processes by CPU hogs.
+    fn enqueue_front(&self, pid: PId);
 
     /// Pick the next process to run, removing it from the run queue.
     fn pick_next(&self) -> Option<PId>;
@@ -62,6 +68,12 @@ impl SchedulerPolicy for Scheduler {
     fn enqueue(&self, pid: PId) {
         let cpu = cpu_id() as usize % MAX_CPUS;
         self.run_queues[cpu].lock().push_back(pid);
+        RUNQUEUE_LEN.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn enqueue_front(&self, pid: PId) {
+        let cpu = cpu_id() as usize % MAX_CPUS;
+        self.run_queues[cpu].lock().push_front(pid);
         RUNQUEUE_LEN.fetch_add(1, Ordering::Relaxed);
     }
 

@@ -23,8 +23,9 @@ struct Timer {
 
 /// Suspends the current process at least `ms` milliseconds.
 pub fn _sleep_ms(ms: usize) {
+    let ticks = (ms * TICK_HZ + 999) / 1000;
     TIMERS.lock().push(Timer {
-        current: (ms * TICK_HZ + 999) / 1000,
+        current: ticks,
         process: current_process().clone(),
     });
 
@@ -162,7 +163,11 @@ pub fn handle_timer_irq() -> bool {
 
         timers.retain(|timer| {
             if timer.current == 0 {
-                timer.process.resume();
+                // Use resume_boosted: sleeping processes get front-of-queue
+                // priority. This prevents starvation by CPU-bound threads
+                // (e.g., xfwm4 rendering) that flood the queue via
+                // POLL_WAIT_QUEUE.wake_all() on every tick.
+                timer.process.resume_boosted();
             }
 
             timer.current > 0

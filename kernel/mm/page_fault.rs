@@ -645,12 +645,37 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 #[cfg(not(feature = "profile-fortress"))]
                 {
                     let buf = page_as_slice_mut(paddr);
-                    file.read(
+                    let read_result = file.read(
                         offset_in_file,
                         (&mut buf[offset_in_page..(offset_in_page + copy_len)]).into(),
                         &OpenOptions::readwrite(),
-                    )
-                    .expect("failed to read file");
+                    );
+                    match read_result {
+                        Ok(n) => {
+                            // Diagnostic: detect zero-page demand faults.
+                            // If file.read returned fewer bytes than expected,
+                            // the remainder of the page stays zero — which means
+                            // executable pages contain 00 00 (add %al,(%rax))
+                            // instead of real code, causing ip≠0 SIGSEGV at
+                            // fault_addr=0.
+                            if n < copy_len {
+                                warn!(
+                                    "DEMAND PAGE SHORT READ: pid={} vaddr={:#x} \
+                                     file_off={:#x} expected={} got={} page_off={}",
+                                    current.pid().as_i32(),
+                                    aligned_vaddr.value(),
+                                    offset_in_file,
+                                    copy_len, n, offset_in_page,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            panic!(
+                                "failed to read file: {:?} (vaddr={:#x} off={:#x} len={})",
+                                e, aligned_vaddr.value(), offset_in_file, copy_len
+                            );
+                        }
+                    }
                 }
             }
         }

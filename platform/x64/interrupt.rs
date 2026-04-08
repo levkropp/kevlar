@@ -250,26 +250,29 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             // or single-step (RFLAGS.TF). Read DR6 for the status.
             let dr6: u64;
             unsafe { core::arch::asm!("mov {}, dr6", out(reg) dr6); }
-            let rip = frame.rip;
-            let rsp = frame.rsp;
             let cs = frame.cs;
-            if dr6 & 0xF != 0 {
-                // Hardware breakpoint/watchpoint hit (DR0-DR3).
-                let dr0: u64;
-                unsafe { core::arch::asm!("mov {}, dr0", out(reg) dr0); }
-                warn!("#DB watchpoint hit: DR6={:#x} DR0={:#x} RIP={:#x} RSP={:#x} CS={:#x}",
-                      dr6, dr0, rip, rsp, cs);
-                // Disable watchpoint to prevent infinite loop.
-                unsafe { core::arch::asm!("mov dr7, {}", in(reg) 0u64); }
-            } else {
-                // Single-step or other debug event.
-                warn!("#DB: DR6={:#x} RIP={:#x} CS={:#x}", dr6, rip, cs);
-            }
-            // Clear DR6 status bits.
+
+            // Clear DR6 status bits immediately.
             unsafe { core::arch::asm!("mov dr6, {}", in(reg) 0u64); }
-            // For user-mode #DB: deliver SIGTRAP via the fault handler.
-            if cs & 3 != 0 {
-                handler().handle_user_fault("DEBUG", rip as usize);
+
+            if cs & 3 == 0 {
+                // Kernel-mode #DB: a userspace process set RFLAGS.TF before a
+                // syscall, and the trap flag leaked into kernel mode.  Clear
+                // TF in the saved RFLAGS so we stop single-stepping.  This
+                // matches Linux's behavior (arch/x86/kernel/traps.c).
+                let rflags_ptr = core::ptr::addr_of_mut!(frame.rflags);
+                let rflags = unsafe { rflags_ptr.read_unaligned() };
+                if rflags & 0x100 != 0 { // TF bit
+                    unsafe { rflags_ptr.write_unaligned(rflags & !0x100) };
+                }
+                // Silently ignore — don't flood serial.
+            } else {
+                // User-mode #DB: deliver SIGTRAP (debugger single-step / watchpoint).
+                if dr6 & 0xF != 0 {
+                    // Hardware breakpoint/watchpoint hit — disable to prevent loop.
+                    unsafe { core::arch::asm!("mov dr7, {}", in(reg) 0u64); }
+                }
+                handler().handle_user_fault("DEBUG", frame.rip as usize);
             }
         }
         NONMASKABLE_INTERRUPT_VECTOR => {

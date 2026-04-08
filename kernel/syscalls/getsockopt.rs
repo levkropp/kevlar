@@ -26,21 +26,32 @@ const SO_PASSCRED: c_int = 16;
 const TCP_NODELAY: c_int = 1;
 
 fn write_int_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, value: c_int) -> Result<()> {
-    if let (Some(val), Some(len)) = (optval, optlen) {
-        len.write::<c_int>(&(size_of::<c_int>() as c_int))?;
-        val.write::<c_int>(&value)?;
+    if let (Some(val), Some(len_ptr)) = (optval, optlen) {
+        let max_len = len_ptr.read::<c_int>()? as usize;
+        let full_len = size_of::<c_int>();
+        let copy_len = core::cmp::min(max_len, full_len);
+        if copy_len > 0 {
+            val.write_bytes(&value.to_ne_bytes()[..copy_len])?;
+        }
+        len_ptr.write::<c_int>(&(full_len as c_int))?;
     }
     Ok(())
 }
 
 fn write_timeval_opt(optval: Option<UserVAddr>, optlen: Option<UserVAddr>, us: u64) -> Result<()> {
-    if let (Some(val), Some(len)) = (optval, optlen) {
-        len.write::<c_int>(&(16 as c_int))?; // sizeof(struct timeval) = 16
+    if let (Some(val), Some(len_ptr)) = (optval, optlen) {
+        let max_len = len_ptr.read::<c_int>()? as usize;
+        let full_len: usize = 16; // sizeof(struct timeval)
         let tv_sec = (us / 1_000_000) as i64;
         let tv_usec = (us % 1_000_000) as i64;
-        val.write::<i64>(&tv_sec)?;
-        let val2 = UserVAddr::new_nonnull(val.as_isize() as usize + 8)?;
-        val2.write::<i64>(&tv_usec)?;
+        let mut buf = [0u8; 16];
+        buf[0..8].copy_from_slice(&tv_sec.to_ne_bytes());
+        buf[8..16].copy_from_slice(&tv_usec.to_ne_bytes());
+        let copy_len = core::cmp::min(max_len, full_len);
+        if copy_len > 0 {
+            val.write_bytes(&buf[..copy_len])?;
+        }
+        len_ptr.write::<c_int>(&(full_len as c_int))?;
     }
     Ok(())
 }
@@ -137,9 +148,14 @@ impl<'a> SyscallHandler<'a> {
                     buf[8..12].copy_from_slice(&0u32.to_le_bytes()); // gid=0 (root)
                     buf
                 };
-                if let (Some(val), Some(len)) = (optval, optlen) {
-                    len.write::<c_int>(&12)?;
-                    val.write_bytes(&ucred)?;
+                if let (Some(val), Some(len_ptr)) = (optval, optlen) {
+                    let max_len = len_ptr.read::<c_int>()? as usize;
+                    let full_len: usize = 12;
+                    let copy_len = core::cmp::min(max_len, full_len);
+                    if copy_len > 0 {
+                        val.write_bytes(&ucred[..copy_len])?;
+                    }
+                    len_ptr.write::<c_int>(&(full_len as c_int))?;
                 }
                 Ok(0)
             }

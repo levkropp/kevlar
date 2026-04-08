@@ -31,7 +31,13 @@ pub fn switch() -> bool {
         prev.arch().context_saved.store(false, core::sync::atomic::Ordering::Release);
     }
 
-    let next = {
+    // ── Phase 1: scheduler decision (SCHEDULER lock only) ───────────────
+    // Release SCHEDULER before acquiring PROCESSES to avoid the
+    // SCHEDULER→PROCESSES nested lock.  The window between releasing
+    // SCHEDULER and locking PROCESSES is safe: if the chosen PID is
+    // removed by exit_group() in that window, the PROCESSES lookup
+    // returns None and we fall back to the idle thread.
+    let next_pid = {
         let scheduler = SCHEDULER.lock();
 
         // Push back the currently running thread to the runqueue if it's still
@@ -41,27 +47,30 @@ pub fn switch() -> bool {
         }
 
         // Pick a thread to run next.
-        match scheduler.pick_next() {
-            Some(next_pid) => {
-                // Fast path: if we picked ourselves, reuse the existing Arc
-                // instead of locking PROCESSES for a hash lookup.
-                if next_pid == prev_pid {
-                    // Self-yield: skip the full context switch entirely.
-                    prev.arch().context_saved.store(true, core::sync::atomic::Ordering::Release);
-                    kevlar_platform::arch::preempt_enable();
-                    return false;
-                }
-                // Defensive None-check: exit_group() removes a sibling from the
-                // scheduler queues before removing it from PROCESSES, but there is
-                // still a narrow window where pick_next() returns a PID that is
-                // already gone.  Fall back to the idle thread rather than panic.
-                match PROCESSES.lock().get(&next_pid) {
-                    Some(p) if p.state() == ProcessState::Runnable => p.clone(),
-                    _ => IDLE_THREAD.get().get().clone(),
-                }
+        scheduler.pick_next()
+    };
+
+    // ── Phase 2: resolve PID to Arc<Process> (PROCESSES lock only) ────
+    let next = match next_pid {
+        Some(next_pid) => {
+            // Fast path: if we picked ourselves, reuse the existing Arc
+            // instead of locking PROCESSES for a hash lookup.
+            if next_pid == prev_pid {
+                // Self-yield: skip the full context switch entirely.
+                prev.arch().context_saved.store(true, core::sync::atomic::Ordering::Release);
+                kevlar_platform::arch::preempt_enable();
+                return false;
             }
-            None => IDLE_THREAD.get().get().clone(),
+            // Defensive None-check: exit_group() removes a sibling from the
+            // scheduler queues before removing it from PROCESSES, but there is
+            // still a narrow window where pick_next() returns a PID that is
+            // already gone.  Fall back to the idle thread rather than panic.
+            match PROCESSES.lock().get(&next_pid) {
+                Some(p) if p.state() == ProcessState::Runnable => p.clone(),
+                _ => IDLE_THREAD.get().get().clone(),
+            }
         }
+        None => IDLE_THREAD.get().get().clone(),
     };
 
     if Arc::ptr_eq(&prev, &next) {
