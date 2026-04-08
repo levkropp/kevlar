@@ -93,6 +93,10 @@ pub struct CpuLocalHead {
     /// handler skips `process::switch()` while this is non-zero, preventing
     /// nested context switches on the same CPU.
     pub preempt_count: u32,
+    /// Set by the timer handler when preemption is disabled but a context
+    /// switch is due.  Checked by `preempt_enable()` to reschedule
+    /// immediately.  Matches Linux's TIF_NEED_RESCHED.
+    pub need_resched: u32,
 }
 
 #[used]

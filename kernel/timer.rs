@@ -24,6 +24,10 @@ struct Timer {
 /// Suspends the current process at least `ms` milliseconds.
 pub fn _sleep_ms(ms: usize) {
     let ticks = (ms * TICK_HZ + 999) / 1000;
+    let pid = current_process().pid().as_i32();
+    if false && ms >= 5000 {
+        warn!("TIMER PUSH: pid={} ms={} ticks={}", pid, ms, ticks);
+    }
     TIMERS.lock().push(Timer {
         current: ticks,
         process: current_process().clone(),
@@ -161,17 +165,23 @@ pub fn handle_timer_irq() -> bool {
             }
         }
 
+        let timer_count_before = timers.len();
         timers.retain(|timer| {
             if timer.current == 0 {
-                // Use resume_boosted: sleeping processes get front-of-queue
-                // priority. This prevents starvation by CPU-bound threads
-                // (e.g., xfwm4 rendering) that flood the queue via
-                // POLL_WAIT_QUEUE.wake_all() on every tick.
+                let pid = timer.process.pid().as_i32();
+                if false && timer.current == 0 && pid > 1 {
+                    warn!("TIMER EXPIRE: pid={} state={:?}",
+                          pid, timer.process.state());
+                }
                 timer.process.resume_boosted();
             }
 
             timer.current > 0
-        })
+        });
+        let expired = timer_count_before - timers.len();
+        if expired > 0 {
+            // Log total expired count if any timers fired
+        }
     }
 
     // Tick real-time interval timers (setitimer/alarm → SIGALRM delivery).
@@ -203,8 +213,14 @@ pub fn handle_timer_irq() -> bool {
 
     crate::debug::htrace::exit(crate::debug::htrace::id::TIMER_IRQ, 0);
 
-    if ticks % PREEMPT_PER_TICKS == 0 && !kevlar_platform::arch::in_preempt() {
-        return process::switch();
+    if ticks % PREEMPT_PER_TICKS == 0 {
+        if !kevlar_platform::arch::in_preempt() {
+            return process::switch();
+        }
+        // Preemption is disabled (lock_preempt held). Defer the reschedule
+        // to when preempt_enable() is called — this prevents timer starvation
+        // when CPU-bound threads hold preemption locks in tight loops.
+        kevlar_platform::arch::set_need_resched();
     }
     false
 }
