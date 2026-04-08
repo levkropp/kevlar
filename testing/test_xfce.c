@@ -466,17 +466,19 @@ phase5:
         }
         // Start session D-Bus manually, then startxfce4
         // Start XFCE with proper environment
-        // Start session bus separately (not via dbus-launch) so it survives
-        // if startxfce4 exits. Then start XFCE session.
-        sh_run("dbus-daemon --session --address=unix:path=/tmp/dbus-session "
-               "--fork --print-pid --print-address "
-               ">/tmp/dbus-session-info 2>&1", 3000);
+        // Start a persistent session bus (not via dbus-launch which kills
+        // the bus when its child exits). Then start xfce4-session with
+        // the bus address. NO_AT_BRIDGE=1 prevents at-spi GLib traps.
+        sh_run("rm -f /tmp/.dbus-session-sock; "
+               "dbus-daemon --session "
+               "--address=unix:path=/tmp/.dbus-session-sock "
+               "--fork --print-address >/tmp/dbus-addr 2>/dev/null", 3000);
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
                  "GTK_THEME=Adwaita "
                  "NO_AT_BRIDGE=1 "
-                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session; "
+                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
         // Wait ~10 seconds for XFCE to start using busy-spin + yield.
