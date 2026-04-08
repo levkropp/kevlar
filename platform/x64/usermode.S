@@ -76,7 +76,10 @@ syscall_entry:
     pop rcx    // User RIP
     add rsp, 8 // User CS
     pop r11    // User RFLAGS
-
+    or r11, 0x200  // Force IF=1: userspace must not leave interrupts disabled.
+                   // Xorg with iopl(3) can execute cli, which clears IF.
+                   // Without this, SYSRET restores IF=0 and the PIT timer
+                   // stops on this CPU, breaking all sleep/nanosleep timers.
     pop rsp
 
     // Ensure that interrupts are disabled since SWAPGS and SYSRETQ are not a
