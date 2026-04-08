@@ -466,31 +466,36 @@ phase5:
         }
         // Start session D-Bus manually, then startxfce4
         // Start XFCE with proper environment
-        // Start XFCE session via dbus-launch.
+        // Start session bus separately (not via dbus-launch) so it survives
+        // if startxfce4 exits. Then start XFCE session.
+        sh_run("dbus-daemon --session --address=unix:path=/tmp/dbus-session "
+               "--fork --print-pid --print-address "
+               ">/tmp/dbus-session-info 2>&1", 3000);
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
-                 "GTK_THEME=Adwaita; "
-                 "/usr/bin/dbus-launch --exit-with-session /usr/bin/startxfce4 "
+                 "GTK_THEME=Adwaita "
+                 "NO_AT_BRIDGE=1 "
+                 "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session; "
+                 "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Busy-wait for XFCE — check session process every 100ms.
-        // Uses write() to /dev/null + sched_yield() instead of usleep
-        // to avoid timer-based scheduling dependencies.
-        {
-            int devnull = open("/dev/null", O_WRONLY);
-            for (int i = 0; i < 100; i++) {
-                // sched_yield + short busy-spin instead of usleep
-                for (volatile int j = 0; j < 2000000; j++) { }
-                sched_yield();
-                if (i >= 80 && sh_run("pgrep xfce4-session >/dev/null 2>&1", 500) == 0)
-                    break;
-            }
-            if (devnull >= 0) close(devnull);
+        // Wait ~10 seconds for XFCE to start using busy-spin + yield.
+        for (int i = 0; i < 300; i++) {
+            for (volatile int j = 0; j < 3000000; j++) { }
+            sched_yield();
         }
         printf("  XFCE wait done\n");
         fflush(stdout);
 
-        // Check components immediately (skip slow diagnostics)
+        // Quick process snapshot
+        {
+            char b[512];
+            sh_capture("ps -o pid,args 2>/dev/null | grep -E 'xfwm|xfce4-panel|xfce4-session|xfconfd|Xorg' | head -10",
+                       b, sizeof(b), 2000);
+            printf("  XFCE procs: %s\n", b); fflush(stdout);
+        }
+
+        // Check components
         if (sh_run("pgrep -x xfwm4 >/dev/null 2>&1", 2000) == 0)
             pass("xfwm4_running");
         else
