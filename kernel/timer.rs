@@ -165,23 +165,12 @@ pub fn handle_timer_irq() -> bool {
             }
         }
 
-        let timer_count_before = timers.len();
         timers.retain(|timer| {
             if timer.current == 0 {
-                let pid = timer.process.pid().as_i32();
-                if false && timer.current == 0 && pid > 1 {
-                    warn!("TIMER EXPIRE: pid={} state={:?}",
-                          pid, timer.process.state());
-                }
                 timer.process.resume_boosted();
             }
-
             timer.current > 0
         });
-        let expired = timer_count_before - timers.len();
-        if expired > 0 {
-            // Log total expired count if any timers fired
-        }
     }
 
     // Tick real-time interval timers (setitimer/alarm → SIGALRM delivery).
@@ -202,6 +191,24 @@ pub fn handle_timer_irq() -> bool {
 
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+
+    // Periodic timer health check: every ~5 seconds, log the TIMERS list.
+    // This detects timer starvation where timers are pushed but never expire.
+    if ticks % 500 == 0 {
+        let timers = TIMERS.lock();
+        if !timers.is_empty() {
+            let mut min_ticks = usize::MAX;
+            let mut max_ticks = 0usize;
+            let mut long_timers = 0u32; // timers with > 100 ticks remaining
+            for t in timers.iter() {
+                min_ticks = core::cmp::min(min_ticks, t.current);
+                max_ticks = core::cmp::max(max_ticks, t.current);
+                if t.current > 100 { long_timers += 1; }
+            }
+            warn!("TIMER HEALTH: tick={} count={} min={} max={} long={}",
+                  ticks, timers.len(), min_ticks, max_ticks, long_timers);
+        }
+    }
 
 
 

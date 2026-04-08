@@ -119,9 +119,14 @@ interrupt_common:
     add rsp, 8
 
     // Check CS register in the IRET frame to determine whether the exception
-    // occur in the userspace. If so, do SWAPGS.
+    // occur in the userspace. If so, do SWAPGS and force IF=1.
     test qword ptr [rsp + 8], 3
     jz 1f
+
+    // Force IF=1 in saved RFLAGS: userspace must not leave interrupts disabled.
+    // Xorg with iopl(3) can execute cli, clearing IF. Without this fix,
+    // IRET restores IF=0 and the PIT timer stops on this CPU.
+    or qword ptr [rsp + 16], 0x200
 
     cli
     swapgs

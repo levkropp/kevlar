@@ -125,26 +125,14 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_ap_preempt(&self) -> bool {
-        // Process deferred jobs (network packet processing, etc.) on every
-        // LAPIC preempt tick. Required because the PIT timer may stop firing
-        // after the LAPIC timer takes over for preemption.
-        crate::deferred_job::run_deferred_jobs();
-
-        // Poll the network stack directly on every preempt tick. This handles
-        // the case where virtio-net doesn't deliver an IRQ for incoming packets
-        // (e.g., after SYN-ACK arrives in response to a connect()).
-        crate::net::poll_if_ready();
-
-        // Tick interval timers (setitimer/alarm → SIGALRM) on every
-        // LAPIC preempt tick, not just PIC timer IRQ.  The PIC timer
-        // may not fire with pci=off or on AP CPUs.
-        crate::syscalls::setitimer::tick_real_timers();
-
-        if !kevlar_platform::arch::in_preempt() {
-            process::switch()
-        } else {
-            false
-        }
+        // Run the FULL timer handler on AP preempt ticks.  The PIT timer
+        // (which normally drives handle_timer_irq on the BSP) can be
+        // disabled by userspace processes with iopl(3) — Xorg writes to
+        // PIT ports 0x40-0x43 during VGA initialization, reprogramming
+        // or stopping the PIT.  By running handle_timer_irq from the
+        // LAPIC preempt vector, ALL CPUs process sleep timers, poll
+        // waiters, and preemption — regardless of PIT state.
+        crate::timer::handle_timer_irq()
     }
 
     fn current_process_signal_pending(&self) -> u32 {
