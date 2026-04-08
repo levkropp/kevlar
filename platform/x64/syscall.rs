@@ -4,9 +4,13 @@ use crate::handler;
 use super::gdt::{KERNEL_CS, USER_CS32};
 use x86::msr::{self, rdmsr, wrmsr};
 
-// Clear IF bit to disable interrupts when we enter the syscall handler
-// or an interrupt occurs before doing SWAPGS.
-const SYSCALL_RFLAGS_MASK: u64 = 0x200;
+// Mask RFLAGS bits on SYSCALL entry (IA32_FMASK).  The CPU clears these
+// bits in RFLAGS when SYSCALL executes:
+//   IF  (0x0200) — disable interrupts before SWAPGS
+//   TF  (0x0100) — prevent single-step #DB flood in kernel mode
+//   DF  (0x0400) — direction flag (string ops forward)
+// Note: Linux also masks NT and AC, but we keep it minimal for now.
+const SYSCALL_RFLAGS_MASK: u64 = 0x0700;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]

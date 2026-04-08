@@ -89,6 +89,16 @@ pub fn interrupts_enabled() -> bool {
     daif & (1 << 7) == 0
 }
 
+/// Enables hardware interrupts (clears DAIF.I).
+///
+/// Used to re-enable interrupts after entering via an exception vector that
+/// masked IRQs.  Must only be called when the kernel environment is fully
+/// set up (register frame saved, per-CPU state accessible).
+#[inline(always)]
+pub fn enable_interrupts() {
+    unsafe { core::arch::asm!("msr daifclr, #2", options(nomem, nostack)) }
+}
+
 /// Increment the per-CPU preemption disable count.
 /// While > 0, the timer preemption handler will not call `process::switch()`.
 #[inline(always)]

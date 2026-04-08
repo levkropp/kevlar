@@ -1009,6 +1009,28 @@ impl Process {
         SCHEDULER.lock().enqueue(self.pid);
     }
 
+    /// Resumes a process with scheduling priority boost (front of queue).
+    /// Used for timer-based wakeups (nanosleep, sleep_ms) — the process
+    /// has been sleeping and deserves prompt scheduling over CPU-bound
+    /// threads.  Regular resume() enqueues at back (for poll/signal wakes
+    /// which should not starve preempted threads).
+    pub fn resume_boosted(&self) {
+        let old_state = self.state.swap(ProcessState::Runnable);
+        if matches!(old_state, ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_)) {
+            self.state.store(old_state);
+            return;
+        }
+        if old_state == ProcessState::Runnable {
+            return;
+        }
+        if kevlar_platform::arch::interrupts_enabled() {
+            while !self.arch.context_saved.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+        }
+        SCHEDULER.lock().enqueue_front(self.pid);
+    }
+
     /// Stops the current process with the given signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU).
     /// The process is removed from the run queue and the parent is notified via SIGCHLD.
     pub fn stop(signal: Signal) {
@@ -1285,6 +1307,16 @@ impl Process {
 
     /// Terminates the **current** process by a signal.
     pub fn exit_by_signal(signal: Signal) -> ! {
+        // Re-enable interrupts.  Fault handlers may enter via interrupt gates
+        // (which clear IF).  Running the entire exit path with IF=0 means
+        // SpinLock save/restore cycles never re-enable interrupts — every lock
+        // acquire/release just restores IF=0.  If two processes crash on two
+        // CPUs simultaneously, both exit paths run with IF=0 permanently, and
+        // any spinlock contention becomes unbounded (no timer can break it).
+        // Enabling interrupts here — before any lock is touched — matches
+        // Linux's cond_local_irq_enable() in its trap handlers.
+        kevlar_platform::arch::enable_interrupts();
+
         let current = current_process();
         let pid = current.pid().as_i32();
         let cmdline = current.cmdline();

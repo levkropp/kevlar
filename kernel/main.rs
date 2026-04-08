@@ -171,20 +171,27 @@ impl kevlar_platform::Handler for Handler {
 
     fn handle_user_fault(&self, exception: &str, ip: usize) {
         let pid = crate::process::current_process().pid().as_i32();
+        // BREAKPOINT (int3) delivers SIGTRAP per POSIX/Linux.
+        // All other user faults deliver SIGSEGV.
+        let signal = if exception == "BREAKPOINT" {
+            crate::process::signal::SIGTRAP
+        } else {
+            crate::process::signal::SIGSEGV
+        };
         crate::debug::emit(
             crate::debug::DebugFilter::FAULT,
             &crate::debug::DebugEvent::UserFault {
                 pid,
                 exception,
                 ip,
-                signal_delivered: crate::process::signal::SIGSEGV,
+                signal_delivered: signal,
             },
         );
         warn!(
             "USER FAULT: {} pid={} ip={:#x}",
             exception, pid, ip
         );
-        crate::process::Process::exit_by_signal(crate::process::signal::SIGSEGV);
+        crate::process::Process::exit_by_signal(signal);
     }
 
     fn handle_syscall(

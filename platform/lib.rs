@@ -72,7 +72,7 @@ pub mod arch {
     pub use super::x64::{
         broadcast_halt_ipi, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
         enable_irq, halt, idle,
-        in_preempt, interrupts_enabled,
+        enable_interrupts, in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, read_rtc_epoch_secs,
         semihosting_halt,
         start_ap_preemption_timer, x64_specific, tsc, vdso,
@@ -83,7 +83,7 @@ pub mod arch {
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
-        broadcast_halt_ipi, cpu_id, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        broadcast_halt_ipi, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, read_rtc_epoch_secs,
         semihosting_halt,
         start_ap_preemption_timer, arm64_specific, Backtrace,

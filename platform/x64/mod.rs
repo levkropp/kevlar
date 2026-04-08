@@ -150,6 +150,16 @@ pub fn interrupts_enabled() -> bool {
     rflags::read().contains(rflags::RFlags::FLAGS_IF)
 }
 
+/// Enables hardware interrupts (sets RFLAGS.IF = 1).
+///
+/// Used to re-enable interrupts after entering via an interrupt gate (which
+/// clears IF).  Must only be called when the kernel environment is fully set
+/// up (register frame saved, per-CPU state accessible).
+#[inline(always)]
+pub fn enable_interrupts() {
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)) }
+}
+
 /// Increment the per-CPU preemption disable count.
 /// While > 0, the timer preemption handler will not call `process::switch()`.
 #[inline(always)]
