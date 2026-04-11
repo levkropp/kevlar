@@ -108,9 +108,13 @@ impl WaitQueue {
         if self.waiter_count.load(Ordering::Relaxed) == 0 {
             return;
         }
-        let mut queue = self.queue.lock();
-        if let Some(process) = queue.pop_front() {
-            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+        let process = {
+            let mut queue = self.queue.lock();
+            let p = queue.pop_front();
+            if p.is_some() { self.waiter_count.fetch_sub(1, Ordering::Relaxed); }
+            p
+        };
+        if let Some(process) = process {
             process.resume();
         }
     }
@@ -121,12 +125,23 @@ impl WaitQueue {
         }
         use crate::debug::htrace;
         htrace::enter(htrace::id::WAKE_ALL, self.waiter_count.load(Ordering::Relaxed) as u32);
-        let mut queue = self.queue.lock();
-        let mut woken_count = 0u32;
-        while let Some(process) = queue.pop_front() {
-            self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+        // Collect waiters while holding the lock, then resume AFTER releasing.
+        // Calling resume() inside the lock acquires SCHEDULER with interrupts
+        // disabled (SpinLock cli). With many poll waiters (XFCE has 20+),
+        // the lock is held for >10ms — longer than the timer period. This
+        // prevents the timer handler from returning, starving ALL timers.
+        let waiters: alloc::vec::Vec<Arc<Process>> = {
+            let mut queue = self.queue.lock();
+            let mut v = alloc::vec::Vec::new();
+            while let Some(process) = queue.pop_front() {
+                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                v.push(process);
+            }
+            v
+        }; // queue lock released
+        let woken_count = waiters.len() as u32;
+        for process in &waiters {
             process.resume();
-            woken_count += 1;
         }
         htrace::exit(htrace::id::WAKE_ALL, 0);
 
@@ -139,16 +154,22 @@ impl WaitQueue {
         if self.waiter_count.load(Ordering::Relaxed) == 0 || max == 0 {
             return 0;
         }
-        let mut queue = self.queue.lock();
-        let mut woken = 0u32;
-        while woken < max {
-            if let Some(process) = queue.pop_front() {
-                self.waiter_count.fetch_sub(1, Ordering::Relaxed);
-                process.resume();
-                woken += 1;
-            } else {
-                break;
+        let waiters: alloc::vec::Vec<Arc<Process>> = {
+            let mut queue = self.queue.lock();
+            let mut v = alloc::vec::Vec::new();
+            while v.len() < max as usize {
+                if let Some(process) = queue.pop_front() {
+                    self.waiter_count.fetch_sub(1, Ordering::Relaxed);
+                    v.push(process);
+                } else {
+                    break;
+                }
             }
+            v
+        };
+        let woken = waiters.len() as u32;
+        for process in &waiters {
+            process.resume();
         }
         woken
     }
