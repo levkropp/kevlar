@@ -137,15 +137,32 @@ impl<'a> SyscallHandler<'a> {
             }
             (SOL_SOCKET, SO_PEERCRED) => {
                 // struct ucred { pid_t pid; uid_t uid; gid_t gid; } = 12 bytes
-                // For local Unix sockets, return the current process's credentials.
-                // Remote TCP sockets: return current process (simplification).
-                let proc = current_process();
-                let pid = proc.pid().as_i32();
+                // Return the PEER's credentials, not our own.  For Unix sockets,
+                // these are captured at connect/socketpair time.  For non-Unix
+                // sockets, fall back to current process (simplification).
+                let (pid, uid, gid) = {
+                    let opened_file = current_process().get_opened_file_by_fd(fd)?;
+                    let file = opened_file.as_file()?;
+                    if let Some(stream) = (**file).as_any().downcast_ref::<crate::net::UnixStream>() {
+                        stream.peer_cred()
+                    } else if let Some(sock) = (**file).as_any().downcast_ref::<crate::net::UnixSocket>() {
+                        // For connected UnixSocket, get peer cred from the underlying stream.
+                        sock.connected_stream()
+                            .map(|s| s.peer_cred())
+                            .unwrap_or_else(|| {
+                                let p = current_process();
+                                (p.pid().as_i32(), 0, 0)
+                            })
+                    } else {
+                        let p = current_process();
+                        (p.pid().as_i32(), 0, 0)
+                    }
+                };
                 let ucred: [u8; 12] = {
                     let mut buf = [0u8; 12];
                     buf[0..4].copy_from_slice(&pid.to_le_bytes());
-                    buf[4..8].copy_from_slice(&0u32.to_le_bytes()); // uid=0 (root)
-                    buf[8..12].copy_from_slice(&0u32.to_le_bytes()); // gid=0 (root)
+                    buf[4..8].copy_from_slice(&uid.to_le_bytes());
+                    buf[8..12].copy_from_slice(&gid.to_le_bytes());
                     buf
                 };
                 if let (Some(val), Some(len_ptr)) = (optval, optlen) {

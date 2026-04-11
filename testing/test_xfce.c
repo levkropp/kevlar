@@ -516,15 +516,17 @@ phase5:
         }
         printf("  XFCE wait done\n");
         fflush(stdout);
-        // Dump session and dbus logs
+        // Dump session log, dbus errors, and ICE auth file
         {
             char b[1024];
             sh_capture("cat /tmp/xfce-session.log 2>/dev/null | head -20",
                        b, sizeof(b), 2000);
             if (b[0]) { printf("  session-log:\n%s\n", b); fflush(stdout); }
-            sh_capture("cat /tmp/dbus-session-err 2>/dev/null | head -5",
+            sh_capture("ls -la /root/.ICEauthority 2>&1; "
+                       "cat /root/.ICEauthority 2>/dev/null | wc -c; "
+                       "echo SESSION_MANAGER=$SESSION_MANAGER",
                        b, sizeof(b), 2000);
-            if (b[0]) { printf("  dbus-err: %s\n", b); fflush(stdout); }
+            printf("  ice-auth: %s\n", b); fflush(stdout);
         }
 
         // Quick process snapshot
