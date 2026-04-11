@@ -153,20 +153,31 @@ impl Timeval {
 /// next preemption cycle.
 pub fn handle_timer_irq() -> bool {
     crate::debug::htrace::enter(crate::debug::htrace::id::TIMER_IRQ, 0);
-    {
+    // Collect expired timers while holding the lock, then resume them
+    // AFTER releasing the lock. This breaks the TIMERS→SCHEDULER lock
+    // nesting that caused a deadlock with switch()→SCHEDULER on SMP.
+    let expired: alloc::vec::Vec<Arc<Process>> = {
         let mut timers = TIMERS.lock();
         for timer in timers.iter_mut() {
             if timer.current > 0 {
                 timer.current -= 1;
             }
         }
-
+        let mut expired = alloc::vec::Vec::new();
         timers.retain(|timer| {
             if timer.current == 0 {
-                timer.process.resume_boosted();
+                expired.push(timer.process.clone());
+                false
+            } else {
+                true
             }
-            timer.current > 0
         });
+        expired
+    }; // TIMERS lock released here
+
+    // Now resume expired timers without holding TIMERS lock.
+    for proc in &expired {
+        proc.resume_boosted();
     }
 
     // Tick real-time interval timers (setitimer/alarm → SIGALRM delivery).
