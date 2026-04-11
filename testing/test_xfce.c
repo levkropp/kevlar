@@ -505,53 +505,40 @@ phase5:
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Direct sleep — no fork, no chroot, no sh_run overhead.
-        // If THIS hangs, the kernel timer for PID 1 is broken.
-        // If it works, the issue is in sh_run's fork/chroot/waitpid.
+        // Sleep 15s for XFCE to fully start.
         sleep(15);
-        printf("  XFCE wait done\n");
-        fflush(stdout);
-        // Dump session log, dbus errors, and ICE auth file
+        printf("  XFCE wait done\n"); fflush(stdout);
+
+        // Check components by reading /proc/*/comm directly.
+        // No fork, no usleep, no timer dependency.
         {
-            char b[1024];
-            sh_capture("cat /tmp/xfce-session.log 2>/dev/null | head -20",
-                       b, sizeof(b), 2000);
-            if (b[0]) { printf("  session-log:\n%s\n", b); fflush(stdout); }
-            sh_capture("ls -la /root/.ICEauthority 2>&1; "
-                       "HOME=/root ICEAUTHORITY=/root/.ICEauthority iceauth list 2>&1; "
-                       "ls /tmp/.ICE-unix/ 2>&1; "
-                       "cat /proc/$(pgrep xfce4-session | head -1)/environ 2>/dev/null "
-                       "| tr '\\0' '\\n' | grep SESSION_MANAGER 2>/dev/null",
-                       b, sizeof(b), 2000);
-            printf("  ice-auth: %s\n", b); fflush(stdout);
+            int has_xfwm = 0, has_panel = 0, has_session = 0;
+            // Scan /proc for matching process names
+            for (int pid = 2; pid < 200; pid++) {
+                char path[32], comm[32];
+                snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+                int fd = open(path, O_RDONLY);
+                if (fd < 0) continue;
+                int n = read(fd, comm, sizeof(comm) - 1);
+                close(fd);
+                if (n <= 0) continue;
+                comm[n] = '\0';
+                // Strip trailing newline
+                if (n > 0 && comm[n-1] == '\n') comm[n-1] = '\0';
+                if (strcmp(comm, "xfwm4") == 0) has_xfwm = 1;
+                if (strcmp(comm, "xfce4-panel") == 0) has_panel = 1;
+                if (strcmp(comm, "xfce4-session") == 0) has_session = 1;
+            }
+            printf("  components: wm=%d panel=%d session=%d\n",
+                   has_xfwm, has_panel, has_session);
+            fflush(stdout);
+            if (has_xfwm) pass("xfwm4_running");
+            else fail("xfwm4_running", "window manager not found");
+            if (has_panel) pass("xfce4_panel_running");
+            else fail("xfce4_panel_running", "panel not found");
+            if (has_session) pass("xfce4_session_running");
+            else fail("xfce4_session_running", "session not found");
         }
-
-        // Full process snapshot — show ALL processes, not just filtered
-        {
-            char b[2048];
-            sh_capture("ps -o pid,ppid,args 2>/dev/null | head -40",
-                       b, sizeof(b), 2000);
-            printf("  XFCE procs: %s\n", b); fflush(stdout);
-        }
-
-        // Check components
-        if (sh_run("pgrep -x xfwm4 >/dev/null 2>&1", 2000) == 0)
-            pass("xfwm4_running");
-        else
-            fail("xfwm4_running", "window manager not found");
-
-        // Use ps + grep instead of pgrep — pgrep in chroot may miss
-        // processes due to /proc/[pid]/comm truncation.
-        if (sh_run("ps -o args 2>/dev/null | grep -q '[x]fce4-panel'", 2000) == 0) {
-            pass("xfce4_panel_running");
-        } else {
-            fail("xfce4_panel_running", "panel not found");
-        }
-
-        if (sh_run("pgrep xfce4-session >/dev/null 2>&1", 2000) == 0)
-            pass("xfce4_session_running");
-        else
-            fail("xfce4_session_running", "session not found");
 
     }
 
