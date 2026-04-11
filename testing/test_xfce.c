@@ -484,7 +484,18 @@ phase5:
                  ">/tmp/dbus-addr 2>/tmp/dbus-session-err");
         // Give dbus-daemon time to bind and listen
         sh_run("sleep 1", 3000);
-        // Start xfce4-session and log SESSION_MANAGER for debug.
+        // Pre-configure xfwm4 to disable compositing (avoids RenderBadPicture
+        // error when swrast_dri.so is missing from the Alpine image).
+        sh_run("mkdir -p /root/.config/xfce4/xfconf/xfce-perchannel-xml && "
+               "cat > /root/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml << 'XMLEOF'\n"
+               "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+               "<channel name=\"xfwm4\" version=\"1.0\">\n"
+               "  <property name=\"general\" type=\"empty\">\n"
+               "    <property name=\"use_compositing\" type=\"bool\" value=\"false\"/>\n"
+               "  </property>\n"
+               "</channel>\n"
+               "XMLEOF", 3000);
+        // Start xfce4-session.
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
@@ -530,10 +541,10 @@ phase5:
             printf("  ice-auth: %s\n", b); fflush(stdout);
         }
 
-        // Quick process snapshot
+        // Full process snapshot — show ALL processes, not just filtered
         {
-            char b[512];
-            sh_capture("ps -o pid,args 2>/dev/null | grep -E 'xfwm|xfce4-panel|xfce4-session|xfconfd|Xorg' | head -10",
+            char b[2048];
+            sh_capture("ps -o pid,ppid,args 2>/dev/null | head -40",
                        b, sizeof(b), 2000);
             printf("  XFCE procs: %s\n", b); fflush(stdout);
         }
