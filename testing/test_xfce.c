@@ -514,7 +514,7 @@ phase5:
             pid_t sleeper = fork();
             if (sleeper == 0) {
                 close(pfd[0]);
-                sleep(10);
+                sleep(15);
                 write(pfd[1], "x", 1);
                 _exit(0);
             }
