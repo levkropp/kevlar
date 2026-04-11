@@ -468,22 +468,9 @@ phase5:
         // Start session D-Bus manually, then startxfce4
         // Start XFCE with proper environment
         // Start a persistent session bus (not via dbus-launch which kills
-        // the bus when its child exits). Then start xfce4-session with
-        // the bus address. NO_AT_BRIDGE=1 prevents at-spi GLib traps.
-        // Start session D-Bus. Use --nofork to keep the daemon in the
-        // foreground (avoids parent-kills-child issue with --fork).
-        // Run as background process via start_bg.
-        // Clean stale sockets, ICE auth, and corrupt xfconf configs.
-        // Stale .ICEauthority from previous runs has wrong cookies.
-        sh_run("rm -f /tmp/.dbus-session-sock; "
-               "rm -f /root/.ICEauthority; "
+        // Clean stale state from previous runs.
+        sh_run("rm -f /root/.ICEauthority; "
                "rm -rf /root/.config/xfce4/xfconf/xfce-perchannel-xml/", 1000);
-        start_bg("dbus-daemon --session "
-                 "--address=unix:path=/tmp/.dbus-session-sock "
-                 "--nofork --print-address "
-                 ">/tmp/dbus-addr 2>/tmp/dbus-session-err");
-        // Give dbus-daemon time to bind and listen
-        sh_run("sleep 1", 3000);
         // Pre-configure xfwm4 to disable compositing (avoids RenderBadPicture
         // error when swrast_dri.so is missing from the Alpine image).
         sh_run("mkdir -p /root/.config/xfce4/xfconf/xfce-perchannel-xml && "
@@ -495,7 +482,13 @@ phase5:
                "  </property>\n"
                "</channel>\n"
                "XMLEOF", 3000);
-        // Start xfce4-session.
+        // Start persistent session bus (nofork via start_bg).
+        start_bg("dbus-daemon --session "
+                 "--address=unix:path=/tmp/.dbus-session-sock "
+                 "--nofork --print-address "
+                 ">/dev/null 2>&1");
+        sleep(1); // Let dbus bind
+        // Start xfce4-session with the pre-created bus address.
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
