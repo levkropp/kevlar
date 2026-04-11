@@ -138,6 +138,7 @@ static void setup_rootfs(void) {
     mount("tmpfs", ROOT "/run", "tmpfs", 0, NULL);
     mkdir(ROOT "/run/dbus", 0755);
     mkdir(ROOT "/tmp/.X11-unix", 01777);
+    mkdir(ROOT "/tmp/.ICE-unix", 01777);
 }
 
 int main(void) {
@@ -472,10 +473,10 @@ phase5:
         // Start session D-Bus. Use --nofork to keep the daemon in the
         // foreground (avoids parent-kills-child issue with --fork).
         // Run as background process via start_bg.
-        // Clean stale sockets and corrupt xfconf user configs from previous runs.
-        // xfconfd parsing errors on corrupt xfwm4.xml prevent it from serving
-        // the failsafe session config, so xfce4-session can't launch the panel.
+        // Clean stale sockets, ICE auth, and corrupt xfconf configs.
+        // Stale .ICEauthority from previous runs has wrong cookies.
         sh_run("rm -f /tmp/.dbus-session-sock; "
+               "rm -f /root/.ICEauthority; "
                "rm -rf /root/.config/xfce4/xfconf/xfce-perchannel-xml/", 1000);
         start_bg("dbus-daemon --session "
                  "--address=unix:path=/tmp/.dbus-session-sock "
@@ -483,13 +484,11 @@ phase5:
                  ">/tmp/dbus-addr 2>/tmp/dbus-session-err");
         // Give dbus-daemon time to bind and listen
         sh_run("sleep 1", 3000);
-        // Start xfce4-session. SESSION_MANAGER is set by the session
-        // itself (it listens on an ICE socket and advertises the address).
-        // Clients connect to SESSION_MANAGER to register with the session.
-        // xfce4-session generates its own ICE auth internally.
+        // Start xfce4-session and log SESSION_MANAGER for debug.
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
+                 "XDG_CONFIG_HOME=/root/.config "
                  "GTK_THEME=Adwaita "
                  "NO_AT_BRIDGE=1 "
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
@@ -523,8 +522,10 @@ phase5:
                        b, sizeof(b), 2000);
             if (b[0]) { printf("  session-log:\n%s\n", b); fflush(stdout); }
             sh_capture("ls -la /root/.ICEauthority 2>&1; "
-                       "cat /root/.ICEauthority 2>/dev/null | wc -c; "
-                       "echo SESSION_MANAGER=$SESSION_MANAGER",
+                       "HOME=/root ICEAUTHORITY=/root/.ICEauthority iceauth list 2>&1; "
+                       "ls /tmp/.ICE-unix/ 2>&1; "
+                       "cat /proc/$(pgrep xfce4-session | head -1)/environ 2>/dev/null "
+                       "| tr '\\0' '\\n' | grep SESSION_MANAGER 2>/dev/null",
                        b, sizeof(b), 2000);
             printf("  ice-auth: %s\n", b); fflush(stdout);
         }
