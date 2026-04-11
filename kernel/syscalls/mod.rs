@@ -1699,9 +1699,11 @@ impl<'a> SyscallHandler<'a> {
             SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
             // XFCE/GTK stubs — return harmless defaults so desktop components start.
             172 /* iopl */ => {
-                // Xorg calls iopl(3) to access VGA I/O ports directly.
-                // Set IOPL bits (12-13) in the saved RFLAGS on the syscall
-                // stack so when we return to usermode, the CPU has IOPL=3.
+                // Grant iopl(3) for VGA I/O port access.
+                // CAUTION: this allows userspace cli/sti and PIT writes.
+                // Timer resilience is handled by:
+                // - BSP LAPIC timer (immune to port I/O, configured at boot)
+                // - IF=1 forced on SYSRET/IRET (limits cli duration)
                 let level = a1 & 3;
                 let old_flags = self.frame.rflags;
                 self.frame.rflags = (old_flags & !(3u64 << 12)) | ((level as u64) << 12);

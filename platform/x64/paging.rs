@@ -734,14 +734,21 @@ pub struct PageTable {
 static NEXT_PCID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
 
 fn alloc_pcid() -> u16 {
-    if !super::boot::PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
-        return 0; // No PCID support — use 0 (no PCID bits in CR3)
-    }
-    loop {
-        let pcid = NEXT_PCID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let pcid = pcid & 0xFFF; // wrap to 12 bits
-        if pcid != 0 { return pcid; } // 0 reserved for kernel
-    }
+    // PCID is DISABLED until proper wraparound handling is implemented.
+    //
+    // With PCID enabled, each context switch uses bit 63 = 1 (no-invalidate),
+    // preserving TLB entries tagged with other PCIDs. When PCIDs wrap after
+    // 4095 allocations, a new process gets a PCID previously used by a dead
+    // process. The stale TLB entries from the dead process are still cached
+    // and match the new process's PCID — causing it to execute from the
+    // old process's physical pages. This is the root cause of the intermittent
+    // SIGSEGV in XFCE: heavy process churn (fork+exec for dbus, xfconf,
+    // xfwm4, etc.) wraps the PCID counter within seconds.
+    //
+    // With PCID=0, every CR3 write fully flushes the TLB. Safe but ~5-10%
+    // slower for context-switch-heavy workloads. The proper fix is to track
+    // active PCIDs and flush via invpcid on reuse (like Linux does).
+    0
 }
 
 impl PageTable {
