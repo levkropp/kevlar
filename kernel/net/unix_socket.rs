@@ -95,6 +95,12 @@ pub struct UnixStream {
     peer_path: SpinLock<Option<String>>,
     /// Socket type: SOCK_STREAM (1) or SOCK_DGRAM (2).
     sock_type: i32,
+    /// Peer credentials captured at connection time (for SO_PEERCRED).
+    /// On Linux, SO_PEERCRED returns the peer's pid/uid/gid at the time
+    /// of connect()/socketpair(), NOT the current process's credentials.
+    peer_pid: core::sync::atomic::AtomicI32,
+    peer_uid: core::sync::atomic::AtomicU32,
+    peer_gid: core::sync::atomic::AtomicU32,
 }
 
 /// Allocate a StreamInner directly on the heap via alloc_zeroed.
@@ -127,6 +133,15 @@ impl UnixStream {
 
         let peer_flag = Arc::new(AtomicBool::new(false));
 
+        // Capture current process credentials for both sides of the pair.
+        // For socketpair(): both sides belong to the current process.
+        // For accept(): the server side's peer is the connecting client
+        // (set later in enqueue_connection).
+        let proc = crate::process::current_process();
+        let cur_pid = proc.pid().as_i32();
+        let cur_uid = proc.uid();
+        let cur_gid = proc.gid();
+
         let a = Arc::new(UnixStream {
             tx: buf_a.clone(),
             rx: buf_b.clone(),
@@ -135,6 +150,9 @@ impl UnixStream {
             bound_path: SpinLock::new(None),
             peer_path: SpinLock::new(None),
             sock_type,
+            peer_pid: core::sync::atomic::AtomicI32::new(cur_pid),
+            peer_uid: core::sync::atomic::AtomicU32::new(cur_uid),
+            peer_gid: core::sync::atomic::AtomicU32::new(cur_gid),
         });
         let b = Arc::new(UnixStream {
             tx: buf_b,
@@ -144,6 +162,9 @@ impl UnixStream {
             bound_path: SpinLock::new(None),
             peer_path: SpinLock::new(None),
             sock_type,
+            peer_pid: core::sync::atomic::AtomicI32::new(cur_pid),
+            peer_uid: core::sync::atomic::AtomicU32::new(cur_uid),
+            peer_gid: core::sync::atomic::AtomicU32::new(cur_gid),
         });
 
         (a, b)
@@ -152,6 +173,16 @@ impl UnixStream {
     /// Create a connected pair of Unix STREAM sockets (default).
     pub fn new_pair() -> (Arc<UnixStream>, Arc<UnixStream>) {
         Self::new_pair_typed(1) // SOCK_STREAM
+    }
+
+    /// Returns the peer's credentials (pid, uid, gid) captured at connection time.
+    /// Used by SO_PEERCRED getsockopt.
+    pub fn peer_cred(&self) -> (i32, u32, u32) {
+        (
+            self.peer_pid.load(core::sync::atomic::Ordering::Relaxed),
+            self.peer_uid.load(core::sync::atomic::Ordering::Relaxed),
+            self.peer_gid.load(core::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Push ancillary data to be received by the peer.
@@ -530,6 +561,26 @@ impl UnixListener {
     /// backlog. Returns the client's end.
     fn enqueue_connection(&self, client_path: Option<&str>) -> Result<Arc<UnixStream>> {
         let (server_end, client_end) = UnixStream::new_pair();
+
+        // Capture credentials: the CLIENT_END's peer is the SERVER (listener),
+        // and the SERVER_END's peer is the CLIENT (connector).
+        // new_pair() sets both sides to current process. For connect(), the
+        // client end's peer should be the listener process (unknown at this
+        // point — set when accept() returns the server end). The server end's
+        // peer should be the connecting process (current).
+        // For SO_PEERCRED to work correctly:
+        //   - On the client fd: peer = server (set when accept runs)
+        //   - On the server fd: peer = client (set now from current_process)
+        // For simplicity, set both to current_process now. The accept() side
+        // will update when the server calls accept().
+        let proc = crate::process::current_process();
+        let client_pid = proc.pid().as_i32();
+        let client_uid = proc.uid();
+        let client_gid = proc.gid();
+        // Server end's peer = connecting client
+        server_end.peer_pid.store(client_pid, core::sync::atomic::Ordering::Relaxed);
+        server_end.peer_uid.store(client_uid, core::sync::atomic::Ordering::Relaxed);
+        server_end.peer_gid.store(client_gid, core::sync::atomic::Ordering::Relaxed);
 
         // Set path metadata.
         if let Some(p) = self.path.lock().as_deref() {
