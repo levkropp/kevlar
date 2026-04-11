@@ -480,9 +480,17 @@ impl FileLike for UnixStream {
             path: [0u8; 108],
         };
         if let Some(p) = path_opt {
-            let bytes = p.as_bytes();
-            let len = core::cmp::min(bytes.len(), 107);
-            sa.path[..len].copy_from_slice(&bytes[..len]);
+            if let Some(name) = p.strip_prefix('@') {
+                // Abstract socket: write NUL prefix + name
+                sa.path[0] = 0;
+                let bytes = name.as_bytes();
+                let len = core::cmp::min(bytes.len(), 106);
+                sa.path[1..1 + len].copy_from_slice(&bytes[..len]);
+            } else {
+                let bytes = p.as_bytes();
+                let len = core::cmp::min(bytes.len(), 107);
+                sa.path[..len].copy_from_slice(&bytes[..len]);
+            }
         }
         Ok(SockAddr::Un(sa))
     }
@@ -494,9 +502,17 @@ impl FileLike for UnixStream {
             path: [0u8; 108],
         };
         if let Some(p) = path_opt {
-            let bytes = p.as_bytes();
-            let len = core::cmp::min(bytes.len(), 107);
-            sa.path[..len].copy_from_slice(&bytes[..len]);
+            if let Some(name) = p.strip_prefix('@') {
+                // Abstract socket: write NUL prefix + name
+                sa.path[0] = 0;
+                let bytes = name.as_bytes();
+                let len = core::cmp::min(bytes.len(), 106);
+                sa.path[1..1 + len].copy_from_slice(&bytes[..len]);
+            } else {
+                let bytes = p.as_bytes();
+                let len = core::cmp::min(bytes.len(), 107);
+                sa.path[..len].copy_from_slice(&bytes[..len]);
+            }
         }
         Ok(SockAddr::Un(sa))
     }
@@ -650,9 +666,17 @@ impl FileLike for UnixListener {
             path: [0u8; 108],
         };
         if let Some(p) = path_opt {
-            let bytes = p.as_bytes();
-            let len = core::cmp::min(bytes.len(), 107);
-            sa.path[..len].copy_from_slice(&bytes[..len]);
+            if let Some(name) = p.strip_prefix('@') {
+                // Abstract socket: write NUL prefix + name
+                sa.path[0] = 0;
+                let bytes = name.as_bytes();
+                let len = core::cmp::min(bytes.len(), 106);
+                sa.path[1..1 + len].copy_from_slice(&bytes[..len]);
+            } else {
+                let bytes = p.as_bytes();
+                let len = core::cmp::min(bytes.len(), 107);
+                sa.path[..len].copy_from_slice(&bytes[..len]);
+            }
         }
         Ok(SockAddr::Un(sa))
     }
@@ -774,12 +798,22 @@ impl FileLike for UnixSocket {
             _ => return Err(Errno::EINVAL.into()),
         };
 
-        let path = sockaddr_un_path(sa)?;
+        let raw_path = sockaddr_un_path(sa)?;
+        // Prefix abstract socket paths with "@" for internal storage.
+        // getsockname() reverses this: "@name" → sun_path[0]=NUL + "name".
+        let path = if sa.path[0] == 0 {
+            let mut s = alloc::string::String::with_capacity(raw_path.len() + 1);
+            s.push('@');
+            s.push_str(raw_path);
+            s
+        } else {
+            alloc::string::String::from(raw_path)
+        };
 
         let mut state = self.state.lock();
         match &*state {
             SocketState::Created => {
-                *state = SocketState::Bound(String::from(path));
+                *state = SocketState::Bound(path);
                 Ok(())
             }
             _ => Err(Errno::EINVAL.into()),
@@ -823,7 +857,19 @@ impl FileLike for UnixSocket {
             _ => return Err(Errno::EINVAL.into()),
         };
 
-        let path = sockaddr_un_path(sa)?;
+        let raw_path = sockaddr_un_path(sa)?;
+        // For abstract sockets, build "@" prefixed path (matching bind format).
+        // For filesystem sockets, use raw path directly.
+        let mut abstract_buf = [0u8; 109];
+        let path: &str = if sa.path[0] == 0 {
+            abstract_buf[0] = b'@';
+            let bytes = raw_path.as_bytes();
+            let len = core::cmp::min(bytes.len(), 108);
+            abstract_buf[1..1 + len].copy_from_slice(&bytes[..len]);
+            core::str::from_utf8(&abstract_buf[..1 + len]).unwrap_or(raw_path)
+        } else {
+            raw_path
+        };
 
         // Look up the listener at the target path.
         let listener = match find_listener(path) {
@@ -933,9 +979,16 @@ impl FileLike for UnixSocket {
                     family: AF_UNIX as u16,
                     path: [0u8; 108],
                 };
-                let bytes = path.as_bytes();
-                let len = core::cmp::min(bytes.len(), 107);
-                sa.path[..len].copy_from_slice(&bytes[..len]);
+                if let Some(name) = path.strip_prefix('@') {
+                    sa.path[0] = 0;
+                    let bytes = name.as_bytes();
+                    let len = core::cmp::min(bytes.len(), 106);
+                    sa.path[1..1 + len].copy_from_slice(&bytes[..len]);
+                } else {
+                    let bytes = path.as_bytes();
+                    let len = core::cmp::min(bytes.len(), 107);
+                    sa.path[..len].copy_from_slice(&bytes[..len]);
+                }
                 Ok(SockAddr::Un(sa))
             }
             SocketState::Listening(l) => l.getsockname(),
