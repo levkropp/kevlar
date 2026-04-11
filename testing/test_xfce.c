@@ -469,10 +469,24 @@ phase5:
         // Start a persistent session bus (not via dbus-launch which kills
         // the bus when its child exits). Then start xfce4-session with
         // the bus address. NO_AT_BRIDGE=1 prevents at-spi GLib traps.
+        // Start session D-Bus. Use --nofork to keep the daemon in the
+        // foreground (avoids parent-kills-child issue with --fork).
+        // Run as background process via start_bg.
+        // Clean stale sockets and corrupt xfconf user configs from previous runs.
+        // xfconfd parsing errors on corrupt xfwm4.xml prevent it from serving
+        // the failsafe session config, so xfce4-session can't launch the panel.
         sh_run("rm -f /tmp/.dbus-session-sock; "
-               "dbus-daemon --session "
-               "--address=unix:path=/tmp/.dbus-session-sock "
-               "--fork --print-address >/tmp/dbus-addr 2>/dev/null", 10000);
+               "rm -rf /root/.config/xfce4/xfconf/xfce-perchannel-xml/", 1000);
+        start_bg("dbus-daemon --session "
+                 "--address=unix:path=/tmp/.dbus-session-sock "
+                 "--nofork --print-address "
+                 ">/tmp/dbus-addr 2>/tmp/dbus-session-err");
+        // Give dbus-daemon time to bind and listen
+        sh_run("sleep 1", 3000);
+        // Start xfce4-session. SESSION_MANAGER is set by the session
+        // itself (it listens on an ICE socket and advertises the address).
+        // Clients connect to SESSION_MANAGER to register with the session.
+        // xfce4-session generates its own ICE auth internally.
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
                  "XDG_DATA_DIRS=/usr/share "
@@ -502,6 +516,16 @@ phase5:
         }
         printf("  XFCE wait done\n");
         fflush(stdout);
+        // Dump session and dbus logs
+        {
+            char b[1024];
+            sh_capture("cat /tmp/xfce-session.log 2>/dev/null | head -20",
+                       b, sizeof(b), 2000);
+            if (b[0]) { printf("  session-log:\n%s\n", b); fflush(stdout); }
+            sh_capture("cat /tmp/dbus-session-err 2>/dev/null | head -5",
+                       b, sizeof(b), 2000);
+            if (b[0]) { printf("  dbus-err: %s\n", b); fflush(stdout); }
+        }
 
         // Quick process snapshot
         {
