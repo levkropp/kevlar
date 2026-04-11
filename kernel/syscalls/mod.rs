@@ -1699,14 +1699,17 @@ impl<'a> SyscallHandler<'a> {
             SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
             // XFCE/GTK stubs — return harmless defaults so desktop components start.
             172 /* iopl */ => {
-                // Grant iopl(3) for VGA I/O port access.
-                // CAUTION: this allows userspace cli/sti and PIT writes.
-                // Timer resilience is handled by:
-                // - BSP LAPIC timer (immune to port I/O, configured at boot)
-                // - IF=1 forced on SYSRET/IRET (limits cli duration)
-                let level = a1 & 3;
-                let old_flags = self.frame.rflags;
-                self.frame.rflags = (old_flags & !(3u64 << 12)) | ((level as u64) << 12);
+                // Return success WITHOUT changing IOPL in RFLAGS.
+                //
+                // The TSS I/O Permission Bitmap (IOPB) is initialized to
+                // all-zeros (all 65536 ports allowed). With IOPL=0, the CPU
+                // checks the IOPB for ring-3 IN/OUT instructions and allows
+                // them. But cli/sti require IOPL >= CPL (3), so they remain
+                // blocked — preventing userspace from disabling interrupts.
+                //
+                // This gives Xorg port I/O access (for VBE registers at
+                // 0x1CE-0x1CF) without allowing cli/sti (which killed the
+                // PIT timer and caused timer starvation on SMP).
                 Ok(0)
             }
             173 /* ioperm */ => Ok(0), // Accept silently — iopl(3) grants all ports

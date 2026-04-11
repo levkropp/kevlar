@@ -505,25 +505,10 @@ phase5:
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Wait for XFCE to start. Use a pipe: child sleeps then writes,
-        // parent blocks on read. This avoids CPU-burning yield loops that
-        // cause timer starvation on SMP.
-        {
-            int pfd[2];
-            pipe(pfd);
-            pid_t sleeper = fork();
-            if (sleeper == 0) {
-                close(pfd[0]);
-                sleep(15);
-                write(pfd[1], "x", 1);
-                _exit(0);
-            }
-            close(pfd[1]);
-            char buf;
-            read(pfd[0], &buf, 1); // blocks until child writes or pipe closes
-            close(pfd[0]);
-            waitpid(sleeper, NULL, 0);
-        }
+        // Wait for XFCE to start. Use sh_run("sleep N") which has built-in
+        // 50ms usleep polling with per-iteration timeout. Each sh_run call
+        // has its own timeout to avoid indefinite hangs.
+        sh_run("sleep 15", 20000);
         printf("  XFCE wait done\n");
         fflush(stdout);
         // Dump session log, dbus errors, and ICE auth file

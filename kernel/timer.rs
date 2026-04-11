@@ -189,8 +189,6 @@ pub fn handle_timer_irq() -> bool {
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
 
-
-
     // Update VFS clock with nanosecond precision for filesystem timestamps.
     let wall_ns = read_wall_clock().nanosecs_from_epoch();
     let secs = (wall_ns / 1_000_000_000) as u32;
