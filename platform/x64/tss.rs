@@ -26,6 +26,32 @@ impl Tss {
     }
 }
 
+/// Build the I/O permission bitmap: deny all ports except VGA registers.
+/// Bit = 0: allowed, Bit = 1: denied.
+/// Allowed ranges:
+///   0x1CE-0x1CF: Bochs VBE index/data registers
+///   0x3B0-0x3DF: VGA registers (CRT, attribute, sequencer, graphics, etc.)
+const fn build_iomap() -> [u8; 8191] {
+    let mut map = [0xFFu8; 8191]; // deny all by default
+    // Allow port range: clear bits for allowed ports
+    // Port N → byte N/8, bit N%8
+    let allowed: &[(u16, u16)] = &[
+        (0x1CE, 0x1CF), // Bochs VBE
+        (0x3B0, 0x3DF), // VGA
+    ];
+    let mut i = 0;
+    while i < allowed.len() {
+        let (start, end) = allowed[i];
+        let mut port = start;
+        while port <= end {
+            map[(port / 8) as usize] &= !(1u8 << (port % 8));
+            port += 1;
+        }
+        i += 1;
+    }
+    map
+}
+
 cpu_local! {
     pub static ref TSS: Tss = Tss {
         reserved0: 0,
@@ -37,7 +63,7 @@ cpu_local! {
         reserved2: 0,
         reserved3: 0,
         iomap_offset: 104, // offsetof(Tss, iomap)
-        iomap: [0; 8191],
+        iomap: build_iomap(),
         // According to Intel SDM, all bits of the last byte must be set to 1.
         iomap_last_byte: 0xff,
     };
