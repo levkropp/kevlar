@@ -24,10 +24,6 @@ struct Timer {
 /// Suspends the current process at least `ms` milliseconds.
 pub fn _sleep_ms(ms: usize) {
     let ticks = (ms * TICK_HZ + 999) / 1000;
-    let pid = current_process().pid().as_i32();
-    if false && ms >= 5000 {
-        warn!("TIMER PUSH: pid={} ms={} ticks={}", pid, ms, ticks);
-    }
     TIMERS.lock().push(Timer {
         current: ticks,
         process: current_process().clone(),
@@ -192,23 +188,6 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // Periodic timer health check: every ~5 seconds, log the TIMERS list.
-    // This detects timer starvation where timers are pushed but never expire.
-    if ticks % 500 == 0 {
-        let timers = TIMERS.lock();
-        if !timers.is_empty() {
-            let mut min_ticks = usize::MAX;
-            let mut max_ticks = 0usize;
-            let mut long_timers = 0u32; // timers with > 100 ticks remaining
-            for t in timers.iter() {
-                min_ticks = core::cmp::min(min_ticks, t.current);
-                max_ticks = core::cmp::max(max_ticks, t.current);
-                if t.current > 100 { long_timers += 1; }
-            }
-            warn!("TIMER HEALTH: tick={} count={} min={} max={} long={}",
-                  ticks, timers.len(), min_ticks, max_ticks, long_timers);
-        }
-    }
 
 
 

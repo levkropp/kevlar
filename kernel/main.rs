@@ -455,6 +455,11 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     process::init();
     // Register the switch function for deferred rescheduling from preempt_enable().
     kevlar_platform::arch::set_resched_fn(process::switch);
+    // Start the LAPIC timer on the BSP too.  The PIT (ports 0x40-0x43) can be
+    // reprogrammed by userspace with iopl(3) — Xorg does this during VGA init.
+    // The LAPIC timer is memory-mapped in kernel space, immune to iopl.
+    // Both BSP and APs now process timers via the LAPIC preempt vector.
+    start_ap_preemption_timer();
     // Signal to waiting APs that the kernel and scheduler are ready.
     KERNEL_READY.store(true, Ordering::Release);
     profiler.lap_time("process init");

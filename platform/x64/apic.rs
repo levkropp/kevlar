@@ -312,6 +312,8 @@ pub unsafe fn lapic_timer_init() {
         warn!("apic: LAPIC timer not calibrated, skipping");
         return;
     }
+    let cpu = super::cpu_id();
+    log::trace!("apic: starting LAPIC timer on cpu {} (ticks_per_10ms={})", cpu, ticks_per_10ms);
     lapic_write(LAPIC_DIV_CONF_OFF, 0xB);
     lapic_write(LAPIC_LVT_TIMER_OFF, LAPIC_TIMER_PERIODIC | LAPIC_PREEMPT_VECTOR as u32);
     lapic_write(LAPIC_INIT_COUNT_OFF, ticks_per_10ms);
