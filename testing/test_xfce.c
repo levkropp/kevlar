@@ -505,10 +505,10 @@ phase5:
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Wait for XFCE to start. Use sh_run("sleep N") which has built-in
-        // 50ms usleep polling with per-iteration timeout. Each sh_run call
-        // has its own timeout to avoid indefinite hangs.
-        sh_run("sleep 15", 20000);
+        // Direct sleep — no fork, no chroot, no sh_run overhead.
+        // If THIS hangs, the kernel timer for PID 1 is broken.
+        // If it works, the issue is in sh_run's fork/chroot/waitpid.
+        sleep(15);
         printf("  XFCE wait done\n");
         fflush(stdout);
         // Dump session log, dbus errors, and ICE auth file
