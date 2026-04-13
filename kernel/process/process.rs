@@ -2562,13 +2562,24 @@ fn load_elf_segments(
         let page_end = align_up(seg_end, PAGE_SIZE);
         let page_len = page_end - page_start;
 
-        // Adjust file offset: if seg_start was rounded down by N bytes,
-        // the file offset also moves back by N bytes.
+        // The VMA is page-aligned but the file data starts at an offset
+        // within the first page.  The page fault handler uses `offset` as the
+        // file position for the VMA's start address, so we need to subtract
+        // the page-alignment adjustment from the file offset.  The file_size
+        // stays as p_filesz — we don't extend it beyond the original segment.
+        // Bytes before p_vaddr within the first page are zero-filled by demand
+        // paging (the page fault handler zeroes the page first, then copies
+        // file data at the correct offset within the page).
         let start_adjust = seg_start - page_start;
         let area_type = if phdr.p_filesz > 0 {
             VmAreaType::File {
                 file: file.clone(),
-                offset: (phdr.p_offset as usize).saturating_sub(start_adjust),
+                // The file offset must correspond to the VMA start (page_start),
+                // which is start_adjust bytes before seg_start.  The ELF file
+                // offset for seg_start is p_offset, so for page_start it's
+                // p_offset - start_adjust.  This is safe because PT_LOAD segments
+                // have p_offset page-aligned (ELF spec requirement).
+                offset: (phdr.p_offset as usize).wrapping_sub(start_adjust),
                 file_size: (phdr.p_filesz as usize) + start_adjust,
             }
         } else {
