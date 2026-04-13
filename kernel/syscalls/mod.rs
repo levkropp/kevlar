@@ -843,17 +843,17 @@ impl<'a> SyscallHandler<'a> {
         // ── strace: per-PID syscall tracing ──────────────────────────
         // Auto-enable for Xorg: set STRACE_PID when we detect PID 3 calling
         // epoll_create1 (Xorg's first epoll call during init).
-        if n == 291 /*SYS_EPOLL_CREATE1*/ && current_process().pid().as_i32() == 3 {
-            STRACE_PID.store(3, core::sync::atomic::Ordering::Relaxed);
+        // Strace: hardcode PID 7 (xterm when twm is skipped).
+        // PID 1=boot_twm, PID 3=Xorg, PID 4=mkfontdir, PID 5=xsetroot, PID 6=sh, PID 7=xterm
+        {
+            let pid = current_process().pid().as_i32();
+            if pid == 7 && STRACE_PID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                STRACE_PID.store(7, core::sync::atomic::Ordering::Relaxed);
+            }
         }
         let strace_pid = STRACE_PID.load(core::sync::atomic::Ordering::Relaxed);
-        // Only trace I/O syscalls on fds >= 5 to reduce noise
-        let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid
-            && matches!(n,
-                0 /*read*/ | 1 /*write*/ | 20 /*writev*/ |
-                3 /*close*/ | 43 /*accept*/ | 288 /*accept4*/ |
-                291 /*epoll_create1*/ | 233 /*epoll_ctl*/ | 232 /*epoll_wait*/ | 281 /*epoll_pwait*/
-            ) && (n >= 232 || a1 >= 5);
+        // Trace all syscalls for the target PID
+        let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid;
         if do_strace {
             warn!("STRACE[{}] → {}(fd={}, {:#x}, {:#x})",
                 strace_pid, syscall_name_by_number(n), a1, a2, a3);
