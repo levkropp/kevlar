@@ -4,8 +4,16 @@ use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
 use crate::arch::SavedInterruptStatus;
+use crate::lockdep;
+#[cfg(target_arch = "x86_64")]
+use crate::x64::if_trace;
 
 pub struct SpinLock<T: ?Sized> {
+    /// Lock rank for dependency checking (0 = unranked, higher = acquired later).
+    rank: u8,
+    /// Human-readable name for lockdep violation messages.
+    name: &'static str,
+    /// The actual spin mutex.  Must be the LAST field so ?Sized T works.
     inner: spin::mutex::SpinMutex<T>,
 }
 
@@ -13,6 +21,18 @@ impl<T> SpinLock<T> {
     pub const fn new(value: T) -> SpinLock<T> {
         SpinLock {
             inner: spin::mutex::SpinMutex::new(value),
+            rank: 0,
+            name: "<unnamed>",
+        }
+    }
+
+    /// Create a lock with a rank and name for lock dependency checking.
+    /// See `lockdep::rank` for rank constants.  Higher rank = acquired later.
+    pub const fn new_ranked(value: T, rank: u8, name: &'static str) -> SpinLock<T> {
+        SpinLock {
+            inner: spin::mutex::SpinMutex::new(value),
+            rank,
+            name,
         }
     }
 
@@ -37,11 +57,22 @@ impl<T: ?Sized> SpinLock<T> {
             asm!("msr daifset, #2"); // Mask IRQs
         }
 
+        let lock_addr = (self as *const Self).cast::<()>() as usize;
+
+        // IF trace: record the cli (IF 1→0 transition).
+        #[cfg(target_arch = "x86_64")]
+        if_trace::record(if_trace::IfEvent::LockAcquire, lock_addr as u32, false);
+
+        // Lockdep check: verify rank ordering BEFORE acquiring the spin.
+        // Interrupts are already disabled, so CPU index is stable.
+        lockdep::on_acquire(lock_addr, self.rank, self.name);
+
         let guard = self.inner.lock();
 
         SpinLockGuard {
             inner: ManuallyDrop::new(guard),
             saved_intr_status: ManuallyDrop::new(saved_intr_status),
+            lock_addr,
         }
     }
 
@@ -52,10 +83,13 @@ impl<T: ?Sized> SpinLock<T> {
     /// acquire/release cycle.
     #[inline(always)]
     pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
+        lockdep::on_acquire((self as *const Self).cast::<()>() as usize, self.rank, self.name);
+
         let guard = self.inner.lock();
 
         SpinLockGuardNoIrq {
             inner: ManuallyDrop::new(guard),
+            lock_addr: (self as *const Self).cast::<()>() as usize,
         }
     }
 
@@ -73,10 +107,13 @@ impl<T: ?Sized> SpinLock<T> {
     #[inline(always)]
     pub fn lock_preempt(&self) -> SpinLockGuardPreempt<'_, T> {
         crate::arch::preempt_disable();
+        lockdep::on_acquire((self as *const Self).cast::<()>() as usize, self.rank, self.name);
+
         let guard = self.inner.lock();
 
         SpinLockGuardPreempt {
             inner: ManuallyDrop::new(guard),
+            lock_addr: (self as *const Self).cast::<()>() as usize,
         }
     }
 
@@ -91,13 +128,21 @@ unsafe impl<T: ?Sized + Send> Send for SpinLock<T> {}
 pub struct SpinLockGuard<'a, T: ?Sized> {
     inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
     saved_intr_status: ManuallyDrop<SavedInterruptStatus>,
+    lock_addr: usize,
 }
 
 impl<'a, T: ?Sized> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
+        lockdep::on_release(self.lock_addr);
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
             ManuallyDrop::drop(&mut self.saved_intr_status);
+        }
+        // IF trace: record IF restoration (may go IF=0→0 or IF=0→1).
+        #[cfg(target_arch = "x86_64")]
+        {
+            let if_now = crate::arch::interrupts_enabled();
+            if_trace::record(if_trace::IfEvent::LockRelease, self.lock_addr as u32, if_now);
         }
     }
 }
@@ -107,10 +152,12 @@ impl<'a, T: ?Sized> Drop for SpinLockGuard<'a, T> {
 /// Created by [`SpinLock::lock_no_irq`].
 pub struct SpinLockGuardNoIrq<'a, T: ?Sized> {
     inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
+    lock_addr: usize,
 }
 
 impl<'a, T: ?Sized> Drop for SpinLockGuardNoIrq<'a, T> {
     fn drop(&mut self) {
+        lockdep::on_release(self.lock_addr);
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
         }
@@ -137,10 +184,12 @@ impl<'a, T: ?Sized> DerefMut for SpinLockGuardNoIrq<'a, T> {
 /// Created by [`SpinLock::lock_preempt`].
 pub struct SpinLockGuardPreempt<'a, T: ?Sized> {
     inner: ManuallyDrop<spin::mutex::SpinMutexGuard<'a, T>>,
+    lock_addr: usize,
 }
 
 impl<'a, T: ?Sized> Drop for SpinLockGuardPreempt<'a, T> {
     fn drop(&mut self) {
+        lockdep::on_release(self.lock_addr);
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
         }

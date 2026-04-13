@@ -497,6 +497,45 @@ test-xorg: build/alpine-xorg.img
 	@echo ""
 	@grep 'TEST_END' /tmp/kevlar-test-xorg-$(PROFILE).log || echo "(no summary)"
 
+# Test twm desktop session (Xorg + twm + xterm on single CPU)
+.PHONY: test-twm
+test-twm: build/alpine-xorg.img
+	$(PROGRESS) "TEST" "twm desktop session"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-twm"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -mem-prealloc -vga std 2>&1 \
+		| tee /tmp/kevlar-test-twm-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-twm-$(PROFILE).log || echo "(no test output)"
+	@echo ""
+	@grep 'TEST_END' /tmp/kevlar-test-twm-$(PROFILE).log || echo "(no summary)"
+
+# Test twm desktop on SMP
+.PHONY: test-twm-smp
+test-twm-smp: build/alpine-xorg.img
+	$(PROGRESS) "TEST" "twm desktop session (SMP)"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-twm"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -smp 2 -mem-prealloc -vga std 2>&1 \
+		| tee /tmp/kevlar-test-twm-smp-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-twm-smp-$(PROFILE).log || echo "(no test output)"
+	@echo ""
+	@grep 'TEST_END' /tmp/kevlar-test-twm-smp-$(PROFILE).log || echo "(no summary)"
+
+# ═══════════════════════════════════════════════════════════════════
+# Kevlar Alpine+twm Desktop — our first graphical "distro"
+# ═══════════════════════════════════════════════════════════════════
+.PHONY: alpine-twm
+alpine-twm: build/alpine-xorg.img
+	$(PROGRESS) "DESKTOP" "Kevlar Alpine+twm"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-twm"
+	$(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm --gui --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -smp 2 -m 512 -mem-prealloc -vga std
+
 # Run Alpine graphical (with QEMU window)
 .PHONY: run-alpine-gui
 run-alpine-gui: build/alpine-xorg.img

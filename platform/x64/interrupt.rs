@@ -84,6 +84,10 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             loop { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
         }
         LAPIC_PREEMPT_VECTOR => {
+            // Heartbeat: increment per-CPU counter BEFORE ack or any lock.
+            // If this counter stops incrementing, the interrupt is not being
+            // delivered (IF=0 permanently on this CPU).
+            super::apic::lapic_hb_inc();
             ack_interrupt();
             crate::flight_recorder::record(
                 crate::flight_recorder::kind::PREEMPT,
@@ -276,8 +280,68 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             }
         }
         NONMASKABLE_INTERRUPT_VECTOR => {
-            // TODO:
-            panic!("unsupported exception: NONMASKABLE_INTERRUPT\n{:?}", frame);
+            // NMI Watchdog handler — lock-free state dump.
+            // This fires when the watchdog detects a CPU stuck with IF=0.
+            // We use emergency_serial_hex (lock-free) to avoid deadlocking
+            // on any spinlock the stuck code might be holding.
+            let cpu = super::cpu_id();
+            let rip = frame.rip;
+            let rsp = frame.rsp;
+            let rflags = frame.rflags;
+            let cs = frame.cs;
+            let if_enabled = if rflags & 0x200 != 0 { "IF=1" } else { "IF=0" };
+            let ring = cs & 3;
+
+            // Use warn! for structured output — the serial lock is a spin::Mutex
+            // (not our SpinLock), so it's safe here as long as the stuck code
+            // wasn't inside the logger.  Fall back to emergency output if needed.
+            log::warn!("========== NMI WATCHDOG: CPU {} STUCK ==========", cpu);
+            log::warn!("  RIP={:#018x}  RSP={:#018x}", rip, rsp);
+            log::warn!("  RFLAGS={:#018x}  ({}, ring {})", rflags, if_enabled, ring);
+            let head = super::cpu_local::cpu_local_head();
+            let pc = head.preempt_count;
+            let nr = head.need_resched;
+            log::warn!("  preempt_count={}  need_resched={}", pc, nr);
+
+            // Dump LAPIC timer registers to verify hardware state.
+            let (lvt, init, curr, div) = super::apic::lapic_timer_read_regs();
+            let masked = if lvt & (1 << 16) != 0 { "MASKED" } else { "unmasked" };
+            let mode = if lvt & (1 << 17) != 0 { "periodic" } else { "one-shot" };
+            log::warn!("  LAPIC: LVT={:#x} ({}, {}) INIT={} CURR={} DIV={:#x}",
+                lvt, mode, masked, init, curr, div);
+            log::warn!("  HB counters: CPU0={} CPU1={}",
+                super::apic::lapic_hb_read(0), super::apic::lapic_hb_read(1));
+
+            // Stack trace — walk RBP chain (best-effort, may be incomplete).
+            log::warn!("  Backtrace:");
+            let mut rbp = frame.rbp;
+            for i in 0..16u32 {
+                if rbp == 0 || rbp < 0xffff_8000_0000_0000 {
+                    break;
+                }
+                let ret_addr = unsafe { *((rbp as usize + 8) as *const u64) };
+                if ret_addr == 0 || ret_addr < 0xffff_8000_0000_0000 {
+                    break;
+                }
+                log::warn!("    #{}: {:#018x}", i, ret_addr);
+                rbp = unsafe { *(rbp as *const u64) };
+            }
+            // Dump currently held locks (lockdep state).
+            crate::lockdep::dump_held_locks(cpu as usize);
+
+            // Dump IF transition history — shows the exact sequence of
+            // CLI/STI/IRETQ/lock that led to permanent IF=0.
+            super::if_trace::dump(cpu as usize);
+
+            log::warn!("========== END NMI WATCHDOG ==========");
+
+            // Record in flight recorder for crash dump correlation.
+            crate::flight_recorder::record(
+                crate::flight_recorder::kind::NMI_WATCHDOG,
+                cpu as u32,
+                rip,
+                rflags,
+            );
         }
         BREAKPOINT_VECTOR => {
             // int3 from userspace: deliver SIGTRAP (debugger breakpoint).

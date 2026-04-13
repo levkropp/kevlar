@@ -22,7 +22,11 @@ struct RealTimer {
     deadline_ns: u64,
 }
 
-static REAL_TIMERS: SpinLock<alloc::vec::Vec<RealTimer>> = SpinLock::new(alloc::vec::Vec::new());
+static REAL_TIMERS: SpinLock<alloc::vec::Vec<RealTimer>> = SpinLock::new_ranked(
+    alloc::vec::Vec::new(),
+    kevlar_platform::lockdep::rank::REAL_TIMERS,
+    "REAL_TIMERS",
+);
 
 /// Current monotonic time in nanoseconds.
 #[inline]

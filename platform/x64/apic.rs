@@ -71,6 +71,103 @@ pub unsafe fn broadcast_halt_ipi() {
     lapic_write(ICR_LOW_OFF, ICR_ALL_EXCL_SELF_FIXED);
 }
 
+// ── NMI Watchdog (Hard Lockup Detector) ─────────────────────────────
+
+/// Send an NMI IPI to a specific CPU by APIC ID.
+///
+/// NMI is non-maskable: it fires even when IF=0, which is the whole point
+/// of the watchdog — it can interrupt a CPU stuck in a spinloop with
+/// interrupts disabled.
+pub unsafe fn send_nmi_ipi(apic_id: u8) {
+    // ICR: destination = apic_id, delivery mode = NMI (0b100 in bits 10:8).
+    const ICR_NMI: u32 = 0x400; // bits 10:8 = 100 = NMI delivery mode
+    wait_icr_idle();
+    lapic_write(ICR_HIGH_OFF, (apic_id as u32) << 24);
+    lapic_write(ICR_LOW_OFF, ICR_NMI);
+}
+
+/// APIC IDs indexed by CPU number (0 = BSP, 1+ = APs).
+/// Populated during SMP init.  Used by the watchdog to target NMI IPIs.
+static APIC_ID_TABLE: [AtomicU32; 8] = [
+    AtomicU32::new(0xFF), AtomicU32::new(0xFF), AtomicU32::new(0xFF), AtomicU32::new(0xFF),
+    AtomicU32::new(0xFF), AtomicU32::new(0xFF), AtomicU32::new(0xFF), AtomicU32::new(0xFF),
+];
+
+/// Register the current CPU's APIC ID in the table.
+pub fn register_cpu_apic_id(cpu_index: u32) {
+    let apic_id = unsafe { lapic_id() };
+    if (cpu_index as usize) < APIC_ID_TABLE.len() {
+        APIC_ID_TABLE[cpu_index as usize].store(apic_id as u32, Ordering::Relaxed);
+    }
+}
+
+/// Previous heartbeat snapshot for each CPU.  Used by the watchdog to detect
+/// stalls: if `LAPIC_HB[cpu]` hasn't changed since `LAST_HB_SNAPSHOT[cpu]`,
+/// that CPU is stuck.
+static LAST_HB_SNAPSHOT: [AtomicU32; 8] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+
+/// Watchdog tick counter.  Incremented by every handle_timer_irq call.
+/// We check heartbeats every WATCHDOG_INTERVAL ticks.
+static WATCHDOG_TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Check interval: ~2 seconds at 100Hz per CPU (both PIT and LAPIC contribute).
+const WATCHDOG_INTERVAL: u32 = 400;
+
+/// Whether the watchdog is armed (set after all CPUs are online).
+static WATCHDOG_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Enable the NMI watchdog.  Called after SMP init when all CPUs are online.
+pub fn watchdog_enable() {
+    // Snapshot current heartbeat values so the first check doesn't false-alarm.
+    for i in 0..8 {
+        LAST_HB_SNAPSHOT[i].store(LAPIC_HB[i].load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+    WATCHDOG_TICKS.store(0, Ordering::Relaxed);
+    WATCHDOG_ENABLED.store(true, Ordering::Relaxed);
+    log::info!("watchdog: NMI hard lockup detector enabled");
+}
+
+/// Called from handle_timer_irq on every tick.  Periodically checks whether
+/// any CPU's LAPIC heartbeat counter has stalled, and sends an NMI IPI to
+/// stuck CPUs.  Lock-free — safe from interrupt context.
+pub fn watchdog_check() {
+    if !WATCHDOG_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let tick = WATCHDOG_TICKS.fetch_add(1, Ordering::Relaxed);
+    if tick % WATCHDOG_INTERVAL != 0 {
+        return;
+    }
+
+    let my_cpu = super::cpu_id() as usize;
+    let num_cpus = super::smp::num_online_cpus() as usize;
+
+    for cpu in 0..num_cpus.min(8) {
+        if cpu == my_cpu {
+            continue; // Don't NMI ourselves
+        }
+        let current_hb = LAPIC_HB[cpu].load(Ordering::Relaxed);
+        let last_hb = LAST_HB_SNAPSHOT[cpu].load(Ordering::Relaxed);
+        LAST_HB_SNAPSHOT[cpu].store(current_hb, Ordering::Relaxed);
+
+        if current_hb == last_hb && current_hb > 0 {
+            // CPU's heartbeat hasn't incremented — it's stuck!
+            let apic_id = APIC_ID_TABLE[cpu].load(Ordering::Relaxed);
+            if apic_id != 0xFF {
+                log::warn!(
+                    "WATCHDOG: CPU {} stuck! HB={} (unchanged for {}ms). Sending NMI.",
+                    cpu, current_hb, WATCHDOG_INTERVAL * 10, // ~10ms per tick
+                );
+                unsafe { send_nmi_ipi(apic_id as u8); }
+            }
+        }
+    }
+}
+
 /// Flush a single page from all online CPUs' TLBs.
 ///
 /// Performs the local `invlpg` immediately, then — if there are other online
@@ -317,6 +414,57 @@ pub unsafe fn lapic_timer_init() {
     lapic_write(LAPIC_DIV_CONF_OFF, 0xB);
     lapic_write(LAPIC_LVT_TIMER_OFF, LAPIC_TIMER_PERIODIC | LAPIC_PREEMPT_VECTOR as u32);
     lapic_write(LAPIC_INIT_COUNT_OFF, ticks_per_10ms);
+}
+
+// ── LAPIC timer diagnostics ─────────────────────────────────────────
+
+/// Per-CPU heartbeat counters.  Index 0 = BSP, 1 = first AP, etc.
+/// Incremented at the very start of the LAPIC preempt handler.
+static LAPIC_HB: [AtomicU32; 8] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+];
+
+/// Increment the per-CPU LAPIC heartbeat counter.  Called at the very
+/// top of the LAPIC_PREEMPT_VECTOR handler, before ack_interrupt().
+#[inline(always)]
+pub fn lapic_hb_inc() {
+    let cpu = super::cpu_id() as usize;
+    if cpu < LAPIC_HB.len() {
+        LAPIC_HB[cpu].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Read the heartbeat counter for the given CPU.
+pub fn lapic_hb_read(cpu: usize) -> u32 {
+    if cpu < LAPIC_HB.len() {
+        LAPIC_HB[cpu].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// Read the LAPIC timer diagnostic registers for the CURRENT CPU.
+/// Returns (LVT_TIMER, INIT_COUNT, CURR_COUNT, DIV_CONF).
+pub fn lapic_timer_read_regs() -> (u32, u32, u32, u32) {
+    unsafe {
+        let lvt = lapic_read(LAPIC_LVT_TIMER_OFF);
+        let init = lapic_read(LAPIC_INIT_COUNT_OFF);
+        let curr = lapic_read(LAPIC_CURR_COUNT_OFF);
+        let div = lapic_read(LAPIC_DIV_CONF_OFF);
+        (lvt, init, curr, div)
+    }
+}
+
+/// Log the LAPIC timer registers and per-CPU heartbeat counters.
+pub fn lapic_timer_diag_log() {
+    let (lvt, init, curr, div) = lapic_timer_read_regs();
+    let cpu = super::cpu_id();
+    log::warn!(
+        "LAPIC-DIAG cpu={} LVT={:#x} INIT={} CURR={} DIV={:#x} HB=[{}, {}]",
+        cpu, lvt, init, curr, div,
+        lapic_hb_read(0), lapic_hb_read(1),
+    );
 }
 
 #[inline(always)]

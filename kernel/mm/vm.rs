@@ -304,6 +304,12 @@ impl Vm {
         prot: MMapProt,
         shared: bool,
     ) -> Result<()> {
+        // Silently skip zero-length VMAs (can occur when ELF BSS segment
+        // ends exactly on a page boundary, producing page_end - page_start = 0).
+        if len == 0 {
+            return Ok(());
+        }
+
         start.access_ok(len)?;
 
         if !self.is_free_vaddr_range(start, len) {
@@ -318,6 +324,33 @@ impl Vm {
             return Err(Errno::EINVAL.into());
         }
 
+        // Try to merge with an adjacent VMA instead of creating a new one.
+        // This prevents pathological fragmentation (466+ VMAs for Xorg).
+        // Merging is only valid for anonymous mappings with matching attributes.
+        let new_end = start.value() + len;
+        if matches!(area_type, VmAreaType::Anonymous) {
+            // Check if any existing VMA can be extended to absorb this range.
+            for vma in self.vm_areas.iter_mut() {
+                if !matches!(vma.area_type(), VmAreaType::Anonymous) { continue; }
+                if vma.prot != prot || vma.is_shared != shared { continue; }
+
+                let vma_end = vma.start().value() + vma.len();
+
+                // Case 1: new VMA is right after existing VMA (extend forward).
+                if vma_end == start.value() {
+                    vma.len += len;
+                    return Ok(());
+                }
+                // Case 2: new VMA is right before existing VMA (extend backward).
+                if new_end == vma.start().value() {
+                    vma.start = start;
+                    vma.len += len;
+                    return Ok(());
+                }
+            }
+        }
+
+        // No merge possible — create a new VMA.
         self.vm_areas.push(VmArea {
             start,
             len,
@@ -629,6 +662,40 @@ impl Vm {
             }
         }
         Err(Errno::ESRCH.into())
+    }
+
+    /// VMA integrity check.  Verifies:
+    /// - No overlapping VMAs
+    /// - No zero-length VMAs
+    /// - All VMAs are page-aligned
+    /// Called after every VMA-mutating operation in debug builds.
+    /// `context` describes which operation triggered the check.
+    pub fn check_vma_integrity(&self, context: &str) {
+        let pid = crate::process::current_process().pid().as_i32();
+        for (i, vma) in self.vm_areas.iter().enumerate() {
+            if vma.len == 0 {
+                warn!("VMA_BUG[{}]: pid={} zero-length VMA[{}] at {:#x}",
+                    context, pid, i, vma.start.value());
+            }
+            if vma.start.value() % PAGE_SIZE != 0 {
+                warn!("VMA_BUG[{}]: pid={} unaligned start VMA[{}] at {:#x}",
+                    context, pid, i, vma.start.value());
+            }
+            if vma.len % PAGE_SIZE != 0 {
+                warn!("VMA_BUG[{}]: pid={} unaligned len VMA[{}] at {:#x} len={:#x}",
+                    context, pid, i, vma.start.value(), vma.len);
+            }
+            let i_end = vma.start.value() + vma.len;
+            for (j, other) in self.vm_areas.iter().enumerate() {
+                if i == j { continue; }
+                let j_start = other.start.value();
+                let j_end = j_start + other.len;
+                if vma.start.value() < j_end && i_end > j_start {
+                    warn!("VMA_BUG[{}]: pid={} OVERLAP VMA[{}] [{:#x}-{:#x}] vs VMA[{}] [{:#x}-{:#x}]",
+                        context, pid, i, vma.start.value(), i_end, j, j_start, j_end);
+                }
+            }
+        }
     }
 
     pub fn is_free_vaddr_range(&self, start: UserVAddr, len: usize) -> bool {

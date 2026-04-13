@@ -63,6 +63,8 @@ bitflags! {
         const PRESENT = 1 << 0;
         const WRITABLE = 1 << 1;
         const USER = 1 << 2;
+        const WRITE_THROUGH = 1 << 3; // PWT — write-through caching
+        const CACHE_DISABLE = 1 << 4; // PCD — page cache disable (uncacheable)
         const HUGE_PAGE = 1 << 7; // PS bit — marks a 2MB page in a PDE
         const NO_EXECUTE = 1 << 63;
     }
@@ -935,6 +937,10 @@ impl PageTable {
         if prot_flags & 4 == 0 {
             attrs |= PageAttrs::NO_EXECUTE;
         }
+        // Device memory (MMIO) must be uncacheable — writes must go directly
+        // to the hardware, not to the CPU cache.  Without PCD, Xorg's fbdev
+        // driver writes to a cached shadow and the display stays black.
+        attrs |= PageAttrs::CACHE_DISABLE | PageAttrs::WRITE_THROUGH;
         self.map_page(vaddr, paddr, attrs);
     }
 

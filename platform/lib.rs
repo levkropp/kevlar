@@ -39,6 +39,7 @@ pub mod page_refcount;
 pub mod stack_cache;
 pub mod profile;
 pub mod spinlock;
+pub mod lockdep;
 pub mod usercopy_trace;
 pub mod page_trace;
 
@@ -76,7 +77,10 @@ pub mod arch {
         num_online_cpus, preempt_disable, preempt_enable, set_need_resched, set_resched_fn,
         read_clock_counter, read_rtc_epoch_secs,
         semihosting_halt,
-        start_ap_preemption_timer, x64_specific, tsc, vdso,
+        start_ap_preemption_timer, lapic_timer_diag_log,
+        register_cpu_apic_id, watchdog_enable, watchdog_check,
+        if_trace_enable, enable_preempt_check, assert_preempt_safe,
+        x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
         fbcon, ps2mouse,

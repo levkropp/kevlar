@@ -17,9 +17,38 @@ use crate::{
 /// queuing the signal. This prevents infinite fault loops where the faulting
 /// instruction is retried after the page fault handler returns.
 /// Use for unrecoverable faults (invalid address, no VMA).
+#[allow(unsafe_code)]
 fn deliver_sigsegv_fatal() {
     let current = current_process();
     let pid = current.pid().as_i32();
+    let cmdline = current.cmdline();
+    // Read the fault address from CR2 and stashed registers for diagnostics.
+    let fault_addr = unsafe { x86::controlregs::cr2() };
+    let cpu = kevlar_platform::arch::cpu_id() as usize;
+    let regs = kevlar_platform::crash_regs::take(cpu);
+    warn!("SIGSEGV: pid={} cmd={} fault_addr={:#x}", pid, cmdline.as_str(), fault_addr);
+    if let Some(r) = regs {
+        warn!("  RIP={:#x} RSP={:#x} RBP={:#x} RAX={:#x}", r.rip, r.rsp, r.rbp, r.rax);
+        warn!("  RDI={:#x} RSI={:#x} RDX={:#x} RCX={:#x}", r.rdi, r.rsi, r.rdx, r.rcx);
+        // If RIP=0 (NULL function pointer call), dump the object at RBP
+        // to see which function pointers are initialized vs NULL.
+        #[allow(unsafe_code)]
+        if r.rip == 0 {
+            if r.rsp > 0x1000 && r.rsp < 0x7FFF_FFFF_FFFF {
+                let ret_addr = unsafe { *(r.rsp as *const u64) };
+                warn!("  NULL call — return addr at [RSP]={:#x}", ret_addr);
+            }
+            // Dump the object at RBP (the vtable/struct being called through)
+            if r.rbp > 0x1000 && r.rbp < 0x7FFF_FFFF_FFFF {
+                warn!("  Object at RBP={:#x}:", r.rbp);
+                for i in 0..16u64 {
+                    let val = unsafe { *((r.rbp + i * 8) as *const u64) };
+                    let marker = if i == 8 { " ← [RBP+0x40] = call target" } else { "" };
+                    warn!("    [RBP+{:#04x}] = {:#018x}{}", i * 8, val, marker);
+                }
+            }
+        }
+    }
     let action = current.signals().lock_no_irq().get_action(SIGSEGV);
     if matches!(action, SigAction::Terminate) {
         Process::exit_by_signal(SIGSEGV);
@@ -296,6 +325,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                             }
                             warn!("  call site (ret_addr-8..ret_addr): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                                   bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]);
+                        }
+                    }
+                    // Dump the object at RBP — shows which vtable entries are NULL vs populated
+                    #[allow(unsafe_code)]
+                    if r.rbp > 0x1000 && r.rbp < 0x7FFF_FFFF_FFFF {
+                        warn!("  Object at RBP={:#x}:", r.rbp);
+                        for i in 0..20u64 {
+                            let val = unsafe { *((r.rbp + i * 8) as *const u64) };
+                            let marker = if i == 8 { " ← call target (NULL!)" } else { "" };
+                            warn!("    [+{:#04x}] = {:#018x}{}", i * 8, val, marker);
                         }
                     }
                 }

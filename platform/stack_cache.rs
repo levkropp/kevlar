@@ -7,6 +7,8 @@
 
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::spinlock::SpinLock;
+use crate::arch::PAGE_SIZE;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Number of cached stacks per size class.
 const CACHE_SIZE: usize = 4;
@@ -58,12 +60,80 @@ pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError
 
     if let Some(cache) = cache {
         if let Some(stack) = cache.lock_no_irq().pop() {
+            install_guard(&stack);
             return Ok(stack);
         }
     }
 
     // Cache miss: allocate from buddy.
-    alloc_pages_owned(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)
+    let stack = alloc_pages_owned(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+    install_guard(&stack);
+    Ok(stack)
+}
+
+// ── Stack Guard (Poison Pattern) ──────────────────────────────────────
+
+/// Magic value written to the bottom 512 bytes of every kernel stack.
+/// If any of these values are overwritten, a stack overflow occurred.
+const GUARD_MAGIC: u64 = 0xDEAD_CAFE_DEAD_CAFE;
+/// Number of u64 values in the guard region (512 bytes = 64 u64s).
+const GUARD_WORDS: usize = 64;
+
+/// Total number of stacks with guard patterns installed.
+static GUARD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Write the guard poison pattern at the bottom of a stack.
+fn install_guard(stack: &OwnedPages) {
+    #[allow(unsafe_code)]
+    unsafe {
+        let base = stack.as_vaddr().as_mut_ptr::<u64>();
+        for i in 0..GUARD_WORDS {
+            base.add(i).write_volatile(GUARD_MAGIC);
+        }
+    }
+    GUARD_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Check the guard poison pattern at the bottom of a stack.
+/// Returns `true` if the guard is intact, `false` if corrupted.
+fn check_guard(stack: &OwnedPages) -> bool {
+    #[allow(unsafe_code)]
+    unsafe {
+        let base = stack.as_vaddr().as_ptr::<u64>();
+        for i in 0..GUARD_WORDS {
+            if base.add(i).read_volatile() != GUARD_MAGIC {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Check all cached stacks' guard patterns.  Called from `interval_work()`
+/// periodically.  Panics if any guard is corrupted (stack overflow detected).
+pub fn check_all_guards() {
+    // Check cached 4-page stacks.
+    {
+        let cache = CACHE_4PAGE.lock_no_irq();
+        for i in 0..cache.count {
+            if let Some(ref stack) = cache.stacks[i] {
+                if !check_guard(stack) {
+                    panic!("STACK GUARD: kernel stack overflow detected in 4-page cached stack #{}", i);
+                }
+            }
+        }
+    }
+    // Check cached 2-page stacks.
+    {
+        let cache = CACHE_2PAGE.lock_no_irq();
+        for i in 0..cache.count {
+            if let Some(ref stack) = cache.stacks[i] {
+                if !check_guard(stack) {
+                    panic!("STACK GUARD: kernel stack overflow detected in 2-page cached stack #{}", i);
+                }
+            }
+        }
+    }
 }
 
 /// Return a kernel stack to the cache. If the cache is full, the stack

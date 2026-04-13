@@ -9,12 +9,23 @@ use kevlar_platform::{arch::TICK_HZ, spinlock::SpinLock};
 use process::switch;
 
 const PREEMPT_PER_TICKS: usize = 3;
+
+/// LAPIC timer diagnostic: set to `true` to skip context switches from the
+/// timer handler.  Timers, poll wakes, and tick accounting still run normally.
+/// If the LAPIC heartbeat counters keep incrementing with this set to `true`,
+/// the bug is in `switch()`'s interaction with the interrupt return path.
+pub const DIAG_SKIP_SWITCH: bool = false;
+
 static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Ticks from the epoch (00:00:00 on 1 January 1970, UTC).
 static WALLCLOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Wall-clock epoch in nanoseconds (set once from CMOS RTC at boot).
 static WALLCLOCK_EPOCH_NS: AtomicUsize = AtomicUsize::new(0);
-static TIMERS: SpinLock<Vec<Timer>> = SpinLock::new(Vec::new());
+static TIMERS: SpinLock<Vec<Timer>> = SpinLock::new_ranked(
+    Vec::new(),
+    kevlar_platform::lockdep::rank::TIMERS,
+    "TIMERS",
+);
 
 struct Timer {
     current: usize,
@@ -152,6 +163,9 @@ impl Timeval {
 /// the interrupted thread's frame — the new thread will receive signals on its
 /// next preemption cycle.
 pub fn handle_timer_irq() -> bool {
+    // NMI watchdog: periodically check if any CPU's LAPIC heartbeat has stalled.
+    kevlar_platform::arch::watchdog_check();
+
     crate::debug::htrace::enter(crate::debug::htrace::id::TIMER_IRQ, 0);
     // Collect expired timers while holding the lock, then resume them
     // AFTER releasing the lock. This breaks the TIMERS→SCHEDULER lock
@@ -209,6 +223,11 @@ pub fn handle_timer_irq() -> bool {
     crate::debug::htrace::exit(crate::debug::htrace::id::TIMER_IRQ, 0);
 
     if ticks % PREEMPT_PER_TICKS == 0 {
+        if DIAG_SKIP_SWITCH {
+            // Diagnostic mode: skip context switches entirely.
+            // Timers, poll wakes, and tick accounting still run.
+            return false;
+        }
         if !kevlar_platform::arch::in_preempt() {
             return process::switch();
         }
