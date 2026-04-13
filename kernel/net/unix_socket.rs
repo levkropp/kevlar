@@ -686,6 +686,8 @@ impl FileLike for UnixListener {
         let mut status = PollStatus::empty();
         if !inner.backlog.is_empty() {
             status |= PollStatus::POLLIN;
+            let pid = crate::process::current_process().pid().as_i32();
+            warn!("UnixListener::poll pid={} backlog={} → POLLIN", pid, inner.backlog.len());
         }
         Ok(status)
     }

@@ -718,6 +718,19 @@ use core::sync::atomic::{AtomicUsize, Ordering as AtomOrd};
 /// Current syscall number being dispatched (for crash diagnostics).
 static CURRENT_SYSCALL_NR: AtomicUsize = AtomicUsize::new(0);
 
+/// PID to strace (0 = disabled). Set via set_strace_pid().
+/// Set to 3 to trace Xorg during graphical desktop debugging.
+static STRACE_PID: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// Enable syscall tracing for a specific PID. All syscalls from that PID
+/// will be logged to serial with arguments and results (like strace).
+pub fn set_strace_pid(pid: i32) {
+    STRACE_PID.store(pid, core::sync::atomic::Ordering::Relaxed);
+    if pid != 0 {
+        warn!("STRACE: enabled for PID {}", pid);
+    }
+}
+
 /// Read the current syscall number (called from page fault handler).
 pub fn current_syscall_nr() -> usize {
     CURRENT_SYSCALL_NR.load(AtomOrd::Relaxed)
@@ -827,6 +840,24 @@ impl<'a> SyscallHandler<'a> {
         #[cfg(debug_assertions)]
         CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
 
+        // ── strace: per-PID syscall tracing ──────────────────────────
+        // Auto-enable for Xorg: set STRACE_PID when we detect PID 3 calling
+        // epoll_create1 (Xorg's first epoll call during init).
+        if n == 291 /*SYS_EPOLL_CREATE1*/ && current_process().pid().as_i32() == 3 {
+            STRACE_PID.store(3, core::sync::atomic::Ordering::Relaxed);
+        }
+        let strace_pid = STRACE_PID.load(core::sync::atomic::Ordering::Relaxed);
+        // Only trace I/O syscalls on fds >= 5 to reduce noise
+        let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid
+            && matches!(n,
+                0 /*read*/ | 1 /*write*/ | 20 /*writev*/ |
+                3 /*close*/ | 43 /*accept*/ | 288 /*accept4*/ |
+                291 /*epoll_create1*/ | 233 /*epoll_ctl*/ | 232 /*epoll_wait*/ | 281 /*epoll_pwait*/
+            ) && (n >= 232 || a1 >= 5);
+        if do_strace {
+            warn!("STRACE[{}] → {}(fd={}, {:#x}, {:#x})",
+                strace_pid, syscall_name_by_number(n), a1, a2, a3);
+        }
 
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
         // Saves ~5ns/call by eliding tick_stime, record_syscall, profiler, htrace.
@@ -837,6 +868,12 @@ impl<'a> SyscallHandler<'a> {
                 n as u32, a1 as u32, (a1 >> 32) as u32, a2 as u32, (a2 >> 32) as u32);
 
             let ret = self.do_dispatch(a1, a2, a3, a4, a5, a6, n);
+
+            // strace result
+            if do_strace {
+                let rv = match &ret { Ok(v) => *v, Err(e) => -(e.errno() as isize) };
+                warn!("STRACE[{}] ← {}() = {}", strace_pid, syscall_name_by_number(n), rv);
+            }
 
             #[cfg(feature = "ktrace-syscall")]
             {
@@ -941,8 +978,16 @@ impl<'a> SyscallHandler<'a> {
                     errno: Some(err.errno_name()),
                 });
             }
+            if do_strace {
+                warn!("STRACE[{}] ← {}() = -{}", strace_pid, syscall_name_by_number(n), err.errno_name());
+            }
             err
         });
+        if do_strace {
+            if let Ok(v) = &ret {
+                warn!("STRACE[{}] ← {}() = {}", strace_pid, syscall_name_by_number(n), v);
+            }
+        }
 
         // Per-syscall cycle profiler: record TSC at exit.
         debug::profiler::syscall_exit(n, prof_start);

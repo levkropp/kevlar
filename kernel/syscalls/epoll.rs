@@ -61,6 +61,11 @@ impl<'a> SyscallHandler<'a> {
         fd: Fd,
         event_ptr: Option<UserVAddr>,
     ) -> Result<isize> {
+        {
+            let pid = current_process().pid().as_i32();
+            let op_name = match op { 1 => "ADD", 2 => "DEL", 3 => "MOD", _ => "???" };
+            warn!("epoll_ctl pid={} op={} fd={}", pid, op_name, fd.as_int());
+        }
         // Read the epoll_event from userspace (NULL is valid for EPOLL_CTL_DEL).
         let event = if op != EPOLL_CTL_DEL {
             let ptr = event_ptr.ok_or(Error::new(Errno::EFAULT))?;
@@ -181,6 +186,10 @@ impl<'a> SyscallHandler<'a> {
         let started_at = crate::timer::read_monotonic_clock();
 
         // Blocking path: sleep until events are ready or timeout expires.
+        {
+            let pid = current_process().pid().as_i32();
+            warn!("epoll_wait BLOCK pid={} timeout={}", pid, timeout);
+        }
         let ready_events: Vec<EpollEvent> = POLL_WAIT_QUEUE.sleep_signalable_until(|| {
             if timeout > 0 && started_at.elapsed_msecs() >= timeout as usize {
                 return Ok(Some(Vec::new()));
