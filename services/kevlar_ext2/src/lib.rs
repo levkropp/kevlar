@@ -618,7 +618,7 @@ const DIRTY_CACHE_SIZE: usize = 8192;
 
 /// Read cache: LRU block cache for hot metadata blocks (inode tables, directories).
 /// Eliminates redundant disk reads during path resolution and inode access.
-const READ_CACHE_SIZE: usize = 512;  // 512 × 4KB = 2MB of cached blocks
+const READ_CACHE_SIZE: usize = 2048;  // 2048 × 4KB = 8MB of cached blocks
 
 struct ReadCacheEntry {
     block_num: u64,
@@ -685,7 +685,6 @@ impl Ext2Inner {
         {
             let mut cache = self.read_cache.lock_no_irq();
             if cache.len() >= READ_CACHE_SIZE {
-                // Evict the entry with the lowest access count.
                 let min_idx = cache.iter().enumerate()
                     .min_by_key(|(_, e)| e.access_count)
                     .map(|(i, _)| i)
