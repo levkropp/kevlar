@@ -731,7 +731,16 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             return;
         }
 
-        // Not a write fault — just update PTE flags to match VMA prot.
+        // Write to a page the VMA doesn't allow writing — SIGSEGV.
+        if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0) {
+            drop(vm); drop(vm_ref);
+            current.send_signal(SIGSEGV);
+            return;
+        }
+
+        // Not a write fault — just update PTE flags to match VMA prot
+        // (e.g., exec fault after mprotect added PROT_EXEC, or read fault
+        // after mprotect restored PROT_READ from PROT_NONE).
         vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
         vm.page_table().flush_tlb_local(aligned_vaddr);
         return;
