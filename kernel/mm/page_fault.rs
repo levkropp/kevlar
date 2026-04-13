@@ -604,6 +604,141 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
         } // None
     };
 
+    // EARLY EXIT: If the page is already present in the page table, this is a
+    // permission fault (wrong PTE flags), NOT a demand fault (missing page).
+    // Handle it directly without reading from the file — this preserves modified
+    // MAP_PRIVATE page content (e.g., dynamic linker relocations in the GOT).
+    // Without this, we'd allocate a fresh page, fill it with original file data
+    // (overwriting relocations), and try_map would catch it — but the wasted I/O
+    // is expensive and the fresh-page allocation can fail under memory pressure.
+    if _reason.contains(PageFaultReason::PRESENT) {
+        kevlar_platform::page_allocator::free_pages(paddr, 1);
+        let prot_flags = vma.prot().bits();
+        let vma_is_shared = vma.is_shared();
+        let is_anonymous = matches!(vma.area_type(), VmAreaType::Anonymous);
+        // vma is no longer used — vm can be reborrowed.
+
+        // Split huge page before any 4KB-level PTE operations. If the faulting
+        // address is inside a 2MB huge page, we must decompose it into 512 × 4KB
+        // PTEs first so that CoW and update_page_flags work on the correct PTE.
+        if vm.page_table().is_huge_mapped(aligned_vaddr).is_some() {
+            vm.page_table_mut().split_huge_page(aligned_vaddr);
+            vm.page_table().flush_tlb_local(aligned_vaddr);
+        }
+
+        if prot_flags == 0 {
+            drop(vm); drop(vm_ref);
+            warn!(
+                "SIGSEGV: PROT_NONE+PRESENT fault at {:#x} (pid={}, ip={:#x})",
+                unaligned_vaddr.value(), current.pid().as_i32(), ip
+            );
+            current.send_signal(SIGSEGV);
+            return;
+        }
+
+        // CoW write fault: page is present read-only, VMA allows writes.
+        if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 != 0) {
+            if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                if vma_is_shared {
+                    vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    return;
+                }
+                let is_ghost = vm.is_ghost_forked;
+                let refcount = kevlar_platform::page_refcount::page_ref_count(old_paddr);
+                if refcount > 1 || is_ghost {
+                    if !is_ghost {
+                        kevlar_platform::page_refcount::page_ref_inc(old_paddr);
+                    }
+                    let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            if !is_ghost {
+                                kevlar_platform::page_refcount::page_ref_dec(old_paddr);
+                            }
+                            drop(vm); drop(vm_ref);
+                            Process::exit_by_signal(SIGKILL);
+                        }
+                    };
+                    #[cfg(not(feature = "profile-fortress"))]
+                    {
+                        let src = kevlar_platform::page_ops::page_as_slice(old_paddr);
+                        let dst = kevlar_platform::page_ops::page_as_slice_mut(new_paddr);
+                        dst.copy_from_slice(src);
+                    }
+                    #[cfg(feature = "profile-fortress")]
+                    {
+                        let mut tmp = [0u8; PAGE_SIZE];
+                        let src_frame = kevlar_platform::page_ops::PageFrame::new(old_paddr);
+                        src_frame.read(0, &mut tmp);
+                        let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(new_paddr);
+                        dst_frame.write(0, &tmp);
+                    }
+                    kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                    if !is_ghost {
+                        kevlar_platform::page_refcount::page_ref_dec(old_paddr);
+                        if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                            kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                        }
+                    }
+                    vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
+                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    return;
+                }
+                // Sole owner: just update flags to writable.
+                vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+                vm.page_table().flush_tlb_local(aligned_vaddr);
+                return;
+            }
+        }
+
+        // Write to read-only MAP_PRIVATE file-backed page (RELR relocations).
+        if _reason.contains(PageFaultReason::CAUSED_BY_WRITE) && (prot_flags & 2 == 0)
+            && !vma_is_shared && !is_anonymous
+        {
+            if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
+                let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
+                    Ok(p) => p,
+                    Err(_) => { drop(vm); drop(vm_ref); Process::exit_by_signal(SIGKILL); }
+                };
+                #[cfg(not(feature = "profile-fortress"))]
+                {
+                    let src = kevlar_platform::page_ops::page_as_slice(old_paddr);
+                    let dst = kevlar_platform::page_ops::page_as_slice_mut(new_paddr);
+                    dst.copy_from_slice(src);
+                }
+                #[cfg(feature = "profile-fortress")]
+                {
+                    let mut tmp = [0u8; PAGE_SIZE];
+                    let src_frame = kevlar_platform::page_ops::PageFrame::new(old_paddr);
+                    src_frame.read(0, &mut tmp);
+                    let mut dst_frame = kevlar_platform::page_ops::PageFrame::new(new_paddr);
+                    dst_frame.write(0, &tmp);
+                }
+                kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                vm.page_table_mut().unmap_user_page(aligned_vaddr);
+                vm.page_table_mut().map_user_page_with_prot(
+                    aligned_vaddr, new_paddr, prot_flags | 2);
+                vm.page_table().flush_tlb_local(aligned_vaddr);
+                if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                    kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                }
+                return;
+            }
+            // No existing page for write to read-only — genuine SIGSEGV.
+            drop(vm); drop(vm_ref);
+            deliver_sigsegv_fatal();
+            return;
+        }
+
+        // Not a write fault — just update PTE flags to match VMA prot.
+        vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
+        vm.page_table().flush_tlb_local(aligned_vaddr);
+        return;
+    }
+
+    // ---- DEMAND FAULT PATH: page not present, need to read from file/zero ----
+
     // Page cache state — set inside the File match arm, used after for refcount init.
     let mut cache_hit = false;
     let mut cache_shared = false; // true when paddr is a shared cached page
@@ -658,9 +793,15 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
 
             // --- Page cache for immutable files (initramfs) ---
             let vma_readonly = vma.prot().bits() & 2 == 0;
+            // Only cache FULL pages. Partial pages (copy_len < PAGE_SIZE) at
+            // segment boundaries must NOT be cached: a different VMA covering
+            // the same file page index may need the full 4096 bytes. If we
+            // cache a partial page (e.g. rodata's last page with 0x2E0 bytes),
+            // the huge page assembler reuses it for the data VMA's first page,
+            // leaving function pointers / GOT entries as zero.
             is_cacheable = file.is_content_immutable()
                 && offset_in_page == 0
-                && copy_len > 0
+                && copy_len == PAGE_SIZE
                 && vma_readonly;
 
             if is_cacheable {
