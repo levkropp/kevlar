@@ -116,8 +116,16 @@ impl SyscallTrace {
 type ProcessTable = BTreeMap<PId, Arc<Process>>;
 
 /// The process table. All processes are registered in with its process Id.
-pub(super) static PROCESSES: SpinLock<ProcessTable> = SpinLock::new(BTreeMap::new());
-pub static EXITED_PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new(Vec::new());
+pub(super) static PROCESSES: SpinLock<ProcessTable> = SpinLock::new_ranked(
+    BTreeMap::new(),
+    kevlar_platform::lockdep::rank::PROCESSES,
+    "PROCESSES",
+);
+pub static EXITED_PROCESSES: SpinLock<Vec<Arc<Process>>> = SpinLock::new_ranked(
+    Vec::new(),
+    kevlar_platform::lockdep::rank::EXITED_PROCESSES,
+    "EXITED_PROCESSES",
+);
 
 static FORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
 
@@ -2534,8 +2542,12 @@ fn load_elf_segments(
 ) -> Result<()> {
     use kevlar_utils::alignment::align_down;
 
-    // First, add file-backed VMAs for each PT_LOAD (non-page-aligned, as the
-    // page fault handler already handles partial pages correctly).
+    // Add VMAs for each PT_LOAD segment.  VMAs MUST be page-aligned:
+    // the page fault handler looks up VMAs by page address, and if a VMA
+    // only covers bytes 0x400000-0x400200 (512 bytes), accessing byte
+    // 0x400201 has no VMA → SIGSEGV.  The VMA must cover the full pages
+    // that the segment touches.  The file offset is adjusted to match
+    // the page-aligned start.
     let mut page_ranges: Vec<(usize, usize)> = Vec::new();
     for phdr in phdrs {
         if phdr.p_type != PT_LOAD {
@@ -2543,27 +2555,33 @@ fn load_elf_segments(
         }
 
         let seg_start = (phdr.p_vaddr as usize) + base_offset;
+        let seg_end = seg_start + phdr.p_memsz as usize;
+
+        // Page-align: start rounds down, end rounds up.
+        let page_start = align_down(seg_start, PAGE_SIZE);
+        let page_end = align_up(seg_end, PAGE_SIZE);
+        let page_len = page_end - page_start;
+
+        // Adjust file offset: if seg_start was rounded down by N bytes,
+        // the file offset also moves back by N bytes.
+        let start_adjust = seg_start - page_start;
         let area_type = if phdr.p_filesz > 0 {
             VmAreaType::File {
                 file: file.clone(),
-                offset: phdr.p_offset as usize,
-                file_size: phdr.p_filesz as usize,
+                offset: (phdr.p_offset as usize).saturating_sub(start_adjust),
+                file_size: (phdr.p_filesz as usize) + start_adjust,
             }
         } else {
             VmAreaType::Anonymous
         };
         vm.add_vm_area_with_prot(
-            UserVAddr::new_nonnull(seg_start)?,
-            phdr.p_memsz as usize,
+            UserVAddr::new_nonnull(page_start)?,
+            page_len,
             area_type,
             elf_flags_to_prot(phdr.p_flags),
             false,
         )?;
 
-        // Track the page-aligned range this segment occupies.
-        let seg_end = seg_start + phdr.p_memsz as usize;
-        let page_start = align_down(seg_start, PAGE_SIZE);
-        let page_end = align_up(seg_end, PAGE_SIZE);
         page_ranges.push((page_start, page_end));
     }
 

@@ -146,6 +146,8 @@ def compile_all_local():
         ("testing/test_readdir_debug.c", "test-readdir-dbg", []),
         ("testing/smoke_alpine.c",       "smoke-alpine",     []),
         ("testing/test_xorg.c",          "test-xorg",        []),
+        ("testing/test_twm.c",           "test-twm",         []),
+        ("testing/boot_twm.c",           "boot-twm",         []),
         ("testing/test_xfce.c",          "test-xfce",        []),
         ("testing/fb0_probe.c",          "fb0-probe",        []),
     ]

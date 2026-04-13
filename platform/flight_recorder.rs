@@ -28,27 +28,40 @@
 //!  [3] data2       : u64
 //! ```
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
 pub const MAX_CPUS:  usize = 8;
-pub const RING_SIZE: usize = 64;
+/// Ring size per CPU — increased from 64 to 256 for better crash coverage.
+/// 256 entries × 32 bytes = 8KB per CPU, 64KB total for 8 CPUs.
+pub const RING_SIZE: usize = 256;
 
 /// Event kind codes.
 pub mod kind {
-    pub const CTX_SWITCH:  u8 = 1;
-    pub const TLB_SEND:    u8 = 2;
-    pub const TLB_RECV:    u8 = 3;
-    pub const MUNMAP:      u8 = 4;
-    pub const MMAP_FAULT:  u8 = 5;
-    pub const PREEMPT:     u8 = 6;
-    pub const SYSCALL_IN:  u8 = 7;
-    pub const SYSCALL_OUT: u8 = 8;
-    pub const IDLE_ENTER:  u8 = 9;
-    pub const IDLE_EXIT:   u8 = 10;
-    pub const SIGNAL:      u8 = 11;
+    pub const CTX_SWITCH:      u8 = 1;
+    pub const TLB_SEND:        u8 = 2;
+    pub const TLB_RECV:        u8 = 3;
+    pub const MUNMAP:          u8 = 4;
+    pub const MMAP_FAULT:      u8 = 5;
+    pub const PREEMPT:         u8 = 6;
+    pub const SYSCALL_IN:      u8 = 7;
+    pub const SYSCALL_OUT:     u8 = 8;
+    pub const IDLE_ENTER:      u8 = 9;
+    pub const IDLE_EXIT:       u8 = 10;
+    pub const SIGNAL:          u8 = 11;
+    // Milestone T diagnostic event kinds:
+    pub const NMI_WATCHDOG:    u8 = 12;
+    pub const LOCKDEP_ACQUIRE: u8 = 13;
+    pub const LOCKDEP_RELEASE: u8 = 14;
+    pub const IF_TRANSITION:   u8 = 15;
+    pub const GUARD_PAGE_HIT:  u8 = 16;
 }
+
+/// Global monotonic sequence counter.  Stamped on every event to allow
+/// merging per-CPU buffers into a causally-ordered timeline (TSC can
+/// drift across CPUs; sequence numbers cannot).
+static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ── Storage ─────────────────────────────────────────────────────────────────
 
@@ -79,17 +92,19 @@ static IDX: [AtomicUsize; MAX_CPUS] = [
 #[inline(always)]
 pub fn record(kind: u8, data0: u32, data1: u64, data2: u64) {
     let cpu = crate::arch::cpu_id() as usize % MAX_CPUS;
-    // Relaxed: we only need the index to be unique per-CPU; total ordering
-    // with other CPUs is established by TSC timestamps at dump time.
     let raw_idx = IDX[cpu].fetch_add(1, Ordering::Relaxed);
     let idx = raw_idx % RING_SIZE;
     let tsc = crate::arch::read_clock_counter();
+    // Global sequence number for causal ordering across CPUs.
+    let seq = GLOBAL_SEQ.fetch_add(1, Ordering::Relaxed);
     // Safety: only CPU `cpu` writes to RINGS[cpu].
     unsafe {
         let slot = &mut RINGS[cpu][idx];
         slot[0] = tsc;
+        // Pack: kind:8 | cpu:8 | seq_lo:16 | data0:32
         slot[1] = ((kind  as u64) << 56)
                 | ((cpu   as u64) << 48)
+                | (((seq & 0xFFFF) as u64) << 32)
                 | (data0  as u64);
         slot[2] = data1;
         slot[3] = data2;
@@ -100,18 +115,23 @@ pub fn record(kind: u8, data0: u32, data1: u64, data2: u64) {
 
 fn kind_name(k: u8) -> &'static str {
     match k {
-        kind::CTX_SWITCH  => "CTX_SWITCH ",
-        kind::TLB_SEND    => "TLB_SEND   ",
-        kind::TLB_RECV    => "TLB_RECV   ",
-        kind::MUNMAP      => "MUNMAP     ",
-        kind::MMAP_FAULT  => "MMAP_FAULT ",
-        kind::PREEMPT     => "PREEMPT    ",
-        kind::SYSCALL_IN  => "SYSCALL_IN ",
-        kind::SYSCALL_OUT => "SYSCALL_OUT",
-        kind::IDLE_ENTER  => "IDLE_ENTER ",
-        kind::IDLE_EXIT   => "IDLE_EXIT  ",
-        kind::SIGNAL      => "SIGNAL     ",
-        _                 => "???        ",
+        kind::CTX_SWITCH      => "CTX_SWITCH ",
+        kind::TLB_SEND        => "TLB_SEND   ",
+        kind::TLB_RECV        => "TLB_RECV   ",
+        kind::MUNMAP          => "MUNMAP     ",
+        kind::MMAP_FAULT      => "MMAP_FAULT ",
+        kind::PREEMPT         => "PREEMPT    ",
+        kind::SYSCALL_IN      => "SYSCALL_IN ",
+        kind::SYSCALL_OUT     => "SYSCALL_OUT",
+        kind::IDLE_ENTER      => "IDLE_ENTER ",
+        kind::IDLE_EXIT       => "IDLE_EXIT  ",
+        kind::SIGNAL          => "SIGNAL     ",
+        kind::NMI_WATCHDOG    => "NMI_WDOG   ",
+        kind::LOCKDEP_ACQUIRE => "LOCKDEP_ACQ",
+        kind::LOCKDEP_RELEASE => "LOCKDEP_REL",
+        kind::IF_TRANSITION   => "IF_TRANS   ",
+        kind::GUARD_PAGE_HIT  => "GUARD_HIT  ",
+        _                     => "???        ",
     }
 }
 
@@ -162,6 +182,27 @@ fn print_event_detail(kind: u8, cpu: usize, data0: u32, data1: u64, data2: u64) 
         kind::SIGNAL => {
             warn!("  CPU={} SIGNAL      pid={} sig={}", cpu, data0, data1);
         }
+        kind::NMI_WATCHDOG => {
+            warn!("  CPU={} NMI_WDOG    rip={:#x} rflags={:#x}",
+                cpu, data1, data2);
+        }
+        kind::LOCKDEP_ACQUIRE => {
+            warn!("  CPU={} LOCKDEP_ACQ lock_addr={:#x} rank={}",
+                cpu, data1, data0);
+        }
+        kind::LOCKDEP_RELEASE => {
+            warn!("  CPU={} LOCKDEP_REL lock_addr={:#x}",
+                cpu, data1);
+        }
+        kind::IF_TRANSITION => {
+            let if_after = if data2 != 0 { "IF=1" } else { "IF=0" };
+            warn!("  CPU={} IF_TRANS    event={} src={:#x} → {}",
+                cpu, data0, data1, if_after);
+        }
+        kind::GUARD_PAGE_HIT => {
+            warn!("  CPU={} GUARD_HIT   fault_addr={:#x}",
+                cpu, data1);
+        }
         _ => {
             warn!("  CPU={} kind={} data0={:#x} data1={:#x} data2={:#x}",
                 cpu, kind, data0, data1, data2);
@@ -172,12 +213,13 @@ fn print_event_detail(kind: u8, cpu: usize, data0: u32, data1: u64, data2: u64) 
 
 /// A decoded flight recorder entry for sorting.
 struct DecodedEntry {
-    tsc:   u64,
-    cpu:   u8,
-    kind:  u8,
-    data0: u32,
-    data1: u64,
-    data2: u64,
+    tsc:    u64,
+    seq_lo: u16,
+    cpu:    u8,
+    kind:   u8,
+    data0:  u32,
+    data1:  u64,
+    data2:  u64,
 }
 
 /// Dump all flight recorder ring buffers in TSC order.
@@ -194,7 +236,7 @@ pub fn dump() {
     // Collect all non-zero entries into a fixed-size stack array.
     // MAX_CPUS * RING_SIZE = 8 * 64 = 512 entries.
     let mut entries: [DecodedEntry; MAX_CPUS * RING_SIZE] = core::array::from_fn(|_| {
-        DecodedEntry { tsc: 0, cpu: 0, kind: 0, data0: 0, data1: 0, data2: 0 }
+        DecodedEntry { tsc: 0, seq_lo: 0, cpu: 0, kind: 0, data0: 0, data1: 0, data2: 0 }
     });
     let mut count = 0usize;
 
@@ -228,12 +270,13 @@ pub fn dump() {
                 continue; // unwritten slot
             }
 
-            let kind  = ((descriptor >> 56) & 0xff) as u8;
-            let _ecpu = ((descriptor >> 48) & 0xff) as u8;
-            let data0 = (descriptor & 0xffff_ffff) as u32;
+            let kind   = ((descriptor >> 56) & 0xff) as u8;
+            let _ecpu  = ((descriptor >> 48) & 0xff) as u8;
+            let seq_lo = ((descriptor >> 32) & 0xffff) as u16;
+            let data0  = (descriptor & 0xffff_ffff) as u32;
 
             if count < entries.len() {
-                entries[count] = DecodedEntry { tsc, cpu: cpu as u8, kind, data0, data1, data2 };
+                entries[count] = DecodedEntry { tsc, seq_lo, cpu: cpu as u8, kind, data0, data1, data2 };
                 count += 1;
             }
         }
@@ -260,12 +303,10 @@ pub fn dump() {
     // Approximate: use 1 tick ≈ 1 ns at ~1GHz to avoid needing tsc_freq here.
     // For relative display, raw TSC delta is informative enough.
 
-    warn!("  (base TSC={:#x}, showing {} events)", base_tsc, count);
+    warn!("  (base TSC={:#x}, showing {} events, seq=global ordering)", base_tsc, count);
     for e in &entries[..count] {
         let delta = e.tsc.saturating_sub(base_tsc);
-        // Print delta in raw TSC ticks — precise ns conversion needs
-        // tsc::ns_from_cycles which is only available from kernel, not platform.
-        warn!("  +{:>8} ticks  CPU={}  {}", delta, e.cpu,
+        warn!("  +{:>8} ticks  seq={:>5}  CPU={}  {}", delta, e.seq_lo, e.cpu,
             kind_name(e.kind));
         print_event_detail(e.kind, e.cpu as usize, e.data0, e.data1, e.data2);
     }

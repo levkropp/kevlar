@@ -17,11 +17,13 @@ macro_rules! __cpu_local_impl {
         impl $N {
             #[allow(unused)]
             $V fn get(&self) -> &$T {
+                $crate::arch::assert_preempt_safe();
                 self.as_mut()
             }
 
             #[allow(unused)]
             $V fn set(&self, value: $T) {
+                $crate::arch::assert_preempt_safe();
                 *self.as_mut() = value;
             }
 
@@ -105,6 +107,62 @@ static CPU_LOCAL_HEAD_SPACE: MaybeUninit<CpuLocalHead> = MaybeUninit::uninit();
 
 pub fn cpu_local_head() -> &'static mut CpuLocalHead {
     unsafe { &mut *(rdgsbase() as *mut CpuLocalHead) }
+}
+
+/// Runtime check: verify that per-CPU data access is safe.
+///
+/// Per-CPU data is only valid when the current thread cannot migrate to
+/// another CPU.  This is guaranteed when:
+/// - Interrupts are disabled (IF=0) — no timer can preempt
+/// - Preemption is disabled (preempt_count > 0) — timer handler skips switch()
+/// - During early boot (before SMP init) — only one CPU running
+///
+/// In release builds this compiles to nothing.  In debug/development builds
+/// it panics on violation, catching bugs where a thread reads per-CPU data,
+/// gets preempted, migrates, and uses stale data.
+/// Reentrancy guard — prevents infinite recursion when the panic handler
+/// or logging code accesses cpu_local variables.
+static PREEMPT_CHECK_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+#[inline(always)]
+pub fn assert_preempt_safe() {
+    // Only check after the preemption checker is enabled.
+    if !PREEMPT_CHECK_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // Reentrancy guard: skip if we're already inside a check (prevents
+    // infinite recursion when the panic handler accesses cpu_local data).
+    if PREEMPT_CHECK_ACTIVE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // Safe if interrupts disabled OR preemption disabled.
+    let safe = !crate::arch::interrupts_enabled() || {
+        let head = cpu_local_head();
+        head.preempt_count > 0
+    };
+    PREEMPT_CHECK_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+    if safe {
+        return;
+    }
+    // Violation detected — disable further checks to prevent recursion
+    // in the panic handler.
+    PREEMPT_CHECK_ENABLED.store(false, core::sync::atomic::Ordering::Relaxed);
+    panic!(
+        "PREEMPT_SAFETY: per-CPU data accessed with preemption enabled!\n\
+         preempt_count=0, IF=1\n\
+         Wrap the access in preempt_disable()/preempt_enable() or a cli lock.",
+    );
+}
+
+/// Enable the preemption safety checker.
+/// Called after per-CPU init is complete.
+static PREEMPT_CHECK_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn enable_preempt_check() {
+    PREEMPT_CHECK_ENABLED.store(true, core::sync::atomic::Ordering::Relaxed);
+    log::info!("preempt-check: per-CPU access safety checker enabled");
 }
 
 /// Expected GS base per CPU, set during init. Used for SMP debugging.

@@ -67,7 +67,11 @@ pub fn try_current_pid() -> i32 {
 pub fn init() {
     JOIN_WAIT_QUEUE.init(WaitQueue::new);
     VFORK_WAIT_QUEUE.init(WaitQueue::new);
-    SCHEDULER.init(|| SpinLock::new(Scheduler::new()));
+    SCHEDULER.init(|| SpinLock::new_ranked(
+        Scheduler::new(),
+        kevlar_platform::lockdep::rank::SCHEDULER,
+        "SCHEDULER",
+    ));
     let idle_thread = Process::new_idle_thread().unwrap();
     IDLE_THREAD.as_mut().set(idle_thread.clone());
     CURRENT.as_mut().set(idle_thread);

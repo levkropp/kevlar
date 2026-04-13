@@ -455,6 +455,9 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     process::init();
     // Register the switch function for deferred rescheduling from preempt_enable().
     kevlar_platform::arch::set_resched_fn(process::switch);
+    // Register BSP's APIC ID for NMI watchdog targeting.
+    kevlar_platform::arch::register_cpu_apic_id(0);
+
     // Start the LAPIC timer on the BSP too.  The PIT (ports 0x40-0x43) can be
     // reprogrammed by userspace with iopl(3) — Xorg does this during VGA init.
     // The LAPIC timer is memory-mapped in kernel space, immune to iopl.
@@ -462,6 +465,22 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     start_ap_preemption_timer();
     // Signal to waiting APs that the kernel and scheduler are ready.
     KERNEL_READY.store(true, Ordering::Release);
+
+    // Enable runtime lock dependency checker.
+    kevlar_platform::lockdep::enable();
+
+    // Enable interrupt state tracker (IF transition ring buffer).
+    kevlar_platform::arch::if_trace_enable();
+
+    // Preemption safety checker disabled for now — too many false positives
+    // from current_process() being called with IF=1 in syscall return paths.
+    // Re-enable after fixing the violations incrementally.
+    // kevlar_platform::arch::enable_preempt_check();
+
+    // Enable NMI watchdog after all CPUs are online and timers are running.
+    // APs will have registered their APIC IDs by the time they call
+    // start_ap_preemption_timer(), which happens before switch().
+    kevlar_platform::arch::watchdog_enable();
     profiler.lap_time("process init");
 
     // Create the init process.
@@ -525,6 +544,9 @@ pub fn ap_kernel_entry() -> ! {
     // Create a per-CPU idle thread and set CURRENT.
     process::init_ap();
 
+    // Register this AP's APIC ID for NMI watchdog targeting.
+    kevlar_platform::arch::register_cpu_apic_id(kevlar_platform::arch::cpu_id());
+
     // Start the LAPIC preemption timer now that CURRENT is valid.
     start_ap_preemption_timer();
 
@@ -533,11 +555,30 @@ pub fn ap_kernel_entry() -> ! {
     idle_thread()
 }
 
+/// Counter for how many times interval_work has run on this CPU.
+/// Used to limit diagnostic output to the first few calls.
+static INTERVAL_WORK_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 pub fn interval_work() {
+    // LAPIC timer diagnostic: print register state + heartbeat counters
+    // periodically from idle.  This runs with IF=0 (after cli in idle
+    // loop), so it captures the LAPIC state between timer fires.
+    // First 3 calls (pre-first-sti), then every 1000 calls (~10 seconds).
+    let iw_count = INTERVAL_WORK_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if iw_count < 3 || (iw_count < 10000 && iw_count % 1000 == 0) {
+        kevlar_platform::arch::lapic_timer_diag_log();
+    }
+
     process::gc_exited_processes();
     // Refill the 4KB prezeroed page pool so page faults get instant
     // zeroed pages without inline memset.
     kevlar_platform::page_allocator::refill_prezeroed_pages();
+
+    // Check kernel stack guard patterns for overflow (every 100 idles ≈ 1s).
+    if iw_count % 100 == 0 {
+        kevlar_platform::stack_cache::check_all_guards();
+    }
 }
 
 fn idle_thread() -> ! {

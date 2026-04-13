@@ -35,10 +35,15 @@ XORG_PACKAGES = [
     "twm",            # Tiny window manager
     "xinit",
     "xauth",
-    "font-misc-misc",  # Basic X11 fonts
+    "font-misc-misc",  # Basic X11 bitmap fonts (fixed, cursor)
     "font-cursor-misc",
+    "font-dejavu",    # TrueType fonts for xterm/applications
+    "fontconfig",     # Font configuration and fc-cache
+    "mkfontscale",    # Generates fonts.dir and fonts.scale
     "xset",
     "xdpyinfo",
+    "xsetroot",       # Set root window background color
+    "xprop",          # X11 property inspection
 ]
 
 
@@ -126,6 +131,7 @@ def main():
             '    Identifier "fbdev"\n'
             '    Driver "fbdev"\n'
             '    Option "fbdev" "/dev/fb0"\n'
+            '    Option "ShadowFB" "off"\n'
             'EndSection\n'
             '\n'
             'Section "Screen"\n'
@@ -144,10 +150,45 @@ def main():
         root_home.mkdir(exist_ok=True)
         (root_home / ".xinitrc").write_text(
             "#!/bin/sh\n"
-            "xterm &\n"
+            "# Set a visible background\n"
+            "xsetroot -solid '#2E3440'\n"
+            "# Launch xterm with a working font\n"
+            "xterm -fa DejaVuSansMono -fs 11 -bg '#2E3440' -fg '#A3BE8C' &\n"
+            "# Start twm\n"
             "exec twm\n"
         )
         os.chmod(root_home / ".xinitrc", 0o755)
+
+        # twm config with visible colors and usable defaults
+        (root_home / ".twmrc").write_text(
+            'Color {\n'
+            '    DefaultBackground "#3B4252"\n'
+            '    DefaultForeground "#D8DEE9"\n'
+            '    TitleBackground "#5E81AC"\n'
+            '    TitleForeground "#ECEFF4"\n'
+            '    MenuBackground "#3B4252"\n'
+            '    MenuForeground "#E5E9F0"\n'
+            '    MenuTitleBackground "#5E81AC"\n'
+            '    MenuTitleForeground "#ECEFF4"\n'
+            '    BorderColor "#81A1C1"\n'
+            '    MenuShadowColor "#2E3440"\n'
+            '}\n'
+            'BorderWidth 2\n'
+            'TitleFont "-misc-fixed-bold-r-normal--13-120-75-75-c-80-iso8859-1"\n'
+            'MenuFont "-misc-fixed-medium-r-normal--13-120-75-75-c-80-iso8859-1"\n'
+            'IconManagerFont "-misc-fixed-medium-r-normal--13-120-75-75-c-80-iso8859-1"\n'
+            'ResizeFont "-misc-fixed-medium-r-normal--13-120-75-75-c-80-iso8859-1"\n'
+            '\n'
+            '# Right-click menu\n'
+            'Button3 = : root : f.menu "main"\n'
+            'menu "main" {\n'
+            '    "Kevlar Desktop"  f.title\n'
+            '    "XTerm"           !"xterm -fa DejaVuSansMono -fs 11 -bg \'#2E3440\' -fg \'#A3BE8C\' &"\n'
+            '    ""                f.nop\n'
+            '    "Restart TWM"     f.restart\n'
+            '    "Exit"            f.quit\n'
+            '}\n'
+        )
 
         # Create a first-boot script that generates font caches
         (root_home / "setup-fonts.sh").write_text(
@@ -161,21 +202,42 @@ def main():
         )
         os.chmod(root_home / "setup-fonts.sh", 0o755)
 
-        # Pre-create basic fonts.dir so X11 can find at least some fonts
-        font_dirs = [
-            alpine_root / "usr" / "share" / "fonts" / "misc",
-            alpine_root / "usr" / "share" / "fonts" / "cursor",
-        ]
-        for fd in font_dirs:
-            if fd.exists():
-                fonts_dir = fd / "fonts.dir"
-                # Count .pcf.gz files
-                pcf_files = list(fd.glob("*.pcf.gz"))
-                with open(fonts_dir, "w") as f:
-                    f.write(f"{len(pcf_files)}\n")
-                    for pcf in sorted(pcf_files):
-                        # Minimal fonts.dir entry: filename -misc-fixed-medium-r-...
-                        f.write(f"{pcf.name} -misc-fixed-medium-r-normal--0-0-0-0-c-0-iso8859-1\n")
+        # Generate proper font catalogs using mkfontdir/mkfontscale.
+        # These must have correct XLFD entries for Xorg to serve fonts.
+        print("  FONTS  Generating font catalogs...", file=sys.stderr)
+        for font_dir_name in ["misc", "cursor", "TTF", "75dpi", "100dpi"]:
+            font_dir = alpine_root / "usr" / "share" / "fonts" / font_dir_name
+            if font_dir.exists():
+                # Run mkfontscale and mkfontdir via the rootfs binaries
+                mkfontscale = alpine_root / "usr" / "bin" / "mkfontscale"
+                mkfontdir = alpine_root / "usr" / "bin" / "mkfontdir"
+                if mkfontscale.exists():
+                    subprocess.run(
+                        [str(mkfontscale), str(font_dir)],
+                        check=False, capture_output=True,
+                    )
+                if mkfontdir.exists():
+                    subprocess.run(
+                        [str(mkfontdir), str(font_dir)],
+                        check=False, capture_output=True,
+                    )
+                # Verify
+                fonts_dir = font_dir / "fonts.dir"
+                if fonts_dir.exists():
+                    with open(fonts_dir) as f:
+                        count = f.readline().strip()
+                    print(f"    {font_dir_name}: {count} fonts", file=sys.stderr)
+                else:
+                    print(f"    {font_dir_name}: no fonts.dir generated", file=sys.stderr)
+
+        # Generate fontconfig cache
+        fc_cache = alpine_root / "usr" / "bin" / "fc-cache"
+        if fc_cache.exists():
+            subprocess.run(
+                [str(fc_cache), "-f", "-s", str(alpine_root / "usr" / "share" / "fonts")],
+                check=False, capture_output=True,
+                env={**os.environ, "FONTCONFIG_SYSROOT": str(alpine_root)},
+            )
 
         # Create 512MB ext2 disk image
         size_mb = 512

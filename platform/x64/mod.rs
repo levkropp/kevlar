@@ -26,6 +26,7 @@ mod pit;
 mod profile;
 mod semihosting;
 mod serial;
+pub mod if_trace;
 pub mod smp;
 mod syscall;
 pub mod tsc;
@@ -62,6 +63,45 @@ pub fn cpu_id() -> u32 {
 /// has been fully initialized.
 pub fn start_ap_preemption_timer() {
     unsafe { apic::lapic_timer_init(); }
+}
+
+/// Log the LAPIC timer registers and heartbeat counters for the current CPU.
+/// Safe to call from any context (including with IF=0).
+pub fn lapic_timer_diag_log() {
+    apic::lapic_timer_diag_log();
+}
+
+/// Register the current CPU's APIC ID for NMI watchdog targeting.
+pub fn register_cpu_apic_id(cpu_index: u32) {
+    apic::register_cpu_apic_id(cpu_index);
+}
+
+/// Enable the NMI watchdog (hard lockup detector).
+/// Call after all CPUs are online and their LAPIC timers are running.
+pub fn watchdog_enable() {
+    apic::watchdog_enable();
+}
+
+/// Enable the per-CPU data access safety checker.
+pub fn enable_preempt_check() {
+    cpu_local::enable_preempt_check();
+}
+
+/// Assert that per-CPU data access is safe (preemption or interrupts disabled).
+/// Called from the cpu_local! macro expansion.
+#[inline(always)]
+pub fn assert_preempt_safe() {
+    cpu_local::assert_preempt_safe();
+}
+
+/// Enable the interrupt state tracker.
+pub fn if_trace_enable() {
+    if_trace::enable();
+}
+
+/// Periodic watchdog check — called from handle_timer_irq.
+pub fn watchdog_check() {
+    apic::watchdog_check();
 }
 
 /// Lock-free emergency serial write. Safe from any context (signal, NMI, etc).
