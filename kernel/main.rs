@@ -561,14 +561,9 @@ static INTERVAL_WORK_COUNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 pub fn interval_work() {
-    // LAPIC timer diagnostic: print register state + heartbeat counters
-    // periodically from idle.  This runs with IF=0 (after cli in idle
-    // loop), so it captures the LAPIC state between timer fires.
-    // First 3 calls (pre-first-sti), then every 1000 calls (~10 seconds).
     let iw_count = INTERVAL_WORK_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if iw_count < 3 || (iw_count < 10000 && iw_count % 1000 == 0) {
-        kevlar_platform::arch::lapic_timer_diag_log();
-    }
+    // LAPIC-DIAG disabled to keep serial output clean for strace
+    let _ = iw_count;
 
     process::gc_exited_processes();
     // Refill the 4KB prezeroed page pool so page faults get instant

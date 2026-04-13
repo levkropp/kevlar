@@ -241,6 +241,25 @@ int main(void) {
     }
     msg("kevlar: xterm spawned\n");
 
+    // Dump Xorg's last syscalls via /proc/PID/trace
+    msg("kevlar: checking Xorg state...\n");
+    {
+        char *diag_argv[] = { "/bin/sh", "-c",
+            "echo '=== Xorg trace ==='; "
+            "cat /proc/3/trace 2>&1 | tail -20; "
+            "echo '=== xterm trace ==='; "
+            "cat /proc/8/trace 2>&1 | tail -10; "
+            "echo '=== check done ==='",
+            NULL };
+        char *diag_env[] = { "PATH=/usr/bin:/bin", NULL };
+        pid_t dp = fork();
+        if (dp == 0) {
+            execve("/bin/sh", diag_argv, diag_env);
+            _exit(127);
+        }
+        if (dp > 0) { int st; waitpid(dp, &st, 0); }
+    }
+
     // Force a screen refresh by setting the background again.
     // This triggers Xorg's damage/shadow copy-back path.
     {
