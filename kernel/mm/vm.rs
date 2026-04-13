@@ -324,11 +324,19 @@ impl Vm {
             return Err(Errno::EINVAL.into());
         }
 
-        // Try to merge with an adjacent VMA instead of creating a new one.
-        // This prevents pathological fragmentation (466+ VMAs for Xorg).
-        // Merging is only valid for anonymous mappings with matching attributes.
+        // Try to merge adjacent anonymous VMAs, but ONLY in the brk heap
+        // region (below valloc_next).  In the valloc/mmap region, the dynamic
+        // linker uses mmap(MAP_FIXED) to replace parts of large anonymous
+        // reservations with file-backed segments.  If those reservations were
+        // merged with adjacent anonymous VMAs, the MAP_FIXED replacement
+        // would only split part of the merged VMA, corrupting the layout.
         let new_end = start.value() + len;
-        if matches!(area_type, VmAreaType::Anonymous) {
+        // Brk heap is between heap_bottom and heap_end.
+        // The valloc region (libraries, mmap) starts at USER_VALLOC_BASE.
+        // Only merge in the brk heap — NOT in the valloc region.
+        let in_brk_heap = start.value() >= self.heap_bottom.value()
+            && start.value() < self.heap_end.value().saturating_add(PAGE_SIZE);
+        if in_brk_heap && matches!(area_type, VmAreaType::Anonymous) {
             // Check if any existing VMA can be extended to absorb this range.
             for vma in self.vm_areas.iter_mut() {
                 if !matches!(vma.area_type(), VmAreaType::Anonymous) { continue; }
@@ -338,7 +346,11 @@ impl Vm {
 
                 // Case 1: new VMA is right after existing VMA (extend forward).
                 if vma_end == start.value() {
-                    vma.len += len;
+                    let new_total = vma.len + len;
+                    let pid = crate::process::current_process().pid().as_i32();
+                    warn!("VMA_MERGE fwd: pid={} [{:#x}-{:#x}]+[{:#x}-{:#x}] prot={:#x} → {:#x} bytes",
+                        pid, vma.start().value(), vma_end, start.value(), new_end, prot.bits(), new_total);
+                    vma.len = new_total;
                     return Ok(());
                 }
                 // Case 2: new VMA is right before existing VMA (extend backward).
