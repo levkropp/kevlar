@@ -50,6 +50,13 @@ impl VmAreaType {
     }
 }
 
+/// Monotonic allocation ID — each mmap/brk call gets a unique one.
+static NEXT_ALLOC_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+fn next_alloc_id() -> u64 {
+    NEXT_ALLOC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone)]
 pub struct VmArea {
     start: UserVAddr,
@@ -57,6 +64,10 @@ pub struct VmArea {
     area_type: VmAreaType,
     prot: MMapProt,
     is_shared: bool,
+    /// Allocation ID — VMAs can only merge if they share the same alloc_id.
+    /// Each mmap() call assigns a unique ID. brk expansions share the brk ID.
+    /// ELF loader segments each get their own ID (no merge across segments).
+    alloc_id: u64,
 }
 
 impl VmArea {
@@ -143,6 +154,7 @@ impl Vm {
             area_type: VmAreaType::Anonymous,
             prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
             is_shared: false,
+            alloc_id: 0,
         };
 
         let heap_vma = VmArea {
@@ -151,6 +163,7 @@ impl Vm {
             area_type: VmAreaType::Anonymous,
             prot: MMapProt::PROT_READ | MMapProt::PROT_WRITE,
             is_shared: false,
+            alloc_id: 0,
         };
 
         Ok(Vm {
@@ -324,43 +337,7 @@ impl Vm {
             return Err(Errno::EINVAL.into());
         }
 
-        // Try to merge adjacent anonymous VMAs, but ONLY in the brk heap
-        // region (below valloc_next).  In the valloc/mmap region, the dynamic
-        // linker uses mmap(MAP_FIXED) to replace parts of large anonymous
-        // reservations with file-backed segments.  If those reservations were
-        // merged with adjacent anonymous VMAs, the MAP_FIXED replacement
-        // would only split part of the merged VMA, corrupting the layout.
-        let new_end = start.value() + len;
-        // Brk heap is between heap_bottom and heap_end.
-        // The valloc region (libraries, mmap) starts at USER_VALLOC_BASE.
-        // Only merge in the brk heap — NOT in the valloc region.
-        let in_brk_heap = start.value() >= self.heap_bottom.value()
-            && start.value() < self.heap_end.value().saturating_add(PAGE_SIZE);
-        if in_brk_heap && matches!(area_type, VmAreaType::Anonymous) {
-            // Check if any existing VMA can be extended to absorb this range.
-            for vma in self.vm_areas.iter_mut() {
-                if !matches!(vma.area_type(), VmAreaType::Anonymous) { continue; }
-                if vma.prot != prot || vma.is_shared != shared { continue; }
-
-                let vma_end = vma.start().value() + vma.len();
-
-                // Case 1: new VMA is right after existing VMA (extend forward).
-                if vma_end == start.value() {
-                    let new_total = vma.len + len;
-                    let pid = crate::process::current_process().pid().as_i32();
-                    warn!("VMA_MERGE fwd: pid={} [{:#x}-{:#x}]+[{:#x}-{:#x}] prot={:#x} → {:#x} bytes",
-                        pid, vma.start().value(), vma_end, start.value(), new_end, prot.bits(), new_total);
-                    vma.len = new_total;
-                    return Ok(());
-                }
-                // Case 2: new VMA is right before existing VMA (extend backward).
-                if new_end == vma.start().value() {
-                    vma.start = start;
-                    vma.len += len;
-                    return Ok(());
-                }
-            }
-        }
+        let alloc_id: u64 = 0;
 
         // No merge possible — create a new VMA.
         self.vm_areas.push(VmArea {
@@ -369,6 +346,7 @@ impl Vm {
             area_type,
             prot,
             is_shared: shared,
+            alloc_id,
         });
 
         Ok(())
@@ -447,7 +425,17 @@ impl Vm {
             // brk must never fail once the address is within limits.
             let start = UserVAddr::new_nonnull(aligned_old)?;
             if self.is_free_vaddr_range(start, grow) {
-                self.add_vm_area(start, grow, VmAreaType::Anonymous)?;
+                // Try to extend the existing heap VMA first (merge).
+                let extended = self.vm_areas.iter_mut().any(|area| {
+                    let area_end = area.start().value() + area.len();
+                    area_end == aligned_old
+                        && matches!(area.area_type(), VmAreaType::Anonymous)
+                        && area.prot == (MMapProt::PROT_READ | MMapProt::PROT_WRITE)
+                        && { area.len += grow; true }
+                });
+                if !extended {
+                    self.add_vm_area(start, grow, VmAreaType::Anonymous)?;
+                }
             } else {
                 // Try to extend the existing heap VMA that ends at aligned_old,
                 // but ONLY if the extension range doesn't overlap other VMAs.
@@ -563,6 +551,7 @@ impl Vm {
                     area_type: removed.area_type.clone(),
                     prot: removed.prot,
                     is_shared: removed.is_shared,
+                    alloc_id: removed.alloc_id,
                 });
             }
 
@@ -575,6 +564,7 @@ impl Vm {
                     area_type: removed.area_type.clone_with_shift(shift),
                     prot: removed.prot,
                     is_shared: removed.is_shared,
+                    alloc_id: removed.alloc_id,
                 });
             }
 
@@ -630,6 +620,7 @@ impl Vm {
                     area_type: removed.area_type.clone(),
                     prot: removed.prot,
                     is_shared: removed.is_shared,
+                    alloc_id: removed.alloc_id,
                 });
             }
 
@@ -643,6 +634,7 @@ impl Vm {
                 area_type: removed.area_type.clone_with_shift(mid_shift),
                 prot: new_prot,
                 is_shared: removed.is_shared,
+                    alloc_id: removed.alloc_id,
             });
 
             // Right piece (keeps old prot): [end, vma_end)
@@ -654,6 +646,7 @@ impl Vm {
                     area_type: removed.area_type.clone_with_shift(right_shift),
                     prot: removed.prot,
                     is_shared: removed.is_shared,
+                    alloc_id: removed.alloc_id,
                 });
             }
 
