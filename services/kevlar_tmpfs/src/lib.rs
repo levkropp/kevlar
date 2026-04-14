@@ -465,6 +465,10 @@ impl File {
 }
 
 impl FileLike for File {
+    fn inode_key(&self) -> Result<(usize, u64)> {
+        Ok((self.stat.dev.as_usize(), self.stat.inode_no.as_u64()))
+    }
+
     fn stat(&self) -> Result<Stat> {
         use kevlar_vfs::stat::{FileSize, NLink, Time};
         let mut stat = self.stat;

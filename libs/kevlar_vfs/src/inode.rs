@@ -169,6 +169,13 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     /// when no edge-triggered watchers exist.
     fn notify_epoll_et(&self, _added: bool) {}
 
+    /// Returns (dev_id, inode_no) for use as a flock key.
+    /// Default: extracts from stat(). Override for lock-free access.
+    fn inode_key(&self) -> Result<(usize, u64)> {
+        let st = self.stat()?;
+        Ok((st.dev.as_usize(), st.inode_no.as_u64()))
+    }
+
     /// Whether this file supports lseek. Pipes, sockets, and eventfds return
     /// false (lseek returns ESPIPE).
     fn is_seekable(&self) -> bool {
@@ -475,6 +482,21 @@ impl INode {
             INode::FileLike(file) => file.stat(),
             INode::Symlink(file) => file.stat(),
             INode::Directory(dir) => dir.stat(),
+        }
+    }
+
+    /// Returns (dev_id, inode_no) for flock keying without full stat().
+    pub fn inode_key(&self) -> Result<(usize, u64)> {
+        match self {
+            INode::FileLike(file) => file.inode_key(),
+            INode::Symlink(file) => {
+                let st = file.stat()?;
+                Ok((st.dev.as_usize(), st.inode_no.as_u64()))
+            }
+            INode::Directory(dir) => {
+                let st = dir.stat()?;
+                Ok((st.dev.as_usize(), st.inode_no.as_u64()))
+            }
         }
     }
 

@@ -345,8 +345,8 @@ pub struct Process {
     #[cfg(not(feature = "profile-fortress"))]
     file_hot_ptr: AtomicPtr<u8>,
     /// Per-process resource limits (16 resources × [cur, max]).
-    /// Indexed by RLIMIT_* constants (0..16). Each entry is [rlim_cur, rlim_max].
-    rlimits: SpinLock<[[u64; 2]; 16]>,
+    /// Lock-free: reads via AtomicU64, writes via atomic stores.
+    rlimits: AtomicRlimits,
     /// Pre-built `struct utsname` (390 bytes) for fast sys_uname response.
     /// Built at init/fork from UTS namespace data. TODO: rebuild on sethostname/setdomainname.
     cached_utsname: SpinLock<[u8; 390]>,
@@ -354,6 +354,35 @@ pub struct Process {
     /// 0 = not yet allocated (before vdso::init() runs).
     #[cfg(target_arch = "x86_64")]
     vdso_data_paddr: AtomicU64,
+}
+
+/// Lock-free resource limits: 16 resources × [cur, max] as AtomicU64 pairs.
+/// Reads are lock-free (2 atomic loads). Writes are rare (setrlimit only).
+struct AtomicRlimits {
+    vals: [AtomicU64; 32], // [cur0, max0, cur1, max1, ...]
+}
+
+impl AtomicRlimits {
+    fn new(init: [[u64; 2]; 16]) -> Self {
+        let vals = core::array::from_fn(|i| {
+            AtomicU64::new(init[i / 2][i % 2])
+        });
+        Self { vals }
+    }
+
+    fn get(&self, idx: usize) -> [u64; 2] {
+        [self.vals[idx * 2].load(Ordering::Relaxed),
+         self.vals[idx * 2 + 1].load(Ordering::Relaxed)]
+    }
+
+    fn set(&self, idx: usize, cur: u64, max: u64) {
+        self.vals[idx * 2].store(cur, Ordering::Relaxed);
+        self.vals[idx * 2 + 1].store(max, Ordering::Relaxed);
+    }
+
+    fn get_all(&self) -> [[u64; 2]; 16] {
+        core::array::from_fn(|i| self.get(i))
+    }
 }
 
 /// Default resource limits (RLIMIT_* indexed, 16 entries × [cur, max]).
@@ -429,7 +458,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
-            rlimits: SpinLock::new(default_rlimits()),
+            rlimits: AtomicRlimits::new(default_rlimits()),
             cached_utsname: SpinLock::new([0u8; 390]),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(0),
@@ -552,7 +581,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
-            rlimits: SpinLock::new(default_rlimits()),
+            rlimits: AtomicRlimits::new(default_rlimits()),
             cached_utsname: SpinLock::new(init_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(init_vdso_paddr),
@@ -615,16 +644,20 @@ impl Process {
         *self.groups.lock_no_irq() = gids;
     }
 
-    /// Get resource limits table.
+    /// Get resource limits table (lock-free, reads 32 atomics).
     pub fn rlimits(&self) -> [[u64; 2]; 16] {
-        *self.rlimits.lock_no_irq()
+        self.rlimits.get_all()
     }
 
-    /// Set a single resource limit.
+    /// Get a single resource limit pair [cur, max] (lock-free, 2 atomic loads).
+    pub fn rlimit(&self, resource: usize) -> [u64; 2] {
+        if resource < 16 { self.rlimits.get(resource) } else { [!0u64, !0u64] }
+    }
+
+    /// Set a single resource limit (lock-free, 2 atomic stores).
     pub fn set_rlimit(&self, resource: usize, cur: u64, max: u64) {
         if resource < 16 {
-            let mut rl = self.rlimits.lock_no_irq();
-            rl[resource] = [cur, max];
+            self.rlimits.set(resource, cur, max);
         }
     }
 
@@ -1719,6 +1752,7 @@ impl Process {
                 EXITED_PROCESSES.lock().push(sibling.clone());
                 SCHEDULER.lock().remove(sibling.pid);
                 PROCESSES.lock().remove(&sibling.pid);
+
             }
         }
 
@@ -1874,7 +1908,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
-            rlimits: SpinLock::new(parent.rlimits()),
+            rlimits: AtomicRlimits::new(parent.rlimits()),
             cached_utsname: SpinLock::new(child_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
@@ -1995,7 +2029,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
-            rlimits: SpinLock::new(parent.rlimits()),
+            rlimits: AtomicRlimits::new(parent.rlimits()),
             cached_utsname: SpinLock::new(child_utsname),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
@@ -2119,7 +2153,7 @@ impl Process {
             file_hot_fd: AtomicI32::new(-1),
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
-            rlimits: SpinLock::new(parent.rlimits()),
+            rlimits: AtomicRlimits::new(parent.rlimits()),
             cached_utsname: SpinLock::new(*parent.cached_utsname.lock_no_irq()),
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new({

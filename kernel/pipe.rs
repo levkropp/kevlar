@@ -133,7 +133,7 @@ impl FileLike for PipeWriter {
                     if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
                         self.0.state_gen.fetch_add(1, Ordering::Relaxed);
                     }
-                    self.0.waitq.wake_all();
+                    self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
                     return Ok(written_len);
                 }
@@ -145,7 +145,8 @@ impl FileLike for PipeWriter {
         }
 
         // Slow path: buffer full, wait for reader to drain.
-        let ret_value = self.0.waitq.sleep_signalable_until(|| {
+        // Use _unchecked: fast path above already verified buffer is full.
+        let ret_value = self.0.waitq.sleep_signalable_until_unchecked(|| {
             let mut pipe = self.0.inner.lock_no_irq();
             if pipe.closed_by_reader {
                 crate::process::current_process()
@@ -166,7 +167,7 @@ impl FileLike for PipeWriter {
         if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
-        self.0.waitq.wake_all();
+        self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
         ret_value
     }
@@ -223,7 +224,7 @@ impl Drop for PipeWriter {
         if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
-        self.0.waitq.wake_all();
+        self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
     }
 }
@@ -273,7 +274,7 @@ impl FileLike for PipeReader {
                 if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
                     self.0.state_gen.fetch_add(1, Ordering::Relaxed);
                 }
-                self.0.waitq.wake_all();
+                self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
                 return Ok(writer.written_len());
             }
@@ -287,7 +288,8 @@ impl FileLike for PipeReader {
         }
 
         // Slow path: buffer empty, wait for writer.
-        let ret_value = self.0.waitq.sleep_signalable_until(|| {
+        // Use _unchecked: fast path above already verified buffer is empty.
+        let ret_value = self.0.waitq.sleep_signalable_until_unchecked(|| {
             let mut pipe = self.0.inner.lock_no_irq();
 
             while let Some(src) = pipe.buf.pop_slice(writer.remaining_len()) {
@@ -308,7 +310,7 @@ impl FileLike for PipeReader {
         if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
-        self.0.waitq.wake_all();
+        self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
         ret_value
     }
@@ -342,7 +344,7 @@ impl Drop for PipeReader {
         if self.0.et_watcher_count.load(Ordering::Relaxed) > 0 {
             self.0.state_gen.fetch_add(1, Ordering::Relaxed);
         }
-        self.0.waitq.wake_all();
+        self.0.waitq.wake_one();
         POLL_WAIT_QUEUE.wake_all();
     }
 }
