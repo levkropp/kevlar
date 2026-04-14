@@ -47,6 +47,24 @@ impl WaitQueue {
             Ok(None) => {}
         }
 
+        self.sleep_signalable_until_inner(condition)
+    }
+
+    /// Like `sleep_signalable_until` but skips the initial condition check.
+    /// Use when the caller already verified the condition is not met, to
+    /// avoid a redundant (and expensive) re-check under lock.
+    pub fn sleep_signalable_until_unchecked<F, R>(&self, condition: F) -> Result<R>
+    where
+        F: FnMut() -> Result<Option<R>>,
+    {
+        self.sleep_signalable_until_inner(condition)
+    }
+
+    fn sleep_signalable_until_inner<F, R>(&self, mut condition: F) -> Result<R>
+    where
+        F: FnMut() -> Result<Option<R>>,
+    {
+        use crate::debug::htrace;
         loop {
             if current_process().has_pending_signals() {
                 return Err(Errno::EINTR.into());
@@ -104,7 +122,7 @@ impl WaitQueue {
         }
     }
 
-    pub fn _wake_one(&self) {
+    pub fn wake_one(&self) {
         if self.waiter_count.load(Ordering::Relaxed) == 0 {
             return;
         }

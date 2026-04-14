@@ -726,37 +726,56 @@ fn allocate_pml4() -> Result<PAddr, PageAllocError> {
 
 pub struct PageTable {
     pml4: PAddr,
-    /// Process Context ID (0-4095) for TLB tagging.
-    /// Each address space gets a unique PCID so context switches don't
-    /// flush the entire TLB — only entries for the target PCID are used.
-    pcid: u16,
+    /// Packed PCID + generation: bits [63:12] = generation, bits [11:0] = PCID.
+    /// On context switch, if the stored generation is older than the global
+    /// generation, the PCID's TLB entries are stale and must be flushed.
+    /// AtomicU64 for interior mutability in switch() (called through &self).
+    pcid_gen: core::sync::atomic::AtomicU64,
 }
 
-/// Next PCID to allocate. Wraps at 4095 (12-bit field). 0 = kernel.
-static NEXT_PCID: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(1);
+/// Global PCID state: bits [63:12] = generation, bits [11:0] = next PCID.
+/// When PCID reaches 4095, generation increments and PCID resets to 1.
+/// Stale TLB entries from a previous generation are flushed on first use.
+static PCID_STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
-fn alloc_pcid() -> u16 {
-    // PCID is DISABLED until proper wraparound handling is implemented.
-    //
-    // With PCID enabled, each context switch uses bit 63 = 1 (no-invalidate),
-    // preserving TLB entries tagged with other PCIDs. When PCIDs wrap after
-    // 4095 allocations, a new process gets a PCID previously used by a dead
-    // process. The stale TLB entries from the dead process are still cached
-    // and match the new process's PCID — causing it to execute from the
-    // old process's physical pages. This is the root cause of the intermittent
-    // SIGSEGV in XFCE: heavy process churn (fork+exec for dbus, xfconf,
-    // xfwm4, etc.) wraps the PCID counter within seconds.
-    //
-    // With PCID=0, every CR3 write fully flushes the TLB. Safe but ~5-10%
-    // slower for context-switch-heavy workloads. The proper fix is to track
-    // active PCIDs and flush via invpcid on reuse (like Linux does).
-    0
+/// Allocate a PCID+generation pair. Returns 0 if PCID not supported.
+fn alloc_pcid() -> u64 {
+    if !super::boot::PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    loop {
+        let state = PCID_STATE.load(core::sync::atomic::Ordering::Relaxed);
+        let generation = state & !0xFFF; // upper bits = generation << 12
+        let next = (state & 0xFFF) as u16;
+
+        if next >= 4095 {
+            // Exhausted: bump generation, reset to PCID 1.
+            let new_state = (generation + 0x1000) | 1;
+            if PCID_STATE.compare_exchange_weak(
+                state, new_state,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                return new_state;
+            }
+            continue;
+        }
+
+        let new_state = generation | ((next + 1) as u64);
+        if PCID_STATE.compare_exchange_weak(
+            state, new_state,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        ).is_ok() {
+            return generation | (next as u64);
+        }
+    }
 }
 
 impl PageTable {
     pub fn new() -> Result<PageTable, PageAllocError> {
         let pml4 = allocate_pml4()?;
-        Ok(PageTable { pml4, pcid: alloc_pcid() })
+        Ok(PageTable { pml4, pcid_gen: core::sync::atomic::AtomicU64::new(alloc_pcid()) })
     }
 
     /// Returns the physical address of the PML4 (top-level page table).
@@ -764,34 +783,31 @@ impl PageTable {
         self.pml4
     }
 
+    /// Extract the 12-bit PCID value from the packed pcid_gen.
+    fn pcid(&self) -> u64 {
+        self.pcid_gen.load(core::sync::atomic::Ordering::Relaxed) & 0xFFF
+    }
+
     pub fn duplicate_from(original: &mut PageTable) -> Result<PageTable, PageAllocError> {
         let new_pml4 = duplicate_table_cow(original.pml4, 4)?;
         // PCID TLB coherency fix for fork:
         //
-        // duplicate_table_cow cleared WRITABLE on the parent's PTEs. But with
-        // PCID, remote CPUs may still cache stale WRITABLE entries for the
-        // parent's old PCID. A no-invalidate context switch (switch() with
-        // bit 63=1) back to this process on such a CPU would use the stale
-        // entry, allowing writes to bypass COW — the phantom refcount bug.
+        // duplicate_table_cow cleared WRITABLE on the parent's PTEs. With
+        // PCID, remote CPUs may cache stale WRITABLE entries for the parent's
+        // old PCID. Allocate a FRESH PCID+gen for the parent so stale entries
+        // (tagged with the old PCID) are never used again.
         //
-        // Fix: allocate a FRESH PCID for the parent. All stale TLB entries
-        // on remote CPUs are tagged with the OLD PCID, which will never be
-        // loaded again. When the parent is next scheduled on any CPU, the
-        // fresh PCID has zero cached entries, so all accesses walk the page
-        // table and see the correct read-only PTEs.
-        //
-        // Without PCID (pcid==0): every context switch fully flushes the TLB,
-        // so stale entries can't persist across switches. No reallocation needed.
-        if original.pcid != 0 {
-            original.pcid = alloc_pcid();
+        // Without PCID (pcid()==0): every CR3 write fully flushes the TLB.
+        if original.pcid() != 0 {
+            original.pcid_gen.store(alloc_pcid(), core::sync::atomic::Ordering::Relaxed);
         }
-        // Flush the current CPU: load parent's PML4 with the (possibly new)
-        // PCID and bit 63=0 to force-flush entries for this PCID.
+        // Flush the current CPU: load parent's PML4 WITHOUT bit 63 to
+        // invalidate all entries for this PCID on this CPU.
         unsafe {
-            let flush_cr3 = original.pml4.value() as u64 | (original.pcid as u64);
+            let flush_cr3 = original.pml4.value() as u64 | original.pcid();
             x86::controlregs::cr3_write(flush_cr3);
         }
-        Ok(PageTable { pml4: new_pml4, pcid: alloc_pcid() })
+        Ok(PageTable { pml4: new_pml4, pcid_gen: core::sync::atomic::AtomicU64::new(alloc_pcid()) })
     }
 
     /// Ghost-fork: duplicate page table structure but skip all refcount
@@ -802,21 +818,39 @@ impl PageTable {
         let new_pml4 = duplicate_table_ghost(original.pml4, 4, 0, &mut cow_addrs)?;
         // Flush parent's TLB so read-only PTEs take effect.
         unsafe {
-            let cr3_val = original.pml4.value() as u64 | (original.pcid as u64);
+            let cr3_val = original.pml4.value() as u64 | original.pcid();
             x86::controlregs::cr3_write(cr3_val);
         }
-        Ok((PageTable { pml4: new_pml4, pcid: alloc_pcid() }, cow_addrs))
+        Ok((PageTable { pml4: new_pml4, pcid_gen: core::sync::atomic::AtomicU64::new(alloc_pcid()) }, cow_addrs))
     }
 
     pub fn switch(&self) {
+        use core::sync::atomic::Ordering;
+        let my_pcid_gen = self.pcid_gen.load(Ordering::Relaxed);
+        let pcid = my_pcid_gen & 0xFFF;
+
         unsafe {
-            if self.pcid != 0 {
-                // PCID enabled: bits [11:0] = PCID, bit 63 = no-invalidate.
-                let cr3_val = self.pml4.value() as u64 | (self.pcid as u64) | (1u64 << 63);
-                x86::controlregs::cr3_write(cr3_val);
-            } else {
+            if pcid == 0 {
                 // No PCID: plain CR3 write (flushes entire TLB).
                 x86::controlregs::cr3_write(self.pml4.value() as u64);
+                return;
+            }
+
+            let my_gen = my_pcid_gen & !0xFFF;
+            let global_gen = PCID_STATE.load(Ordering::Relaxed) & !0xFFF;
+
+            if my_gen == global_gen {
+                // Same generation: TLB entries for this PCID are valid.
+                // Bit 63 = no-invalidate — preserves other PCIDs' entries.
+                let cr3_val = self.pml4.value() as u64 | pcid | (1u64 << 63);
+                x86::controlregs::cr3_write(cr3_val);
+            } else {
+                // Stale generation: this PCID was potentially reused by another
+                // process. Flush by loading CR3 WITHOUT bit 63.
+                let cr3_val = self.pml4.value() as u64 | pcid;
+                x86::controlregs::cr3_write(cr3_val);
+                // Update stored generation so subsequent switches are fast.
+                self.pcid_gen.store(global_gen | pcid, Ordering::Relaxed);
             }
         }
     }
@@ -1206,9 +1240,9 @@ impl PageTable {
 
     /// Flushes the entire TLB by reloading CR3.
     pub fn flush_tlb_all(&self) {
-        // Reload CR3 WITHOUT bit 63 to flush entries.
+        // Reload CR3 WITHOUT bit 63 to flush entries for this PCID.
         unsafe {
-            let cr3_val = self.pml4.value() as u64 | (self.pcid as u64);
+            let cr3_val = self.pml4.value() as u64 | self.pcid();
             x86::controlregs::cr3_write(cr3_val);
         }
     }

@@ -73,9 +73,8 @@ impl<'a> SyscallHandler<'a> {
         // OFD identity: raw Arc pointer (stable for the lifetime of the description).
         let ofd = alloc::sync::Arc::as_ptr(&opened_file) as usize;
 
-        // Get inode identity for lock keying.
-        let stat = opened_file.inode().stat()?;
-        let key: InodeKey = (stat.dev.as_usize(), stat.inode_no.as_u64());
+        // Get inode identity for lock keying (avoids full stat()).
+        let key: InodeKey = opened_file.inode().inode_key()?;
 
         let op = operation & !LOCK_NB;
         let nonblock = (operation & LOCK_NB) != 0;

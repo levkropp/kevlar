@@ -361,12 +361,16 @@ struct LocalOpenedFile {
 #[derive(Clone)]
 pub struct OpenedFileTable {
     files: Vec<Option<LocalOpenedFile>>,
+    /// Hint: all FDs below this index are occupied.
+    /// Updated on close() to allow faster alloc_fd() scans.
+    lowest_free_hint: i32,
 }
 
 impl OpenedFileTable {
     pub fn new() -> OpenedFileTable {
         OpenedFileTable {
             files: Vec::new(),
+            lowest_free_hint: 0,
         }
     }
 
@@ -423,6 +427,10 @@ impl OpenedFileTable {
                     let _ = local.opened_file.path.inode.close();
                 }
                 *slot = None;
+                // Update the free hint so alloc_fd can find this slot.
+                if (fd.as_int()) < self.lowest_free_hint {
+                    self.lowest_free_hint = fd.as_int();
+                }
             }
             _ => return Err(Errno::EBADF.into()),
         }
@@ -538,11 +546,12 @@ impl OpenedFileTable {
     /// Closes all opened files.
     pub fn close_all(&mut self) {
         self.files.clear();
+        self.lowest_free_hint = 0;
     }
 
     /// Closes opened files with `CLOEXEC` set.
     pub fn close_cloexec_files(&mut self) {
-        for slot in &mut self.files {
+        for (i, slot) in self.files.iter_mut().enumerate() {
             if matches!(
                 slot,
                 Some(LocalOpenedFile {
@@ -551,6 +560,9 @@ impl OpenedFileTable {
                 })
             ) {
                 *slot = None;
+                if (i as i32) < self.lowest_free_hint {
+                    self.lowest_free_hint = i as i32;
+                }
             }
         }
     }
@@ -560,17 +572,22 @@ impl OpenedFileTable {
     fn alloc_fd(&mut self, gte: Option<i32>) -> Result<Fd> {
         // Use per-process RLIMIT_NOFILE if available, else fall back to FD_MAX.
         let limit = crate::process::current_process_option()
-            .map(|p| {
-                let rl = p.rlimits();
-                rl[7][0] as i32 // RLIMIT_NOFILE soft limit
-            })
+            .map(|p| p.rlimit(7)[0] as i32) // RLIMIT_NOFILE soft limit
             .unwrap_or(FD_MAX);
         let limit = limit.min(FD_MAX); // Never exceed the hard table max
 
         // POSIX: open() must return the lowest available fd number.
-        let start = gte.unwrap_or(0);
+        // Use the hint to skip known-occupied low FDs.
+        let start = match gte {
+            Some(g) => g,
+            None => self.lowest_free_hint,
+        };
         for i in start..limit {
             if matches!(self.files.get(i as usize), Some(None) | None) {
+                // Update hint: next alloc starts after this one.
+                if gte.is_none() {
+                    self.lowest_free_hint = i + 1;
+                }
                 return Ok(Fd::new(i));
             }
         }
