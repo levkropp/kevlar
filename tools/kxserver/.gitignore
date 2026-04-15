@@ -1,1 +1,3 @@
 /target
+/tests/c/xlib_hello
+/tests/c/gtk3_hello
