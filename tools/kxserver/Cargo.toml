@@ -1,0 +1,26 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name        = "kxserver"
+version     = "0.1.0"
+edition     = "2021"
+description = "Minimal diagnostic X11 display server for the Kevlar kernel."
+license     = "MIT OR Apache-2.0 OR BSD-2-Clause"
+
+[[bin]]
+name = "kxserver"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level        = 3
+lto              = true
+codegen-units    = 1
+panic            = "abort"
+strip            = "symbols"
+debug            = 0
+overflow-checks  = false

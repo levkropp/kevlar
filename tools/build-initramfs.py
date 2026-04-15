@@ -149,6 +149,7 @@ def compile_all_local():
         ("testing/test_twm.c",           "test-twm",         []),
         ("testing/boot_twm.c",           "boot-twm",         []),
         ("testing/test_xfce.c",          "test-xfce",        []),
+        ("testing/test_kxserver.c",      "test-kxserver",    []),
         ("testing/fb0_probe.c",          "fb0-probe",        []),
     ]
     for src_rel, name, extra in musl_bins:

@@ -1,0 +1,22 @@
+# Build configuration for kxserver.
+#
+# kxserver is a diagnostic X11 display server that runs in userspace on top
+# of Kevlar (or native Linux). It is built statically against musl so it can
+# be dropped into the Alpine ext2 image without dragging in a dynamic loader.
+
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+# -no-pie: produce a non-PIE binary.  Kevlar's ELF loader handles PIE
+# correctly for small binaries but seems to mis-relocate some eh_frame
+# / frame_info fix-ups as the binary grows (we hit GP faults in
+# __register_frame_info starting at Phase 3 with PIE, but never with
+# non-PIE).  A fixed load address also makes post-mortem address
+# decoding simpler.
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-no-pie",
+]

@@ -841,16 +841,13 @@ impl<'a> SyscallHandler<'a> {
         CURRENT_SYSCALL_NR.store(n, core::sync::atomic::Ordering::Relaxed);
 
         // ── strace: per-PID syscall tracing ──────────────────────────
-        // Auto-enable for Xorg: set STRACE_PID when we detect PID 3 calling
-        // epoll_create1 (Xorg's first epoll call during init).
-        // Strace: hardcode PID 7 (xterm when twm is skipped).
-        // PID 1=boot_twm, PID 3=Xorg, PID 4=mkfontdir, PID 5=xsetroot, PID 6=sh, PID 7=xterm
-        {
-            let pid = current_process().pid().as_i32();
-            if pid == 7 && STRACE_PID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-                STRACE_PID.store(7, core::sync::atomic::Ordering::Relaxed);
-            }
-        }
+        // Strace is opt-in via set_strace_pid().  The previous
+        // auto-enable hack (hardcoded PID 7 = xterm) made test-xfce
+        // unrunnable because every syscall warn!s to serial; serial
+        // is the slowest path in the kernel, so traced processes
+        // ran ~100x slower and Phase 5's 15s sleep would overshoot
+        // the 5min test timeout while almost no useful work happened.
+        // Re-enable explicitly via set_strace_pid() when needed.
         let strace_pid = STRACE_PID.load(core::sync::atomic::Ordering::Relaxed);
         // Trace all syscalls for the target PID
         let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid;

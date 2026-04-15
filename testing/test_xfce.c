@@ -483,11 +483,14 @@ phase5:
                "</channel>\n"
                "XMLEOF", 3000);
         // Start persistent session bus (nofork via start_bg).
+        printf("  T+0 about to start_bg dbus-daemon\n"); fflush(stdout);
         start_bg("dbus-daemon --session "
                  "--address=unix:path=/tmp/.dbus-session-sock "
                  "--nofork --print-address "
                  ">/dev/null 2>&1");
+        printf("  T+0 dbus-daemon start_bg returned\n"); fflush(stdout);
         sleep(1); // Let dbus bind
+        printf("  T+1 about to start_bg xfce4-session\n"); fflush(stdout);
         // Start xfce4-session with the pre-created bus address.
         start_bg("export DISPLAY=:0 HOME=/root "
                  "PATH=/usr/bin:/usr/sbin:/usr/local/bin:/bin:/sbin "
@@ -498,8 +501,12 @@ phase5:
                  "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
                  "exec /usr/bin/xfce4-session "
                  ">/tmp/xfce-session.log 2>&1");
-        // Sleep 15s for XFCE to fully start.
-        sleep(15);
+        printf("  T+1 xfce4-session start_bg returned\n"); fflush(stdout);
+        // Sleep in 1s chunks so we can see progress on the serial log.
+        for (int s = 0; s < 15; s++) {
+            sleep(1);
+            printf("  T+%d sleeping\n", 2 + s); fflush(stdout);
+        }
         printf("  XFCE wait done\n"); fflush(stdout);
 
         // Check components by reading /proc/*/comm directly.

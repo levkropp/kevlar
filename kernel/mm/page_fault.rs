@@ -418,7 +418,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
     let mut paddr = match alloc_page(AllocPageFlags::USER) {
         Ok(p) => p,
         Err(_) => {
-            debug_warn!(
+            warn!(
                 "pid={}: OOM during page fault at {} (ip={:x}), killing process",
                 current.pid().as_i32(), unaligned_vaddr, ip
             );
@@ -657,6 +657,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                 kevlar_platform::page_refcount::page_ref_dec(old_paddr);
                             }
                             drop(vm); drop(vm_ref);
+                            warn!("pid={}: OOM during CoW dup at vaddr={}",
+                                  current.pid().as_i32(), unaligned_vaddr);
                             Process::exit_by_signal(SIGKILL);
                         }
                     };
@@ -699,7 +701,12 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             if let Some(old_paddr) = vm.page_table().lookup_paddr(aligned_vaddr) {
                 let new_paddr = match alloc_page(AllocPageFlags::USER | AllocPageFlags::DIRTY_OK) {
                     Ok(p) => p,
-                    Err(_) => { drop(vm); drop(vm_ref); Process::exit_by_signal(SIGKILL); }
+                    Err(_) => {
+                        drop(vm); drop(vm_ref);
+                        warn!("pid={}: OOM during file-backed CoW at vaddr={}",
+                              current.pid().as_i32(), unaligned_vaddr);
+                        Process::exit_by_signal(SIGKILL);
+                    }
                 };
                 #[cfg(not(feature = "profile-fortress"))]
                 {
@@ -1087,7 +1094,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                             if !is_ghost {
                                 kevlar_platform::page_refcount::page_ref_dec(old_paddr);
                             }
-                            debug_warn!("OOM during CoW fault");
+                            warn!("pid={}: OOM during CoW fault at vaddr={}",
+                                  current.pid().as_i32(), unaligned_vaddr);
                             Process::exit_by_signal(SIGKILL);
                         }
                     };
@@ -1144,6 +1152,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         Ok(p) => p,
                         Err(_) => {
                             drop(vm); drop(vm_ref);
+                            warn!("pid={}: OOM during RELR-write CoW at vaddr={}",
+                                  current.pid().as_i32(), unaligned_vaddr);
                             Process::exit_by_signal(SIGKILL);
                         }
                     };

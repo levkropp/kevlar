@@ -2,7 +2,7 @@
 use crate::process::PId;
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use kevlar_platform::{arch::cpu_id, spinlock::SpinLock};
+use kevlar_platform::{arch::{cpu_id, num_online_cpus}, spinlock::SpinLock};
 
 /// Maximum number of CPUs supported.
 pub const MAX_CPUS: usize = 8;
@@ -72,8 +72,31 @@ impl SchedulerPolicy for Scheduler {
     }
 
     fn enqueue_front(&self, pid: PId) {
-        let cpu = cpu_id() as usize % MAX_CPUS;
-        self.run_queues[cpu].lock().push_front(pid);
+        // Pick the LEAST-LOADED queue across all online CPUs and put
+        // the boosted PID at the front of that queue.
+        //
+        // The previous version used the calling CPU's queue, which is
+        // wrong on SMP: timer wakeups all land on whichever CPU took
+        // the timer interrupt, and that CPU might be saturated with
+        // CPU-bound user threads.  Work stealing only pops from the
+        // BACK of remote queues, so a boosted PID stuck behind a
+        // CPU-bound thread on the timer-interrupting CPU is invisible
+        // to the other CPUs and waits a full preemption quantum (30ms
+        // by default — but multiple back-to-back boosted enqueues into
+        // the same queue can chain into multi-second stalls under
+        // load).  Repro: test-xfce shows PID 1 freezing for 10s+
+        // while xfce4-session children spawn.
+        let n = (num_online_cpus() as usize).min(MAX_CPUS);
+        let mut best_cpu: usize = 0;
+        let mut best_len = usize::MAX;
+        for c in 0..n {
+            let len = self.run_queues[c].lock().len();
+            if len < best_len {
+                best_len = len;
+                best_cpu = c;
+            }
+        }
+        self.run_queues[best_cpu].lock().push_front(pid);
         RUNQUEUE_LEN.fetch_add(1, Ordering::Relaxed);
     }
 

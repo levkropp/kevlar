@@ -1195,14 +1195,27 @@ impl Process {
 
             // Kill all remaining processes before halting to prevent GPF from
             // orphaned processes running with stale page tables after halt.
+            //
+            // CRITICAL: snapshot every Arc<Process> we want to signal BEFORE
+            // calling send_signal, because send_signal → resume → SCHEDULER.lock
+            // and SCHEDULER (rank 30) sits BELOW PROCESSES (rank 40) in the
+            // lockdep order.  The previous version used
+            //   if let Some(proc) = PROCESSES.lock().get(&pid).cloned()
+            // which keeps the PROCESSES guard alive until the end of the
+            // `if let` body — meaning send_signal runs while we still hold
+            // PROCESSES, violating the order and panicking lockdep on PID 1
+            // exit (e.g. when test-xfce halts the system at the end of the
+            // session-component check).  Two-phase: collect, then signal.
             {
-                let all_pids: Vec<PId> = PROCESSES.lock().keys().cloned().collect();
-                for pid in all_pids {
-                    if pid != PId::new(1) {
-                        if let Some(proc) = PROCESSES.lock().get(&pid).cloned() {
-                            proc.send_signal(SIGKILL);
-                        }
-                    }
+                let to_kill: Vec<Arc<Process>> = {
+                    let table = PROCESSES.lock();
+                    table.iter()
+                        .filter(|(p, _)| **p != PId::new(1))
+                        .map(|(_, proc)| proc.clone())
+                        .collect()
+                };
+                for proc in to_kill {
+                    proc.send_signal(SIGKILL);
                 }
             }
 
@@ -1669,6 +1682,8 @@ impl Process {
             current.sigset_store(SigSet::from_raw(saved_mask));
         } else {
             // No saved frame — spurious sigreturn. Kill the process.
+            warn!("pid={}: spurious sigreturn with no saved frame — killing",
+                  current.pid().as_i32());
             Process::exit_by_signal(SIGKILL);
         }
     }
