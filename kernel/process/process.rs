@@ -1401,6 +1401,30 @@ impl Process {
             ((self.pid().as_i32() as u32) << 8) | (signal as u32),
         );
 
+        // TASK #26 DIAG: log every SIGKILL delivery with sender info.
+        // Used to find the source of the dbus-daemon SIGKILL during
+        // XFCE startup — when this prints "from=N to=M" we can trace
+        // the sender's PID back to a userspace process or a kernel
+        // fault-handler path.
+        if signal == SIGKILL {
+            let sender_pid = crate::process::try_current_pid();
+            let sender_name = if sender_pid > 0 {
+                // Best-effort cmdline of sender.
+                if let Some(p) = Process::find_by_pid(crate::process::PId::new(sender_pid)) {
+                    p.cmdline().as_str().chars().take(48).collect::<alloc::string::String>()
+                } else {
+                    alloc::string::String::from("?")
+                }
+            } else {
+                alloc::string::String::from("kernel")
+            };
+            let target_name = self.cmdline().as_str().chars().take(48).collect::<alloc::string::String>();
+            warn!(
+                "SIGKILL: from pid={} ({:?}) to pid={} ({:?})",
+                sender_pid, sender_name, self.pid().as_i32(), target_name,
+            );
+        }
+
         // SIGCONT always continues a stopped process, even if SIGCONT is blocked.
         if signal == SIGCONT {
             self.continue_process();

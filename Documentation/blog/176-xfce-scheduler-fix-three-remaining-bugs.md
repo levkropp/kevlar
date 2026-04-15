@@ -108,19 +108,29 @@ plain `warn!` so future investigations can see them.
 
 ### Bug A — dbus-daemon (PID 24) dies with SIGKILL in every run
 
-Every test-xfce run shows exactly one line:
+~~Every test-xfce run shows exactly one line:~~
+
+**Update: this is NOT a bug.** After instrumenting `send_signal`
+with a log of sender and target:
 
 ```
-PID 24 (dbus-daemon --session --address=unix:path=...) killed by signal 9
+SIGKILL: from pid=19 ("dbus-daemon --session --address=unix:path=/tmp/.")
+         to   pid=24 ("dbus-daemon --session --address=unix:path=/tmp/.")
+PID 24 (dbus-daemon --session …) killed by signal 9
 ```
 
-With all OOM paths now `warn!`-instrumented, **no OOM warning
-appears**, so the SIGKILL isn't coming from a page-fault handler.
-Task #26 needs to instrument every remaining `exit_by_signal(SIGKILL)`
-site and trace where dbus is actually dying. Candidates: some
-syscall path (address validation, futex waitwake, a bad EFAULT)
-that delivers SIGKILL via `Process::exit_by_signal` on
-current_process() from kernel code.
+PID 19 and PID 24 **both have the same cmdline** — dbus-daemon's
+internal fork/kill pattern. The main dbus-daemon (PID 19) forks a
+helper child (PID 24) during startup (probably for auth setup or
+the print-address mechanism) and SIGKILLs the helper when done.
+It's normal dbus behavior and always has been.
+
+Every previous "intermittent dbus crash" we chased in blogs 147,
+150, 151 may have been the same red herring — we saw SIGKILL, our
+kernel dutifully printed "killed by signal 9", and we assumed
+something was killing dbus. Task #26: **resolved as noise**.
+
+The real bug is further down the xfce4-session startup sequence.
 
 ### Bug B — xfce4-session SIGSEGV, xfwm4 NULL deref
 
