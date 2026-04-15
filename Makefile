@@ -525,6 +525,48 @@ test-twm-smp: build/alpine-xorg.img
 	@echo ""
 	@grep 'TEST_END' /tmp/kevlar-test-twm-smp-$(PROFILE).log || echo "(no summary)"
 
+# ── kxserver: custom diagnostic X11 server in Rust ────────────────────
+# See tools/kxserver/ and the Phase-0 plan.  The binary is a static musl
+# build installed into the Alpine image at /usr/bin/kxserver.
+
+KXSERVER_BIN := tools/kxserver/target/x86_64-unknown-linux-musl/release/kxserver
+
+.PHONY: kxserver-bin
+kxserver-bin:
+	$(PROGRESS) "CARGO" "kxserver (static musl)"
+	@# kxserver is a USERSPACE musl binary, NOT a Kevlar kernel crate.
+	@# Unset the top-level RUSTFLAGS (-Z emit-stack-sizes and friends)
+	@# that the kernel build relies on — they propagate via `export
+	@# RUSTFLAGS` in this Makefile and would override kxserver's own
+	@# .cargo/config.toml rustflags (which need -no-pie on Kevlar;
+	@# see Phase 3 blog post).
+	cd tools/kxserver && env -u RUSTFLAGS cargo build --release
+	@ls -lh $(KXSERVER_BIN) 2>/dev/null || (echo "kxserver build produced no binary" && false)
+
+# Force a rebuild of the Alpine image so the freshly-built kxserver is
+# copied in.  build-alpine-xorg.py skips rebuild when the image already
+# exists, so we delete it first.
+.PHONY: kxserver-image
+kxserver-image: kxserver-bin
+	@rm -f build/alpine-xorg.img
+	$(MAKE) build/alpine-xorg.img
+
+# Test kxserver: Phase 0 = prove the binary is present and runs inside the
+# Alpine rootfs.  Later phases will grow the /bin/test-kxserver harness to
+# launch X clients against the server.
+.PHONY: test-kxserver
+test-kxserver: kxserver-image
+	$(PROGRESS) "TEST" "kxserver"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-kxserver"
+	timeout 120 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-kxserver-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-kxserver-$(PROFILE).log || echo "(no test output)"
+	@echo ""
+	@grep 'TEST_END' /tmp/kevlar-test-kxserver-$(PROFILE).log || echo "(no summary)"
+
 # ═══════════════════════════════════════════════════════════════════
 # Kevlar Alpine+twm Desktop — our first graphical "distro"
 # ═══════════════════════════════════════════════════════════════════

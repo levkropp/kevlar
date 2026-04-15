@@ -239,6 +239,32 @@ def main():
                 env={**os.environ, "FONTCONFIG_SYSROOT": str(alpine_root)},
             )
 
+        # Install kxserver (minimal diagnostic X11 server) if it has been built.
+        # See tools/kxserver/ and the Phase 0 plan in Documentation/blog/.
+        # Built by `make kxserver-bin` (or `cd tools/kxserver && cargo build --release`).
+        kxserver_bin = (
+            ROOT
+            / "tools"
+            / "kxserver"
+            / "target"
+            / "x86_64-unknown-linux-musl"
+            / "release"
+            / "kxserver"
+        )
+        if kxserver_bin.exists():
+            dst = alpine_root / "usr" / "bin" / "kxserver"
+            shutil.copy2(kxserver_bin, dst)
+            os.chmod(dst, 0o755)
+            print(
+                f"  KXSRV  installed {kxserver_bin.stat().st_size} bytes at /usr/bin/kxserver",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "  KXSRV  no binary at tools/kxserver/target/.../release/kxserver (skip)",
+                file=sys.stderr,
+            )
+
         # Create 512MB ext2 disk image
         size_mb = 512
         print(f"  MKDISK  {size_mb}MB ext2", file=sys.stderr)

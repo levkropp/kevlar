@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 
 use kevlar_platform::spinlock::SpinLock;
 use kevlar_utils::ring_buffer::RingBuffer;
@@ -35,14 +35,29 @@ const BACKLOG_MAX: usize = 128;
 // ── Global listener registry ─────────────────────────────────────────
 //
 // Maps bound paths to listener sockets so that connect() can find them.
+//
+// The registry holds `Weak<UnixListener>` (NOT strong Arc).  A strong Arc
+// would keep the listener alive forever even after the owning fd was
+// closed and the owning process exited, and `UnixListener::drop` (which
+// removes the entry) would never run.  Subsequent `listen()` calls for
+// the same path would register new entries, but `find_listener` returns
+// the FIRST matching entry, so new connections would be routed to the
+// dead listener's backlog and the new server would never see them.
+//
+// With `Weak`, when the last strong reference (the owning fd) is dropped,
+// `UnixListener::drop` fires and removes the entry.  `find_listener`
+// skips any dangling `Weak`s it finds and opportunistically prunes them.
 
-static UNIX_LISTENERS: SpinLock<VecDeque<(String, Arc<UnixListener>)>> =
+static UNIX_LISTENERS: SpinLock<VecDeque<(String, Weak<UnixListener>)>> =
     SpinLock::new(VecDeque::new());
 
 fn register_listener(path: &str, listener: &Arc<UnixListener>) {
-    UNIX_LISTENERS
-        .lock()
-        .push_back((String::from(path), listener.clone()));
+    let mut table = UNIX_LISTENERS.lock();
+    // Purge any existing entries for this path — dead ones (dangling Weak)
+    // and live ones (should be very rare; Linux returns EADDRINUSE on a
+    // double-bind, but we tolerate it and let the newest listener win).
+    table.retain(|(p, _)| p != path);
+    table.push_back((String::from(path), Arc::downgrade(listener)));
 }
 
 fn unregister_listener(path: &str) {
@@ -50,11 +65,22 @@ fn unregister_listener(path: &str) {
 }
 
 fn find_listener(path: &str) -> Option<Arc<UnixListener>> {
-    UNIX_LISTENERS
-        .lock()
-        .iter()
-        .find(|(p, _)| p == path)
-        .map(|(_, l)| l.clone())
+    let mut table = UNIX_LISTENERS.lock();
+    // Scan for a matching, still-live listener.  Opportunistically prune
+    // dangling Weak entries while we iterate.
+    let mut found: Option<Arc<UnixListener>> = None;
+    table.retain(|(p, w)| {
+        match w.upgrade() {
+            Some(arc) => {
+                if found.is_none() && p == path {
+                    found = Some(arc);
+                }
+                true
+            }
+            None => false, // dangling — remove
+        }
+    });
+    found
 }
 
 // ── Ancillary data (SCM_RIGHTS) ──────────────────────────────────────
