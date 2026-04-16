@@ -47,6 +47,10 @@ impl<T> SpinLock<T> {
     }
 }
 
+/// Threshold: if a spin exceeds this many iterations, print a
+/// one-shot contention warning with the lock name + CPU.
+const SPIN_CONTENTION_THRESHOLD: u32 = 5_000_000;
+
 impl<T: ?Sized> SpinLock<T> {
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
         let saved_intr_status = SavedInterruptStatus::save();
@@ -67,7 +71,39 @@ impl<T: ?Sized> SpinLock<T> {
         // Interrupts are already disabled, so CPU index is stable.
         lockdep::on_acquire(lock_addr, self.rank, self.name);
 
-        let guard = self.inner.lock();
+        // Try-lock with a contention counter.  If the lock is held for
+        // more than SPIN_CONTENTION_THRESHOLD iterations, print a
+        // warning — this catches the timer-death scenario where both
+        // CPUs spin with IF=0 on the same lock for seconds.
+        let guard = if let Some(g) = self.inner.try_lock() {
+            g
+        } else {
+            let mut spins: u32 = 0;
+            loop {
+                if let Some(g) = self.inner.try_lock() {
+                    break g;
+                }
+                core::hint::spin_loop();
+                spins += 1;
+                if spins == SPIN_CONTENTION_THRESHOLD {
+                    // Re-enable interrupts briefly so we can print
+                    // and so the NMI/timer can fire.
+                    unsafe {
+                        #[cfg(target_arch = "x86_64")]
+                        asm!("sti");
+                    }
+                    let cpu = crate::arch::cpu_id();
+                    log::warn!(
+                        "SPIN_CONTENTION: cpu={} lock={:?} addr={:#x} spins={}",
+                        cpu, self.name, lock_addr, spins,
+                    );
+                    unsafe {
+                        #[cfg(target_arch = "x86_64")]
+                        asm!("cli");
+                    }
+                }
+            }
+        };
 
         SpinLockGuard {
             inner: ManuallyDrop::new(guard),
@@ -83,13 +119,32 @@ impl<T: ?Sized> SpinLock<T> {
     /// acquire/release cycle.
     #[inline(always)]
     pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
-        lockdep::on_acquire((self as *const Self).cast::<()>() as usize, self.rank, self.name);
+        let lock_addr = (self as *const Self).cast::<()>() as usize;
+        lockdep::on_acquire(lock_addr, self.rank, self.name);
 
-        let guard = self.inner.lock();
+        let guard = if let Some(g) = self.inner.try_lock() {
+            g
+        } else {
+            let mut spins: u32 = 0;
+            loop {
+                if let Some(g) = self.inner.try_lock() {
+                    break g;
+                }
+                core::hint::spin_loop();
+                spins += 1;
+                if spins == SPIN_CONTENTION_THRESHOLD {
+                    let cpu = crate::arch::cpu_id();
+                    log::warn!(
+                        "SPIN_CONTENTION(no_irq): cpu={} lock={:?} addr={:#x} spins={}",
+                        cpu, self.name, lock_addr, spins,
+                    );
+                }
+            }
+        };
 
         SpinLockGuardNoIrq {
             inner: ManuallyDrop::new(guard),
-            lock_addr: (self as *const Self).cast::<()>() as usize,
+            lock_addr,
         }
     }
 

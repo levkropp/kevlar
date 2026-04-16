@@ -738,6 +738,32 @@ pub struct PageTable {
 /// Stale TLB entries from a previous generation are flushed on first use.
 static PCID_STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// Bump the global PCID generation so that every process's next
+/// `PageTable::switch()` sees a generation mismatch and does a full
+/// CR3 reload (flushing all TLB entries for that PCID).  Used as
+/// a non-IPI fallback when `tlb_shootdown` is called with IF=0.
+pub fn bump_global_pcid_generation() {
+    if !super::boot::PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    // Atomically increment the generation (bits [63:12]) by 0x1000,
+    // keeping the PCID counter (bits [11:0]) unchanged.  CAS loop
+    // handles concurrent bumps.
+    loop {
+        let state = PCID_STATE.load(core::sync::atomic::Ordering::Relaxed);
+        let generation = state & !0xFFF;
+        let pcid_part = state & 0xFFF;
+        let new_state = (generation + 0x1000) | pcid_part;
+        if PCID_STATE.compare_exchange_weak(
+            state, new_state,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        ).is_ok() {
+            return;
+        }
+    }
+}
+
 /// Allocate a PCID+generation pair. Returns 0 if PCID not supported.
 fn alloc_pcid() -> u64 {
     if !super::boot::PCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
