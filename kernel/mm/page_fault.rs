@@ -49,6 +49,14 @@ fn deliver_sigsegv_fatal() {
             }
         }
     }
+    // Task #25: also verify the text page for SIGSEGV — the
+    // ip might point into a library's text that was correct at
+    // mmap time but got stomped.
+    if let Some(r) = &regs {
+        if r.rip > 0x1000 {
+            verify_text_page_at_ip(r.rip as usize);
+        }
+    }
     let action = current.signals().lock_no_irq().get_action(SIGSEGV);
     if matches!(action, SigAction::Terminate) {
         Process::exit_by_signal(SIGSEGV);
