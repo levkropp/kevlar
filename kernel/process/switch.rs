@@ -129,6 +129,20 @@ pub fn switch() -> bool {
     crate::debug::ktrace::trace(crate::debug::ktrace::event::CTX_SWITCH,
         prev_pid.as_i32() as u32, next.pid().as_i32() as u32, 0, 0, 0);
 
+    // Task #25 diagnostic: track when PID 1 was last scheduled.
+    // The timer ISR uses this to detect and dump PID 1 starvation.
+    if next.pid().as_i32() == 1 {
+        let t = crate::timer::monotonic_ticks();
+        let prev_last = crate::timer::PID1_LAST_TICK
+            .swap(t, core::sync::atomic::Ordering::Relaxed);
+        // Re-arm the stall dump so the next stall event prints again.
+        crate::timer::pid1_stall_rearm();
+        // First-seen print: confirm the detector is wired.
+        if prev_last == 0 {
+            warn!("PID1_TRACKER: first observation at tick={}", t);
+        }
+    }
+
     CURRENT.as_mut().set(next.clone());
     arch::switch_thread(prev.arch(), next.arch());
 

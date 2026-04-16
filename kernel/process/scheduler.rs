@@ -134,3 +134,26 @@ impl SchedulerPolicy for Scheduler {
         }
     }
 }
+
+impl Scheduler {
+    /// Diagnostic: return the length of each run queue and the PIDs
+    /// in it (up to `max` entries).  Used by the PID 1 stall detector
+    /// in `timer.rs` to print scheduler state when the system is
+    /// stuck.  No locks held on return; takes a single try_lock pass.
+    pub fn snapshot(&self, max: usize) -> alloc::vec::Vec<(usize, alloc::vec::Vec<PId>)> {
+        use alloc::vec::Vec;
+        let n = (num_online_cpus() as usize).min(MAX_CPUS);
+        let mut out: Vec<(usize, Vec<PId>)> = Vec::with_capacity(n);
+        for c in 0..n {
+            let q = self.run_queues[c].lock();
+            let len = q.len();
+            let mut pids: Vec<PId> = Vec::with_capacity(max.min(len));
+            for (i, pid) in q.iter().enumerate() {
+                if i >= max { break; }
+                pids.push(*pid);
+            }
+            out.push((len, pids));
+        }
+        out
+    }
+}

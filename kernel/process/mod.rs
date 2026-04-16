@@ -64,6 +64,15 @@ pub fn try_current_pid() -> i32 {
     }
 }
 
+/// Task #25 diagnostic: snapshot each run queue (length + up to
+/// `max` PIDs) by locking each queue briefly.  Returned as an owned
+/// Vec so the caller can print it without holding any lock.
+pub fn dump_scheduler_state(max: usize)
+    -> alloc::vec::Vec<(usize, alloc::vec::Vec<PId>)>
+{
+    SCHEDULER.lock().snapshot(max)
+}
+
 pub fn init() {
     JOIN_WAIT_QUEUE.init(WaitQueue::new);
     VFORK_WAIT_QUEUE.init(WaitQueue::new);
