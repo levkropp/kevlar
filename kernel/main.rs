@@ -179,6 +179,15 @@ impl kevlar_platform::Handler for Handler {
             "USER FAULT: {} pid={} ip={:#x}",
             exception, pid, ip
         );
+        // Task #25 diagnostic: if this is GENERAL_PROTECTION_FAULT or
+        // INVALID_OPCODE at a user IP, the faulting instruction is
+        // almost certainly in a text-segment mmap that got its bytes
+        // stomped after fault-in.  Re-read the same offset from the
+        // file-backed VMA and print the diff so we can tell whether
+        // the corruption happened at mmap time or later.
+        if exception == "GENERAL_PROTECTION_FAULT" || exception == "INVALID_OPCODE" {
+            crate::mm::page_fault::verify_text_page_at_ip(ip);
+        }
         crate::process::Process::exit_by_signal(signal);
     }
 
