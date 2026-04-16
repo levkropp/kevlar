@@ -216,17 +216,31 @@ pub fn verify_text_page_at_ip(ip: usize) {
             break;
         }
     }
+    // Look up the physical address backing this page — if it's
+    // different from what was originally assigned, the PTE was
+    // remapped (CoW / PCID race).  If it's the same, the physical
+    // page itself was stomped (use-after-free or DMA write).
+    let current_paddr = {
+        let vm_ref2 = current.vm();
+        let vm2 = vm_ref2.as_ref().unwrap().lock_no_irq();
+        vm2.page_table().lookup_paddr(
+            UserVAddr::new_nonnull(page_vaddr).unwrap()
+        )
+    };
+
     match first_bad {
         None => {
             warn!(
-                "verify_text: ip={:#x} file_off={:#x} len={} — NO DIFF (bytes match file)",
-                ip, file_off, read_len
+                "verify_text: ip={:#x} file_off={:#x} len={} paddr={:?} — NO DIFF",
+                ip, file_off, read_len,
+                current_paddr.map(|p| p.value()),
             );
         }
         Some(off) => {
             warn!(
-                "verify_text: ip={:#x} file_off={:#x} first_bad_off={} live={:#04x} expected={:#04x}",
-                ip, file_off, off, live[off], expected[off]
+                "verify_text: ip={:#x} file_off={:#x} first_bad_off={} live={:#04x} expected={:#04x} paddr={:?}",
+                ip, file_off, off, live[off], expected[off],
+                current_paddr.map(|p| p.value()),
             );
             // Dump 32 bytes of each side for context.
             let hex_live = (0..read_len.min(32))
@@ -937,6 +951,26 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 }
             }
 
+            // Task #25: trace the demand-fault fill for pages that keep
+            // showing up as all-zeros at crash time.  offset_in_file
+            // around 0x1e000 is the hot one for xfce4-session.
+            if (vma.prot().bits() & 4 != 0) && copy_len > 0 {
+                if offset_in_file >= 0x1d000 && offset_in_file <= 0x1f000 {
+                    warn!(
+                        "FILL_TRACE: pid={} vaddr={:#x} file_off={:#x} copy_len={} \
+                         page_off={} file_size={:#x} offset_in_vma={:#x} paddr={:#x}",
+                        current.pid().as_i32(),
+                        aligned_vaddr.value(),
+                        offset_in_file,
+                        copy_len,
+                        offset_in_page,
+                        file_size,
+                        offset_in_file - *offset,
+                        paddr.value(),
+                    );
+                }
+            }
+
             // --- Page cache for immutable files (initramfs) ---
             let vma_readonly = vma.prot().bits() & 2 == 0;
             // Only cache FULL pages. Partial pages (copy_len < PAGE_SIZE) at
@@ -1035,6 +1069,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                     aligned_vaddr.value(),
                                     offset_in_file,
                                     copy_len, n, offset_in_page,
+                                );
+                            }
+                            // Task #25: after read, verify the first 8 bytes
+                            // of the hot page to catch immediate corruption.
+                            if offset_in_file >= 0x1d000 && offset_in_file <= 0x1f000
+                                && (vma.prot().bits() & 4 != 0)
+                            {
+                                let actual = page_as_slice_mut(paddr);
+                                let b0 = actual[offset_in_page];
+                                let b1 = actual[offset_in_page + 1];
+                                warn!(
+                                    "FILL_VERIFY: pid={} vaddr={:#x} file_off={:#x} \
+                                     read_n={} first_bytes=[{:#04x},{:#04x}] paddr={:#x}",
+                                    current.pid().as_i32(),
+                                    aligned_vaddr.value(),
+                                    offset_in_file,
+                                    n, b0, b1, paddr.value(),
                                 );
                             }
                             // SMP page corruption detector (task #25).
