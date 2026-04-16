@@ -127,6 +127,114 @@ pub fn huge_page_cache_insert(file_ptr: usize, huge_index: usize, paddr: PAddr, 
     map.insert((file_ptr, huge_index), (paddr, bitmap));
 }
 
+/// Task #25 diagnostic: invoked from the user-fault handler when a
+/// process crashes with GP or INVALID_OPCODE.  Walks the current
+/// process's VMA list, finds the file-backed text VMA containing
+/// `ip`, re-reads the same file offset for 128 bytes, and prints a
+/// diff against the live physical frame.  If the diff is non-zero,
+/// the page was stomped AFTER it was first mapped — which rules out
+/// the page-fault fill path and points at either a user-mode write
+/// through a wrong mapping (CoW refcount / PCID race) or a kernel
+/// path writing to the wrong physical frame.
+pub fn verify_text_page_at_ip(ip: usize) {
+    let current = current_process();
+    let vm_ref = current.vm();
+    let vm_arc = match vm_ref.as_ref() {
+        Some(a) => a,
+        None => return,
+    };
+    let ip_vaddr = match UserVAddr::new_nonnull(ip) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut vm = vm_arc.lock_no_irq();
+    let vma = match vm.find_vma_cached(ip_vaddr) {
+        Some(v) => v,
+        None => {
+            warn!("verify_text: no VMA for ip={:#x}", ip);
+            return;
+        }
+    };
+    let prot = vma.prot().bits();
+    let (file, vma_file_offset, file_size) = match vma.area_type() {
+        VmAreaType::File { file, offset, file_size } => {
+            (file.clone(), *offset, *file_size)
+        }
+        _ => {
+            warn!("verify_text: VMA is not file-backed (prot={:#x})", prot);
+            return;
+        }
+    };
+    // Compute the file offset for the faulting IP.
+    let offset_in_vma = vma.offset_in_vma(
+        kevlar_platform::address::UserVAddr::new_nonnull(
+            align_down(ip, 4096)
+        ).unwrap()
+    );
+    let file_off = vma_file_offset + offset_in_vma;
+    // Bounded read of 128 bytes centered on the IP.
+    let ip_in_page = ip & 0xfff;
+    let read_off_in_page = ip_in_page.saturating_sub(16);
+    let read_file_off = file_off + read_off_in_page;
+    let mut expected = [0u8; 128];
+    let max_len = core::cmp::min(128, file_size.saturating_sub(read_off_in_page));
+    let rr = file.read(
+        read_file_off,
+        (&mut expected[..max_len]).into(),
+        &OpenOptions::readwrite(),
+    );
+    let read_len = match rr {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("verify_text: file read error: {:?}", e);
+            return;
+        }
+    };
+    drop(vm);
+    // Read the live bytes from the user mapping.
+    let mut live = [0u8; 128];
+    let page_vaddr = align_down(ip, 4096);
+    let live_start = page_vaddr + read_off_in_page;
+    #[allow(unsafe_code)]
+    for i in 0..read_len {
+        let p = (live_start + i) as *const u8;
+        live[i] = unsafe { core::ptr::read_volatile(p) };
+    }
+    // Compare and print first difference plus a full side-by-side.
+    let mut first_bad: Option<usize> = None;
+    for i in 0..read_len {
+        if expected[i] != live[i] {
+            first_bad = Some(i);
+            break;
+        }
+    }
+    match first_bad {
+        None => {
+            warn!(
+                "verify_text: ip={:#x} file_off={:#x} len={} — NO DIFF (bytes match file)",
+                ip, file_off, read_len
+            );
+        }
+        Some(off) => {
+            warn!(
+                "verify_text: ip={:#x} file_off={:#x} first_bad_off={} live={:#04x} expected={:#04x}",
+                ip, file_off, off, live[off], expected[off]
+            );
+            // Dump 32 bytes of each side for context.
+            let hex_live = (0..read_len.min(32))
+                .map(|i| alloc::format!("{:02x}", live[i]))
+                .collect::<alloc::vec::Vec<_>>()
+                .join(" ");
+            let hex_exp = (0..read_len.min(32))
+                .map(|i| alloc::format!("{:02x}", expected[i]))
+                .collect::<alloc::vec::Vec<_>>()
+                .join(" ");
+            warn!("  live:     {}", hex_live);
+            warn!("  expected: {}", hex_exp);
+        }
+    }
+}
+
 /// Emit a CrashReport debug event and then kill the process.
 ///
 /// Collects the per-process syscall trace, VMA map, and fsbase before
@@ -907,35 +1015,53 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                     copy_len, n, offset_in_page,
                                 );
                             }
-                            // SMP page corruption detector: for executable pages,
-                            // read back the first 8 bytes and verify they match
-                            // what the file read wrote. If they differ, another
-                            // CPU wrote to this page between our write and now.
+                            // SMP page corruption detector (task #25).
+                            //
+                            // For executable pages, re-read the ENTIRE
+                            // page from the file and diff it against the
+                            // freshly-mapped physical frame.  The
+                            // previous version only checked the first 8
+                            // bytes of the page; the xfce4-session HLT
+                            // corruption we tracked down was at page
+                            // offset 0xcf3, so the 8-byte check missed
+                            // it entirely.
+                            //
+                            // This is diagnostic-only — expensive (4 KB
+                            // re-read per executable page-fault), and
+                            // prints the first divergent byte so we can
+                            // see what the corrupted byte should have
+                            // been vs what it actually is.
                             if vma.prot().bits() & 4 != 0 && copy_len >= 8 {
-                                #[allow(unsafe_code)]
-                                let verify = unsafe {
-                                    core::ptr::read_volatile(
-                                        (paddr.as_ptr::<u8>() as *const u64)
-                                            .add(offset_in_page / 8)
-                                    )
-                                };
-                                // Re-read the same 8 bytes from the file
-                                let mut expected_buf = [0u8; 8];
-                                let _ = file.read(
+                                let mut expected = [0u8; PAGE_SIZE];
+                                let re_read = file.read(
                                     offset_in_file,
-                                    (&mut expected_buf[..]).into(),
+                                    (&mut expected[..copy_len]).into(),
                                     &OpenOptions::readwrite(),
                                 );
-                                let expected = u64::from_ne_bytes(expected_buf);
-                                if verify != expected {
-                                    warn!(
-                                        "PAGE CORRUPTION DETECTED: pid={} vaddr={:#x} \
-                                         file_off={:#x} expected={:#018x} got={:#018x}",
-                                        current.pid().as_i32(),
-                                        aligned_vaddr.value(),
-                                        offset_in_file,
-                                        expected, verify,
-                                    );
+                                if re_read.is_ok() {
+                                    let actual = page_as_slice_mut(paddr);
+                                    let mut first_bad: Option<usize> = None;
+                                    for i in 0..copy_len {
+                                        let want = expected[i];
+                                        let got = actual[offset_in_page + i];
+                                        if want != got {
+                                            first_bad = Some(i);
+                                            break;
+                                        }
+                                    }
+                                    if let Some(off) = first_bad {
+                                        warn!(
+                                            "PAGE CORRUPTION: pid={} vaddr={:#x} \
+                                             page_off={:#x} file_off={:#x} \
+                                             expected={:#04x} got={:#04x} (first of {} bytes)",
+                                            current.pid().as_i32(),
+                                            aligned_vaddr.value() + off,
+                                            off, offset_in_file + off,
+                                            expected[off],
+                                            actual[offset_in_page + off],
+                                            copy_len - off,
+                                        );
+                                    }
                                 }
                             }
                         }

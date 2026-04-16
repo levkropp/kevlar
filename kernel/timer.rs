@@ -230,23 +230,28 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
-    // Task #25 diagnostic: PID 1 starvation detector.  Fires once
-    // per stall event (re-armed when PID 1 runs again).  Only
-    // checks on every Nth tick to avoid calling into scheduler
-    // internals every tick.
+    // Task #25 diagnostic: unconditional tick heartbeat + PID 1
+    // starvation detector.  The heartbeat proves the timer ISR is
+    // still running during a hang.
+    if ticks % 100 == 0 {
+        let last = PID1_LAST_TICK.load(Ordering::Relaxed);
+        let gap = ticks.saturating_sub(last);
+        let cpu = kevlar_platform::arch::cpu_id();
+        warn!("TICK_HB: cpu={} tick={} pid1_last={} pid1_gap={}",
+              cpu, ticks, last, gap);
+    }
     if ticks % 100 == 50 {  // once per second, offset from preempt
         let last = PID1_LAST_TICK.load(Ordering::Relaxed);
-        // `last == 0` means PID 1 hasn't been observed yet — skip.
         if last != 0 && ticks > last + PID1_STALL_THRESHOLD_TICKS
             && !PID1_STALL_DUMPED.swap(true, Ordering::Relaxed)
         {
             let gap_ms = (ticks - last) * 1000 / TICK_HZ;
-            let n_timers = TIMERS.lock().len();
-            let queues = crate::process::dump_scheduler_state(4);
             warn!(
-                "PID1_STALL: tick={} last_run={} gap={}ms timers={} queues={:?}",
-                ticks, last, gap_ms, n_timers, queues,
+                "PID1_STALL: tick={} last_run={} gap={}ms",
+                ticks, last, gap_ms,
             );
+            let queues = crate::process::dump_scheduler_state(4);
+            warn!("PID1_STALL queues={:?}", queues);
         }
     }
 
