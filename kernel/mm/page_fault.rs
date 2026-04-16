@@ -800,12 +800,23 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         }
                     }
                     vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
-                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    // CRITICAL FIX (task #25): must flush ALL CPUs' TLBs,
+                    // not just the local one.  With PCID, context switches
+                    // use bit-63 (no-invalidate) when the generation matches,
+                    // so stale RO entries for this PCID survive on remote CPUs.
+                    // After CoW frees old_paddr, the stale entry resolves to
+                    // whatever physical page gets reallocated at that address —
+                    // a totally different process's data.  Symptoms: GOT/vtable
+                    // entries contain wrong function pointers → GP faults,
+                    // NULL deref, HLT execution, string bytes in text segments.
+                    // This was the root cause of the xfce4-session/xfwm4/iceauth
+                    // crashes in blogs 175–177.
+                    vm.page_table().flush_tlb(aligned_vaddr);
                     return;
                 }
                 // Sole owner: just update flags to writable.
                 vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
-                vm.page_table().flush_tlb_local(aligned_vaddr);
+                vm.page_table().flush_tlb(aligned_vaddr);
                 return;
             }
         }
@@ -842,7 +853,8 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 vm.page_table_mut().unmap_user_page(aligned_vaddr);
                 vm.page_table_mut().map_user_page_with_prot(
                     aligned_vaddr, new_paddr, prot_flags | 2);
-                vm.page_table().flush_tlb_local(aligned_vaddr);
+                // Same PCID TLB shootdown fix as above.
+                vm.page_table().flush_tlb(aligned_vaddr);
                 if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
                     kevlar_platform::page_allocator::free_pages(old_paddr, 1);
                 }
@@ -861,11 +873,13 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             return;
         }
 
-        // Not a write fault — just update PTE flags to match VMA prot
-        // (e.g., exec fault after mprotect added PROT_EXEC, or read fault
-        // after mprotect restored PROT_READ from PROT_NONE).
+        // Not a write fault — just update PTE flags to match VMA prot.
+        // This needs a remote TLB flush too: the stale entry might be
+        // PROT_NONE (from mprotect) while the new PTE is readable, and
+        // a stale PROT_NONE read on another CPU would fault endlessly
+        // instead of succeeding.
         vm.page_table_mut().update_page_flags(aligned_vaddr, prot_flags);
-        vm.page_table().flush_tlb_local(aligned_vaddr);
+        vm.page_table().flush_tlb(aligned_vaddr);
         return;
     }
 
