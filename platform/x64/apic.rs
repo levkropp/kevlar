@@ -194,6 +194,35 @@ pub fn tlb_shootdown(vaddr: usize) {
         return;
     }
 
+    // DEADLOCK PREVENTION (task #25, blog 177):
+    //
+    // If interrupts are currently disabled (IF=0), we CANNOT send an
+    // IPI and spin-wait for the remote CPU to acknowledge — the
+    // remote CPU may be trying to acquire TLB_SHOOTDOWN_LOCK while
+    // we hold it (or vice versa), producing an AB-BA deadlock that
+    // kills both CPUs' timers and freezes the entire system.
+    //
+    // This was the root cause of the "timer-death" that blocked
+    // XFCE on Kevlar: the CoW TLB shootdown we added earlier called
+    // flush_tlb() which calls tlb_shootdown(), and sometimes the
+    // caller was running with IF=0 (e.g., inside the timer ISR's
+    // resume_boosted path, or from a page fault inside a signal
+    // handler that interrupted a lock holder).
+    //
+    // Fix: when IF=0, just do the local invlpg (already done above)
+    // and bump the global PCID generation.  Every process's page
+    // table has a stored generation; PageTable::switch() compares it
+    // against the global generation and does a full CR3 reload
+    // (without bit 63 = flush all entries for that PCID) if they
+    // diverge.  This defers the remote TLB invalidation to the next
+    // context switch on each CPU, which is strictly correct for the
+    // CoW case (the stale entry is read-only, so any write through
+    // it still faults → re-walks the PTE → gets the new mapping).
+    if !super::interrupts_enabled() {
+        super::paging::bump_global_pcid_generation();
+        return;
+    }
+
     let my_cpu = super::cpu_id();
     debug_assert!((my_cpu as u32) < 32, "tlb_shootdown: CPU id >= 32");
 
@@ -204,13 +233,10 @@ pub fn tlb_shootdown(vaddr: usize) {
     let _lock = TLB_SHOOTDOWN_LOCK.lock_no_irq();
 
     // Publish the shootdown address and the pending bitmask.
-    // The Release fence ensures both stores are visible to other CPUs
-    // before the IPI fires.
     TLB_SHOOTDOWN_VADDR.store(vaddr, Ordering::Relaxed);
     TLB_SHOOTDOWN_PENDING.store(pending, Ordering::Relaxed);
     core::sync::atomic::fence(Ordering::SeqCst);
 
-    // Record the TLB shootdown in the flight recorder.
     crate::flight_recorder::record(
         crate::flight_recorder::kind::TLB_SEND,
         pending,
@@ -231,6 +257,7 @@ pub fn tlb_shootdown(vaddr: usize) {
     }
     // _lock dropped here, releasing the global shootdown slot.
 }
+
 
 /// Send ONE IPI to all other CPUs telling them to reload CR3 (full TLB flush).
 ///
