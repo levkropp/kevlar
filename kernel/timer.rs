@@ -21,6 +21,23 @@ static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
 static WALLCLOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Wall-clock epoch in nanoseconds (set once from CMOS RTC at boot).
 static WALLCLOCK_EPOCH_NS: AtomicUsize = AtomicUsize::new(0);
+/// Task #25 diagnostic: track the last tick at which PID 1 was observed
+/// running on any CPU.  The timer ISR compares against MONOTONIC_TICKS
+/// and fires a one-shot starvation dump if PID 1 hasn't run in more
+/// than 5 seconds — during which it prints scheduler run queue
+/// lengths, the TIMERS list length, and attempts to identify whatever
+/// is spinning instead.  Flag below gates the print so we only fire
+/// once per stall event (re-armed when PID 1 runs again).
+pub static PID1_LAST_TICK: AtomicUsize = AtomicUsize::new(0);
+static PID1_STALL_DUMPED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+const PID1_STALL_THRESHOLD_TICKS: usize = 500;  // 5 seconds at 100 Hz
+
+/// Re-arm the PID 1 stall dump so that the next stall event will
+/// print again.  Called from switch() whenever PID 1 becomes CURRENT.
+pub fn pid1_stall_rearm() {
+    PID1_STALL_DUMPED.store(false, Ordering::Relaxed);
+}
 static TIMERS: SpinLock<Vec<Timer>> = SpinLock::new_ranked(
     Vec::new(),
     kevlar_platform::lockdep::rank::TIMERS,
@@ -212,6 +229,26 @@ pub fn handle_timer_irq() -> bool {
 
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
+
+    // Task #25 diagnostic: PID 1 starvation detector.  Fires once
+    // per stall event (re-armed when PID 1 runs again).  Only
+    // checks on every Nth tick to avoid calling into scheduler
+    // internals every tick.
+    if ticks % 100 == 50 {  // once per second, offset from preempt
+        let last = PID1_LAST_TICK.load(Ordering::Relaxed);
+        // `last == 0` means PID 1 hasn't been observed yet — skip.
+        if last != 0 && ticks > last + PID1_STALL_THRESHOLD_TICKS
+            && !PID1_STALL_DUMPED.swap(true, Ordering::Relaxed)
+        {
+            let gap_ms = (ticks - last) * 1000 / TICK_HZ;
+            let n_timers = TIMERS.lock().len();
+            let queues = crate::process::dump_scheduler_state(4);
+            warn!(
+                "PID1_STALL: tick={} last_run={} gap={}ms timers={} queues={:?}",
+                ticks, last, gap_ms, n_timers, queues,
+            );
+        }
+    }
 
 
     // Update VFS clock with nanosecond precision for filesystem timestamps.
