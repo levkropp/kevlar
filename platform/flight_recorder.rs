@@ -233,11 +233,11 @@ pub fn dump() {
     warn!("[FLIGHT RECORDER — last {} events per CPU, sorted by TSC]",
         RING_SIZE);
 
-    // Collect all non-zero entries into a fixed-size stack array.
-    // MAX_CPUS * RING_SIZE = 8 * 64 = 512 entries.
-    let mut entries: [DecodedEntry; MAX_CPUS * RING_SIZE] = core::array::from_fn(|_| {
-        DecodedEntry { tsc: 0, seq_lo: 0, cpu: 0, kind: 0, data0: 0, data1: 0, data2: 0 }
-    });
+    // Collect all non-zero entries into a heap-allocated buffer.
+    // MAX_CPUS * RING_SIZE = 8 * 256 = 2048 entries × ~40 B = ~80 KB —
+    // larger than a 16 KB kernel stack, so must NOT be on the stack.
+    use alloc::vec::Vec;
+    let mut entries: Vec<DecodedEntry> = Vec::with_capacity(MAX_CPUS * RING_SIZE);
     let mut count = 0usize;
 
     let cur_cpu = crate::arch::cpu_id() as usize % MAX_CPUS;
@@ -275,8 +275,8 @@ pub fn dump() {
             let seq_lo = ((descriptor >> 32) & 0xffff) as u16;
             let data0  = (descriptor & 0xffff_ffff) as u32;
 
-            if count < entries.len() {
-                entries[count] = DecodedEntry { tsc, seq_lo, cpu: cpu as u8, kind, data0, data1, data2 };
+            if count < entries.capacity() {
+                entries.push(DecodedEntry { tsc, seq_lo, cpu: cpu as u8, kind, data0, data1, data2 });
                 count += 1;
             }
         }
