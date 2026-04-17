@@ -378,20 +378,33 @@ impl Vm {
         }
 
         if new_heap_end < self.heap_end {
-            // Shrink: unmap pages in the freed region.
+            // Shrink: unmap pages in the freed region. Defer page free
+            // until after the remote TLB shootdown — see alloc_vaddr_range
+            // for the full rationale (stale entries on other CPUs can
+            // corrupt the page's next owner).
             let free_start = new_heap_end.value();
             let free_end = self.heap_end.value();
             let start_aligned = kevlar_utils::alignment::align_up(free_start, PAGE_SIZE);
 
+            let mut cleared = 0usize;
+            let mut to_free: alloc::vec::Vec<kevlar_platform::address::PAddr> =
+                alloc::vec::Vec::new();
             for addr in (start_aligned..free_end).step_by(PAGE_SIZE) {
                 if let Ok(uaddr) = UserVAddr::new_nonnull(addr) {
                     if let Some(paddr) = self.page_table.unmap_user_page(uaddr) {
                         self.page_table.flush_tlb_local(uaddr);
                         if kevlar_platform::page_refcount::page_ref_dec(paddr) {
-                            kevlar_platform::page_allocator::free_pages(paddr, 1);
+                            to_free.push(paddr);
                         }
+                        cleared += 1;
                     }
                 }
+            }
+            if cleared > 0 {
+                self.page_table.flush_tlb_remote();
+            }
+            for paddr in to_free {
+                kevlar_platform::page_allocator::free_pages(paddr, 1);
             }
 
             self.heap_end = new_heap_end;
@@ -719,9 +732,16 @@ impl Vm {
                 return Err(Errno::ENOMEM.into());
             }
             if self.is_free_vaddr_range(next, aligned_len) {
-                // Clear any stale PTEs in the allocated range.
+                // Clear any stale PTEs in the allocated range. Defer the
+                // free until AFTER the remote TLB shootdown — otherwise
+                // other CPUs can still have stale user-VA → phys entries
+                // pointing at the freed page, and a user write through
+                // such a stale entry corrupts whoever the buddy hands the
+                // page to next (often a kernel stack or slab buffer).
                 let num_pages = aligned_len / PAGE_SIZE;
                 let mut cleared = 0usize;
+                let mut to_free: alloc::vec::Vec<kevlar_platform::address::PAddr> =
+                    alloc::vec::Vec::new();
                 for i in 0..num_pages {
                     let page_addr = next.add(i * PAGE_SIZE);
                     if self.page_table.is_huge_mapped(page_addr).is_some() {
@@ -730,10 +750,16 @@ impl Vm {
                     if let Some(stale) = self.page_table.unmap_user_page(page_addr) {
                         self.page_table.flush_tlb_local(page_addr);
                         if kevlar_platform::page_refcount::page_ref_dec(stale) {
-                            kevlar_platform::page_allocator::free_pages(stale, 1);
+                            to_free.push(stale);
                         }
                         cleared += 1;
                     }
+                }
+                if cleared > 0 {
+                    self.page_table.flush_tlb_remote();
+                }
+                for paddr in to_free {
+                    kevlar_platform::page_allocator::free_pages(paddr, 1);
                 }
                 if cleared > 0 {
                     log::warn!("alloc_vaddr_range: cleared {} stale PTEs at {:#x}+{:#x}",

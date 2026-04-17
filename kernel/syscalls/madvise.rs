@@ -26,23 +26,31 @@ impl<'a> SyscallHandler<'a> {
             let mut vm = vm_ref.as_ref().unwrap().lock_preempt();
 
             let end = addr + len;
-            let mut freed_any = false;
+            let mut cleared_any = false;
+            let mut to_free: alloc::vec::Vec<kevlar_platform::address::PAddr> =
+                alloc::vec::Vec::new();
             let mut cursor = addr;
             while cursor < end {
                 if let Some(vaddr) = UserVAddr::new(cursor) {
                     if let Some(paddr) = vm.page_table_mut().unmap_user_page(vaddr) {
                         vm.page_table().flush_tlb_local(vaddr);
                         if kevlar_platform::page_refcount::page_ref_dec(paddr) {
-                            free_pages(paddr, 1);
+                            to_free.push(paddr);
                         }
-                        freed_any = true;
+                        cleared_any = true;
                     }
                 }
                 cursor += PAGE_SIZE;
             }
 
-            if freed_any {
+            // Remote TLB shootdown must happen BEFORE free_pages, otherwise
+            // other CPUs can write through stale user VA translations into
+            // a newly-reissued kernel page (slab, stack, PT, etc.).
+            if cleared_any {
                 vm.page_table().flush_tlb_remote();
+            }
+            for paddr in to_free {
+                free_pages(paddr, 1);
             }
 
             return Ok(0);
