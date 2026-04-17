@@ -124,6 +124,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let mut msg_buf = arrayvec::ArrayString::<512>::new();
     let _ = write!(msg_buf, "{}", info);
 
+    // Dump the flight recorder FIRST — before unwinding — so that
+    // panics whose unwinders crash (e.g. gimli faulting on corrupt
+    // .eh_frame) still expose the last per-CPU events leading to the
+    // original panic.
+    kevlar_platform::flight_recorder::dump();
+
     // Under Fortress/Balanced: try to unwind to a catch_unwind frame.
     // If a service triggered this panic, execution will resume at the
     // catch_unwind call site in services.rs, returning Err.
