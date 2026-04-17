@@ -840,9 +840,10 @@ impl Process {
         if let Some(ref name) = *self.comm.lock_no_irq() {
             name.clone()
         } else {
-            // Fall back to argv0.
             let cmdline = self.cmdline();
-            cmdline.argv0().as_bytes().to_vec()
+            let argv0 = cmdline.argv0();
+            let basename = argv0.rsplit('/').next().unwrap_or(argv0);
+            basename.as_bytes().to_vec()
         }
     }
 
@@ -3517,16 +3518,35 @@ fn do_setup_userspace(
 
 pub fn gc_exited_processes() {
     // Free resources (kernel stacks, vDSO pages) of exited-and-reaped
-    // processes. Safe to run from any context: the exited process has
-    // already switched away from its kernel stack via switch(), so
-    // the stack is not on any CPU.
-    //
-    // Previously restricted to idle thread — this starved GC when the
-    // CPU was 100% busy (e.g. busybox test suite running 100 fork+exec
-    // cycles back-to-back), causing vDSO page and kernel stack leaks
-    // that exhausted the page allocator after ~130 forks.
-    let mut exited = EXITED_PROCESSES.lock();
-    if !exited.is_empty() {
-        exited.clear();
+    // processes. Swap the list out under the lock; drop the Arcs AFTER
+    // the lock is released AND with interrupts enabled. The Arc drops
+    // may trigger Vm::Drop → teardown_user_pages → TLB shootdown IPI,
+    // which requires IF=1 (waits for remote CPU ACK). If IF=0 (e.g.
+    // called from the IRQ bottom half), flush_tlb_for_teardown falls
+    // back to bump-PCID-gen-only, which doesn't invalidate entries on
+    // CPUs currently scheduling a different process — so freed PT
+    // pages can be corrupted by stale writes.
+    let to_drop: alloc::vec::Vec<Arc<Process>> = {
+        let mut exited = EXITED_PROCESSES.lock();
+        if exited.is_empty() {
+            return;
+        }
+        core::mem::take(&mut *exited)
+    }; // lock released (IF restored to caller's state)
+
+    // Ensure IF=1 for the Arc drops. If our caller (e.g. the IRQ bottom
+    // half) had IF=0, temporarily enable it here. The drops only touch
+    // the kernel heap and the TLB shootdown machinery; neither conflicts
+    // with nested IRQs on this CPU.
+    let was_if_off = !kevlar_platform::arch::interrupts_enabled();
+    if was_if_off {
+        kevlar_platform::arch::enable_interrupts();
+    }
+    drop(to_drop);
+    // Also drain any teardowns that other IF=0 drop sites deferred here.
+    crate::mm::vm::process_deferred_vm_teardowns();
+    if was_if_off {
+        #[allow(unsafe_code)]
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
     }
 }

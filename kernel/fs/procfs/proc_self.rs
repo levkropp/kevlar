@@ -202,7 +202,10 @@ impl FileLike for ProcPidStat {
         let proc = Process::find_by_pid(self.pid);
 
         let comm = proc.as_ref()
-            .map(|p| p.cmdline().argv0().to_string())
+            .map(|p| {
+                let c = p.get_comm();
+                alloc::string::String::from_utf8_lossy(&c).into_owned()
+            })
             .unwrap_or_else(|| alloc::string::String::from("unknown"));
         let ppid = proc.as_ref()
             .map(|p| p.ppid().as_i32())
@@ -278,7 +281,10 @@ impl FileLike for ProcPidStatus {
         let proc = Process::find_by_pid(self.pid);
 
         let comm = proc.as_ref()
-            .map(|p| p.cmdline().argv0().to_string())
+            .map(|p| {
+                let c = p.get_comm();
+                alloc::string::String::from_utf8_lossy(&c).into_owned()
+            })
             .unwrap_or_else(|| String::from("unknown"));
         let ppid = proc.as_ref()
             .map(|p| p.ppid().as_i32())

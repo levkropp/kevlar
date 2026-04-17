@@ -103,11 +103,16 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
         }
         TLB_SHOOTDOWN_VECTOR => {
             // A peer CPU invalidated pages in a shared address space.
-            // vaddr == 0: full TLB flush (reload CR3).
+            // vaddr == u64::MAX: invalidate ALL PCIDs (used by page-table teardown).
+            // vaddr == 0: full TLB flush of CURRENT PCID (reload CR3).
             // vaddr != 0: single-page invlpg for that address.
             use core::sync::atomic::Ordering;
             let vaddr = super::apic::TLB_SHOOTDOWN_VADDR.load(Ordering::Acquire);
-            if vaddr == 0 {
+            if vaddr == usize::MAX {
+                // Invalidate ALL PCIDs (except global mappings) via INVPCID type=3.
+                // Falls back to a CR4.PCIDE toggle on hardware without INVPCID.
+                super::paging::flush_all_pcids();
+            } else if vaddr == 0 {
                 // Full flush: reload CR3 WITHOUT bit 63 to invalidate all
                 // TLB entries for the current PCID.
                 unsafe {

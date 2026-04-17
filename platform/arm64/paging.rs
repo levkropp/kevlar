@@ -323,12 +323,15 @@ impl PageTable {
             None => return false,
         };
         unsafe {
-            if *entry_ptr.as_ptr() != 0 {
-                return false; // already mapped
+            let atom = &*(entry_ptr.as_ptr() as *const core::sync::atomic::AtomicU64);
+            let new_val = paddr.value() as u64 | attrs;
+            let ok = atom.compare_exchange(0, new_val,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Relaxed).is_ok();
+            if ok {
+                core::arch::asm!("dsb ish", "isb", options(nostack));
             }
-            *entry_ptr.as_ptr() = paddr.value() as u64 | attrs;
-            core::arch::asm!("dsb ish", "isb", options(nostack));
-            true
+            ok
         }
     }
 
@@ -365,9 +368,12 @@ impl PageTable {
             let mut idx = start_idx;
             while i < batch_end {
                 let entry_ptr = unsafe { pt_base.add(idx) };
-                let entry_val = unsafe { *entry_ptr };
-                if entry_val == 0 {
-                    unsafe { *entry_ptr = paddrs[i].value() as u64 | attrs; }
+                let new_val = paddrs[i].value() as u64 | attrs;
+                let atom = unsafe { &*(entry_ptr as *const core::sync::atomic::AtomicU64) };
+                if atom.compare_exchange(0, new_val,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed).is_ok()
+                {
                     mapped |= 1 << i;
                 }
                 idx += 1;

@@ -268,11 +268,68 @@ pub fn tlb_shootdown(vaddr: usize) {
 /// "reload CR3", vs a non-zero vaddr which means "invlpg that one page".
 ///
 /// Same interrupt-enable requirement as `tlb_shootdown`.
+/// Send ONE IPI to all other CPUs telling them to invalidate ALL PCIDs
+/// (not just the current one). Used by page-table teardown to prevent
+/// stale TLB entries tagged with the dropped Vm's PCID from outliving
+/// the freed pages.
+pub fn tlb_remote_flush_all_pcids() {
+    use core::sync::atomic::Ordering;
+
+    let num_cpus = super::smp::num_online_cpus();
+    if num_cpus <= 1 {
+        return;
+    }
+
+    if !super::interrupts_enabled() {
+        super::paging::bump_global_pcid_generation();
+        return;
+    }
+
+    let my_cpu = super::cpu_id();
+    debug_assert!((my_cpu as u32) < 32, "tlb_remote_flush_all_pcids: CPU id >= 32");
+
+    let pending: u32 = ((1u32 << num_cpus) - 1) & !(1u32 << my_cpu);
+
+    let _lock = TLB_SHOOTDOWN_LOCK.lock_no_irq();
+
+    // usize::MAX is the "flush all PCIDs" sentinel; receiver does INVPCID type=3.
+    TLB_SHOOTDOWN_VADDR.store(usize::MAX, Ordering::Relaxed);
+    TLB_SHOOTDOWN_PENDING.store(pending, Ordering::Relaxed);
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    crate::flight_recorder::record(
+        crate::flight_recorder::kind::TLB_SEND,
+        pending,
+        usize::MAX as u64,
+        0,
+    );
+
+    const ICR_ALL_EXCL_SELF_SHOOTDOWN: u32 = (3 << 18) | TLB_SHOOTDOWN_VECTOR as u32;
+    unsafe {
+        wait_icr_idle();
+        lapic_write(ICR_LOW_OFF, ICR_ALL_EXCL_SELF_SHOOTDOWN);
+    }
+
+    while TLB_SHOOTDOWN_PENDING.load(Ordering::Acquire) != 0 {
+        core::hint::spin_loop();
+    }
+}
+
 pub fn tlb_remote_full_flush() {
     use core::sync::atomic::Ordering;
 
     let num_cpus = super::smp::num_online_cpus();
     if num_cpus <= 1 {
+        return;
+    }
+
+    // DEADLOCK PREVENTION: same as tlb_shootdown above. If IF=0, sending an
+    // IPI and spin-waiting for ACK can deadlock with another CPU also holding
+    // TLB_SHOOTDOWN_LOCK or otherwise unable to ACK. Defer remote invalidation
+    // by bumping the global PCID generation; each CPU does a full CR3 reload
+    // on its next context switch.
+    if !super::interrupts_enabled() {
+        super::paging::bump_global_pcid_generation();
         return;
     }
 

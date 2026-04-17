@@ -134,9 +134,17 @@ impl<T: ?Sized> SpinLock<T> {
                 spins += 1;
                 if spins == SPIN_CONTENTION_THRESHOLD {
                     let cpu = crate::arch::cpu_id();
+                    #[cfg(target_arch = "x86_64")]
+                    let if_state = {
+                        let flags: u64;
+                        unsafe { asm!("pushfq; pop {}", out(reg) flags, options(nomem, preserves_flags)); }
+                        (flags >> 9) & 1
+                    };
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let if_state = 0u64;
                     log::warn!(
-                        "SPIN_CONTENTION(no_irq): cpu={} lock={:?} addr={:#x} spins={}",
-                        cpu, self.name, lock_addr, spins,
+                        "SPIN_CONTENTION(no_irq): cpu={} lock={:?} addr={:#x} spins={} caller_IF={}",
+                        cpu, self.name, lock_addr, spins, if_state,
                     );
                 }
             }

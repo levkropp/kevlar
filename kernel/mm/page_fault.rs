@@ -583,17 +583,26 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
             } else {
             let pid = current.pid().as_i32();
             // Dump instruction bytes at the faulting IP for crash investigation.
+            // Only read if the IP page is actually mapped (otherwise the kernel
+            // would page-fault while trying to dump diagnostics — crash on crash).
             #[allow(unsafe_code)]
-            if ip > 0x1000 && ip < 0x7FFF_FFFF_FFFF {
-                let mut ibytes = [0u8; 16];
-                for j in 0..16usize {
-                    ibytes[j] = unsafe { *((ip + j) as *const u8) };
+            if ip > 0x1000 && ip < 0x7FFF_FFFF_FFFF
+                && (ip & !(PAGE_SIZE - 1)) == ((ip + 15) & !(PAGE_SIZE - 1))
+            {
+                let mapped = UserVAddr::new(ip & !(PAGE_SIZE - 1))
+                    .and_then(|p| vm.page_table().lookup_paddr(p))
+                    .is_some();
+                if mapped {
+                    let mut ibytes = [0u8; 16];
+                    for j in 0..16usize {
+                        ibytes[j] = unsafe { *((ip + j) as *const u8) };
+                    }
+                    warn!("  code at ip={:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                          ip, ibytes[0], ibytes[1], ibytes[2], ibytes[3],
+                          ibytes[4], ibytes[5], ibytes[6], ibytes[7],
+                          ibytes[8], ibytes[9], ibytes[10], ibytes[11],
+                          ibytes[12], ibytes[13], ibytes[14], ibytes[15]);
                 }
-                warn!("  code at ip={:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                      ip, ibytes[0], ibytes[1], ibytes[2], ibytes[3],
-                      ibytes[4], ibytes[5], ibytes[6], ibytes[7],
-                      ibytes[8], ibytes[9], ibytes[10], ibytes[11],
-                      ibytes[12], ibytes[13], ibytes[14], ibytes[15]);
             }
             // Always dump VMAs on SIGSEGV for dlopen/Alpine investigation.
             {

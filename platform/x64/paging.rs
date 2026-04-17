@@ -40,6 +40,61 @@ fn alloc_pt_page() -> Result<PAddr, PageAllocError> {
     Ok(page)
 }
 
+/// Flush stale TLB entries on every CPU before tearing down a page table.
+/// Without this, freed PT pages and freed user data pages can be re-issued
+/// (to PT pool, to slab, to user mmap) while another CPU still holds TLB
+/// entries pointing at them. A subsequent write through the stale entry
+/// corrupts the new owner.
+///
+/// We do two things:
+/// 1. Bump the global PCID generation so any future `PageTable::switch()`
+///    forces a full CR3 reload (covers entries cached for the dropped PCID
+///    that survive in CPUs not currently scheduling).
+/// 2. Send a TLB IPI to all other CPUs telling them to invalidate ALL
+///    PCIDs (not just the current one) immediately. The IPI is skipped if
+///    the caller has interrupts disabled (would deadlock waiting for ACK).
+///    Local CPU also flushes via INVPCID type=3.
+fn flush_tlb_for_teardown() {
+    bump_global_pcid_generation();
+    if super::interrupts_enabled() {
+        super::apic::tlb_remote_flush_all_pcids();
+        flush_all_pcids();
+    }
+}
+
+/// Invalidate all TLB entries on the current CPU for all PCIDs (excluding
+/// global mappings). Uses INVPCID type=3 if supported; otherwise toggles
+/// CR4.PCIDE which has the same effect.
+pub fn flush_all_pcids() {
+    if super::boot::INVPCID_SUPPORTED.load(core::sync::atomic::Ordering::Relaxed) {
+        // INVPCID type=3: invalidate all contexts EXCEPT global mappings.
+        // The descriptor at [rdi] is ignored for type 3 but must be a valid
+        // 16-byte aligned address.
+        let descriptor: [u64; 2] = [0, 0];
+        unsafe {
+            core::arch::asm!(
+                "invpcid {0}, [{1}]",
+                in(reg) 3u64,
+                in(reg) &descriptor,
+                options(nostack, preserves_flags),
+            );
+        }
+    } else {
+        // Fallback for hardware without INVPCID: toggle CR4.PCIDE off and on.
+        // Clearing PCIDE flushes all TLB entries (including non-global).
+        // We then re-set PCIDE and re-load CR3.
+        unsafe {
+            let cr4 = x86::controlregs::cr4();
+            let cr3 = x86::controlregs::cr3();
+            // Clearing PCIDE requires CR3 to have PCID bits cleared.
+            x86::controlregs::cr3_write(cr3 & !0xFFF);
+            x86::controlregs::cr4_write(cr4 & !x86::controlregs::Cr4::CR4_ENABLE_PCID);
+            x86::controlregs::cr4_write(cr4);
+            x86::controlregs::cr3_write(cr3);
+        }
+    }
+}
+
 /// Return a page table page to the pool (or free it if pool is full).
 #[inline]
 fn free_pt_page(paddr: PAddr) {
@@ -804,6 +859,22 @@ impl PageTable {
         Ok(PageTable { pml4, pcid_gen: core::sync::atomic::AtomicU64::new(alloc_pcid()) })
     }
 
+    /// Construct a PageTable from an existing PML4 for the sole purpose of
+    /// running `teardown_forked_pages` / `teardown_ghost_pages` on it.
+    /// Used by the deferred Vm teardown path: Vm::Drop under IF=0 stashes
+    /// the pml4 and a safe-context drainer re-materializes a PageTable
+    /// here to do the actual free.
+    pub fn from_pml4_for_teardown(pml4: PAddr) -> PageTable {
+        PageTable { pml4, pcid_gen: core::sync::atomic::AtomicU64::new(0) }
+    }
+
+    /// Zero out the pml4 field so the *original* PageTable's drop path
+    /// won't double-free after we've handed the pml4 off to the deferred
+    /// teardown list.
+    pub fn clear_pml4_for_defer(&mut self) {
+        self.pml4 = PAddr::new(0);
+    }
+
     /// Returns the physical address of the PML4 (top-level page table).
     pub fn pml4(&self) -> PAddr {
         self.pml4
@@ -1085,9 +1156,12 @@ impl PageTable {
             let mut idx = start_idx;
             while i < batch_end {
                 let entry_ptr = unsafe { pt_base.add(idx) };
-                let entry_val = unsafe { *entry_ptr };
-                if entry_val == 0 {
-                    unsafe { *entry_ptr = paddrs[i].value() as u64 | attrs_bits; }
+                let new_val = paddrs[i].value() as u64 | attrs_bits;
+                let atom = unsafe { &*(entry_ptr as *const core::sync::atomic::AtomicU64) };
+                if atom.compare_exchange(0, new_val,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Relaxed).is_ok()
+                {
                     mapped |= 1 << i;
                 }
                 idx += 1;
@@ -1158,6 +1232,12 @@ impl PageTable {
     /// refcount reaches zero, and free intermediate page table pages.
     /// Called when a process's address space is destroyed (exec or exit).
     pub fn teardown_user_pages(&mut self) {
+        // Invalidate stale TLB entries on all CPUs before freeing PT pages.
+        // Other CPUs may have cached translations from this address space; if
+        // they remain after we hand the PT pages back to the page allocator,
+        // a page-walk-driven accessed/dirty bit update could corrupt the
+        // newly-reused page (e.g. zeroing out the PT_PAGE_MAGIC cookie).
+        flush_tlb_for_teardown();
         teardown_table(self.pml4, 4);
     }
 
@@ -1171,6 +1251,7 @@ impl PageTable {
         if self.pml4.is_null() {
             return;
         }
+        flush_tlb_for_teardown();
         teardown_table_dec_only(self.pml4, 4);
         // Free the PML4 page itself and prevent double-free.
         let pml4 = self.pml4;
@@ -1184,6 +1265,7 @@ impl PageTable {
         if self.pml4.is_null() {
             return;
         }
+        flush_tlb_for_teardown();
         teardown_table_ghost(self.pml4, 4);
         let pml4 = self.pml4;
         self.pml4 = PAddr::new(0);
@@ -1255,13 +1337,18 @@ impl PageTable {
         }
     }
 
-    /// Sends ONE IPI to all other CPUs telling them to reload CR3 (full TLB flush).
+    /// Sends ONE IPI to all other CPUs telling them to invalidate ALL PCIDs.
     ///
     /// Call after a batch of `flush_tlb_local` calls to flush remote CPUs
-    /// with a single IPI round-trip instead of one per page.
+    /// with a single IPI round-trip. Uses INVPCID type=3 (or CR4.PCIDE
+    /// toggle as fallback) so that stale entries tagged with this process's
+    /// PCID are invalidated on CPUs currently scheduling a different
+    /// process — without this, those entries remain dormant in the remote
+    /// TLB until the PCID is reused, allowing a stale write into a
+    /// freed-then-reissued page (often a kernel slab page).
     #[inline(always)]
     pub fn flush_tlb_remote(&self) {
-        super::apic::tlb_remote_full_flush();
+        super::apic::tlb_remote_flush_all_pcids();
     }
 
     /// Flushes the entire TLB by reloading CR3.

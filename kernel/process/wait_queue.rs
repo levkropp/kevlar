@@ -158,7 +158,25 @@ impl WaitQueue {
             v
         }; // queue lock released
         let woken_count = waiters.len() as u32;
-        for process in &waiters {
+        // Guard: skip any Arc<Process> whose inner pointer is outside the
+        // kernel direct-map range. Those came from a heap-corrupted
+        // VecDeque buffer (bad Arc would crash inside resume() and again
+        // when Vec<Arc> is dropped). Drain so we have ownership and can
+        // forget the bad ones instead of dropping them.
+        let mut warned = false;
+        for process in waiters.into_iter() {
+            let raw = Arc::as_ptr(&process) as usize;
+            if raw < 0xffff_8000_0000_0000 {
+                if !warned {
+                    log::warn!(
+                        "WAITQ CORRUPT: queue={:p} bad arc={:#x} — forgetting",
+                        self, raw,
+                    );
+                    warned = true;
+                }
+                core::mem::forget(process);
+                continue;
+            }
             process.resume();
         }
         htrace::exit(htrace::id::WAKE_ALL, 0);

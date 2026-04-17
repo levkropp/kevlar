@@ -774,6 +774,44 @@ impl Vm {
     }
 }
 
+/// Deferred teardown kind — matches the three paths in Vm::Drop.
+#[derive(Copy, Clone, PartialEq)]
+pub enum DeferredTeardownKind {
+    Forked,
+    GhostForked,
+}
+
+pub struct DeferredTeardown {
+    pub pml4: kevlar_platform::address::PAddr,
+    pub kind: DeferredTeardownKind,
+}
+
+pub static DEFERRED_VM_TEARDOWNS: kevlar_platform::spinlock::SpinLock<Vec<DeferredTeardown>> =
+    kevlar_platform::spinlock::SpinLock::new(Vec::new());
+
+/// Process any Vm teardowns deferred from IF=0 contexts. Must be called with
+/// interrupts enabled; the teardown path sends a TLB shootdown IPI and waits
+/// for remote ACK, which deadlocks under IF=0.
+pub fn process_deferred_vm_teardowns() {
+    debug_assert!(kevlar_platform::arch::interrupts_enabled());
+    let items: Vec<DeferredTeardown> = {
+        let mut list = DEFERRED_VM_TEARDOWNS.lock_no_irq();
+        if list.is_empty() {
+            return;
+        }
+        core::mem::take(&mut *list)
+    };
+    for item in items {
+        // Reconstruct a minimal PageTable to run the teardown method.
+        // The teardown method owns the pml4, walks it, and frees it.
+        let mut pt = PageTable::from_pml4_for_teardown(item.pml4);
+        match item.kind {
+            DeferredTeardownKind::Forked => pt.teardown_forked_pages(),
+            DeferredTeardownKind::GhostForked => pt.teardown_ghost_pages(),
+        }
+    }
+}
+
 // Vm::Drop decrements CoW refcounts and frees intermediate page table pages
 // for forked VMs. Only forked VMs are torn down — exec'd VMs' page table
 // pages are leaked (~20-40KB/process, same as before this fix).
@@ -782,10 +820,30 @@ impl Vm {
 // forcing full page copies on every subsequent CoW fault.
 impl Drop for Vm {
     fn drop(&mut self) {
-        if self.is_ghost_forked {
-            self.page_table.teardown_ghost_pages();
+        let kind = if self.is_ghost_forked {
+            Some(DeferredTeardownKind::GhostForked)
         } else if self.is_forked {
-            self.page_table.teardown_forked_pages();
+            Some(DeferredTeardownKind::Forked)
+        } else {
+            None
+        };
+        let Some(kind) = kind else { return };
+
+        // If called with interrupts disabled (e.g. IRQ bottom half dropping
+        // the last Arc<Process>), the teardown path's TLB IPI would be
+        // skipped, leaving stale entries that corrupt freed PT pages.
+        // Defer to a safe context that drains DEFERRED_VM_TEARDOWNS.
+        if !kevlar_platform::arch::interrupts_enabled() {
+            let pml4 = self.page_table.pml4();
+            // Prevent the PageTable's own Drop (if any) from also freeing it.
+            self.page_table.clear_pml4_for_defer();
+            DEFERRED_VM_TEARDOWNS.lock_no_irq().push(DeferredTeardown { pml4, kind });
+            return;
+        }
+
+        match kind {
+            DeferredTeardownKind::Forked => self.page_table.teardown_forked_pages(),
+            DeferredTeardownKind::GhostForked => self.page_table.teardown_ghost_pages(),
         }
     }
 }

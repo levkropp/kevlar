@@ -22,6 +22,11 @@ fn check_cpuid_feature(name: &str, supported: bool) {
 pub static PCID_SUPPORTED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Whether the CPU supports the INVPCID instruction (separate from PCID).
+/// Used to flush all PCIDs in one instruction during page-table teardown.
+pub static INVPCID_SUPPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Per-AP CPU setup: a subset of `common_setup` that skips BSP-only
 /// initializations (IOAPIC, PIT, TSC calibration, vDSO, serial).
 unsafe fn ap_common_setup(cpu_local_area: VAddr) {
@@ -95,6 +100,13 @@ unsafe fn common_setup(cpu_local_area: VAddr) {
     // Detect PCID support and set the global flag before enabling it.
     let has_pcid = feats.has_pcid();
     PCID_SUPPORTED.store(has_pcid, core::sync::atomic::Ordering::Release);
+
+    // INVPCID is reported in CPUID.7 (ex_feats). Used to flush all PCIDs
+    // at page-table teardown to prevent stale TLB entries from corrupting
+    // freed-then-reused pages.
+    let has_invpcid = ex_feats.has_invpcid();
+    INVPCID_SUPPORTED.store(has_invpcid, core::sync::atomic::Ordering::Release);
+    log::info!("CPU features: PCID={} INVPCID={}", has_pcid, has_invpcid);
 
     let mut cr4 = controlregs::cr4();
     cr4 |= Cr4::CR4_ENABLE_FSGSBASE
