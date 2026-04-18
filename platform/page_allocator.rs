@@ -198,6 +198,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
             if let Some(paddr) = PREZEROED_4K_POOL.lock_no_irq().pop() {
                 PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
                 check_not_stack(paddr);
+                debug_assert_page_is_zero(paddr, "PREZEROED_POOL");
                 return Ok(paddr);
             }
         }
@@ -212,6 +213,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
+                debug_assert_page_is_zero(paddr, "PAGE_CACHE_memset");
             }
             NUM_FREE_PAGES.fetch_sub(1, Ordering::Relaxed);
 
@@ -228,6 +230,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
+                debug_assert_page_is_zero(paddr, "PAGE_CACHE_slow_memset");
             }
 
             return Ok(paddr);
@@ -236,6 +239,42 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 
     Err(PageAllocError)
 }
+
+/// Scan a freshly-zeroed page to verify it really is zero. If not, a
+/// concurrent writer touched the page between memset and return —
+/// log the first non-zero offset + value + site so we can track the
+/// race back to its source. (Blog 186: kernel direct-map pointers
+/// landing in user pages.)
+///
+/// Only compiled in debug builds — the scan is ~512 cache-line-aligned
+/// loads per alloc, too much overhead for release.
+#[inline(always)]
+#[cfg(debug_assertions)]
+fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
+    #[allow(unsafe_code)]
+    unsafe {
+        let ptr = paddr.as_ptr::<u64>();
+        for i in 0..(PAGE_SIZE / 8) {
+            let v = core::ptr::read_volatile(ptr.add(i));
+            if v != 0 {
+                let is_kernel_ptr = (v >> 47) == 0x1ffff;
+                log::warn!(
+                    "alloc_page: zero-fill miss at site={} paddr={:#x} offset={:#x} value={:#x}{}",
+                    site, paddr.value(), i * 8, v,
+                    if is_kernel_ptr { " [KERNEL_PTR]" } else { "" },
+                );
+                // Only report the first non-zero word; the caller will
+                // zero or overwrite before user access, but the fact
+                // we observed non-zero is the signal.
+                return;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+#[cfg(not(debug_assertions))]
+fn debug_assert_page_is_zero(_paddr: PAddr, _site: &'static str) {}
 
 /// Smoking-gun check: panic if the buddy/cache returned a paddr that
 /// the stack_cache has registered as a live kernel stack — that's the

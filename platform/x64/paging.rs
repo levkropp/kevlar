@@ -967,9 +967,24 @@ impl PageTable {
                 let cr3_val = self.pml4.value() as u64 | pcid | (1u64 << 63);
                 x86::controlregs::cr3_write(cr3_val);
             } else {
-                // Stale generation: this PCID was potentially reused by another
-                // process. Flush by loading CR3 WITHOUT bit 63.
-                let cr3_val = self.pml4.value() as u64 | pcid;
+                // Stale generation: the global generation has been bumped
+                // since we last refreshed our pcid_gen. That bump signals
+                // "stale TLB entries exist — possibly with THIS PCID, but
+                // also possibly with OTHER PCIDs that dead processes left
+                // behind on this CPU." If we only flush the current PCID
+                // (CR3 write without bit 63), entries tagged with a recycled
+                // PCID from a pre-bump process survive and are re-used by a
+                // future process whose fresh PCID collides with the old tag —
+                // leaking that old process's physical pages into the new
+                // process's address space. (Task #25 / blog 186 root cause:
+                // a user heap page serving kernel data via such a stale
+                // entry, including kernel direct-map pointers.)
+                //
+                // Fix: invalidate ALL PCIDs on this CPU (INVPCID type=3 or
+                // CR4.PCIDE toggle), then load CR3 with bit 63 set (the
+                // entries we care about are already gone).
+                flush_all_pcids();
+                let cr3_val = self.pml4.value() as u64 | pcid | (1u64 << 63);
                 x86::controlregs::cr3_write(cr3_val);
                 // Update stored generation so subsequent switches are fast.
                 self.pcid_gen.store(global_gen | pcid, Ordering::Relaxed);
