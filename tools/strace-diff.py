@@ -603,6 +603,12 @@ def align_and_diff(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
         print(f"# This means one side ran more syscalls than the other — if the")
         print(f"# first N matched, the divergence starts around call #{n}.")
 
+    # Final single-line summary — easy to grep/CI.
+    print()
+    status = "OK" if bug_ct == 0 else "BUGS"
+    print(f"# STRACE_DIFF {status} bugs={bug_ct} match={match} noise={noise} "
+          f"pairs={n} linux={len(linux)} kevlar={len(kevlar)}")
+
 
 # ─── Main ───────────────────────────────────────────────────────────────
 
