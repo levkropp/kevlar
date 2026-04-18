@@ -422,28 +422,50 @@ def classify(lin: Dict[str, Any], kev: Dict[str, Any]) -> Tuple[str, Optional[st
     return BUG_RETVAL, f"linux={ret_l} kevlar={ret_k}"
 
 
-def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Kevlar's PID 1 is the `strace-target` wrapper, which makes a dozen
-    syscalls (mount, chroot, etc.) and then execve's the target command.
-    Similarly, when Linux runs via bwrap, strace captures bwrap's syscalls
-    plus the target's.  Both need trimming to the LAST successful execve,
-    which marks the moment the target binary actually starts.
+def trim_to_target_execve(records: List[Dict[str, Any]],
+                          target_cmd: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Trim the trace to start at the target command's execve, and filter
+    to just that PID.
 
-    On the Linux side we ALSO filter to only the target's PID so parent
-    (bwrap) syscalls like final wait4/read don't appear as divergences
-    from the target's perspective.
+    - Kevlar's PID 1 is the `strace-target` wrapper → its execve of the
+      target is the 2nd execve overall.
+    - On Linux under bwrap, bwrap's execve is the 1st; the target's is 2nd.
+      If the target forks children (e.g. xfce4-session → dbus-daemon), later
+      execves appear too.  We don't want those.
+
+    If `target_cmd` is provided and we can find an execve whose argv[0] (or
+    exe path) matches, use that.  Otherwise fall back to the LAST execve.
+
+    After trimming to the target's execve, filter to that PID so child
+    processes (with different PIDs) don't pollute the diff.
     """
-    last_execve = -1
-    for i, r in enumerate(records):
-        if r["name"] == "execve" and (r.get("ret") is None or r["ret"] == 0):
-            last_execve = i
-    if last_execve < 0:
+    target_idx = -1
+    if target_cmd is not None:
+        for i, r in enumerate(records):
+            if r["name"] != "execve" or (r.get("ret") is not None and r["ret"] != 0):
+                continue
+            # Check args_text (Linux strace gives the quoted path here).
+            at = r.get("args_text", "")
+            if target_cmd in at:
+                target_idx = i
+                break
+    if target_idx < 0:
+        # Fallback: last successful execve.
+        for i, r in enumerate(records):
+            if r["name"] == "execve" and (r.get("ret") is None or r["ret"] == 0):
+                target_idx = i
+    if target_idx < 0:
         return records
-    target_pid = records[last_execve].get("pid")
-    trimmed = records[last_execve:]
+    target_pid = records[target_idx].get("pid")
+    trimmed = records[target_idx:]
     if target_pid is not None:
         trimmed = [r for r in trimmed if r.get("pid") in (None, target_pid)]
     return trimmed
+
+
+# Backwards-compat wrapper for external callers.
+def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return trim_to_target_execve(records, None)
 
 
 def greedy_align(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
@@ -501,12 +523,19 @@ def greedy_align(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
 
 
 def align_and_diff(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
+                   target_cmd: Optional[str] = None,
                    max_diffs: int = 20) -> None:
     """Print aligned comparison.  Groups by classification: MATCH, NOISE
     (expected divergence — pointer/PID/UID/timing), and BUG (real contract
-    gap).  Only BUG lines block the goal of "semantic ABI compatibility"."""
-    linux = trim_to_last_execve(linux)
-    kevlar = trim_to_last_execve(kevlar)
+    gap).  Only BUG lines block the goal of "semantic ABI compatibility".
+
+    `target_cmd` is the binary path the user asked us to trace (e.g.
+    '/usr/bin/xfwm4').  When set, we trim each trace to the execve of that
+    specific binary — avoiding drift when the target forks children that
+    also execve.
+    """
+    linux = trim_to_target_execve(linux, target_cmd)
+    kevlar = trim_to_target_execve(kevlar, target_cmd)
 
     pairs = greedy_align(linux, kevlar)
 
@@ -647,7 +676,9 @@ def main() -> int:
         print(json.dumps(linux_records, indent=2))
         return 0
 
-    align_and_diff(linux_records, kevlar_records, max_diffs=args.max_diffs)
+    align_and_diff(linux_records, kevlar_records,
+                   target_cmd=args.cmd[0],
+                   max_diffs=args.max_diffs)
     return 0
 
 

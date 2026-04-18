@@ -102,6 +102,18 @@ int main(void) {
     for (int i = 1; i < argc; i++) printf(" '%s'", argv[i]);
     printf("\n"); fflush(stdout);
 
+    // BEFORE chroot: probe /mnt/dev/null — if this fails, the bind mount
+    // from kernel's /dev (devfs) into the chroot's /dev didn't expose the
+    // submount.  Needed before we try to dup2 /dev/null over fd 0/1/2.
+    {
+        struct stat st;
+        int rc = stat(ROOT "/dev/null", &st);
+        printf("strace-target: stat(%s/dev/null) rc=%d errno=%d mode=%#o\n",
+               ROOT, rc, rc < 0 ? errno : 0,
+               rc == 0 ? (unsigned)st.st_mode : 0);
+        fflush(stdout);
+    }
+
     if (chroot(ROOT) != 0) die("chroot", errno);
     if (chdir("/") != 0) die("chdir", errno);
 
