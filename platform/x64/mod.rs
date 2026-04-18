@@ -21,7 +21,7 @@ mod idle;
 mod idt;
 mod interrupt;
 mod ioapic;
-mod paging;
+pub mod paging;
 mod pit;
 mod profile;
 mod semihosting;

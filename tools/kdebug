@@ -36,8 +36,12 @@ set print elements 64
 set disassembly-flavor intel
 set confirm off
 
-# Trap every panic with full state.
-break rust_begin_unwind
+# Trap every panic with full state. The Rust panic entry symbol is
+# mangled; we look it up at runtime by address. Use hbreak (hardware
+# breakpoint) since the kernel image isn't mapped yet at GDB attach
+# time and software breakpoints can't be written until the page
+# tables are loaded.
+hbreak *{panic_addr:#x}
 commands
     printf "\\n=== KEVLAR PANIC ===\\n"
     info registers
@@ -45,36 +49,44 @@ commands
     x/16gx $rsp
     printf "backtrace:\\n"
     backtrace 20
-    printf "frames via rbp:\\n"
-    set $f = $rbp
-    set $i = 0
-    while ($f != 0 && $i < 16)
-        set $ret = *(unsigned long *)($f + 8)
-        printf "  [%d] rbp=%#018lx  ret=%#018lx", $i, $f, $ret
-        info symbol $ret
-        set $f = *(unsigned long *)($f)
-        set $i = $i + 1
-    end
+    printf "\\n--- frames via rbp (manual) ---\\n"
+    # Dump 256 bytes starting at rbp; shows ~16 frames worth of links.
+    x/64gx $rbp
+    printf "\\n--- PtRegs at rdi=%#lx (passed to handle_kernel_page_fault) ---\\n", $rdi
+    # PtRegs layout (platform/x64/cpu.rs): r15, r14, r13, r12, rbp, rbx,
+    # r11, r10, r9, r8, rax, rcx, rdx, rsi, rdi, error_code, rip, cs,
+    # rflags, rsp, ss = 21 u64s.
+    x/21gx $rdi
     printf "===\\n"
     # Detach so QEMU can finish its own crash dump.
     detach
     quit
 end
 
-# Kernel page-fault panic point — also worth catching directly so we
-# get state BEFORE the format-args corruption masks the message.
-break interrupt_common
-commands
-    silent
-    # Only stop if it's a page fault and CR2 != 0 (skip benign faults).
-    # Most cheaply: just continue. Real intent: catch the page-fault
-    # path so we have ground-truth registers.
-    cont
-end
-
 # Run the kernel.
 continue
 """
+
+
+def find_panic_addr(kernel_path: Path) -> int | None:
+    """Resolve the address of `rust_begin_unwind` from the kernel ELF."""
+    try:
+        out = subprocess.check_output(
+            ["nm", str(kernel_path)],
+            text=True,
+        )
+    except Exception:
+        return None
+    for line in out.splitlines():
+        # Mangled form: ..._7___rustc17rust_begin_unwind
+        if "rust_begin_unwind" in line:
+            parts = line.split()
+            if len(parts) >= 1:
+                try:
+                    return int(parts[0], 16)
+                except ValueError:
+                    continue
+    return None
 
 
 def main():
@@ -131,11 +143,21 @@ def main():
 
     print(f"[kdebug] GDB port ready on :{args.port}; attaching", file=sys.stderr)
 
+    # Resolve the panic-handler address from the ELF.
+    panic_addr = find_panic_addr(KERNEL_ELF)
+    if panic_addr is None:
+        print("[kdebug] could not find rust_begin_unwind in kernel ELF",
+              file=sys.stderr)
+        qemu.kill()
+        return 1
+    print(f"[kdebug] panic breakpoint at {panic_addr:#x}", file=sys.stderr)
+
     # Write the gdb command script to a temp file.
     script_path = Path("/tmp/kdebug.gdb")
     script_path.write_text(GDB_SCRIPT.format(
         kernel=str(KERNEL_ELF),
         port=args.port,
+        panic_addr=panic_addr,
     ))
 
     out_file = open(args.out, "w")
@@ -146,13 +168,20 @@ def main():
         stderr=subprocess.STDOUT,
     )
 
-    # Stream QEMU output to our stderr while gdb works.
+    # Stream QEMU (kernel serial) output to our stderr AND tee into a
+    # companion file so we can correlate it with the GDB-captured
+    # panic state.
+    serial_path = Path(args.out).with_suffix(".serial")
+    serial_file = open(serial_path, "wb")
     while True:
         line = qemu.stdout.readline()
         if not line:
             break
         sys.stderr.buffer.write(line)
         sys.stderr.buffer.flush()
+        serial_file.write(line)
+    serial_file.close()
+    print(f"[kdebug] kernel serial in: {serial_path}", file=sys.stderr)
 
     qemu.wait()
     gdb.wait()

@@ -86,6 +86,17 @@ pub mod arch {
         fbcon, ps2mouse,
     };
 
+    /// Bump the global PCID generation. Forces every CPU to do a full TLB
+    /// flush of its current PCID on the next context switch. Used as a
+    /// deferred TLB invalidate when sending an IPI is unsafe (IF=0).
+    /// x86_64 only — ARM64 has no PCID equivalent so this is a no-op.
+    #[cfg(target_arch = "x86_64")]
+    pub fn bump_global_pcid_generation() {
+        super::x64::paging::bump_global_pcid_generation();
+    }
+    #[cfg(target_arch = "aarch64")]
+    pub fn bump_global_pcid_generation() {}
+
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
         broadcast_halt_ipi, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,

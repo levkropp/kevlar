@@ -2246,10 +2246,23 @@ impl Drop for Process {
         );
 
         // Free the per-process vDSO data page (allocated in fork/vfork).
+        // The vDSO is mapped at a FIXED user VA (VDSO_VADDR = 0x1000_0000_0000)
+        // in every process. Without an all-CPU TLB invalidate before freeing,
+        // a CPU that recently ran this process retains a stale VDSO_VADDR →
+        // vdso_paddr translation. The freed page is reissued by the buddy
+        // allocator (often as a kernel stack), and any subsequent user write
+        // through the stale VA corrupts the new owner.
+        //
+        // We can't send an IPI from Drop with IF=0 (it would deadlock against
+        // TLB_SHOOTDOWN_LOCK), so just bump the global PCID generation. Every
+        // CPU does a full CR3 reload on its next context switch, which
+        // invalidates all entries for the old PCID. This is safe in
+        // either IF=1 or IF=0 contexts.
         #[cfg(target_arch = "x86_64")]
         {
             let vdso_paddr = self.vdso_data_paddr.load(core::sync::atomic::Ordering::Relaxed);
             if vdso_paddr != 0 {
+                kevlar_platform::arch::bump_global_pcid_generation();
                 kevlar_platform::page_allocator::free_pages(
                     kevlar_platform::address::PAddr::new(vdso_paddr as usize),
                     1,
