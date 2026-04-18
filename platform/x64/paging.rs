@@ -753,6 +753,31 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     Ok(new_table_paddr)
 }
 
+/// Physical address of the kernel's bootstrap PML4 (identity+kernel-half).
+/// Safe to load as CR3: contains only kernel mappings, no user pages and no
+/// PT pages that are subject to user-process teardown races.
+pub fn kernel_pml4_paddr() -> PAddr {
+    unsafe extern "C" {
+        static __kernel_pml4: u8;
+    }
+    PAddr::new(unsafe { &__kernel_pml4 as *const u8 as usize })
+}
+
+/// Load the kernel bootstrap PML4 as CR3 on this CPU.  Used when switching
+/// to a task that has no Vm (e.g. the idle thread): without this, CR3 keeps
+/// pointing at the outgoing task's pml4.  If that pml4 later gets torn down,
+/// the hardware walker can still traverse it and write A/D bits into freed
+/// PT pages — corrupting the PT_PAGE_POOL cookie.
+///
+/// After this call, no page-walk on this CPU can reach user PT pages until
+/// another task with a Vm is switched in.
+pub fn load_kernel_pml4() {
+    unsafe {
+        // PCID=0 (bit 11..0 cleared), no-invalidate bit clear → full flush.
+        x86::controlregs::cr3_write(kernel_pml4_paddr().value() as u64);
+    }
+}
+
 fn allocate_pml4() -> Result<PAddr, PageAllocError> {
     unsafe extern "C" {
         static __kernel_pml4: u8;

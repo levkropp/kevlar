@@ -97,6 +97,20 @@ pub mod arch {
     #[cfg(target_arch = "aarch64")]
     pub fn bump_global_pcid_generation() {}
 
+    /// Load the kernel bootstrap PML4 into CR3.  Called by the scheduler
+    /// when switching to a task that has no Vm (typically the idle thread):
+    /// without this, CR3 stays pointing at the outgoing task's pml4, and a
+    /// page-walk on that CPU can still traverse that address space even
+    /// after its owner exits and tears it down — corrupting freed PT pages
+    /// via A/D-bit updates.  ARM64 has a similar concept (TTBR0_EL1) but
+    /// we're not wiring it here yet; leave a no-op stub.
+    #[cfg(target_arch = "x86_64")]
+    pub fn load_kernel_page_table() {
+        super::x64::load_kernel_pml4();
+    }
+    #[cfg(target_arch = "aarch64")]
+    pub fn load_kernel_page_table() {}
+
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
         broadcast_halt_ipi, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,

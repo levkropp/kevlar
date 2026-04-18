@@ -114,6 +114,14 @@ pub fn switch() -> bool {
     if let Some(vm) = next.vm().clone() {
         let lock = vm.lock_no_irq();
         lock.page_table().switch();
+    } else {
+        // Task has no Vm (idle thread, kernel thread).  Load the kernel
+        // bootstrap PML4 so CR3 doesn't keep pointing at the outgoing
+        // task's pml4.  Otherwise, when that task's Vm is later torn
+        // down, the hardware walker on this CPU can still traverse the
+        // freed PT pages via stale CR3, writing A/D bits into pool-cached
+        // pages and corrupting the PT_PAGE_MAGIC cookie.
+        kevlar_platform::arch::load_kernel_page_table();
     }
 
     kevlar_platform::sync::arc_leak_one_ref(&next);
