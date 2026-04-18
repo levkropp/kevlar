@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""kdebug — run a Kevlar test with GDB attached and auto-capture panic state.
+
+Spawns QEMU with `--gdb` (waits paused on :7789), then attaches GDB in
+batch mode. GDB sets a breakpoint at the panic handler. When the kernel
+panics, GDB dumps full register state, the stack, and a backtrace —
+to stderr in real time and to a `kdebug.out` file.
+
+Usage:
+  tools/kdebug test-xfce          # run `make test-xfce` under GDB
+  tools/kdebug test-threads-smp   # any make target works
+
+The test runs to completion if no panic happens. On panic, GDB stops
+the kernel, prints the post-mortem, and detaches (so QEMU can dump
+its own crash dump and exit).
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+GDB_BINARY = "rust-gdb"  # from rustup; falls back to gdb
+GDB_PORT = 7789
+KERNEL_ELF = REPO / "target" / "x64-unwind" / "debug" / "kevlar_kernel"
+
+GDB_SCRIPT = """
+file {kernel}
+target remote :{port}
+set pagination off
+set print pretty on
+set print elements 64
+set disassembly-flavor intel
+set confirm off
+
+# Trap every panic with full state.
+break rust_begin_unwind
+commands
+    printf "\\n=== KEVLAR PANIC ===\\n"
+    info registers
+    printf "stack at rsp:\\n"
+    x/16gx $rsp
+    printf "backtrace:\\n"
+    backtrace 20
+    printf "frames via rbp:\\n"
+    set $f = $rbp
+    set $i = 0
+    while ($f != 0 && $i < 16)
+        set $ret = *(unsigned long *)($f + 8)
+        printf "  [%d] rbp=%#018lx  ret=%#018lx", $i, $f, $ret
+        info symbol $ret
+        set $f = *(unsigned long *)($f)
+        set $i = $i + 1
+    end
+    printf "===\\n"
+    # Detach so QEMU can finish its own crash dump.
+    detach
+    quit
+end
+
+# Kernel page-fault panic point — also worth catching directly so we
+# get state BEFORE the format-args corruption masks the message.
+break interrupt_common
+commands
+    silent
+    # Only stop if it's a page fault and CR2 != 0 (skip benign faults).
+    # Most cheaply: just continue. Real intent: catch the page-fault
+    # path so we have ground-truth registers.
+    cont
+end
+
+# Run the kernel.
+continue
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("target", help="make target to run (e.g. test-xfce)")
+    ap.add_argument("--profile", default="balanced",
+                    help="kernel profile (default: balanced)")
+    ap.add_argument("--out", default="kdebug.out",
+                    help="GDB output file (default: kdebug.out)")
+    ap.add_argument("--gdb-binary", default=GDB_BINARY)
+    ap.add_argument("--port", type=int, default=GDB_PORT)
+    args = ap.parse_args()
+
+    if not KERNEL_ELF.exists():
+        print(f"kernel ELF not found at {KERNEL_ELF}; run `make build` first.",
+              file=sys.stderr)
+        return 2
+
+    env = os.environ.copy()
+    env["KEVLAR_GDB"] = "1"
+
+    print(f"[kdebug] launching: make {args.target} PROFILE={args.profile}",
+          file=sys.stderr)
+    print(f"[kdebug] kernel ELF: {KERNEL_ELF}", file=sys.stderr)
+    print(f"[kdebug] gdb output: {args.out}", file=sys.stderr)
+
+    qemu = subprocess.Popen(
+        ["make", args.target, f"PROFILE={args.profile}"],
+        cwd=REPO,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    # QEMU starts paused; wait until the GDB port is listening.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            with subprocess.Popen(
+                ["bash", "-c", f"exec 3<>/dev/tcp/127.0.0.1/{args.port}"],
+                stderr=subprocess.DEVNULL,
+            ) as p:
+                p.wait(timeout=2)
+                if p.returncode == 0:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.5)
+    else:
+        print("[kdebug] timed out waiting for GDB port; aborting", file=sys.stderr)
+        qemu.kill()
+        return 1
+
+    print(f"[kdebug] GDB port ready on :{args.port}; attaching", file=sys.stderr)
+
+    # Write the gdb command script to a temp file.
+    script_path = Path("/tmp/kdebug.gdb")
+    script_path.write_text(GDB_SCRIPT.format(
+        kernel=str(KERNEL_ELF),
+        port=args.port,
+    ))
+
+    out_file = open(args.out, "w")
+    gdb = subprocess.Popen(
+        [args.gdb_binary, "-batch", "-x", str(script_path)],
+        cwd=REPO,
+        stdout=out_file,
+        stderr=subprocess.STDOUT,
+    )
+
+    # Stream QEMU output to our stderr while gdb works.
+    while True:
+        line = qemu.stdout.readline()
+        if not line:
+            break
+        sys.stderr.buffer.write(line)
+        sys.stderr.buffer.flush()
+
+    qemu.wait()
+    gdb.wait()
+    out_file.close()
+
+    print(f"\n[kdebug] done. GDB output in: {args.out}", file=sys.stderr)
+    if Path(args.out).stat().st_size > 0:
+        print(f"[kdebug] last 40 lines of GDB output:", file=sys.stderr)
+        with open(args.out) as f:
+            tail = f.readlines()[-40:]
+            sys.stderr.write("".join(tail))
+
+    return 0 if qemu.returncode in (0, None) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

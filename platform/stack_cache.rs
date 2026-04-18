@@ -120,6 +120,7 @@ pub fn check_all_guards() {
                 if !check_guard(stack) {
                     panic!("STACK GUARD: kernel stack overflow detected in 4-page cached stack #{}", i);
                 }
+                scan_corruption_pattern(stack, KERNEL_STACK_SIZE_4P, "4-page-cache", i);
             }
         }
     }
@@ -131,6 +132,40 @@ pub fn check_all_guards() {
                 if !check_guard(stack) {
                     panic!("STACK GUARD: kernel stack overflow detected in 2-page cached stack #{}", i);
                 }
+                scan_corruption_pattern(stack, KERNEL_STACK_SIZE_2P, "2-page-cache", i);
+            }
+        }
+    }
+}
+
+const KERNEL_STACK_SIZE_4P: usize = 4 * PAGE_SIZE;
+const KERNEL_STACK_SIZE_2P: usize = 2 * PAGE_SIZE;
+
+/// Scan a stack for the "top byte zeroed" corruption pattern that masks the
+/// XFCE crash. A valid kernel pointer on the stack has the form
+/// 0xffff_8000_xxxx_xxxx; if a stale TLB write or other corruption clears
+/// the top byte, we'd see 0x00ff_8000_xxxx_xxxx — non-canonical, never
+/// produced by normal kernel code. Catching this in a CACHED stack proves
+/// the corruption happened to a freed-and-recycled page.
+fn scan_corruption_pattern(stack: &OwnedPages, size: usize, kind: &str, idx: usize) {
+    #[allow(unsafe_code)]
+    unsafe {
+        let base = stack.as_vaddr().as_ptr::<u64>();
+        let words = size / 8;
+        for i in 0..words {
+            let v = base.add(i).read_volatile();
+            // The corruption signature: top byte 0x00, second-top byte 0xff,
+            // then the canonical kernel-VA prefix 0x80_00. Equivalent to the
+            // upper 32 bits being exactly 0x00ff_8000.
+            if (v >> 32) == 0x00ff_8000 {
+                let stack_base = stack.as_vaddr().value();
+                log::warn!(
+                    "STACK CORRUPT DETECTED: kind={} idx={} stack_base={:#x} \
+                     offset={:#x} value={:#x}",
+                    kind, idx, stack_base, i * 8, v,
+                );
+                panic!("STACK CORRUPT: top byte zeroed at offset {:#x}, val={:#x}",
+                    i * 8, v);
             }
         }
     }

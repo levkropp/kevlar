@@ -148,6 +148,11 @@ def main():
     parser.add_argument("qemu_args", nargs="*")
     args = parser.parse_args()
 
+    # Allow GDB attachment via env var (so test targets can pick it up
+    # without per-target Makefile changes). Set KEVLAR_GDB=1 to enable.
+    if os.environ.get("KEVLAR_GDB") == "1":
+        args.gdb = True
+
     # Kill any stale QEMU sessions that might be holding our ports.
     kill_stale_qemu_on_ports(FORWARDED_PORTS)
 
