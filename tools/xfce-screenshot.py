@@ -84,15 +84,16 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--init", default="/bin/test-xfce-idle",
                     help="INIT_SCRIPT path (default: /bin/test-xfce-idle)")
+    ap.add_argument("--disk", default="build/alpine-xfce.img",
+                    help="Disk image path (default: build/alpine-xfce.img; use "
+                         "build/alpine-xorg.img for kxserver)")
     ap.add_argument("--keep-running", action="store_true",
                     help="Don't kill QEMU after capture")
     args = ap.parse_args()
 
-    # Ensure the alpine-xfce image exists.
-    img_path = REPO / "build" / "alpine-xfce.img"
+    img_path = REPO / args.disk
     if not img_path.exists():
-        print(f"[xfce-shot] {img_path} missing — run `make build/alpine-xfce.img` first.",
-              file=sys.stderr)
+        print(f"[xfce-shot] {img_path} missing.", file=sys.stderr)
         return 2
 
     # Build the kernel. Default init is /bin/test-xfce-idle (full XFCE then
@@ -104,9 +105,11 @@ def main():
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for f in OUT_DIR.glob("*.ppm"):
+    # Only clean `shot-*` names; preserve user-saved screenshots with
+    # other prefixes (e.g. xorg-blue.png, kxserver-xterm.png).
+    for f in OUT_DIR.glob("shot-*.ppm"):
         f.unlink()
-    for f in OUT_DIR.glob("*.png"):
+    for f in OUT_DIR.glob("shot-*.png"):
         f.unlink()
 
     # Clean stale QMP sock.

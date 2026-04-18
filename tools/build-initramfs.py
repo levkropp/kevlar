@@ -152,6 +152,7 @@ def compile_all_local():
         ("testing/test_xfce_idle.c",     "test-xfce-idle",   []),
         ("testing/test_x11_visible.c",   "test-x11-visible", []),
         ("testing/test_xfce_direct.c",   "test-xfce-direct", []),
+        ("testing/test_kxserver_visible.c", "test-kxserver-visible", []),
         ("testing/test_kxserver.c",      "test-kxserver",    []),
         ("testing/fb0_probe.c",          "fb0-probe",        []),
     ]
