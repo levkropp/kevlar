@@ -105,6 +105,24 @@ int main(void) {
     if (chroot(ROOT) != 0) die("chroot", errno);
     if (chdir("/") != 0) die("chdir", errno);
 
+    // Replace stdin/stdout/stderr with /dev/null before exec.  Running as
+    // PID 1, the target would otherwise inherit Kevlar's serial-console
+    // tty on fd 0/1/2 — and behave differently from how Linux would run
+    // it under normal strace conditions (fd 0/1/2 = files/pipes, not TTY).
+    // Detection paths like isatty(2), ioctl(TIOCGWINSZ), or GLib's
+    // g_log_writer_supports_color() would diverge.  /dev/null gives a
+    // deterministic "not a tty" fd on both kernels.
+    //
+    // NOTE: target output is discarded.  If you need to see it, run under
+    // strace-diff which captures the syscall stream instead.
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, 0);
+        dup2(devnull, 1);
+        dup2(devnull, 2);
+        if (devnull > 2) close(devnull);
+    }
+
     char *envp[] = {
         "PATH=/usr/bin:/usr/sbin:/sbin:/bin",
         "HOME=/root", "TERM=vt100",
@@ -112,6 +130,7 @@ int main(void) {
         NULL
     };
     execve(argv[0], argv, envp);
-    die("execve", errno);
+    // Can't use die() here — stderr is /dev/null now.  The strace-diff
+    // harness will report execve failure via the syscall trace instead.
     return 1;
 }

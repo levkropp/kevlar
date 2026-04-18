@@ -334,6 +334,12 @@ TIMING_SYSCALLS = {
     "getrandom", "getentropy",
 }
 
+# Writes to stdout/stderr often contain kernel PIDs or formatted paths — the
+# byte count will differ between kernels even when the behaviour is correct.
+# Treat write/writev/pwrite to fd 1 or 2 as noise (if both succeeded with a
+# positive count).
+STDIO_WRITE_SYSCALLS = {"write", "writev", "pwrite", "pwrite64", "pwritev"}
+
 # Divergence categories.
 MATCH           = "MATCH"
 NOISE_POINTER   = "NOISE_POINTER"
@@ -399,6 +405,19 @@ def classify(lin: Dict[str, Any], kev: Dict[str, Any]) -> Tuple[str, Optional[st
         return NOISE_UID, None
     if name_l in TIMING_SYSCALLS:
         return NOISE_TIMING, None
+    if name_l in STDIO_WRITE_SYSCALLS:
+        # Writes to stdout/stderr where both succeeded with positive ret.
+        # The content (often a formatted log message containing a PID or
+        # timestamp) differs by design.  fd detection is heuristic: Kevlar's
+        # args[0] is the fd; Linux we only have args_text.
+        if isinstance(ret_l, int) and isinstance(ret_k, int) and ret_l > 0 and ret_k > 0:
+            kev_fd = kev.get("args", [None])[0] if kev.get("args") else None
+            lin_fd_looks_stdio = (lin.get("args_text", "").startswith("1,")
+                                  or lin.get("args_text", "").startswith("2,")
+                                  or lin.get("args_text", "").startswith("1 ")
+                                  or lin.get("args_text", "").startswith("2 "))
+            if (kev_fd in (1, 2)) or lin_fd_looks_stdio:
+                return NOISE_TIMING, None  # bucket into timing-ish noise
 
     return BUG_RETVAL, f"linux={ret_l} kevlar={ret_k}"
 
@@ -409,6 +428,10 @@ def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Similarly, when Linux runs via bwrap, strace captures bwrap's syscalls
     plus the target's.  Both need trimming to the LAST successful execve,
     which marks the moment the target binary actually starts.
+
+    On the Linux side we ALSO filter to only the target's PID so parent
+    (bwrap) syscalls like final wait4/read don't appear as divergences
+    from the target's perspective.
     """
     last_execve = -1
     for i, r in enumerate(records):
@@ -416,7 +439,11 @@ def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             last_execve = i
     if last_execve < 0:
         return records
-    return records[last_execve:]  # keep execve itself so both sides start aligned
+    target_pid = records[last_execve].get("pid")
+    trimmed = records[last_execve:]
+    if target_pid is not None:
+        trimmed = [r for r in trimmed if r.get("pid") in (None, target_pid)]
+    return trimmed
 
 
 def greedy_align(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
