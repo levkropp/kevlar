@@ -30,7 +30,7 @@ use super::tmpfs::TmpFs;
 
 mod metrics;
 pub mod proc_self;
-mod system;
+pub mod system;
 
 pub static PROC_FS: Once<Arc<ProcFs>> = Once::new();
 

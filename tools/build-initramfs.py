@@ -154,6 +154,7 @@ def compile_all_local():
         ("testing/test_xfce_direct.c",   "test-xfce-direct", []),
         ("testing/test_kxserver_visible.c", "test-kxserver-visible", []),
         ("testing/strace_target.c",      "strace-target",    []),
+        ("testing/auxv_dump.c",          "auxv-dump",        []),
         ("testing/test_kxserver.c",      "test-kxserver",    []),
         ("testing/fb0_probe.c",          "fb0-probe",        []),
     ]

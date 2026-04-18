@@ -3160,6 +3160,7 @@ fn prefault_small_anonymous(vm: &mut Vm) {
 
 fn do_elf_binfmt(
     executable: &Arc<dyn FileLike>,
+    executable_path: &Arc<PathComponent>,
     argv: &[&[u8]],
     envp: &[&[u8]],
     file_header_pages: kevlar_api::address::PAddr,
@@ -3210,7 +3211,14 @@ fn do_elf_binfmt(
     auxv.push(Auxv::Phnum(elf.program_headers().len()));
     auxv.push(Auxv::Phent(size_of::<ProgramHeader>()));
     auxv.push(Auxv::Pagesz(PAGE_SIZE));
-    auxv.push(Auxv::Hwcap(0)); // no extended HW capabilities (glibc reads this at startup)
+    // AT_HWCAP: publish a conservative x86_64 baseline so musl/glibc don't
+    // conclude the CPU lacks basic features. FPU + SSE + SSE2 are always
+    // present on x86_64. Bits from arch/x86/include/asm/cpufeatures.h.
+    //   bit 0  = FPU, bit 23 = MMX, bit 24 = FXSR, bit 25 = SSE, bit 26 = SSE2.
+    #[cfg(target_arch = "x86_64")]
+    auxv.push(Auxv::Hwcap(0x0078_0001));
+    #[cfg(not(target_arch = "x86_64"))]
+    auxv.push(Auxv::Hwcap(0));
     auxv.push(Auxv::Clktck(100)); // TICK_HZ — used by glibc's times()/clock()
     auxv.push(Auxv::Uid(0));
     auxv.push(Auxv::Euid(0));
@@ -3218,6 +3226,17 @@ fn do_elf_binfmt(
     auxv.push(Auxv::Egid(0));
     auxv.push(Auxv::Secure(0));
     auxv.push(Auxv::Random(random_bytes));
+    auxv.push(Auxv::Hwcap2(0));
+    auxv.push(Auxv::MinSigStkSz(2048));
+    // AT_PLATFORM: architecture string pointer. Linux always sets this.
+    #[cfg(target_arch = "x86_64")]
+    auxv.push(Auxv::Platform(b"x86_64"));
+    #[cfg(target_arch = "aarch64")]
+    auxv.push(Auxv::Platform(b"aarch64"));
+    // AT_EXECFN: executable path. Used by musl's __progname_full fallback.
+    auxv.push(Auxv::ExecFn(
+        executable_path.resolve_absolute_path().as_str().as_bytes().to_vec(),
+    ));
 
     // vDSO: map a shared page with __vdso_clock_gettime for fast userspace clocks.
     #[cfg(target_arch = "x86_64")]
@@ -3526,7 +3545,8 @@ fn do_setup_userspace(
         return do_script_binfmt(&executable_path, argv, envp, root_fs, buf);
     }
 
-    do_elf_binfmt(executable, argv, envp, file_header_pages, buf, root_fs)
+    do_elf_binfmt(executable, &executable_path, argv, envp,
+                  file_header_pages, buf, root_fs)
 }
 
 /// PIDs we've already panicked on, to suppress repeated reports

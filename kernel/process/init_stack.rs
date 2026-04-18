@@ -41,6 +41,18 @@ pub enum Auxv {
     Clktck(usize),
     /// Address of the vDSO ELF header (AT_SYSINFO_EHDR).
     SysinfoEhdr(UserVAddr),
+    /// Platform string (e.g. "x86_64") — pointer to NUL-terminated string
+    /// that's part of the aux data on the stack. Linux always sets this;
+    /// some musl code paths read it.
+    Platform(&'static [u8]),
+    /// Pathname of the executable. Provides argv[0] fallback and is used by
+    /// musl's `__progname_full`.
+    ExecFn(Vec<u8>),
+    /// Minimum required signal-stack size (AT_MINSIGSTKSZ=51). glibc 2.34+
+    /// reads this; musl ignores it but having it costs nothing.
+    MinSigStkSz(usize),
+    /// Extended hardware capabilities bitmask (AT_HWCAP2=26).
+    Hwcap2(usize),
 }
 
 fn push_bytes_to_stack(sp: &mut VAddr, stack_bottom: VAddr, buf: &[u8]) -> Result<()> {
@@ -66,6 +78,15 @@ fn push_usize_to_stack(sp: &mut VAddr, stack_bottom: VAddr, value: usize) -> Res
 fn push_aux_data_to_stack(sp: &mut VAddr, stack_bottom: VAddr, auxv: &Auxv) -> Result<()> {
     match auxv {
         Auxv::Random(values) => push_bytes_to_stack(sp, stack_bottom, values.as_slice())?,
+        Auxv::Platform(bytes) => {
+            // NUL-terminate the platform string.
+            push_bytes_to_stack(sp, stack_bottom, &[0])?;
+            push_bytes_to_stack(sp, stack_bottom, bytes)?;
+        }
+        Auxv::ExecFn(bytes) => {
+            push_bytes_to_stack(sp, stack_bottom, &[0])?;
+            push_bytes_to_stack(sp, stack_bottom, bytes.as_slice())?;
+        }
         _ => {}
     }
 
@@ -95,6 +116,10 @@ fn push_auxv_entry_to_stack(
         Auxv::Hwcap(value) => (16, *value),
         Auxv::Clktck(value) => (17, *value),
         Auxv::SysinfoEhdr(uaddr) => (33, uaddr.value()),
+        Auxv::Platform(_) => (15, data_ptr.unwrap().as_isize() as usize),
+        Auxv::ExecFn(_) => (31, data_ptr.unwrap().as_isize() as usize),
+        Auxv::MinSigStkSz(value) => (51, *value),
+        Auxv::Hwcap2(value) => (26, *value),
     };
 
     push_usize_to_stack(sp, stack_bottom, value)?;
@@ -116,6 +141,8 @@ pub(super) fn estimate_user_init_stack_size(
     let aux_data_len = auxv.iter().fold(0, |l, aux| {
         l + match aux {
             Auxv::Random(_) => 16,
+            Auxv::Platform(bytes) => bytes.len() + 1,  // + NUL
+            Auxv::ExecFn(bytes) => bytes.len() + 1,
             _ => 0,
         }
     });

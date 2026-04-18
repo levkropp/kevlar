@@ -41,4 +41,7 @@ pub struct BootInfo {
     /// line to serial — consumed by `tools/strace-diff.py` to compare
     /// Kevlar's syscall behaviour against Linux on an identical rootfs.
     pub strace_pid: Option<i32>,
+    /// Full raw kernel cmdline (as seen at boot). Exposed via /proc/cmdline
+    /// so userspace tools can inspect flags like `strace-exec=...`.
+    pub raw_cmdline: ArrayString<512>,
 }

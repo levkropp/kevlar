@@ -182,6 +182,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: None,
+        raw_cmdline: ArrayString::new(),
     }
 }
 
@@ -218,6 +219,7 @@ pub fn default_boot_info() -> BootInfo {
         init_path: None,
         debug_filter: ArrayString::new(),
         strace_pid: None,
+        raw_cmdline: ArrayString::new(),
     }
 }
 

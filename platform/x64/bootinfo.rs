@@ -137,12 +137,15 @@ struct Cmdline {
     pub init_path: Option<ArrayString<128>>,
     pub debug_filter: ArrayString<64>,
     pub strace_pid: Option<i32>,
+    pub raw_cmdline: ArrayString<512>,
 }
 
 impl Cmdline {
     pub fn parse(cmdline: &[u8]) -> Cmdline {
         let s = core::str::from_utf8(cmdline).expect("cmdline is not a utf-8 string");
         info!("cmdline: {}", if s.is_empty() { "(empty)" } else { s });
+        let mut raw_cmdline = ArrayString::<512>::new();
+        let _ = raw_cmdline.try_push_str(s);
 
         let mut pci_enabled = true;
         let mut pci_allowlist = ArrayVec::new();
@@ -268,6 +271,7 @@ impl Cmdline {
             init_path,
             debug_filter,
             strace_pid,
+            raw_cmdline,
         }
     }
 }
@@ -375,6 +379,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        raw_cmdline: cmdline.raw_cmdline,
     }
 }
 
@@ -424,6 +429,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        raw_cmdline: cmdline.raw_cmdline,
     }
 }
 
@@ -467,6 +473,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        raw_cmdline: cmdline.raw_cmdline,
     }
 }
 

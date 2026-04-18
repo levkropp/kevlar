@@ -91,6 +91,20 @@ impl FileLike for ProcFilesystemsFile {
 
 // ── /proc/cmdline ───────────────────────────────────────────────────
 
+use arrayvec::ArrayString;
+use kevlar_platform::spinlock::SpinLock;
+
+/// Raw kernel cmdline set at boot from BootInfo. Exposed to userspace via
+/// /proc/cmdline so tools like the strace-diff harness can read their args.
+static RAW_CMDLINE: SpinLock<ArrayString<512>> =
+    SpinLock::new(ArrayString::new_const());
+
+pub fn set_cmdline(s: &str) {
+    let mut g = RAW_CMDLINE.lock_no_irq();
+    g.clear();
+    let _ = g.try_push_str(s);
+}
+
 pub struct ProcCmdlineFile;
 
 impl fmt::Debug for ProcCmdlineFile {
@@ -112,16 +126,31 @@ impl FileLike for ProcCmdlineFile {
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
-        if offset > 0 {
+        // Build the full cmdline string + NL into a stack buffer, then
+        // return slice starting at `offset`. Userspace can call read() in
+        // multiple chunks if buf is smaller than the cmdline.
+        let guard = RAW_CMDLINE.lock_no_irq();
+        let s = if guard.is_empty() { "kevlar" } else { guard.as_str() };
+        let total = s.len() + 1; // + newline
+        if offset >= total {
             return Ok(0);
         }
-
-        // Provide a minimal kernel command line.
-        let s = "kevlar\n";
-        let len = core::cmp::min(s.len(), buf.len());
+        let remaining = total - offset;
+        let len = core::cmp::min(remaining, buf.len());
         let mut writer = UserBufWriter::from(buf);
-        writer.write_bytes(&s.as_bytes()[..len])?;
-        Ok(len)
+        let mut written = 0;
+        // Copy s (starting at offset) and then NL if we reach the end.
+        if offset < s.len() {
+            let take = core::cmp::min(s.len() - offset, len);
+            writer.write_bytes(&s.as_bytes()[offset..offset + take])?;
+            written += take;
+        }
+        if written < len {
+            // Emit the trailing newline.
+            writer.write_bytes(b"\n")?;
+            written += 1;
+        }
+        Ok(written)
     }
 }
 

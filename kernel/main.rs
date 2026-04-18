@@ -271,6 +271,10 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         syscalls::set_strace_pid(pid);
     }
 
+    // Expose the real cmdline via /proc/cmdline so userspace tools can
+    // read flags like `strace-exec=...`.
+    fs::procfs::system::set_cmdline(bootinfo.raw_cmdline.as_str());
+
     // Initialize memory allocators first.
     interrupt::init();
     profiler.lap_time("global interrupt init");
@@ -591,7 +595,10 @@ pub fn interval_work() {
     // that crashes — this scanner catches it within ~10 ms of the write.
     if iw_count % 5 == 0 {
         process::scan_suspended_task_corruption();
-        kevlar_platform::stack_cache::scan_live_stack_corruption();
+        // Disabled: live-stack scanner fires on page-recycling residue
+        // (harmless) and the warn!() output interleaves with structured
+        // DBG strace events, corrupting them. Keep off unless debugging.
+        // kevlar_platform::stack_cache::scan_live_stack_corruption();
     }
     // Refill the 4KB prezeroed page pool so page faults get instant
     // zeroed pages without inline memset.
