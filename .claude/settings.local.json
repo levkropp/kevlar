@@ -20,7 +20,9 @@
       "WebFetch(domain:git.kernel.org)",
       "WebFetch(domain:www.phoronix.com)",
       "WebFetch(domain:codebrowser.dev)",
-      "WebFetch(domain:lxr.linux.no)"
+      "WebFetch(domain:lxr.linux.no)",
+      "Bash(rm .git/index.lock)",
+      "Bash(git commit -m 'x64: cld in syscall_entry / interrupt_common — fix DF=1 stack corruption *)"
     ]
   }
 }

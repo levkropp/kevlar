@@ -1,0 +1,7 @@
+warning: Loadable section ".eh_frame_hdr" outside of ELF segments
+  in /home/fw/kevlar/target/x64-unwind/debug/kevlar_kernel
+0x000000000000fff0 in ?? ()
+Function "rust_begin_unwind" not defined.
+/tmp/kdebug.gdb:12: Error in sourced command file:
+Argument required (one or more breakpoint numbers).
+[Inferior 1 (process 1) detached]

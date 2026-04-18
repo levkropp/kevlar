@@ -60,7 +60,8 @@ _STRACE_LINE_RE = re.compile(
     (?P<args>.*)                           # args (may contain escapes/strings)
     \)
     \s*=\s*
-    (?P<ret>-?\d+|\?|0x[0-9a-fA-F]+)       # return value, ?, or hex (mmap etc.)
+    (?P<ret>0x[0-9a-fA-F]+|-?\d+|\?)       # return value: hex first so "0x7f..." doesn't
+                                           # match as literal "0"
     (?:\s*(?P<errno>[A-Z_]+)\s*\([^)]*\))? # optional errno + description
     """,
     re.VERBOSE,
@@ -210,7 +211,15 @@ def run_linux_native(cmd: List[str], out_path: Path,
         # bwrap: unprivileged namespace.  We run `strace` OUTSIDE bwrap,
         # tracing bwrap and all descendants (-f follows forks/execs into the
         # namespace).  This avoids needing strace inside the Alpine rootfs.
+        #
+        # We explicitly clear the environment (bwrap preserves host env by
+        # default) and set ONLY what the Kevlar `strace-target` wrapper also
+        # sets — HOME, PATH, TERM, LANG, LC_ALL.  Otherwise host vars like
+        # DISPLAY=:1, DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR leak through
+        # and cause the Linux trace to make X11 / D-Bus syscalls that Kevlar
+        # would never attempt.  Matching envs is essential for a fair diff.
         inner = [
+            "env", "-i",  # start with NO env
             "bwrap",
             "--bind", str(rootfs), "/",
             "--dev", "/dev",
@@ -223,6 +232,7 @@ def run_linux_native(cmd: List[str], out_path: Path,
             "--die-with-parent",
             "--setenv", "PATH", "/usr/bin:/usr/sbin:/bin:/sbin",
             "--setenv", "HOME", "/root",
+            "--setenv", "TERM", "vt100",
             "--setenv", "LANG", "C",
             "--setenv", "LC_ALL", "C",
             "--",
@@ -298,43 +308,99 @@ def run_kevlar(init_path: str, out_path: Path, disk: Path, cmd: List[str],
 
 # ─── Alignment + diff ───────────────────────────────────────────────────
 
-def normalize_ret(r: Optional[int]) -> Optional[int]:
-    """Normalize return values so Linux and Kevlar compare consistently.
-    Linux: negative errno is surfaced as errno name. Kevlar: negative errno
-    is `result` with `errno` field set."""
-    if r is None:
-        return None
-    return r
+# Syscalls whose return value is a *memory pointer* — different between runs
+# by design (ASLR, kernel layout). As long as both succeeded, divergence is
+# noise.
+POINTER_RET_SYSCALLS = {
+    "mmap", "mmap2", "brk", "mremap", "shmat", "mmap_pgoff",
+}
+
+# Syscalls whose return value is a *PID-like kernel identifier* — varies by
+# process numbering. Noise if both return positive.
+PID_RET_SYSCALLS = {
+    "set_tid_address", "getpid", "gettid", "getppid", "fork", "vfork",
+    "clone", "clone3", "getpgid", "getpgrp", "getsid",
+}
+
+# Syscalls whose return value is a user/group ID — the test runs as uid=0 on
+# Kevlar and as the host user on Linux by design.
+UID_GID_SYSCALLS = {
+    "getuid", "geteuid", "getgid", "getegid", "getresuid", "getresgid",
+}
+
+# Syscalls where timing / random data is expected to differ.
+TIMING_SYSCALLS = {
+    "clock_gettime", "clock_gettime64", "gettimeofday", "time",
+    "getrandom", "getentropy",
+}
+
+# Divergence categories.
+MATCH           = "MATCH"
+NOISE_POINTER   = "NOISE_POINTER"
+NOISE_PID       = "NOISE_PID"
+NOISE_UID       = "NOISE_UID"
+NOISE_TIMING    = "NOISE_TIMING"
+BUG_NAME        = "BUG_NAME"
+BUG_ERRNO       = "BUG_ERRNO"
+BUG_RETVAL      = "BUG_RETVAL"
+
+IS_NOISE = {NOISE_POINTER, NOISE_PID, NOISE_UID, NOISE_TIMING}
+IS_BUG   = {BUG_NAME, BUG_ERRNO, BUG_RETVAL}
 
 
-def compare_entries(lin: Dict[str, Any], kev: Dict[str, Any]) -> List[str]:
-    """Return a list of human-readable differences, empty if compatible."""
-    diffs: List[str] = []
-    if lin["name"] != kev["name"]:
-        diffs.append(f"name:  linux={lin['name']}  kevlar={kev['name']}")
-        return diffs  # everything else meaningless once names diverge
+def classify(lin: Dict[str, Any], kev: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    """Classify a single (linux, kevlar) call pair into MATCH / NOISE_* / BUG_*.
 
-    # Compare return values. Linux treats -1 as "call failed, see errno".
-    # Kevlar uses negative errno directly as result. Normalize.
-    lin_ret = normalize_ret(lin.get("ret"))
-    kev_ret = normalize_ret(kev.get("ret"))
-    lin_err = lin.get("errno")
-    kev_err = kev.get("errno")
+    Returns (category, detail).  The detail is a human-readable summary for
+    bug categories; None for MATCH/NOISE.
+    """
+    name_l, name_k = lin["name"], kev["name"]
+    if name_l != name_k:
+        return BUG_NAME, f"linux={name_l} kevlar={name_k}"
 
-    if lin_err or kev_err:
-        if lin_err != kev_err:
-            diffs.append(f"errno: linux={lin_err}  kevlar={kev_err}")
-    else:
-        if lin_ret != kev_ret:
-            diffs.append(f"ret:   linux={lin_ret}  kevlar={kev_ret}")
+    errno_l = lin.get("errno")
+    errno_k = kev.get("errno")
+    ret_l   = lin.get("ret")
+    ret_k   = kev.get("ret")
 
-    # Arg comparison is best-effort: Kevlar sees raw integers, Linux sees
-    # symbolic flags/strings. We can only sanity-check argument COUNT.
-    if kev.get("args") is not None and len(kev["args"]) >= 6:
-        # Both ran — fine.
-        pass
+    # On Kevlar a failed syscall has ret<0 and errno set.  On Linux strace,
+    # the ret is -1 and errno is the name.  Normalize to "error vs ok".
+    lin_failed = errno_l is not None or (isinstance(ret_l, int) and ret_l == -1)
+    kev_failed = errno_k is not None
 
-    return diffs
+    if lin_failed != kev_failed:
+        detail = (f"linux={'FAIL ' + (errno_l or '?') if lin_failed else 'ok('+str(ret_l)+')'}"
+                  f"  kevlar={'FAIL ' + (errno_k or '?') if kev_failed else 'ok('+str(ret_k)+')'}")
+        return BUG_ERRNO, detail
+
+    if lin_failed:
+        # Both failed.  Only the errno name matters — Linux strace normalizes
+        # the ret to -1 while Kevlar uses the raw -errno, so the *number*
+        # will differ but both represent the same error.
+        if errno_l != errno_k:
+            return BUG_ERRNO, f"linux_errno={errno_l} kevlar_errno={errno_k}"
+        return MATCH, None
+
+    # Both succeeded.  If returns literally match, we're done.
+    if ret_l == ret_k:
+        return MATCH, None
+
+    # Same name, same outcome, different return values — classify as noise
+    # where the kernel ABI says variance is expected.
+    if name_l in POINTER_RET_SYSCALLS:
+        if (isinstance(ret_l, int) and isinstance(ret_k, int)
+                and ret_l > 0x10000 and ret_k > 0x10000):
+            return NOISE_POINTER, None
+    if name_l in PID_RET_SYSCALLS:
+        if (isinstance(ret_l, int) and isinstance(ret_k, int)
+                and ret_l >= 0 and ret_k >= 0):
+            return NOISE_PID, None
+    if name_l in UID_GID_SYSCALLS:
+        return NOISE_UID, None
+    if name_l in TIMING_SYSCALLS:
+        return NOISE_TIMING, None
+
+    return BUG_RETVAL, f"linux={ret_l} kevlar={ret_k}"
 
 
 def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -353,50 +419,133 @@ def trim_to_last_execve(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return records[last_execve:]  # keep execve itself so both sides start aligned
 
 
+def greedy_align(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
+                 lookahead: int = 6
+                 ) -> List[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]]:
+    """Walk both sequences in lockstep; when names diverge, look ahead a few
+    entries on each side to find a match and skip the side that's behind.
+    Entries with no counterpart become (entry, None) or (None, entry).
+    """
+    out: List[Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = []
+    i = 0
+    j = 0
+    while i < len(linux) and j < len(kevlar):
+        if linux[i]["name"] == kevlar[j]["name"]:
+            out.append((linux[i], kevlar[j]))
+            i += 1
+            j += 1
+            continue
+        # Names differ.  Try to find the nearest match within lookahead.
+        # Prefer the smaller skip (minimum total i+j advance).
+        best = None
+        for di in range(0, lookahead + 1):
+            for dj in range(0, lookahead + 1):
+                if di == 0 and dj == 0:
+                    continue
+                if i + di >= len(linux) or j + dj >= len(kevlar):
+                    continue
+                if linux[i + di]["name"] == kevlar[j + dj]["name"]:
+                    cost = di + dj
+                    if best is None or cost < best[0]:
+                        best = (cost, di, dj)
+        if best is None:
+            # No realignment found — emit both as unpaired and advance.
+            out.append((linux[i], None))
+            out.append((None, kevlar[j]))
+            i += 1
+            j += 1
+            continue
+        # Emit skipped entries unpaired, then the matching pair.
+        _, di, dj = best
+        for k in range(di):
+            out.append((linux[i + k], None))
+        for k in range(dj):
+            out.append((None, kevlar[j + k]))
+        out.append((linux[i + di], kevlar[j + dj]))
+        i += di + 1
+        j += dj + 1
+    while i < len(linux):
+        out.append((linux[i], None))
+        i += 1
+    while j < len(kevlar):
+        out.append((None, kevlar[j]))
+        j += 1
+    return out
+
+
 def align_and_diff(linux: List[Dict[str, Any]], kevlar: List[Dict[str, Any]],
                    max_diffs: int = 20) -> None:
-    """Print aligned comparison up to `max_diffs` divergences."""
+    """Print aligned comparison.  Groups by classification: MATCH, NOISE
+    (expected divergence — pointer/PID/UID/timing), and BUG (real contract
+    gap).  Only BUG lines block the goal of "semantic ABI compatibility"."""
     linux = trim_to_last_execve(linux)
     kevlar = trim_to_last_execve(kevlar)
-    print(f"# Alignment summary")
-    print(f"  linux   calls: {len(linux)}")
-    print(f"  kevlar  calls: {len(kevlar)}")
+
+    pairs = greedy_align(linux, kevlar)
+
+    counts: Dict[str, int] = {}
+    bugs: List[Tuple[int, Dict[str, Any], Dict[str, Any], str, str]] = []
+    n = 0
+
+    for i, (lp, kp) in enumerate(pairs):
+        if lp is None or kp is None:
+            # Unpaired entry — one side ran this call and the other didn't.
+            # Classify as BUG_NAME with a special detail.
+            missing = "kevlar" if lp else "linux"
+            ran = lp or kp
+            counts[BUG_NAME] = counts.get(BUG_NAME, 0) + 1
+            bugs.append((i, lp or ran, kp or ran, BUG_NAME,
+                         f"{missing} did not make this call: {ran['name']}"))
+            continue
+        n += 1
+        category, detail = classify(lp, kp)
+        counts[category] = counts.get(category, 0) + 1
+        if category in IS_BUG:
+            bugs.append((i, lp, kp, category, detail or ""))
+
+    print(f"# Kevlar/Linux syscall diff — {n} aligned calls")
+    print(f"  linux  trace : {len(linux)} calls  kevlar trace : {len(kevlar)} calls")
+    print()
+    print(f"## Classification")
+    match   = counts.get(MATCH, 0)
+    noise   = sum(counts.get(c, 0) for c in IS_NOISE)
+    bug_ct  = sum(counts.get(c, 0) for c in IS_BUG)
+    print(f"  MATCH           {match:5d}  — Linux and Kevlar agreed")
+    print(f"  NOISE (total)   {noise:5d}  — allowed variance (pointers/PIDs/UIDs/time)")
+    for c in (NOISE_POINTER, NOISE_PID, NOISE_UID, NOISE_TIMING):
+        v = counts.get(c, 0)
+        if v: print(f"    {c:<16} {v:5d}")
+    print(f"  BUG   (total)   {bug_ct:5d}  — real contract gap")
+    for c in (BUG_NAME, BUG_ERRNO, BUG_RETVAL):
+        v = counts.get(c, 0)
+        if v: print(f"    {c:<16} {v:5d}")
     print()
 
-    n = min(len(linux), len(kevlar))
-    diffs_found = 0
-    matches = 0
-    printed_limit = False
-
-    for i in range(n):
-        ld = linux[i]
-        kd = kevlar[i]
-        issues = compare_entries(ld, kd)
-        if not issues:
-            matches += 1
-            continue
-        if diffs_found < max_diffs:
-            print(f"#{i:4d}  name={ld['name']}")
-            for iss in issues:
-                print(f"       {iss}")
-            # Raw args for debugging
+    if bugs:
+        print(f"## First {min(len(bugs), max_diffs)} contract bugs")
+        for idx, (i, ld, kd, cat, detail) in enumerate(bugs[:max_diffs]):
+            print(f"#{i:4d}  [{cat}] {ld['name']}")
+            print(f"       {detail}")
             if ld.get("args_text"):
-                print(f"       linux args: {ld['args_text'][:200]}")
+                print(f"       linux args : {ld['args_text'][:180]}")
             if kd.get("args") is not None:
-                args_str = ", ".join(f"{a:#x}" if isinstance(a, int) else repr(a)
+                args_str = ", ".join(f"{a:#x}" if isinstance(a, int) and a > 255 else repr(a)
                                      for a in kd['args'][:6])
                 print(f"       kevlar args: [{args_str}]")
             print()
-        elif not printed_limit:
-            print(f"... {max_diffs} diffs shown, more suppressed; use --max-diffs to see more")
-            printed_limit = True
-        diffs_found += 1
+        if len(bugs) > max_diffs:
+            print(f"... {len(bugs) - max_diffs} more bugs; use --max-diffs to see")
+    else:
+        print(f"## 🟢 No contract bugs in the first {n} aligned calls.")
+        print(f"   All divergences are in the ABI's allowed variance set.")
 
-    print(f"# Totals: {matches} matching, {diffs_found} diverging "
-          f"out of {n} aligned calls.")
     if len(linux) != len(kevlar):
-        print(f"# Trace lengths differ by {abs(len(linux) - len(kevlar))} — "
-              f"drift is real (e.g. Kevlar retrying or skipping calls).")
+        delta = abs(len(linux) - len(kevlar))
+        longer = "linux" if len(linux) > len(kevlar) else "kevlar"
+        print()
+        print(f"# Trace length differs by {delta} ({longer} is longer).")
+        print(f"# This means one side ran more syscalls than the other — if the")
+        print(f"# first N matched, the divergence starts around call #{n}.")
 
 
 # ─── Main ───────────────────────────────────────────────────────────────

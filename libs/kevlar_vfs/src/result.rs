@@ -57,6 +57,7 @@ pub enum Errno {
 
     EAFNOSUPPORT = 97,
     EADDRINUSE = 98,
+    ENOTSOCK = 88,
     EADDRNOTAVAIL = 99,
     ENETDOWN = 100,
     ENETUNREACH = 101,
@@ -124,6 +125,7 @@ impl Errno {
             Errno::ENOBUFS => "ENOBUFS",
             Errno::EISCONN => "EISCONN",
             Errno::ENOTCONN => "ENOTCONN",
+            Errno::ENOTSOCK => "ENOTSOCK",
             Errno::ECONNREFUSED => "ECONNREFUSED",
             Errno::EALREADY => "EALREADY",
             Errno::EINPROGRESS => "EINPROGRESS",

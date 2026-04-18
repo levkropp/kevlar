@@ -269,40 +269,46 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
     }
 
     // --- Socket-specific methods (Phase 3: move to SocketOps trait) ---
+    //
+    // Default returns ENOTSOCK ("fd is valid but not a socket").  Linux
+    // returns ENOTSOCK in this situation, NOT EBADF — EBADF is reserved for
+    // "fd does not refer to any open file".  By the time syscall dispatch
+    // calls these, the fd has already been resolved to a FileLike, so it IS
+    // open; what's missing is the socket type.
 
     /// `bind(2)`.
     fn bind(&self, _sockaddr: SockAddr) -> Result<()> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `shutdown(2)`.
     fn shutdown(&self, _how: ShutdownHow) -> Result<()> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `listen(2)`.
     fn listen(&self, _backlog: i32) -> Result<()> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `getsockname(2)`.
     fn getsockname(&self) -> Result<SockAddr> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `getpeername(2)`.
     fn getpeername(&self) -> Result<SockAddr> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `accept(2)`.
     fn accept(&self, _options: &OpenOptions) -> Result<(Arc<dyn FileLike>, SockAddr)> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `connect(2)`.
     fn connect(&self, _sockaddr: SockAddr, _options: &OpenOptions) -> Result<()> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `sendto(2)`.
@@ -312,7 +318,7 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         _sockaddr: Option<SockAddr>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 
     /// `recvfrom(2)`.
@@ -322,7 +328,7 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
         _flags: RecvFromFlags,
         _options: &OpenOptions,
     ) -> Result<(usize, SockAddr)> {
-        Err(Error::new(Errno::EBADF))
+        Err(Error::new(Errno::ENOTSOCK))
     }
 }
 
