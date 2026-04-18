@@ -24,6 +24,15 @@ syscall_entry:
     // has occurred in the kernel mode and SWAPGS won't be performed.
     swapgs
 
+    // Clear DF: x86_64 SysV ABI requires DF=0 across function calls, but
+    // user code is allowed to set it (e.g., glibc memmove for backward
+    // copy uses std + rep movsb + cld; a signal interrupting between std
+    // and cld would enter the kernel with DF=1). Without cld here, kernel
+    // `rep stosb`/`rep movsb` (used by memset/memcpy) would run backward,
+    // corrupting memory BELOW the intended target — including saved RIP
+    // slots on the kernel stack. Linux does the same.
+    cld
+
     // Switch to the kernel stack.
     mov gs:[GS_RSP3], rsp
     mov rsp, gs:[GS_RSP0]

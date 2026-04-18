@@ -58,6 +58,12 @@ interrupt_common:
     jz 1f
     swapgs
 1:
+    // Clear DF unconditionally: a kernel-mode interrupt can fire while a
+    // kernel function is mid-way through a `rep movsb`/`rep stosb` (DF=0)
+    // or a userspace function set DF=1 before being interrupted. The kernel
+    // ABI requires DF=0 in handler bodies, and our memcpy/memset rely on it.
+    cld
+
     // Save RDI and set the IRQ number to RDI at once.
     xchg rdi, [rsp]
 

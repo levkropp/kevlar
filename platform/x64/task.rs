@@ -633,14 +633,46 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     // Fill an invalid value for now: must be initialized in interrupt handlers.
     head.rsp3 = 0xbaad_5a5a_5b5b_baad;
 
-    // Sanity check: verify the return address on next's saved stack is valid.
+    // Sanity check: verify all 8 popped slots on next's saved stack are valid.
+    // do_switch_thread pops rbp, rbx, r12-r15, rflags, ret_addr — 8 qwords.
+    // If any is GUARD_MAGIC, the saved RSP is in a stack's guard region
+    // (stack overflow OR use-after-free of a freed-and-reissued stack).
     let next_rsp_val = unsafe { *next.rsp.get() };
     if next_rsp_val != 0 && next_rsp_val >= 0xffff_8000_0000_0000 {
-        let ret_addr = unsafe { *((next_rsp_val + 56) as *const u64) };
-        if ret_addr == 0 || (ret_addr > 0 && ret_addr < 0xffff_8000_0000_0000) {
+        const GUARD_MAGIC: u64 = 0xDEAD_CAFE_DEAD_CAFE;
+        let slots: [u64; 8] = unsafe {
+            [
+                *((next_rsp_val      ) as *const u64), // rbp
+                *((next_rsp_val +  8) as *const u64),  // rbx
+                *((next_rsp_val + 16) as *const u64),  // r12
+                *((next_rsp_val + 24) as *const u64),  // r13
+                *((next_rsp_val + 32) as *const u64),  // r14
+                *((next_rsp_val + 40) as *const u64),  // r15
+                *((next_rsp_val + 48) as *const u64),  // rflags
+                *((next_rsp_val + 56) as *const u64),  // ret_addr
+            ]
+        };
+        let ret_addr = slots[7];
+        let any_guard = slots.iter().any(|&v| v == GUARD_MAGIC);
+        let bad_ret = ret_addr == 0
+            || (ret_addr > 0 && ret_addr < 0xffff_8000_0000_0000);
+        if any_guard || bad_ret {
+            // Dump the kernel-stack base + offset of saved RSP to identify
+            // whether the corruption is in a guard region.
+            let kstack_base = next.kernel_stack.as_ref()
+                .map(|s| s.as_vaddr().value() as u64).unwrap_or(0);
+            let kstack_off = if kstack_base != 0 {
+                next_rsp_val.wrapping_sub(kstack_base)
+            } else { 0 };
             panic!(
-                "switch_thread BUG: cpu={} rsp={:#x} ret={:#x}",
-                crate::arch::cpu_id(), next_rsp_val, ret_addr,
+                "switch_thread BUG: cpu={} next.rsp={:#x} kstack_base={:#x} \
+                 saved_rsp_off={:#x} guard?={} bad_ret?={} \
+                 slots: rbp={:#x} rbx={:#x} r12={:#x} r13={:#x} \
+                 r14={:#x} r15={:#x} rflags={:#x} ret={:#x}",
+                crate::arch::cpu_id(), next_rsp_val, kstack_base, kstack_off,
+                any_guard, bad_ret,
+                slots[0], slots[1], slots[2], slots[3],
+                slots[4], slots[5], slots[6], slots[7],
             );
         }
     }
