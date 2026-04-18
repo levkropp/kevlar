@@ -28,6 +28,7 @@ pub fn scheduler_is_empty() -> bool {
     scheduler::runqueue_len() == 0
 }
 
+pub use self::process::scan_suspended_task_corruption;
 use self::scheduler::Scheduler;
 
 cpu_local! {

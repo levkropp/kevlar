@@ -575,6 +575,14 @@ pub fn interval_work() {
     let _ = iw_count;
 
     process::gc_exited_processes();
+    // Catch the XFCE stack-corruption bug at the moment of corruption:
+    // walk every suspended task and verify its saved-by-do_switch_thread
+    // RIP is a valid kernel pointer. A kernel stack zeroed by a stale
+    // user-TLB write produces saved_rip=0/2 long before the switch_in
+    // that crashes — this scanner catches it within ~10 ms of the write.
+    if iw_count % 5 == 0 {
+        process::scan_suspended_task_corruption();
+    }
     // Refill the 4KB prezeroed page pool so page faults get instant
     // zeroed pages without inline memset.
     kevlar_platform::page_allocator::refill_prezeroed_pages();

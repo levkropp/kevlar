@@ -3529,6 +3529,86 @@ fn do_setup_userspace(
     do_elf_binfmt(executable, argv, envp, file_header_pages, buf, root_fs)
 }
 
+/// PIDs we've already panicked on, to suppress repeated reports
+/// (TASK CORRUPT panics).
+static LAST_BAD_PIDS: SpinLock<arrayvec::ArrayVec<(i32, u64), 32>> =
+    SpinLock::new(arrayvec::ArrayVec::new_const());
+
+/// Scan every suspended task's saved kernel-stack context for the
+/// "RIP=0/2 + RBP=0" corruption signature that masks the XFCE crash.
+/// To filter out the BlockedSignalable-but-still-racing window between
+/// set_state and switch(), we require the bad context to PERSIST for
+/// at least 2 consecutive scans on the same (pid, rip) tuple.
+pub fn scan_suspended_task_corruption() {
+    let pids: alloc::vec::Vec<(PId, alloc::sync::Arc<Process>)> = {
+        let table = PROCESSES.lock();
+        table.iter().map(|(pid, p)| (*pid, p.clone())).collect()
+    };
+    let mut new_bad: arrayvec::ArrayVec<(i32, u64), 32> = arrayvec::ArrayVec::new();
+    for (pid, proc) in pids {
+        // Only check non-running tasks. A task that's currently executing
+        // on a CPU has its real RSP/RIP in registers, not in the saved
+        // ArchTask context.
+        if !matches!(proc.state(), ProcessState::BlockedSignalable | ProcessState::Stopped(_)) {
+            continue;
+        }
+        if let Some((rsp, rip, rbp)) = proc.arch.saved_context_summary() {
+            // Saved RIP must be a kernel-text pointer (high half).
+            // RBP can be anything — even 0 at thread-entry — so we
+            // only check RIP.
+            if rip < 0xffff_8000_0000_0000 || rip > 0xffff_8fff_ffff_ffff {
+                let owner = proc.arch.rsp_in_owned_stack(rsp);
+                // Skip false-positives: if saved_rsp doesn't point into
+                // any stack this task owns, the value is dangling
+                // (stale from a previous incarnation) and not a real
+                // corruption signal.
+                if owner.is_none() {
+                    continue;
+                }
+                // Was this same (pid, rsp) reported as bad on the
+                // previous scan tick? If yes, the corruption has
+                // persisted across at least one full scan interval —
+                // confidently real. If not, file it for next scan.
+                let prior_bad = LAST_BAD_PIDS.lock_no_irq()
+                    .iter().any(|&(p, r)| p == pid.as_i32() && r == rsp);
+                if !prior_bad {
+                    if !new_bad.is_full() {
+                        new_bad.push((pid.as_i32(), rsp));
+                    }
+                    continue;
+                }
+                let paddr = proc.arch.kernel_stack_paddr()
+                    .map(|p| p.value()).unwrap_or(0);
+                log::warn!(
+                    "TASK CORRUPT (PERSISTENT): pid={} state={:?} \
+                     saved_rsp={:#x} in_stack={:?} saved_rip={:#x} \
+                     saved_rbp={:#x} kstack_paddr={:#x}",
+                    pid.as_i32(), proc.state(), rsp, owner, rip, rbp, paddr,
+                );
+                #[allow(unsafe_code)]
+                unsafe {
+                    for i in 0..8 {
+                        let v = *((rsp + (i * 8) as u64) as *const u64);
+                        log::warn!("  [rsp+{:#04x}] = {:#018x}", i * 8, v);
+                    }
+                }
+                panic!("TASK CORRUPT: pid={} saved_rip={:#x}", pid.as_i32(), rip);
+            }
+        }
+    }
+    // Update the "previously seen bad" list so a corruption persisting
+    // across two consecutive scans triggers the panic.
+    {
+        let mut last = LAST_BAD_PIDS.lock_no_irq();
+        last.clear();
+        for entry in new_bad.iter() {
+            if !last.is_full() {
+                last.push(*entry);
+            }
+        }
+    }
+}
+
 pub fn gc_exited_processes() {
     // Free resources (kernel stacks, vDSO pages) of exited-and-reaped
     // processes. Swap the list out under the lock; drop the Arcs AFTER

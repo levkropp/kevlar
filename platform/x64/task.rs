@@ -65,6 +65,68 @@ impl ArchTask {
         self.kernel_stack.is_none()
     }
 
+    /// Read the saved-by-do_switch_thread context frame at the task's stored
+    /// RSP. Returns Some((saved_rsp, saved_rip, saved_rbp)) on success,
+    /// or None if not safely readable / data is racing under us.
+    pub fn saved_context_summary(&self) -> Option<(u64, u64, u64)> {
+        use core::sync::atomic::Ordering;
+        // Only trust the saved context when do_switch_thread has finished
+        // writing it.
+        if !self.context_saved.load(Ordering::Acquire) {
+            return None;
+        }
+        let rsp = unsafe { *self.rsp.get() };
+        if rsp == 0 || rsp < 0xffff_8000_0000_0000 {
+            return None;
+        }
+        // Double-read with a fence in between — if the task is actually
+        // running on another CPU (state racing), the stack content
+        // changes between reads. Only return if BOTH reads agree.
+        unsafe {
+            let rip1 = *((rsp + 7 * 8) as *const u64);
+            let rbp1 = *(rsp as *const u64);
+            core::sync::atomic::fence(Ordering::SeqCst);
+            // Re-check rsp didn't move (another switch happened) and
+            // re-check we still trust context_saved.
+            let rsp2 = *self.rsp.get();
+            if rsp2 != rsp { return None; }
+            if !self.context_saved.load(Ordering::Acquire) { return None; }
+            let rip2 = *((rsp + 7 * 8) as *const u64);
+            let rbp2 = *(rsp as *const u64);
+            if rip1 != rip2 || rbp1 != rbp2 {
+                // Stack content changed between reads — task is racing.
+                return None;
+            }
+            Some((rsp, rip2, rbp2))
+        }
+    }
+
+    /// Returns the physical base of the kernel stack (for diagnostics).
+    pub fn kernel_stack_paddr(&self) -> Option<PAddr> {
+        self.kernel_stack.as_ref().map(|s| **s)
+    }
+
+    /// Returns true if the given kernel VA is within any of this task's
+    /// allocated stacks (kernel/interrupt/syscall). Used by the
+    /// corruption detector to distinguish "saved RSP points into a
+    /// stack we own" from "saved RSP is garbage / dangling pointer".
+    pub fn rsp_in_owned_stack(&self, vaddr: u64) -> Option<&'static str> {
+        const KERNEL_BASE: u64 = 0xffff_8000_0000_0000;
+        for (label, stack, num_pages) in [
+            ("kernel_stack", self.kernel_stack.as_ref(), KERNEL_STACK_SIZE),
+            ("interrupt_stack", self.interrupt_stack.as_ref(), 2 * 4096),
+            ("syscall_stack", self.syscall_stack.as_ref(), 2 * 4096),
+        ] {
+            if let Some(s) = stack {
+                let base = (**s).value() as u64 + KERNEL_BASE;
+                if vaddr >= base && vaddr < base + num_pages as u64 {
+                    return Some(label);
+                }
+            }
+        }
+        None
+    }
+
     /// Eagerly release kernel stacks back to the allocator.
     ///
     /// Called from `switch()` after context-switching away from an exiting task.
