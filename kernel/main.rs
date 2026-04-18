@@ -262,6 +262,15 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     };
     debug::init(debug_str);
 
+    // Per-PID structured syscall trace: when `strace-pid=N` is on the
+    // cmdline, every syscall PID N makes is emitted as a JSONL event
+    // to serial. Consumed by `tools/strace-diff.py` to compare Kevlar
+    // syscall behaviour against Linux on the same rootfs.
+    if let Some(pid) = bootinfo.strace_pid {
+        info!("strace: enabling structured trace for pid={}", pid);
+        syscalls::set_strace_pid(pid);
+    }
+
     // Initialize memory allocators first.
     interrupt::init();
     profiler.lap_time("global interrupt init");

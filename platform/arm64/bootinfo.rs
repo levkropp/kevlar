@@ -181,6 +181,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         cpu_mpdirs,
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
+        strace_pid: None,
     }
 }
 
@@ -216,6 +217,7 @@ pub fn default_boot_info() -> BootInfo {
         cpu_mpdirs: ArrayVec::new(),
         init_path: None,
         debug_filter: ArrayString::new(),
+        strace_pid: None,
     }
 }
 

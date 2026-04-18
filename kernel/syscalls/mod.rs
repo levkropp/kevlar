@@ -852,8 +852,13 @@ impl<'a> SyscallHandler<'a> {
         // Trace all syscalls for the target PID
         let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid;
         if do_strace {
-            warn!("STRACE[{}] → {}(fd={}, {:#x}, {:#x})",
-                strace_pid, syscall_name_by_number(n), a1, a2, a3);
+            // Structured JSONL event for tools/strace-diff.py.
+            debug::emit_force(&DebugEvent::SyscallEntry {
+                pid: strace_pid,
+                name: syscall_name_by_number(n),
+                number: n,
+                args: [a1, a2, a3, a4, a5, a6],
+            });
         }
 
         // Lean dispatch: skip accounting overhead for trivial read-only syscalls.
@@ -868,8 +873,17 @@ impl<'a> SyscallHandler<'a> {
 
             // strace result
             if do_strace {
-                let rv = match &ret { Ok(v) => *v, Err(e) => -(e.errno() as isize) };
-                warn!("STRACE[{}] ← {}() = {}", strace_pid, syscall_name_by_number(n), rv);
+                let (result, errno) = match &ret {
+                    Ok(v) => (*v as isize, None),
+                    Err(e) => (-(e.errno() as isize), Some(e.errno_name())),
+                };
+                debug::emit_force(&DebugEvent::SyscallExit {
+                    pid: strace_pid,
+                    name: syscall_name_by_number(n),
+                    number: n,
+                    result,
+                    errno,
+                });
             }
 
             #[cfg(feature = "ktrace-syscall")]
@@ -976,13 +990,25 @@ impl<'a> SyscallHandler<'a> {
                 });
             }
             if do_strace {
-                warn!("STRACE[{}] ← {}() = -{}", strace_pid, syscall_name_by_number(n), err.errno_name());
+                debug::emit_force(&DebugEvent::SyscallExit {
+                    pid: strace_pid,
+                    name: syscall_name_by_number(n),
+                    number: n,
+                    result: -(err.errno() as isize),
+                    errno: Some(err.errno_name()),
+                });
             }
             err
         });
         if do_strace {
             if let Ok(v) = &ret {
-                warn!("STRACE[{}] ← {}() = {}", strace_pid, syscall_name_by_number(n), v);
+                debug::emit_force(&DebugEvent::SyscallExit {
+                    pid: strace_pid,
+                    name: syscall_name_by_number(n),
+                    number: n,
+                    result: *v as isize,
+                    errno: None,
+                });
             }
         }
 

@@ -167,8 +167,10 @@ impl<'a> DebugEvent<'a> {
         w.write_str("DBG ")?;
         match self {
             DebugEvent::SyscallEntry { pid, name, number, args } => {
+                // Decimal args so the line parses as valid JSON. Consumers
+                // can re-interpret ints as pointers/flags as needed.
                 write!(w,
-                    r#"{{"type":"syscall_entry","pid":{},"name":"{}","nr":{},"args":[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}]}}"#,
+                    r#"{{"type":"syscall_entry","pid":{},"name":"{}","nr":{},"args":[{},{},{},{},{},{}]}}"#,
                     pid, name, number, args[0], args[1], args[2], args[3], args[4], args[5]
                 )?;
             }

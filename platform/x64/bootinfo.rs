@@ -136,6 +136,7 @@ struct Cmdline {
     pub pci_allowlist: ArrayVec<AllowedPciDevice, 4>,
     pub init_path: Option<ArrayString<128>>,
     pub debug_filter: ArrayString<64>,
+    pub strace_pid: Option<i32>,
 }
 
 impl Cmdline {
@@ -153,6 +154,7 @@ impl Cmdline {
         let mut gateway_ip4 = None;
         let mut init_path = None;
         let mut debug_filter = ArrayString::new();
+        let mut strace_pid: Option<i32> = None;
         if !s.is_empty() {
             for config in s.split(' ') {
                 if config.is_empty() {
@@ -227,6 +229,14 @@ impl Cmdline {
                         }
                         let _ = debug_filter.try_push_str(value);
                     }
+                    (Some("strace-pid"), Some(value)) => {
+                        if let Ok(pid) = value.parse::<i32>() {
+                            info!("bootinfo: strace-pid = {}", pid);
+                            strace_pid = Some(pid);
+                        } else {
+                            warn!("bootinfo: strace-pid value is not a valid integer: {}", value);
+                        }
+                    }
                     (Some("init"), Some(value)) => {
                         info!("bootinfo: init path = \"{}\"", value);
                         let mut s = ArrayString::new();
@@ -257,6 +267,7 @@ impl Cmdline {
             gateway_ip4,
             init_path,
             debug_filter,
+            strace_pid,
         }
     }
 }
@@ -363,6 +374,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
+        strace_pid: cmdline.strace_pid,
     }
 }
 
@@ -411,6 +423,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
+        strace_pid: cmdline.strace_pid,
     }
 }
 
@@ -453,6 +466,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         cpu_mpdirs: ArrayVec::new(),
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
+        strace_pid: cmdline.strace_pid,
     }
 }
 

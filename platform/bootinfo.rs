@@ -36,4 +36,9 @@ pub struct BootInfo {
     /// Debug filter from kernel cmdline (`debug=syscall,fault,...`).
     /// When set, overrides the compile-time KEVLAR_DEBUG env var.
     pub debug_filter: ArrayString<64>,
+    /// Per-PID structured syscall trace from kernel cmdline (`strace-pid=N`).
+    /// When set, every syscall made by that PID is emitted as a `DBG` JSONL
+    /// line to serial — consumed by `tools/strace-diff.py` to compare
+    /// Kevlar's syscall behaviour against Linux on an identical rootfs.
+    pub strace_pid: Option<i32>,
 }

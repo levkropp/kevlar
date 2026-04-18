@@ -48,7 +48,7 @@ pub mod tracer;
 pub mod usercopy;
 
 // Re-export commonly used items.
-pub use emit::{emit, get_filter, is_enabled, parse_cmdline_filter, set_filter};
+pub use emit::{emit, emit_force, get_filter, is_enabled, parse_cmdline_filter, set_filter};
 pub use event::DebugEvent;
 pub use filter::DebugFilter;
 

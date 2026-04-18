@@ -58,7 +58,17 @@ pub fn emit(category: DebugFilter, event: &DebugEvent<'_>) {
     if !is_enabled(category) {
         return;
     }
+    emit_inner(event);
+}
 
+/// Emit an event bypassing the category filter. Used by per-PID strace
+/// (the PID predicate substitutes for the global filter) — always keeps
+/// the reentrancy guard.
+pub fn emit_force(event: &DebugEvent<'_>) {
+    emit_inner(event);
+}
+
+fn emit_inner(event: &DebugEvent<'_>) {
     // Prevent reentrant emission (e.g. page fault during debug emit).
     if EMITTING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
