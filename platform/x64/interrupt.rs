@@ -196,24 +196,37 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                 let error = frame.error;
                 warn!("  RIP={:#x} RFLAGS={:#x} ERR={:#x}",
                       rip, rflags, error);
-                // Dump instruction bytes at faulting IP
+                // Dump instruction bytes at faulting IP — via safe usercopy
+                // so we don't crash the kernel when the user IP is itself
+                // unmapped (which is common: SIGSEGV from jumping to NULL).
                 if rip > 0x1000 && rip < 0x7FFF_FFFF_FFFF {
-                    let mut ibytes = [0u8; 16];
-                    for j in 0..16usize {
-                        ibytes[j] = unsafe { *((rip as usize + j) as *const u8) };
+                    if let Ok(uaddr) = crate::address::UserVAddr::new_nonnull(rip as usize) {
+                        let mut ibytes = [0u8; 16];
+                        match uaddr.read_bytes(&mut ibytes) {
+                            Ok(_) => warn!("  code: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                  ibytes[0], ibytes[1], ibytes[2], ibytes[3],
+                                  ibytes[4], ibytes[5], ibytes[6], ibytes[7],
+                                  ibytes[8], ibytes[9], ibytes[10], ibytes[11],
+                                  ibytes[12], ibytes[13], ibytes[14], ibytes[15]),
+                            Err(_) => warn!("  code: <user RIP unreadable>"),
+                        }
                     }
-                    warn!("  code: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                          ibytes[0], ibytes[1], ibytes[2], ibytes[3],
-                          ibytes[4], ibytes[5], ibytes[6], ibytes[7],
-                          ibytes[8], ibytes[9], ibytes[10], ibytes[11],
-                          ibytes[12], ibytes[13], ibytes[14], ibytes[15]);
                 }
-                // Dump 8 stack values
+                // Dump 8 stack values — same fault-safe usercopy.
                 if rsp > 0x1000 && rsp < 0x7FFF_FFFF_FFFF {
-                    warn!("  stack:");
-                    for i in 0..8u64 {
-                        let val = unsafe { *((rsp + i * 8) as *const u64) };
-                        warn!("    [rsp+{:#x}] = {:#018x}", i * 8, val);
+                    if let Ok(uaddr) = crate::address::UserVAddr::new_nonnull(rsp as usize) {
+                        let mut sbytes = [0u8; 64];
+                        match uaddr.read_bytes(&mut sbytes) {
+                            Ok(_) => {
+                                warn!("  stack:");
+                                for i in 0..8usize {
+                                    let v = u64::from_le_bytes(
+                                        sbytes[i*8..i*8+8].try_into().unwrap());
+                                    warn!("    [rsp+{:#x}] = {:#018x}", i * 8, v);
+                                }
+                            }
+                            Err(_) => warn!("  stack: <user RSP unreadable>"),
+                        }
                     }
                 }
                 handler().handle_user_fault(name, frame.rip as usize);
