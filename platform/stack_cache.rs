@@ -7,8 +7,54 @@
 
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::spinlock::SpinLock;
+use crate::address::PAddr;
 use crate::arch::PAGE_SIZE;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Registry of physical pages currently allocated as kernel stacks.
+/// `is_stack_paddr` consults this to detect the double-allocation bug
+/// where the buddy allocator returns a paddr that's still in use as
+/// a stack — the smoking gun for the XFCE refill_page_cache crash.
+const STACK_REGISTRY_SIZE: usize = 256;
+static STACK_REGISTRY: SpinLock<[u64; STACK_REGISTRY_SIZE]> =
+    SpinLock::new([0u64; STACK_REGISTRY_SIZE]);
+
+fn register_stack(paddr: PAddr, num_pages: usize) {
+    let mut reg = STACK_REGISTRY.lock_no_irq();
+    let base = paddr.value() as u64;
+    for i in 0..num_pages {
+        let p = base + (i * PAGE_SIZE) as u64;
+        // Find a free slot.
+        for slot in reg.iter_mut() {
+            if *slot == 0 {
+                *slot = p;
+                break;
+            }
+        }
+    }
+}
+
+fn unregister_stack(paddr: PAddr, num_pages: usize) {
+    let mut reg = STACK_REGISTRY.lock_no_irq();
+    let base = paddr.value() as u64;
+    for i in 0..num_pages {
+        let p = base + (i * PAGE_SIZE) as u64;
+        for slot in reg.iter_mut() {
+            if *slot == p {
+                *slot = 0;
+                break;
+            }
+        }
+    }
+}
+
+/// Check whether a paddr is currently registered as a kernel stack.
+/// Used by alloc_pages / zero_page to detect double-allocation.
+pub fn is_stack_paddr(paddr: PAddr) -> bool {
+    let reg = STACK_REGISTRY.lock_no_irq();
+    let p = paddr.value() as u64;
+    reg.iter().any(|&s| s == p)
+}
 
 /// Number of cached stacks per size class.
 const CACHE_SIZE: usize = 4;
@@ -61,6 +107,7 @@ pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError
     if let Some(cache) = cache {
         if let Some(stack) = cache.lock_no_irq().pop() {
             install_guard(&stack);
+            register_stack(*stack, num_pages);
             return Ok(stack);
         }
     }
@@ -68,6 +115,7 @@ pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError
     // Cache miss: allocate from buddy.
     let stack = alloc_pages_owned(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
     install_guard(&stack);
+    register_stack(*stack, num_pages);
     Ok(stack)
 }
 
@@ -174,6 +222,10 @@ fn scan_corruption_pattern(stack: &OwnedPages, size: usize, kind: &str, idx: usi
 /// Return a kernel stack to the cache. If the cache is full, the stack
 /// is dropped (freed via buddy allocator through OwnedPages::drop).
 pub fn free_kernel_stack(stack: OwnedPages, num_pages: usize) {
+    // Unregister BEFORE handing back, so the registry doesn't
+    // erroneously claim a freed page is still a stack.
+    unregister_stack(*stack, num_pages);
+
     let cache = match num_pages {
         4 => Some(&CACHE_4PAGE),
         2 => Some(&CACHE_2PAGE),

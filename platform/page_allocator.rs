@@ -197,7 +197,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
             if let Some(paddr) = PREZEROED_4K_POOL.lock_no_irq().pop() {
                 PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
-
+                check_not_stack(paddr);
                 return Ok(paddr);
             }
         }
@@ -208,6 +208,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
+            check_not_stack(paddr);
 
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
@@ -223,6 +224,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
         let cached = PAGE_CACHE.lock_no_irq().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
+            check_not_stack(paddr);
 
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe { paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE); }
@@ -233,6 +235,16 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     }
 
     Err(PageAllocError)
+}
+
+/// Smoking-gun check: panic if the buddy/cache returned a paddr that
+/// the stack_cache has registered as a live kernel stack — that's the
+/// hypothesized refill_page_cache crash root cause.
+#[inline]
+fn check_not_stack(paddr: PAddr) {
+    if crate::stack_cache::is_stack_paddr(paddr) {
+        panic!("BUDDY double-alloc: paddr={:#x} is a live kernel stack", paddr.value());
+    }
 }
 
 /// Pop a single pre-zeroed 4KB page from the pool, or None if empty.
@@ -307,6 +319,18 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
         if let Some(paddr) = zone.alloc_pages(order) {
             let paddr = PAddr::new(paddr);
             drop(zones);
+
+            // Smoking-gun check: if buddy returned a paddr that's still
+            // registered as a kernel stack, we have the double-allocation
+            // bug. Any zero-fill via the DIRTY_OK=false path below would
+            // wipe the live stack.
+            for i in 0..num_pages {
+                let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
+                if crate::stack_cache::is_stack_paddr(p) {
+                    panic!("BUDDY double-alloc: paddr={:#x} is a live kernel stack",
+                        p.value());
+                }
+            }
 
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe {
