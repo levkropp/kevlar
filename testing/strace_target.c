@@ -117,6 +117,16 @@ int main(void) {
     if (chroot(ROOT) != 0) die("chroot", errno);
     if (chdir("/") != 0) die("chdir", errno);
 
+    // Drop to a non-root uid/gid before execve.  On Linux, strace typically
+    // runs as the invoking user (uid=1000 or similar), so musl's
+    // __init_libc sees uid==euid==non-zero and skips the privilege-drop
+    // sequence (getgid, setgid, getuid, setuid, rt_sigprocmask×3).  If
+    // Kevlar's target runs as root (uid=0), musl takes a different code
+    // path and the traces diverge — not a real contract bug, just an env
+    // mismatch.  Match the Linux side by switching to uid=1000 here.
+    if (setgid(1000) != 0) die("setgid", errno);
+    if (setuid(1000) != 0) die("setuid", errno);
+
     // Replace stdin/stdout/stderr with /dev/null before exec.  Running as
     // PID 1, the target would otherwise inherit Kevlar's serial-console
     // tty on fd 0/1/2 — and behave differently from how Linux would run

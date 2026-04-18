@@ -444,9 +444,13 @@ def trim_to_target_execve(records: List[Dict[str, Any]],
         for i, r in enumerate(records):
             if r["name"] != "execve" or (r.get("ret") is not None and r["ret"] != 0):
                 continue
-            # Check args_text (Linux strace gives the quoted path here).
-            at = r.get("args_text", "")
-            if target_cmd in at:
+            # Match only when the FIRST argument (the executable path) is the
+            # target.  Otherwise we match bwrap's own execve (which mentions
+            # the target further down in its argv).
+            at = r.get("args_text", "").lstrip()
+            # Linux strace: `execve("/bin/ls", ["/bin/ls"], 0x7f... /* 88 vars */)`.
+            # args_text starts with `"/bin/ls", ...`.
+            if at.startswith(f'"{target_cmd}"'):
                 target_idx = i
                 break
     if target_idx < 0:
