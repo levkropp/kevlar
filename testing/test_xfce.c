@@ -538,6 +538,27 @@ phase5:
             else fail("xfce4_panel_running", "panel not found");
             if (has_session) pass("xfce4_session_running");
             else fail("xfce4_session_running", "session not found");
+
+            // Dump XFCE component logs so failures are diagnosable.
+            // Only tail recent output to keep serial readable.
+            {
+                const char *logs[] = {
+                    "/tmp/xfce-session.log",
+                    "/tmp/xorg-stdout.log",
+                    NULL,
+                };
+                for (int li = 0; logs[li]; li++) {
+                    char b[4096];
+                    char cmd[128];
+                    snprintf(cmd, sizeof(cmd),
+                             "echo '== %s =='; tail -40 %s 2>/dev/null",
+                             logs[li], logs[li]);
+                    if (sh_capture(cmd, b, sizeof(b), 3000) == 0 && b[0]) {
+                        printf("%s", b);
+                    }
+                }
+                fflush(stdout);
+            }
         }
 
     }

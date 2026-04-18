@@ -31,17 +31,29 @@ impl<'a> SyscallHandler<'a> {
                 let revents = if fd.as_int() < 0 || events.is_empty() {
                     0
                 } else {
-                    let status = current_process().opened_files_no_irq().get(fd)?.poll()?;
-
-                    // POLLHUP, POLLERR, POLLNVAL are always reported
-                    // regardless of requested events (POSIX).
-                    let always = status & (PollStatus::POLLHUP | PollStatus::POLLERR);
-                    let revents = (events & status) | always;
-                    if !revents.is_empty() {
-                        ready_fds += 1;
+                    // Look up the opened file.  POSIX says an invalid fd in
+                    // the pollfd array must cause POLLNVAL in *revents* for
+                    // that fd — NOT a failure of the whole poll call.
+                    // Previously we returned `?` which propagated EBADF and
+                    // crashed every poll loop that had one stale fd (e.g.
+                    // xfce4-session after a child dbus-daemon closed).
+                    match current_process().opened_files_no_irq().get(fd) {
+                        Err(_) => {
+                            ready_fds += 1;
+                            PollStatus::POLLNVAL.bits()
+                        }
+                        Ok(file) => {
+                            let status = file.poll()?;
+                            // POLLHUP, POLLERR, POLLNVAL are always reported
+                            // regardless of requested events (POSIX).
+                            let always = status & (PollStatus::POLLHUP | PollStatus::POLLERR);
+                            let revents = (events & status) | always;
+                            if !revents.is_empty() {
+                                ready_fds += 1;
+                            }
+                            revents.bits()
+                        }
                     }
-
-                    revents.bits()
                 };
 
                 // Update revents.
