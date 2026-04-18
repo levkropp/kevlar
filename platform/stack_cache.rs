@@ -157,6 +157,98 @@ fn check_guard(stack: &OwnedPages) -> bool {
     true
 }
 
+/// Scan every live (currently allocated) kernel stack for the
+/// "top byte zeroed" corruption signature. Live stacks are tracked in
+/// `STACK_REGISTRY`. Reading a stack while its owning task runs on
+/// another CPU is safe: the pattern check is for an exact non-canonical
+/// value (`(v >> 32) == 0x00ff_8000`) that cannot appear as a transient
+/// intermediate of an aligned 8-byte mov, and aligned writes are atomic
+/// on x86_64 (Intel SDM 8.1.1). False positives would require legitimate
+/// kernel code to write that exact value, which doesn't happen.
+///
+/// Logs (does not panic) on hit, so we can correlate detector output
+/// with subsequent crashes.
+/// Hashed (paddr, offset, value) triples already reported, to suppress
+/// the same hit firing every interval. Linear-probe table; collisions
+/// just yield extra reports (acceptable).
+const REPORT_DEDUPE_SIZE: usize = 64;
+static REPORTED_HITS: SpinLock<[u64; REPORT_DEDUPE_SIZE]> =
+    SpinLock::new([0u64; REPORT_DEDUPE_SIZE]);
+
+fn dedupe_check_and_record(paddr: u64, offset: usize, value: u64) -> bool {
+    // Cheap mix of (paddr, offset, value) into a non-zero u64 key.
+    let key = paddr.wrapping_mul(0x9e3779b97f4a7c15)
+        ^ ((offset as u64).wrapping_mul(0xbf58476d1ce4e5b9))
+        ^ value.wrapping_mul(0x94d049bb133111eb);
+    let key = if key == 0 { 1 } else { key };
+    let mut tbl = REPORTED_HITS.lock_no_irq();
+    let idx = (key as usize) % REPORT_DEDUPE_SIZE;
+    for i in 0..REPORT_DEDUPE_SIZE {
+        let slot = (idx + i) % REPORT_DEDUPE_SIZE;
+        if tbl[slot] == key {
+            return false; // already reported
+        }
+        if tbl[slot] == 0 {
+            tbl[slot] = key;
+            return true;
+        }
+    }
+    false // table full, suppress
+}
+
+pub fn scan_live_stack_corruption() {
+    let snapshot: [u64; STACK_REGISTRY_SIZE] = {
+        let reg = STACK_REGISTRY.lock_no_irq();
+        *reg
+    };
+    let self_rsp: u64;
+    #[allow(unsafe_code)]
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) self_rsp, options(nomem, nostack));
+    }
+    let self_page_va = self_rsp & !0xfff;
+    for &p in snapshot.iter() {
+        if p == 0 {
+            continue;
+        }
+        let paddr = PAddr::new(p as usize);
+        let page_va = paddr.as_vaddr().value() as u64;
+        if page_va == self_page_va {
+            continue;
+        }
+        let base = paddr.as_ptr::<u64>();
+        #[allow(unsafe_code)]
+        unsafe {
+            for i in 0..(PAGE_SIZE / 8) {
+                let v = base.add(i).read_volatile();
+                if (v >> 32) == 0x00ff_8000 {
+                    if !dedupe_check_and_record(p, i * 8, v) {
+                        return;
+                    }
+                    log::warn!(
+                        "LIVE STACK CORRUPT: paddr={:#x} offset={:#x} \
+                         value={:#x}",
+                        p, i * 8, v,
+                    );
+                    // Dump 8 qwords before and after for context.
+                    let lo = if i >= 8 { i - 8 } else { 0 };
+                    let hi = if i + 8 < PAGE_SIZE / 8 { i + 8 } else { PAGE_SIZE / 8 - 1 };
+                    for j in lo..=hi {
+                        let marker = if j == i { " <==" } else { "" };
+                        log::warn!(
+                            "  [{:+#06x}] = {:#018x}{}",
+                            (j as isize - i as isize) * 8,
+                            base.add(j).read_volatile(),
+                            marker,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Check all cached stacks' guard patterns.  Called from `interval_work()`
 /// periodically.  Panics if any guard is corrupted (stack overflow detected).
 pub fn check_all_guards() {

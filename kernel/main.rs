@@ -582,6 +582,7 @@ pub fn interval_work() {
     // that crashes — this scanner catches it within ~10 ms of the write.
     if iw_count % 5 == 0 {
         process::scan_suspended_task_corruption();
+        kevlar_platform::stack_cache::scan_live_stack_corruption();
     }
     // Refill the 4KB prezeroed page pool so page faults get instant
     // zeroed pages without inline memset.
