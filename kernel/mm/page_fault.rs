@@ -27,9 +27,26 @@ fn deliver_sigsegv_fatal() {
     let cpu = kevlar_platform::arch::cpu_id() as usize;
     let regs = kevlar_platform::crash_regs::take(cpu);
     warn!("SIGSEGV: pid={} cmd={} fault_addr={:#x}", pid, cmdline.as_str(), fault_addr);
+    // Blog 186: a userspace deref of a kernel direct-map pointer means
+    // kernel data landed in a user page (stale TLB or missed zero-fill).
+    if (fault_addr >> 47) == 0x1ffff {
+        warn!(
+            "KERNEL_PTR_LEAK: pid={} fault_addr={:#x} — kernel direct-map pointer dereferenced from userspace (paddr={:#x})",
+            pid, fault_addr, fault_addr & 0x0000_7fff_ffff_ffff,
+        );
+    }
     if let Some(r) = regs {
         warn!("  RIP={:#x} RSP={:#x} RBP={:#x} RAX={:#x}", r.rip, r.rsp, r.rbp, r.rax);
         warn!("  RDI={:#x} RSI={:#x} RDX={:#x} RCX={:#x}", r.rdi, r.rsi, r.rdx, r.rcx);
+        // Flag any GPR that looks like a kernel direct-map pointer.
+        let gprs = [("RIP", r.rip), ("RSP", r.rsp), ("RBP", r.rbp), ("RAX", r.rax),
+                    ("RDI", r.rdi), ("RSI", r.rsi), ("RDX", r.rdx), ("RCX", r.rcx)];
+        for (name, v) in gprs {
+            if (v >> 47) == 0x1ffff {
+                warn!("  KERNEL_PTR_LEAK: {}={:#x} is a kernel direct-map pointer (paddr={:#x})",
+                      name, v, v & 0x0000_7fff_ffff_ffff);
+            }
+        }
         // If RIP=0 (NULL function pointer call), dump the object at RBP
         // to see which function pointers are initialized vs NULL.
         #[allow(unsafe_code)]
@@ -723,12 +740,31 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 "SIGSEGV: no VMA for address {:#x} (pid={}, ip={:#x}, reason={:?})",
                 unaligned_vaddr.value(), pid, ip, _reason
             );
+            // Userspace should never dereference the kernel high half. If a
+            // fault addr has KERNEL_BASE bits set, something leaked a kernel
+            // direct-map pointer into userspace memory or registers. See
+            // blog 186 for the shape of this bug.
+            if (unaligned_vaddr.value() >> 47) == 0x1ffff {
+                warn!(
+                    "KERNEL_PTR_LEAK: pid={} fault_addr={:#x} ip={:#x} — kernel direct-map pointer dereferenced from userspace",
+                    pid, unaligned_vaddr.value(), ip,
+                );
+            }
             // Dump registers for crash investigation.
             if pid > 2 {
                 let cpu = kevlar_platform::arch::cpu_id() as usize;
                 if let Some(r) = kevlar_platform::crash_regs::take(cpu) {
                     warn!("  RDI={:#x} RSI={:#x} RBP={:#x} RSP={:#x} RAX={:#x}",
                         r.rdi, r.rsi, r.rbp, r.rsp, r.rax);
+                    // Flag any GPR that looks like a kernel direct-map pointer.
+                    let regs = [("RDI", r.rdi), ("RSI", r.rsi), ("RBP", r.rbp),
+                                ("RSP", r.rsp), ("RAX", r.rax)];
+                    for (name, v) in regs {
+                        if (v >> 47) == 0x1ffff {
+                            warn!("  KERNEL_PTR_LEAK: {}={:#x} is a kernel direct-map pointer (paddr={:#x})",
+                                  name, v, v & 0x0000_7fff_ffff_ffff);
+                        }
+                    }
                 }
             }
             // Free the page we allocated since we won't map it.
