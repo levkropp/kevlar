@@ -254,19 +254,29 @@ fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
     #[allow(unsafe_code)]
     unsafe {
         let ptr = paddr.as_ptr::<u64>();
+        let mut first_hit: Option<usize> = None;
+        let mut kernel_ptr_count = 0usize;
+        let mut nonzero_count = 0usize;
         for i in 0..(PAGE_SIZE / 8) {
             let v = core::ptr::read_volatile(ptr.add(i));
             if v != 0 {
-                let is_kernel_ptr = (v >> 47) == 0x1ffff;
-                log::warn!(
-                    "alloc_page: zero-fill miss at site={} paddr={:#x} offset={:#x} value={:#x}{}",
-                    site, paddr.value(), i * 8, v,
-                    if is_kernel_ptr { " [KERNEL_PTR]" } else { "" },
-                );
-                // Only report the first non-zero word; the caller will
-                // zero or overwrite before user access, but the fact
-                // we observed non-zero is the signal.
-                return;
+                nonzero_count += 1;
+                if first_hit.is_none() { first_hit = Some(i); }
+                if (v >> 47) == 0x1ffff { kernel_ptr_count += 1; }
+            }
+        }
+        if let Some(first) = first_hit {
+            log::warn!(
+                "alloc_page: zero-fill miss site={} paddr={:#x} first_nz_off={:#x} nonzero_words={} kernel_ptr_words={}",
+                site, paddr.value(), first * 8, nonzero_count, kernel_ptr_count,
+            );
+            // Dump a 64-byte window around the first non-zero word.
+            let start = first.saturating_sub(4);
+            let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
+            for i in start..end {
+                let v = core::ptr::read_volatile(ptr.add(i));
+                let mark = if i == first { " <<<" } else { "" };
+                log::warn!("    +{:#05x}: {:#018x}{}", i * 8, v, mark);
             }
         }
     }
