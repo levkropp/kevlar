@@ -111,6 +111,13 @@ pub fn last_syscall_nr_read(cpu: usize) -> u32 {
     } else { 0 }
 }
 
+/// Dump per-(cpu, syscall_nr) latency histogram to the log.  Safe to
+/// call from NMI / panic context.  See `syscall::dump_histogram` for
+/// output format.
+pub fn syscall_dump_histogram(cpu: usize) {
+    syscall::dump_histogram(cpu);
+}
+
 /// Periodic watchdog check — called from handle_timer_irq.
 pub fn watchdog_check() {
     apic::watchdog_check();

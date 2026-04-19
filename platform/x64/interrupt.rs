@@ -351,6 +351,12 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             // CLI/STI/IRETQ/lock that led to permanent IF=0.
             super::if_trace::dump(cpu as usize);
 
+            // Dump per-(cpu, syscall_nr) latency histogram. Critical for
+            // diagnosing livelocks where the kernel is making forward
+            // progress but each syscall takes orders of magnitude longer
+            // than normal (e.g. the broad-sti bug from blog 191).
+            super::syscall_dump_histogram(cpu as usize);
+
             log::warn!("========== END NMI WATCHDOG ==========");
 
             // Record in flight recorder for crash dump correlation.

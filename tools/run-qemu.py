@@ -63,6 +63,34 @@ ARCHS = {
 }
 
 
+def _qmp_inject_nmi(sock_path):
+    """Send an `inject-nmi` QMP command to the QEMU monitor at sock_path.
+
+    QMP is JSON-over-Unix-socket, one JSON object per line.  Tiny handshake:
+    read greeting, send qmp_capabilities, send inject-nmi.  No external deps.
+    """
+    import json
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(2.0)
+    try:
+        s.connect(sock_path)
+        f = s.makefile("rwb")
+        _ = f.readline()  # QMP greeting line
+        f.write(b'{"execute":"qmp_capabilities"}\n'); f.flush()
+        _ = f.readline()
+        f.write(b'{"execute":"inject-nmi"}\n'); f.flush()
+        resp = f.readline()
+        # Best-effort validation: response should contain "return".
+        try:
+            obj = json.loads(resp)
+            if "return" not in obj:
+                raise RuntimeError(f"QMP returned: {resp!r}")
+        except json.JSONDecodeError:
+            pass
+    finally:
+        s.close()
+
+
 def kill_stale_qemu_on_ports(ports):
     """Kill any QEMU processes holding our forwarded ports."""
     is_windows = platform.system() == "Windows"
@@ -143,6 +171,12 @@ def main():
                         help="Use plain stdio serial (no monitor). Works with pipes.")
     parser.add_argument("--save-dump", metavar="FILE",
                         help="Intercept serial output and save any crash dump to FILE")
+    parser.add_argument("--nmi-on-stall", metavar="SECONDS", type=float, default=None,
+                        help="Inject NMI via QMP after SECONDS of serial silence. "
+                             "Implies --batch. The guest's NMI handler then dumps "
+                             "per-CPU state (RIP, registers, backtrace, syscall "
+                             "latency histogram). Useful for livelocks that the "
+                             "kernel's internal LAPIC-HB watchdog can't detect.")
     parser.add_argument("--qemu")
     parser.add_argument("kernel_elf", help="The kernel ELF executable.")
     parser.add_argument("qemu_args", nargs="*")
@@ -152,6 +186,17 @@ def main():
     # without per-target Makefile changes). Set KEVLAR_GDB=1 to enable.
     if os.environ.get("KEVLAR_GDB") == "1":
         args.gdb = True
+
+    # --nmi-on-stall needs stdout ownership for silence detection AND a
+    # QMP socket to inject the NMI.  Auto-imply --batch so stdio routing
+    # is deterministic (no mon:stdio multiplexer).
+    if args.nmi_on_stall is not None:
+        if not args.batch:
+            print("run-qemu.py: --nmi-on-stall implies --batch",
+                  file=sys.stderr)
+            args.batch = True
+        if args.gui:
+            sys.exit("run-qemu.py: --nmi-on-stall is incompatible with --gui")
 
     # Kill any stale QEMU sessions that might be holding our ports.
     kill_stale_qemu_on_ports(FORWARDED_PORTS)
@@ -266,6 +311,15 @@ def main():
     if args.log_serial:
         # Add a second serial port that writes to a file.
         argv += ["-serial", f"file:{args.log_serial}"]
+    qmp_sock_path: "str | None" = None
+    if args.nmi_on_stall is not None:
+        qmp_sock_path = f"/tmp/kevlar-qmp-{os.getpid()}.sock"
+        # Clean up any stale socket (e.g. from a prior crashed run).
+        try:
+            os.unlink(qmp_sock_path)
+        except OSError:
+            pass
+        argv += ["-qmp", f"unix:{qmp_sock_path},server=on,wait=off"]
     if args.qemu_args:
         argv += args.qemu_args
 
@@ -279,11 +333,16 @@ def main():
     # Windows doesn't support preexec_fn with os.setsid
     is_windows = platform.system() == "Windows"
 
-    # When --save-dump is given, intercept stdout to detect and save the
-    # base64-encoded crash dump emitted by the panic handler.
-    if args.save_dump:
+    # When --save-dump or --nmi-on-stall is given, intercept stdout both
+    # to detect the crash-dump sentinels AND to maintain a last-output
+    # timestamp for the stall monitor.
+    need_intercept = bool(args.save_dump or args.nmi_on_stall is not None)
+    t = None
+    stall_t = None
+    if need_intercept:
         import base64
         import threading
+        import time
 
         popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
         if not is_windows:
@@ -293,6 +352,10 @@ def main():
         dump_lines = []
         capturing = False
         saved = False
+        # Shared state for stall monitor.
+        last_out_lock = threading.Lock()
+        last_out_monotonic = [time.monotonic()]
+        intercept_running = [True]
 
         def _intercept_stdout():
             nonlocal capturing, saved
@@ -304,31 +367,76 @@ def main():
                 # Pass through immediately (unbuffered).
                 sys.stdout.buffer.write(chunk)
                 sys.stdout.buffer.flush()
+                # Bump the stall-monitor timestamp on any output.
+                with last_out_lock:
+                    last_out_monotonic[0] = time.monotonic()
                 # Accumulate for crash dump detection.
-                line_buf += chunk
-                while b"\n" in line_buf:
-                    raw_line, line_buf = line_buf.split(b"\n", 1)
-                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
-                    if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
-                        capturing = True
-                        dump_lines.clear()
-                    elif line == "===KEVLAR_CRASH_DUMP_END===":
-                        capturing = False
-                        try:
-                            data = base64.b64decode("".join(dump_lines))
-                            with open(args.save_dump, "wb") as f:
-                                f.write(data)
-                            print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
-                                  f"({len(data)} bytes)", file=sys.stderr)
-                            saved = True
-                        except Exception as e:
-                            print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
-                                  file=sys.stderr)
-                    elif capturing:
-                        dump_lines.append(line)
+                if args.save_dump:
+                    line_buf += chunk
+                    while b"\n" in line_buf:
+                        raw_line, line_buf = line_buf.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                        if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
+                            capturing = True
+                            dump_lines.clear()
+                        elif line == "===KEVLAR_CRASH_DUMP_END===":
+                            capturing = False
+                            try:
+                                data = base64.b64decode("".join(dump_lines))
+                                with open(args.save_dump, "wb") as f:
+                                    f.write(data)
+                                print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
+                                      f"({len(data)} bytes)", file=sys.stderr)
+                                saved = True
+                            except Exception as e:
+                                print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
+                                      file=sys.stderr)
+                        elif capturing:
+                            dump_lines.append(line)
+            intercept_running[0] = False
 
         t = threading.Thread(target=_intercept_stdout, daemon=True)
         t.start()
+
+        if args.nmi_on_stall is not None and qmp_sock_path is not None:
+            timeout_secs = args.nmi_on_stall
+
+            def _stall_monitor():
+                # Wait for QEMU to create the socket (it's created during
+                # startup once QMP is ready).
+                deadline = time.monotonic() + 10.0
+                while intercept_running[0] and time.monotonic() < deadline:
+                    if os.path.exists(qmp_sock_path):
+                        break
+                    time.sleep(0.05)
+                else:
+                    # QEMU never opened the QMP socket; give up silently.
+                    return
+                # Initial baseline: reset last_out to now so startup
+                # latency doesn't count as "silence".
+                with last_out_lock:
+                    last_out_monotonic[0] = time.monotonic()
+
+                while intercept_running[0]:
+                    time.sleep(0.5)
+                    with last_out_lock:
+                        silent = time.monotonic() - last_out_monotonic[0]
+                    if silent >= timeout_secs:
+                        try:
+                            _qmp_inject_nmi(qmp_sock_path)
+                            print(f"\nrun-qemu.py: injected NMI after "
+                                  f"{silent:.1f}s of silence",
+                                  file=sys.stderr)
+                        except Exception as e:
+                            print(f"\nrun-qemu.py: QMP NMI inject failed: {e}",
+                                  file=sys.stderr)
+                        # Re-arm — avoid NMI storm while the handler's
+                        # output drains.
+                        with last_out_lock:
+                            last_out_monotonic[0] = time.monotonic()
+
+            stall_t = threading.Thread(target=_stall_monitor, daemon=True)
+            stall_t.start()
     else:
         if is_windows:
             p = subprocess.Popen(argv)
@@ -352,12 +460,19 @@ def main():
 
     try:
         p.wait()
-        if args.save_dump:
+        if t is not None:
             t.join(timeout=5)
+        if stall_t is not None:
+            stall_t.join(timeout=2)
     finally:
         if tmp_elf_path:
             try:
                 os.unlink(tmp_elf_path)
+            except OSError:
+                pass
+        if qmp_sock_path is not None:
+            try:
+                os.unlink(qmp_sock_path)
             except OSError:
                 pass
 
