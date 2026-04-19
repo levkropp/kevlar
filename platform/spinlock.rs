@@ -114,11 +114,19 @@ impl<T: ?Sized> SpinLock<T> {
 
     /// Acquires the lock **without** disabling interrupts (no cli/sti).
     ///
+    /// Preemption IS disabled for the duration of the hold, which prevents
+    /// a nested timer IRQ from context-switching away from a thread that
+    /// holds this lock — without that, the scheduled-in thread on the same
+    /// CPU would deadlock if it also tried to acquire this lock, because
+    /// the owning thread's RSP is now parked on a runqueue.
+    ///
     /// Use for locks that are never accessed from interrupt context (e.g. fd
-    /// tables, root_fs).  Saves the pushfq/cli/sti overhead on every
-    /// acquire/release cycle.
+    /// tables, root_fs) but CAN be accessed from any user syscall.  IPIs
+    /// (e.g. TLB shootdowns) can still be serviced by this CPU while the
+    /// lock is held.
     #[inline(always)]
     pub fn lock_no_irq(&self) -> SpinLockGuardNoIrq<'_, T> {
+        crate::arch::preempt_disable();
         let lock_addr = (self as *const Self).cast::<()>() as usize;
         lockdep::on_acquire(lock_addr, self.rank, self.name);
 
@@ -224,6 +232,7 @@ impl<'a, T: ?Sized> Drop for SpinLockGuardNoIrq<'a, T> {
         unsafe {
             ManuallyDrop::drop(&mut self.inner);
         }
+        crate::arch::preempt_enable();
     }
 }
 

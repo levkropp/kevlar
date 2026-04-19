@@ -49,8 +49,33 @@ extern "C" fn x64_handle_syscall(
     n: usize,
     frame: *mut PtRegs,
 ) -> isize {
+    let cpu = super::cpu_id() as usize;
+    if cpu < SYSCALL_COUNT.len() {
+        SYSCALL_COUNT[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        LAST_SYSCALL_NR[cpu].store(n as u32, core::sync::atomic::Ordering::Relaxed);
+    }
     handler().handle_syscall(a1, a2, a3, a4, a5, a6, n, frame)
 }
+
+/// Per-CPU syscall counter, bumped on every syscall entry. Available via
+/// `kevlar_platform::arch::syscall_counter_read(cpu)` — useful when
+/// diagnosing whether a CPU has stopped making syscalls (e.g. IF=0 lockup).
+pub static SYSCALL_COUNT: [core::sync::atomic::AtomicUsize; 8] = [
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+    core::sync::atomic::AtomicUsize::new(0), core::sync::atomic::AtomicUsize::new(0),
+];
+
+/// Per-CPU last-syscall-number, updated on every syscall entry. Combined
+/// with `SYSCALL_COUNT`, exposes "CPU N is stuck inside syscall nr=X" to
+/// diagnostic dumps without requiring a live debugger.
+pub static LAST_SYSCALL_NR: [core::sync::atomic::AtomicU32; 8] = [
+    core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0),
+];
 
 unsafe extern "C" {
     fn syscall_entry();

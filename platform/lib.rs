@@ -80,6 +80,7 @@ pub mod arch {
         start_ap_preemption_timer, lapic_timer_diag_log,
         register_cpu_apic_id, watchdog_enable, watchdog_check,
         if_trace_enable, enable_preempt_check, assert_preempt_safe,
+        syscall_counter_read, last_syscall_nr_read,
         x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
@@ -110,6 +111,11 @@ pub mod arch {
     }
     #[cfg(target_arch = "aarch64")]
     pub fn load_kernel_page_table() {}
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn syscall_counter_read(_cpu: usize) -> usize { 0 }
+    #[cfg(target_arch = "aarch64")]
+    pub fn last_syscall_nr_read(_cpu: usize) -> u32 { 0 }
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{

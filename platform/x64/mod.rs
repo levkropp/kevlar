@@ -99,6 +99,18 @@ pub fn if_trace_enable() {
     if_trace::enable();
 }
 
+pub fn syscall_counter_read(cpu: usize) -> usize {
+    if cpu < syscall::SYSCALL_COUNT.len() {
+        syscall::SYSCALL_COUNT[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else { 0 }
+}
+
+pub fn last_syscall_nr_read(cpu: usize) -> u32 {
+    if cpu < syscall::LAST_SYSCALL_NR.len() {
+        syscall::LAST_SYSCALL_NR[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else { 0 }
+}
+
 /// Periodic watchdog check — called from handle_timer_irq.
 pub fn watchdog_check() {
     apic::watchdog_check();
