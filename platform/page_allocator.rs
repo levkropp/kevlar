@@ -162,7 +162,7 @@ fn refill_page_cache() -> usize {
     let mut buf = [0usize; PAGE_CACHE_SIZE];
     let mut count = 0;
     {
-        let mut zones = ZONES.lock_no_irq();
+        let mut zones = ZONES.lock();
         for zone in zones.iter_mut() {
             while count < PAGE_CACHE_SIZE {
                 if let Some(paddr) = zone.alloc_one() {
@@ -179,7 +179,7 @@ fn refill_page_cache() -> usize {
     }
 
     if count > 0 {
-        let mut cache = PAGE_CACHE.lock_no_irq();
+        let mut cache = PAGE_CACHE.lock();
         for i in 0..count {
             cache.push(PAddr::new(buf[i]));
         }
@@ -195,7 +195,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     // Fastest path: pre-zeroed page — no memset needed.
     if !flags.contains(AllocPageFlags::DIRTY_OK) {
         if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
-            if let Some(paddr) = PREZEROED_4K_POOL.lock_no_irq().pop() {
+            if let Some(paddr) = PREZEROED_4K_POOL.lock().pop() {
                 PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
                 check_not_stack(paddr);
                 debug_assert_page_is_zero(paddr, "PREZEROED_POOL");
@@ -206,7 +206,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 
     // Fast path: pop from global page cache (lock_no_irq, ~5ns uncontended).
     if PAGE_CACHE_COUNT.load(Ordering::Relaxed) > 0 {
-        let cached = PAGE_CACHE.lock_no_irq().pop();
+        let cached = PAGE_CACHE.lock().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
             check_not_stack(paddr);
@@ -223,7 +223,7 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
 
     // Slow path: refill cache from buddy allocator, then pop.
     if refill_page_cache() > 0 {
-        let cached = PAGE_CACHE.lock_no_irq().pop();
+        let cached = PAGE_CACHE.lock().pop();
         if let Some(paddr) = cached {
             PAGE_CACHE_COUNT.fetch_sub(1, Ordering::Relaxed);
             check_not_stack(paddr);
@@ -300,7 +300,7 @@ fn check_not_stack(paddr: PAddr) {
 #[inline(always)]
 pub fn alloc_page_prezeroed() -> Option<PAddr> {
     if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
-        let result = PREZEROED_4K_POOL.lock_no_irq().pop();
+        let result = PREZEROED_4K_POOL.lock().pop();
         if result.is_some() {
             PREZEROED_4K_COUNT.fetch_sub(1, Ordering::Relaxed);
         }
@@ -324,7 +324,7 @@ pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
 
     // Drain from cache first.
     if PAGE_CACHE_COUNT.load(Ordering::Relaxed) > 0 {
-        let mut cache = PAGE_CACHE.lock_no_irq();
+        let mut cache = PAGE_CACHE.lock();
         while count < max {
             if let Some(paddr) = cache.pop() {
                 out[count] = paddr;
@@ -338,7 +338,7 @@ pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
 
     // Allocate remaining from buddy allocator directly.
     if count < max {
-        let mut zones = ZONES.lock_no_irq();
+        let mut zones = ZONES.lock();
         for zone in zones.iter_mut() {
             while count < max {
                 if let Some(paddr_val) = zone.alloc_one() {
@@ -363,7 +363,7 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
     }
 
     let order = num_pages_to_order(num_pages);
-    let mut zones = ZONES.lock_no_irq();
+    let mut zones = ZONES.lock();
     for zone in zones.iter_mut() {
         if let Some(paddr) = zone.alloc_pages(order) {
             let paddr = PAddr::new(paddr);
@@ -447,7 +447,7 @@ static PREZEROED_HUGE_POOL: SpinLock<HugePagePool> = SpinLock::new(HugePagePool:
 /// `alloc_huge_page()` + `zero_huge_page()`.
 #[inline]
 pub fn alloc_huge_page_prezeroed() -> Option<PAddr> {
-    PREZEROED_HUGE_POOL.lock_no_irq().pop()
+    PREZEROED_HUGE_POOL.lock().pop()
 }
 
 /// Zero a 2MB huge page and add it to the pre-zeroed pool.
@@ -456,7 +456,7 @@ pub fn alloc_huge_page_prezeroed() -> Option<PAddr> {
 pub fn free_huge_page_and_zero(paddr: PAddr) {
     use crate::page_ops::zero_huge_page;
     zero_huge_page(paddr);
-    if !PREZEROED_HUGE_POOL.lock_no_irq().push(paddr) {
+    if !PREZEROED_HUGE_POOL.lock().push(paddr) {
         // Pool full — return to buddy allocator.
         free_pages(paddr, 512);
     } else {
@@ -486,7 +486,7 @@ pub fn prefill_prezeroed_pages() {
         match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
             Ok(paddr) => {
                 zero_page(paddr);
-                let mut pool = PREZEROED_4K_POOL.lock_no_irq();
+                let mut pool = PREZEROED_4K_POOL.lock();
                 if !pool.push(paddr) {
                     drop(pool);
                     free_pages(paddr, 1);
@@ -515,7 +515,7 @@ pub fn refill_prezeroed_pages() -> usize {
         match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
             Ok(paddr) => {
                 zero_page(paddr);
-                let mut pool = PREZEROED_4K_POOL.lock_no_irq();
+                let mut pool = PREZEROED_4K_POOL.lock();
                 if pool.push(paddr) {
                     PREZEROED_4K_COUNT.fetch_add(1, Ordering::Relaxed);
                     filled += 1;
@@ -541,7 +541,7 @@ pub fn alloc_pages_owned(
 /// Returns true if this physical address belongs to a managed memory zone.
 /// Device memory (PCI BARs, framebuffers) returns false.
 pub fn is_managed_page(paddr: PAddr) -> bool {
-    let mut zones = ZONES.lock_no_irq();
+    let mut zones = ZONES.lock();
     for zone in zones.iter_mut() {
         if zone.includes(paddr.value()) {
             return true;
@@ -555,7 +555,7 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // Single page — try to push to cache.
     if num_pages == 1 {
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
-            let mut cache = PAGE_CACHE.lock_no_irq();
+            let mut cache = PAGE_CACHE.lock();
             if cache.push(paddr) {
                 PAGE_CACHE_COUNT.fetch_add(1, Ordering::Relaxed);
                 NUM_FREE_PAGES.fetch_add(1, Ordering::Relaxed);
@@ -565,7 +565,7 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     }
 
     let order = num_pages_to_order(num_pages);
-    let mut zones = ZONES.lock_no_irq();
+    let mut zones = ZONES.lock();
     for zone in zones.iter_mut() {
         if zone.includes(paddr.value()) {
             zone.free_pages(paddr.value(), order);

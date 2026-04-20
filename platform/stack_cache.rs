@@ -20,7 +20,7 @@ static STACK_REGISTRY: SpinLock<[u64; STACK_REGISTRY_SIZE]> =
     SpinLock::new([0u64; STACK_REGISTRY_SIZE]);
 
 fn register_stack(paddr: PAddr, num_pages: usize) {
-    let mut reg = STACK_REGISTRY.lock_no_irq();
+    let mut reg = STACK_REGISTRY.lock();
     let base = paddr.value() as u64;
     for i in 0..num_pages {
         let p = base + (i * PAGE_SIZE) as u64;
@@ -35,7 +35,7 @@ fn register_stack(paddr: PAddr, num_pages: usize) {
 }
 
 fn unregister_stack(paddr: PAddr, num_pages: usize) {
-    let mut reg = STACK_REGISTRY.lock_no_irq();
+    let mut reg = STACK_REGISTRY.lock();
     let base = paddr.value() as u64;
     for i in 0..num_pages {
         let p = base + (i * PAGE_SIZE) as u64;
@@ -51,7 +51,7 @@ fn unregister_stack(paddr: PAddr, num_pages: usize) {
 /// Check whether a paddr is currently registered as a kernel stack.
 /// Used by alloc_pages / zero_page to detect double-allocation.
 pub fn is_stack_paddr(paddr: PAddr) -> bool {
-    let reg = STACK_REGISTRY.lock_no_irq();
+    let reg = STACK_REGISTRY.lock();
     let p = paddr.value() as u64;
     reg.iter().any(|&s| s == p)
 }
@@ -105,7 +105,7 @@ pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError
     };
 
     if let Some(cache) = cache {
-        if let Some(stack) = cache.lock_no_irq().pop() {
+        if let Some(stack) = cache.lock().pop() {
             install_guard(&stack);
             register_stack(*stack, num_pages);
             return Ok(stack);
@@ -181,7 +181,7 @@ fn dedupe_check_and_record(paddr: u64, offset: usize, value: u64) -> bool {
         ^ ((offset as u64).wrapping_mul(0xbf58476d1ce4e5b9))
         ^ value.wrapping_mul(0x94d049bb133111eb);
     let key = if key == 0 { 1 } else { key };
-    let mut tbl = REPORTED_HITS.lock_no_irq();
+    let mut tbl = REPORTED_HITS.lock();
     let idx = (key as usize) % REPORT_DEDUPE_SIZE;
     for i in 0..REPORT_DEDUPE_SIZE {
         let slot = (idx + i) % REPORT_DEDUPE_SIZE;
@@ -198,7 +198,7 @@ fn dedupe_check_and_record(paddr: u64, offset: usize, value: u64) -> bool {
 
 pub fn scan_live_stack_corruption() {
     let snapshot: [u64; STACK_REGISTRY_SIZE] = {
-        let reg = STACK_REGISTRY.lock_no_irq();
+        let reg = STACK_REGISTRY.lock();
         *reg
     };
     let self_rsp: u64;
@@ -254,7 +254,7 @@ pub fn scan_live_stack_corruption() {
 pub fn check_all_guards() {
     // Check cached 4-page stacks.
     {
-        let cache = CACHE_4PAGE.lock_no_irq();
+        let cache = CACHE_4PAGE.lock();
         for i in 0..cache.count {
             if let Some(ref stack) = cache.stacks[i] {
                 if !check_guard(stack) {
@@ -266,7 +266,7 @@ pub fn check_all_guards() {
     }
     // Check cached 2-page stacks.
     {
-        let cache = CACHE_2PAGE.lock_no_irq();
+        let cache = CACHE_2PAGE.lock();
         for i in 0..cache.count {
             if let Some(ref stack) = cache.stacks[i] {
                 if !check_guard(stack) {
@@ -325,7 +325,7 @@ pub fn free_kernel_stack(stack: OwnedPages, num_pages: usize) {
     };
 
     if let Some(cache) = cache {
-        let mut c = cache.lock_no_irq();
+        let mut c = cache.lock();
         match c.push(stack) {
             Ok(()) => return, // cached successfully
             Err(_stack) => return, // cache full, _stack dropped here → freed via buddy
