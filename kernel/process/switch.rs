@@ -158,14 +158,22 @@ pub fn switch() -> bool {
     // Re-enable preemption so the timer can preempt this thread normally.
     kevlar_platform::arch::preempt_enable();
 
-    // Eagerly free prev's kernel stacks if it just exited.  After
-    // switch_thread, prev's stacks are no longer in use on any CPU.
-    // This matches Linux's finish_task_switch() → put_task_stack() and
-    // prevents OOM under heavy fork/exit (zombies held stacks until GC).
-    if matches!(prev_state, ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_)) {
-        #[allow(unsafe_code)]
-        unsafe { prev.arch().release_stacks(); }
-    }
+    // DO NOT eagerly free prev's kernel stacks here.  Another CPU's
+    // wait-queue or scheduler entry can still hold a weak/strong
+    // reference to `prev` for a window after switch_thread returns —
+    // e.g., a futex waker that sampled the runqueue and is about to
+    // call resume() on this PID.  Freeing now can corrupt a
+    // subsequent switch INTO prev's kernel stack.  Blog 147 first
+    // documented this; under broad sti in syscall_entry the window
+    // widens (mid-syscall preemption), and the panic
+    //   "switch_thread BUG: saved_rsp_off=0xffffffff...ba80"
+    // (kstack_base well below saved_rsp) shows the stack has been
+    // freed and re-issued as data pages.
+    //
+    // Lazy-free via gc_exited_processes → Drop of the last Arc<Process>
+    // instead.  Costs ~32KB per zombie until wait4() reaps, which is
+    // well below the memory savings from the always-defer Vm::Drop
+    // change (commit 0c39aa7).
 
     // Drop the `prev` clone here (decrements strong count by 1, mirroring the
     // clone() at the top of this function).  The exiting thread remains alive
