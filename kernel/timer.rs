@@ -50,14 +50,34 @@ struct Timer {
 }
 
 /// Suspends the current process at least `ms` milliseconds.
+///
+/// The push-into-TIMERS and the state transition to `BlockedSignalable`
+/// happen under the same TIMERS lock — without that, a timer IRQ firing
+/// between the push and the `set_state` could observe our Timer entry,
+/// decrement-and-expire it, and call `resume_boosted()` on us while our
+/// state is still `Runnable`.  Our subsequent `set_state(Blocked)`
+/// then removes us from the run queue — and because the Timer entry
+/// was already consumed by the IRQ, nothing will ever wake us again
+/// through this sleep path.  We'd sleep until some unrelated signal
+/// (SIGCHLD from a child exit) happens to rescue us.
+///
+/// With IF=0 syscall bodies this race couldn't happen (the timer IRQ
+/// can't fire between `lock().push()` and `set_state`).  With broad
+/// `sti` in syscall_entry it becomes reachable on every nanosleep call,
+/// manifesting as ~186ms average sleep time for a requested 50ms —
+/// the smoking gun the latency histogram from commit f84193e surfaced.
 pub fn _sleep_ms(ms: usize) {
     let ticks = (ms * TICK_HZ + 999) / 1000;
-    TIMERS.lock().push(Timer {
-        current: ticks,
-        process: current_process().clone(),
-    });
-
-    current_process().set_state(ProcessState::BlockedSignalable);
+    {
+        let mut timers = TIMERS.lock();
+        timers.push(Timer {
+            current: ticks,
+            process: current_process().clone(),
+        });
+        // Still under the TIMERS lock: transition to BlockedSignalable
+        // before a timer IRQ can decrement our `current` counter.
+        current_process().set_state(ProcessState::BlockedSignalable);
+    }
     let _ = switch();
 }
 
