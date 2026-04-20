@@ -86,21 +86,22 @@ impl<T: ?Sized> SpinLock<T> {
                 core::hint::spin_loop();
                 spins += 1;
                 if spins == SPIN_CONTENTION_THRESHOLD {
-                    // Re-enable interrupts briefly so we can print
-                    // and so the NMI/timer can fire.
-                    unsafe {
-                        #[cfg(target_arch = "x86_64")]
-                        asm!("sti");
-                    }
+                    // Don't re-enable interrupts here — doing so lets a
+                    // timer IRQ fire while lockdep still records us as
+                    // holding the outer lock, producing spurious
+                    // "lock ordering violation" panics (the timer
+                    // handler tries to acquire TIMERS rank 10 while
+                    // we're holding a rank-40 lock) AND introduces a
+                    // real nested-preemption risk.  The warn!() goes
+                    // through the serial printer which uses its own
+                    // spin::Mutex — contention is visible via the
+                    // SPIN_CONTENTION(no_irq) path; this one gets a
+                    // simpler log line.
                     let cpu = crate::arch::cpu_id();
                     log::warn!(
                         "SPIN_CONTENTION: cpu={} lock={:?} addr={:#x} spins={}",
                         cpu, self.name, lock_addr, spins,
                     );
-                    unsafe {
-                        #[cfg(target_arch = "x86_64")]
-                        asm!("cli");
-                    }
                 }
             }
         };

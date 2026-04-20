@@ -855,21 +855,23 @@ impl Drop for Vm {
         };
         let Some(kind) = kind else { return };
 
-        // If called with interrupts disabled (e.g. IRQ bottom half dropping
-        // the last Arc<Process>), the teardown path's TLB IPI would be
-        // skipped, leaving stale entries that corrupt freed PT pages.
-        // Defer to a safe context that drains DEFERRED_VM_TEARDOWNS.
-        if !kevlar_platform::arch::interrupts_enabled() {
-            let pml4 = self.page_table.pml4();
-            // Prevent the PageTable's own Drop (if any) from also freeing it.
-            self.page_table.clear_pml4_for_defer();
-            DEFERRED_VM_TEARDOWNS.lock_no_irq().push(DeferredTeardown { pml4, kind });
-            return;
-        }
-
-        match kind {
-            DeferredTeardownKind::Forked => self.page_table.teardown_forked_pages(),
-            DeferredTeardownKind::GhostForked => self.page_table.teardown_ghost_pages(),
-        }
+        // ALWAYS defer, regardless of IF state.  Previously this defer was
+        // only taken when IF=0 (for the IPI-ack deadlock), but with broad
+        // sti in syscall_entry a mid-syscall Arc drop can trigger teardown
+        // while another CPU's hardware walker is actively traversing a
+        // shared-via-CoW intermediate PT page.  The immediate-teardown
+        // path frees those pages back to PT_PAGE_POOL fast enough that
+        // the walker's next access can hit a freshly-recycled page —
+        // producing the `PT page cookie corrupted` panic from blog 194.
+        //
+        // Deferring into `process_deferred_vm_teardowns` (drained from
+        // `gc_exited_processes` in interval_work) gives every other CPU
+        // at least one idle/context-switch quiescent point between the
+        // drop and the teardown, so no walker that started before the
+        // drop is still in flight when we free the pages.  This is a
+        // crude RCU-like grace period, sufficient for the common case.
+        let pml4 = self.page_table.pml4();
+        self.page_table.clear_pml4_for_defer();
+        DEFERRED_VM_TEARDOWNS.lock_no_irq().push(DeferredTeardown { pml4, kind });
     }
 }
