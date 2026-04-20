@@ -82,8 +82,19 @@ impl ArchTask {
         // Double-read with a fence in between — if the task is actually
         // running on another CPU (state racing), the stack content
         // changes between reads. Only return if BOTH reads agree.
+        //
+        // Layout (9 qwords, popped in reverse by do_switch_thread):
+        //   [rsp+0]  rbp
+        //   [rsp+8]  rbx
+        //   [rsp+16] r12
+        //   [rsp+24] r13
+        //   [rsp+32] r14
+        //   [rsp+40] r15
+        //   [rsp+48] preempt_count
+        //   [rsp+56] rflags
+        //   [rsp+64] ret_addr  (saved RIP)
         unsafe {
-            let rip1 = *((rsp + 7 * 8) as *const u64);
+            let rip1 = *((rsp + 8 * 8) as *const u64);
             let rbp1 = *(rsp as *const u64);
             core::sync::atomic::fence(Ordering::SeqCst);
             // Re-check rsp didn't move (another switch happened) and
@@ -91,7 +102,7 @@ impl ArchTask {
             let rsp2 = *self.rsp.get();
             if rsp2 != rsp { return None; }
             if !self.context_saved.load(Ordering::Acquire) { return None; }
-            let rip2 = *((rsp + 7 * 8) as *const u64);
+            let rip2 = *((rsp + 8 * 8) as *const u64);
             let rbp2 = *(rsp as *const u64);
             if rip1 != rip2 || rbp1 != rbp2 {
                 // Stack content changed between reads — task is racing.
@@ -222,9 +233,11 @@ impl ArchTask {
             rsp = push_stack(rsp, ip.value() as u64); // The entry point.
 
             // Registers to be restored in do_switch_thread().
-            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
+            // Order (stack bottom → top, popped in reverse):
+            //   RIP, RFLAGS, preempt_count, R15, R14, R13, R12, RBX, RBP
             rsp = push_stack(rsp, kthread_entry as *const u8 as u64); // RIP.
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled).
+            rsp = push_stack(rsp, 0); // Initial preempt_count (new kthread).
             rsp = push_stack(rsp, 0); // Initial R15.
             rsp = push_stack(rsp, 0); // Initial R14.
             rsp = push_stack(rsp, 0); // Initial R13.
@@ -266,9 +279,11 @@ impl ArchTask {
             rsp = push_stack(rsp, ip.value() as u64); // RIP
 
             // Registers to be restored in do_switch_thread().
-            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
+            // Order (stack bottom → top, popped in reverse):
+            //   RIP, RFLAGS, preempt_count, R15, R14, R13, R12, RBX, RBP
             rsp = push_stack(rsp, userland_entry as *const u8 as u64); // RIP.
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled).
+            rsp = push_stack(rsp, 0); // Initial preempt_count (new user thread).
             rsp = push_stack(rsp, 0); // Initial R15.
             rsp = push_stack(rsp, 0); // Initial R14.
             rsp = push_stack(rsp, 0); // Initial R13.
@@ -343,10 +358,11 @@ impl ArchTask {
             rsp = push_stack(rsp, frame.rdx);
 
             // Registers to be restored in do_switch_thread().
-            // Order must match do_switch_thread's pop sequence:
-            //   pop rbp, rbx, r12, r13, r14, r15, popfq, ret
+            // Order (stack bottom → top, popped in reverse):
+            //   RIP, RFLAGS, preempt_count, R15, R14, R13, R12, RBX, RBP
             rsp = push_stack(rsp, forked_child_entry as *const u8 as u64); // RIP (popped by ret).
             rsp = push_stack(rsp, 0x02); // RFLAGS (popped by popfq, IF=0).
+            rsp = push_stack(rsp, 0); // Initial preempt_count for child.
             rsp = push_stack(rsp, frame.r15);
             rsp = push_stack(rsp, frame.r14);
             rsp = push_stack(rsp, frame.r13);
@@ -412,9 +428,11 @@ impl ArchTask {
             rsp = push_stack(rsp, frame.rdx);
 
             // do_switch_thread context frame.
-            // Order: pop rbp, rbx, r12, r13, r14, r15, popfq, ret
+            // Order (stack bottom → top, popped in reverse):
+            //   RIP, RFLAGS, preempt_count, R15, R14, R13, R12, RBX, RBP
             rsp = push_stack(rsp, forked_child_entry as *const u8 as u64);
             rsp = push_stack(rsp, 0x02); // RFLAGS (interrupts disabled)
+            rsp = push_stack(rsp, 0); // Initial preempt_count for new thread.
             rsp = push_stack(rsp, frame.r15);
             rsp = push_stack(rsp, frame.r14);
             rsp = push_stack(rsp, frame.r13);
@@ -633,14 +651,15 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     // Fill an invalid value for now: must be initialized in interrupt handlers.
     head.rsp3 = 0xbaad_5a5a_5b5b_baad;
 
-    // Sanity check: verify all 8 popped slots on next's saved stack are valid.
-    // do_switch_thread pops rbp, rbx, r12-r15, rflags, ret_addr — 8 qwords.
-    // If any is GUARD_MAGIC, the saved RSP is in a stack's guard region
-    // (stack overflow OR use-after-free of a freed-and-reissued stack).
+    // Sanity check: verify all 9 popped slots on next's saved stack are valid.
+    // do_switch_thread pops rbp, rbx, r12-r15, preempt_count, rflags,
+    // ret_addr — 9 qwords.  If any non-preempt slot is GUARD_MAGIC, the
+    // saved RSP is in a stack's guard region (stack overflow OR
+    // use-after-free of a freed-and-reissued stack).
     let next_rsp_val = unsafe { *next.rsp.get() };
     if next_rsp_val != 0 && next_rsp_val >= 0xffff_8000_0000_0000 {
         const GUARD_MAGIC: u64 = 0xDEAD_CAFE_DEAD_CAFE;
-        let slots: [u64; 8] = unsafe {
+        let slots: [u64; 9] = unsafe {
             [
                 *((next_rsp_val      ) as *const u64), // rbp
                 *((next_rsp_val +  8) as *const u64),  // rbx
@@ -648,11 +667,12 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
                 *((next_rsp_val + 24) as *const u64),  // r13
                 *((next_rsp_val + 32) as *const u64),  // r14
                 *((next_rsp_val + 40) as *const u64),  // r15
-                *((next_rsp_val + 48) as *const u64),  // rflags
-                *((next_rsp_val + 56) as *const u64),  // ret_addr
+                *((next_rsp_val + 48) as *const u64),  // preempt_count
+                *((next_rsp_val + 56) as *const u64),  // rflags
+                *((next_rsp_val + 64) as *const u64),  // ret_addr
             ]
         };
-        let ret_addr = slots[7];
+        let ret_addr = slots[8];
         let any_guard = slots.iter().any(|&v| v == GUARD_MAGIC);
         let bad_ret = ret_addr == 0
             || (ret_addr > 0 && ret_addr < 0xffff_8000_0000_0000);
@@ -668,11 +688,11 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
                 "switch_thread BUG: cpu={} next.rsp={:#x} kstack_base={:#x} \
                  saved_rsp_off={:#x} guard?={} bad_ret?={} \
                  slots: rbp={:#x} rbx={:#x} r12={:#x} r13={:#x} \
-                 r14={:#x} r15={:#x} rflags={:#x} ret={:#x}",
+                 r14={:#x} r15={:#x} preempt={:#x} rflags={:#x} ret={:#x}",
                 crate::arch::cpu_id(), next_rsp_val, kstack_base, kstack_off,
                 any_guard, bad_ret,
                 slots[0], slots[1], slots[2], slots[3],
-                slots[4], slots[5], slots[6], slots[7],
+                slots[4], slots[5], slots[6], slots[7], slots[8],
             );
         }
     }

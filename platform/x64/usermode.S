@@ -115,11 +115,14 @@ kthread_entry:
 
 .global userland_entry
 userland_entry:
-    // Re-enable preemption (switch() called preempt_disable before
-    // do_switch_thread, but this entry bypasses switch()'s return path).
-    mov eax, dword ptr gs:[GS_PREEMPT_COUNT]
-    dec eax
-    mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+    // preempt_count is now per-thread and restored by do_switch_thread
+    // (pop rax; mov gs:[GS_PREEMPT_COUNT], eax) from the initial stack
+    // layout, which stores 0 for a fresh thread.  The old hand-rolled
+    // `dec gs:[GS_PREEMPT_COUNT]` was needed when preempt_count was
+    // per-CPU — switch()'s preempt_disable++ would otherwise leak onto
+    // the new thread's first instructions — but would underflow to
+    // 0xFFFFFFFF on a freshly-created thread whose initial stored
+    // preempt_count is 0.
 
     // Sanitize registers to prevent information leak.
     xor rax, rax
@@ -144,12 +147,9 @@ userland_entry:
 
 .global forked_child_entry
 forked_child_entry:
-    // Re-enable preemption: switch() called preempt_disable() before
-    // do_switch_thread, but forked_child_entry bypasses switch()'s normal
-    // return path (which calls preempt_enable).
-    mov eax, dword ptr gs:[GS_PREEMPT_COUNT]
-    dec eax
-    mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+    // preempt_count is now per-thread and restored by do_switch_thread
+    // from the fork()-constructed stack, which stores 0 for the child.
+    // See userland_entry above for why the hand-rolled dec was removed.
 
     pop rdx
     pop rdi
@@ -186,10 +186,26 @@ forked_child_entry:
 ///
 .global do_switch_thread
 do_switch_thread:
-    /* Save callee-saved registers.
-       IMPORTANT: push order must match fork()'s initial stack layout
-       in task.rs (RFLAGS first, then R15-R12, RBX, RBP, then RIP for ret). */
+    /* Save RFLAGS first (deepest on the saved frame). */
     pushfq
+
+    /* Save preempt_count as part of the thread's context.  Without
+       this, CpuLocalHead.preempt_count would "stick" across context
+       switches — prev yielding with a nonzero depth (e.g. holding a
+       lock_no_irq that bumped preempt_count) would leak that depth
+       onto next's execution.  Per-thread preempt_count matches
+       Linux's thread_info->preempt_count and is a precondition for
+       broad sti in syscall_entry.
+       Pushed AFTER rflags so the restore can pop preempt_count while
+       IF is still 0 (before popfq) — avoids a window where IF is
+       re-enabled but the per-thread count hasn't been set yet. */
+    xor rax, rax
+    mov eax, dword ptr gs:[GS_PREEMPT_COUNT]
+    push rax
+
+    /* Save callee-saved registers.
+       IMPORTANT: push order must match task.rs's initial stack layouts
+       (RIP, RFLAGS, preempt_count, R15-R12, RBX, RBP — popped in reverse). */
     push r15
     push r14
     push r13
@@ -216,6 +232,12 @@ do_switch_thread:
     pop r13
     pop r14
     pop r15
+
+    /* Restore preempt_count BEFORE popfq (while IF still 0), so no IRQ
+       handler observes a mismatched preempt_count/need_resched state. */
+    pop rax
+    mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+
     popfq       /* Restores IF — re-enables interrupts if they were on. */
 
     /* Resume the next thread. */
