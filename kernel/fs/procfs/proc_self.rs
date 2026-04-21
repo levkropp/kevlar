@@ -743,16 +743,20 @@ impl FileLike for ProcPidEnviron {
     }
 
     fn read(&self, offset: usize, buf: UserBufferMut<'_>, _options: &OpenOptions) -> Result<usize> {
-        if offset > 0 { return Ok(0); }
-        // Return a synthetic per-process environment string so that OpenRC's
-        // md5sum-based /proc liveness check (init.sh) sees unique content per
-        // process and correctly detects that /proc is real.
-        let pid = current_process().pid().as_i32();
-        let s = alloc::format!("KEVLAR_PID={}\0", pid);
-        let bytes = s.as_bytes();
-        let len = core::cmp::min(bytes.len(), buf.len());
+        // Return the target process's environ, or an empty buffer if the
+        // process doesn't exist. Matches Linux's /proc/[pid]/environ format:
+        // NUL-separated KEY=VALUE entries, no trailing NUL.
+        let bytes = match Process::find_by_pid(self.pid) {
+            Some(p) => p.environ_clone(),
+            None => alloc::vec::Vec::new(),
+        };
+        if offset >= bytes.len() {
+            return Ok(0);
+        }
+        let remaining = &bytes[offset..];
+        let len = core::cmp::min(remaining.len(), buf.len());
         let mut writer = UserBufWriter::from(buf);
-        writer.write_bytes(&bytes[..len])?;
+        writer.write_bytes(&remaining[..len])?;
         Ok(len)
     }
 }

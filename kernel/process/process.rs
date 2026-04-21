@@ -320,6 +320,10 @@ pub struct Process {
     /// Resolved executable path (after symlink resolution).
     /// Used for /proc/[pid]/exe symlink.  Set by execve, inherited by fork.
     exe_path: SpinLock<ArrayString<256>>,
+    /// NUL-separated envp as passed to execve (or inherited from parent on
+    /// fork). Matches /proc/[pid]/environ format in Linux. Bounded to 8 KiB
+    /// to keep per-process memory bounded for degenerate apps.
+    environ: SpinLock<alloc::vec::Vec<u8>>,
     /// Set to true when this ghost-fork child has exec'd or exited.
     /// Used by the parent's VFORK_WAIT_QUEUE predicate to detect completion.
     pub ghost_fork_done: AtomicBool,
@@ -386,6 +390,22 @@ impl AtomicRlimits {
 }
 
 /// Default resource limits (RLIMIT_* indexed, 16 entries × [cur, max]).
+/// Flatten envp into NUL-separated bytes, the format used by
+/// /proc/[pid]/environ in Linux. Bounded to 8 KiB to cap per-process
+/// memory for degenerate apps with thousands of env vars.
+fn envp_to_vec(envp: &[&[u8]]) -> alloc::vec::Vec<u8> {
+    const ENVIRON_LIMIT: usize = 8 * 1024;
+    let mut out = alloc::vec::Vec::new();
+    for var in envp {
+        if out.len() + var.len() + 1 > ENVIRON_LIMIT {
+            break;
+        }
+        out.extend_from_slice(var);
+        out.push(0);
+    }
+    out
+}
+
 fn default_rlimits() -> [[u64; 2]; 16] {
     const INF: u64 = !0u64;
     let mut rl = [[INF; 2]; 16];
@@ -411,6 +431,7 @@ impl Process {
             state: AtomicCell::new(ProcessState::Runnable),
             parent: Weak::new(),
             cmdline: AtomicRefCell::new(Cmdline::new()),
+            environ: SpinLock::new(alloc::vec::Vec::new()),
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(None),
             pid: PId::new(0),
@@ -537,6 +558,7 @@ impl Process {
             children: SpinLock::new(Vec::new()),
             state: AtomicCell::new(ProcessState::Runnable),
             cmdline: AtomicRefCell::new(Cmdline::from_argv(argv)),
+            environ: SpinLock::new(envp_to_vec(&[])),
             arch: arch::Process::new_user_thread(entry.ip, entry.user_sp),
             vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(entry.vm)))),
             opened_files: Arc::new(SpinLock::new(opened_files)),
@@ -784,6 +806,18 @@ impl Process {
     /// Returns the resolved executable path (for /proc/[pid]/exe).
     pub fn exe_path_string(&self) -> String {
         String::from(self.exe_path.lock_no_irq().as_str())
+    }
+
+    /// Returns a clone of the NUL-separated environ (for /proc/[pid]/environ).
+    pub fn environ_clone(&self) -> alloc::vec::Vec<u8> {
+        self.environ.lock_no_irq().clone()
+    }
+
+    /// Overwrites the stored environ — called from execve.
+    pub fn set_environ(&self, envp: &[&[u8]]) {
+        let bytes = envp_to_vec(envp);
+        let mut guard = self.environ.lock_no_irq();
+        *guard = bytes;
     }
 
     // ── UID/GID accessors ────────────────────────────────────────────
@@ -1741,6 +1775,7 @@ impl Process {
             current.opened_files.lock().close_cloexec_files();
         }
         current.cmdline.borrow_mut().set_by_argv(argv);
+        current.set_environ(envp);
 
         // Store resolved executable path for /proc/[pid]/exe.
         {
@@ -1909,6 +1944,7 @@ impl Process {
             state: AtomicCell::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
+            environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
@@ -2032,6 +2068,7 @@ impl Process {
             state: AtomicCell::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
+            environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
@@ -2149,6 +2186,7 @@ impl Process {
             state: AtomicCell::new(ProcessState::Runnable),
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
+            environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
             children: SpinLock::new(Vec::new()),
             // Share address space and signal handlers.
             vm: AtomicRefCell::new(parent.vm().as_ref().map(Arc::clone)),
