@@ -198,7 +198,8 @@ static int run_abstract(void) {
 // show up if writev is non-atomic and the two writers' iovecs
 // interleave mid-frame.
 
-#define NUM_FRAMES_PER_WRITER 5000
+#define NUM_FRAMES_PER_WRITER 20000
+#define NUM_WRITERS 4
 
 struct dual_writer_ctx {
     int fd;
@@ -234,16 +235,18 @@ static int run_concurrent(void) {
         printf("FAIL socketpair: errno=%d\n", errno);
         return 1;
     }
-    pthread_t ta, tb;
-    struct dual_writer_ctx ca = { sv[0], 0xa };
-    struct dual_writer_ctx cb = { sv[0], 0xb };
-    pthread_create(&ta, NULL, dual_writer, &ca);
-    pthread_create(&tb, NULL, dual_writer, &cb);
+    pthread_t tt[NUM_WRITERS];
+    struct dual_writer_ctx ctx[NUM_WRITERS];
+    for (int i = 0; i < NUM_WRITERS; i++) {
+        ctx[i].fd = sv[0];
+        ctx[i].writer_id = 0xa0 + i;
+        pthread_create(&tt[i], NULL, dual_writer, &ctx[i]);
+    }
 
-    // Receiver on sv[1]: read frame-by-frame, check magic + len only.
+    // Receiver on sv[1]: read frame-by-frame, check magic + len.
     int bad = 0;
-    int count_a = 0, count_b = 0;
-    int total = 2 * NUM_FRAMES_PER_WRITER;
+    int counts[NUM_WRITERS] = {0};
+    int total = NUM_WRITERS * NUM_FRAMES_PER_WRITER;
     for (int i = 0; i < total; i++) {
         struct frame f = {0};
         size_t got = 0;
@@ -269,38 +272,32 @@ static int run_concurrent(void) {
         // upper 24 bits wouldn't match seq.
         int wid = f.payload & 0xff;
         uint32_t iter_from_payload = f.payload >> 8;
-        if (wid == 0xa) {
-            if (f.seq != iter_from_payload) {
-                printf("FAIL writer-a mismatch frame %d: seq=%u payload_iter=%u\n",
-                       i, f.seq, iter_from_payload);
-                bad = 1;
-                break;
-            }
-            count_a++;
-        } else if (wid == 0xb) {
-            if (f.seq != iter_from_payload) {
-                printf("FAIL writer-b mismatch frame %d: seq=%u payload_iter=%u\n",
-                       i, f.seq, iter_from_payload);
-                bad = 1;
-                break;
-            }
-            count_b++;
-        } else {
+        int idx = wid - 0xa0;
+        if (idx < 0 || idx >= NUM_WRITERS) {
             printf("FAIL unknown writer id frame %d: payload=%08x\n",
                    i, f.payload);
             bad = 1;
             break;
         }
+        if (f.seq != iter_from_payload) {
+            printf("FAIL writer-%d mismatch frame %d: seq=%u payload_iter=%u\n",
+                   idx, i, f.seq, iter_from_payload);
+            bad = 1;
+            break;
+        }
+        counts[idx]++;
     }
 done:
-    pthread_join(ta, NULL);
-    pthread_join(tb, NULL);
+    for (int i = 0; i < NUM_WRITERS; i++) pthread_join(tt[i], NULL);
     close(sv[0]); close(sv[1]);
     if (!bad) {
-        printf("OK concurrent: received %d+%d frames (expected %d+%d)\n",
-               count_a, count_b, NUM_FRAMES_PER_WRITER, NUM_FRAMES_PER_WRITER);
-        if (count_a != NUM_FRAMES_PER_WRITER || count_b != NUM_FRAMES_PER_WRITER) {
-            return 1;
+        printf("OK concurrent: counts=[");
+        for (int i = 0; i < NUM_WRITERS; i++) {
+            printf("%d%s", counts[i], i < NUM_WRITERS - 1 ? "," : "");
+        }
+        printf("] expected %d each\n", NUM_FRAMES_PER_WRITER);
+        for (int i = 0; i < NUM_WRITERS; i++) {
+            if (counts[i] != NUM_FRAMES_PER_WRITER) return 1;
         }
     }
     return bad;

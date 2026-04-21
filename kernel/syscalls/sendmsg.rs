@@ -69,15 +69,49 @@ impl<'a> SyscallHandler<'a> {
         let options = opened_file.options();
         let file = opened_file.as_file()?;
 
-        let mut total = 0usize;
+        // Collect iovecs and their total length so we can decide whether
+        // to consolidate into a single atomic sendto (match Linux's
+        // atomic-writev semantics, which D-Bus and ICE rely on for
+        // length-prefixed framing — see blog 201 + kernel/syscalls/writev.rs).
+        const SENDMSG_ATOMIC_LIMIT: usize = 64 * 1024;
+        let mut iovs: alloc::vec::Vec<super::IoVec> = alloc::vec::Vec::new();
+        let mut total_len: usize = 0;
         for i in 0..msghdr.msg_iovlen {
             let iov_ptr = UserVAddr::new_nonnull(
                 msghdr.msg_iov + i * core::mem::size_of::<super::IoVec>(),
             )?;
             let iov = iov_ptr.read::<super::IoVec>()?;
-            if iov.len == 0 {
-                continue;
+            if iov.len > 0 {
+                total_len = total_len.saturating_add(iov.len);
+                iovs.push(iov);
             }
+        }
+
+        if total_len == 0 {
+            return Ok(0);
+        }
+
+        // Atomic path: consolidate all iovecs into one kernel buffer and
+        // issue a single sendto(). Prevents interleaved writes from
+        // concurrent senders on the same fd from scrambling the stream.
+        if total_len <= SENDMSG_ATOMIC_LIMIT {
+            let mut buf = alloc::vec![0u8; total_len];
+            let mut off: usize = 0;
+            for iov in &iovs {
+                iov.base.read_bytes(&mut buf[off..off + iov.len])?;
+                off += iov.len;
+            }
+            let written = file.sendto(
+                UserBuffer::from(buf.as_slice()),
+                None,
+                &options,
+            )?;
+            return Ok(written as isize);
+        }
+
+        // Fallback: per-iovec sendto for huge messages. Not atomic.
+        let mut total = 0usize;
+        for iov in &iovs {
             let buf = UserBuffer::from_uaddr(iov.base, iov.len);
             let written = file.sendto(buf, None, &options)?;
             total += written;
