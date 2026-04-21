@@ -310,6 +310,19 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
             let if_enabled = if rflags & 0x200 != 0 { "IF=1" } else { "IF=0" };
             let ring = cs & 3;
 
+            // Serialize NMI dumps across CPUs so their output doesn't
+            // interleave character-by-character on the serial port. The
+            // watchdog now NMIs every online CPU when one is stuck; that
+            // was producing unreadable transcripts.
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static NMI_SERIAL: AtomicU32 = AtomicU32::new(u32::MAX);
+            // Acquire — first NMI through wins. The cpu itself is the ticket.
+            while NMI_SERIAL.compare_exchange(u32::MAX, cpu,
+                Ordering::Acquire, Ordering::Relaxed).is_err()
+            {
+                core::hint::spin_loop();
+            }
+
             // Use warn! for structured output — the serial lock is a spin::Mutex
             // (not our SpinLock), so it's safe here as long as the stuck code
             // wasn't inside the logger.  Fall back to emergency output if needed.
@@ -329,6 +342,16 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                 lvt, mode, masked, init, curr, div);
             log::warn!("  HB counters: CPU0={} CPU1={}",
                 super::apic::lapic_hb_read(0), super::apic::lapic_hb_read(1));
+
+            // Per-CPU in-flight syscall: which nr the stuck CPU is in, and
+            // the total syscall count advanced on this CPU. Helps tell
+            // "stuck in syscall N" apart from "stuck outside syscall
+            // context" (idle, IRQ path, page fault, etc.).
+            let sc_count = super::syscall::SYSCALL_COUNT[cpu as usize]
+                .load(core::sync::atomic::Ordering::Relaxed);
+            let sc_nr = super::syscall::LAST_SYSCALL_NR[cpu as usize]
+                .load(core::sync::atomic::Ordering::Relaxed);
+            log::warn!("  syscall: count={} last_nr={}", sc_count, sc_nr);
 
             // Stack trace — walk RBP chain (best-effort, may be incomplete).
             log::warn!("  Backtrace:");
@@ -366,6 +389,8 @@ unsafe extern "C" fn x64_handle_interrupt(vec: u8, frame: *mut InterruptFrame) {
                 rip,
                 rflags,
             );
+            // Release the serial — next NMI'd CPU can now dump.
+            NMI_SERIAL.store(u32::MAX, Ordering::Release);
         }
         BREAKPOINT_VECTOR => {
             // int3 from userspace: deliver SIGTRAP (debugger breakpoint).
