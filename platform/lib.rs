@@ -81,6 +81,7 @@ pub mod arch {
         register_cpu_apic_id, watchdog_enable, watchdog_check,
         if_trace_enable, enable_preempt_check, assert_preempt_safe,
         syscall_counter_read, last_syscall_nr_read, syscall_dump_histogram,
+        read_all_qsc_counters, wait_for_qsc_grace_period, QscSnapshot,
         x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
@@ -118,6 +119,15 @@ pub mod arch {
     pub fn last_syscall_nr_read(_cpu: usize) -> u32 { 0 }
     #[cfg(target_arch = "aarch64")]
     pub fn syscall_dump_histogram(_cpu: usize) {}
+
+    // QSC grace-period is x86_64-only; ARM64 uses different (simpler)
+    // TLB invalidation semantics and hasn't hit the same walker-race class.
+    #[cfg(target_arch = "aarch64")]
+    pub type QscSnapshot = [u64; 8];
+    #[cfg(target_arch = "aarch64")]
+    pub fn read_all_qsc_counters() -> QscSnapshot { [0; 8] }
+    #[cfg(target_arch = "aarch64")]
+    pub fn wait_for_qsc_grace_period(_snapshot: &QscSnapshot) -> Result<(), ()> { Ok(()) }
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{

@@ -82,6 +82,10 @@ unsafe extern "C" fn ap_rust_entry(lapic_id: u32) -> ! {
     // Set per-CPU ID now that GSBASE is established.
     CPU_ID.set(ap_cpu_id);
 
+    // Register this AP's CpuLocalHead pointer for remote QSC reads
+    // (Vm::Drop grace period).  Safe now that GSBASE + CPU_ID are set.
+    smp::register_cpu_local_head(ap_cpu_id);
+
     // All platform setup complete — announce online.
     info!("CPU (LAPIC {}, cpu_id={}) online", lapic_id, ap_cpu_id);
     smp::AP_ONLINE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Release);
@@ -205,6 +209,11 @@ unsafe extern "C" fn bsp_early_init(boot_magic: u32, boot_params: u64) -> ! {
     serial::init(boot_info.use_second_serialport);
     init_pic();
     common_setup(VAddr::new(&__bsp_cpu_local as *const _ as usize));
+
+    // Register BSP (cpu_id=0) CpuLocalHead pointer for the QSC grace
+    // period.  Must happen after common_setup has set GSBASE.
+    smp::register_cpu_local_head(0);
+
     smp::init();
 
     boot_kernel(&boot_info);

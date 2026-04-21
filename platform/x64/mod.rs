@@ -118,6 +118,10 @@ pub fn syscall_dump_histogram(cpu: usize) {
     syscall::dump_histogram(cpu);
 }
 
+/// Snapshot every online CPU's quiescent-state counter.
+/// See `paging::read_all_qsc_counters` for details.
+pub use paging::{read_all_qsc_counters, wait_for_qsc_grace_period, QscSnapshot};
+
 /// Periodic watchdog check — called from handle_timer_irq.
 pub fn watchdog_check() {
     apic::watchdog_check();

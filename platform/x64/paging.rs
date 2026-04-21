@@ -62,6 +62,85 @@ fn flush_tlb_for_teardown() {
     }
 }
 
+// ── Per-CPU quiescent-state grace period ──────────────────────────────
+//
+// Vm::Drop needs a way to know that every online CPU has passed through
+// a kernel-transition point (IRQ return, syscall entry, or context
+// switch) since `Vm::Drop` started.  Once every CPU has done so, any
+// in-flight hardware page walker from *before* the drop is guaranteed
+// to have retired, so the freed PT pages can be returned to the pool
+// without risk of a stale walker writing A/D bits into them.
+//
+// Implementation: each CPU increments `qsc_counter` in its own
+// CpuLocalHead at the three quiescent points (see usermode.S and
+// trap.S).  This helper reads a snapshot of every online CPU's
+// counter, then spins until each has advanced by at least 1.
+//
+// See `wait_for_qsc_grace_period` for usage and caveats.
+pub type QscSnapshot = [u64; super::smp::MAX_CPUS];
+
+/// Snapshot every online CPU's quiescent-state counter at call time.
+/// Cheap — O(num_cpus) relaxed loads.
+pub fn read_all_qsc_counters() -> QscSnapshot {
+    use core::sync::atomic::Ordering;
+    let mut snap = [0u64; super::smp::MAX_CPUS];
+    let n = super::smp::num_online_cpus() as usize;
+    for cpu in 0..n.min(super::smp::MAX_CPUS) {
+        let head = super::smp::CPU_LOCAL_HEADS[cpu].load(Ordering::Acquire);
+        if head.is_null() {
+            continue;
+        }
+        // SAFETY: `head` points to a CpuLocalHead registered by the
+        // owning CPU's init path.  `qsc_counter` is u64 at offset 24
+        // (see static_assert in cpu_local.rs).  Naturally aligned.
+        // Volatile prevents the optimizer from hoisting the load.
+        let qsc_ptr = unsafe { (head as *const u8).add(24) as *const u64 };
+        snap[cpu] = unsafe { core::ptr::read_volatile(qsc_ptr) };
+    }
+    snap
+}
+
+/// Spin until every online CPU's QSC counter has advanced past the
+/// corresponding `snapshot[cpu]` value.  Returns `Ok(())` on success or
+/// `Err(())` if `GRACE_PERIOD_TIMEOUT_NS` elapsed first (caller should
+/// fall back to deferred teardown).
+///
+/// MUST be called with interrupts enabled on the caller's CPU.  If IF=0
+/// on the caller, remote CPUs' IRQ-return quiescent points may never
+/// fire (e.g., timer IPIs blocked), causing a timeout.
+pub fn wait_for_qsc_grace_period(snapshot: &QscSnapshot) -> Result<(), ()> {
+    use core::sync::atomic::Ordering;
+    debug_assert!(super::interrupts_enabled());
+    const GRACE_PERIOD_TIMEOUT_NS: u64 = 50_000_000; // 50 ms
+    let n = super::smp::num_online_cpus() as usize;
+    let self_cpu = super::cpu_id() as usize;
+    let deadline_ns = super::tsc::nanoseconds_since_boot() + GRACE_PERIOD_TIMEOUT_NS;
+
+    for cpu in 0..n.min(super::smp::MAX_CPUS) {
+        if cpu == self_cpu {
+            // Self is trivially quiescent — we're in kernel, no walker
+            // started on this CPU from user space can still be in flight.
+            continue;
+        }
+        let head = super::smp::CPU_LOCAL_HEADS[cpu].load(Ordering::Acquire);
+        if head.is_null() {
+            continue;
+        }
+        let qsc_ptr = unsafe { (head as *const u8).add(24) as *const u64 };
+        loop {
+            let cur = unsafe { core::ptr::read_volatile(qsc_ptr) };
+            if cur.wrapping_sub(snapshot[cpu]) >= 1 {
+                break;
+            }
+            if super::tsc::nanoseconds_since_boot() >= deadline_ns {
+                return Err(());
+            }
+            core::hint::spin_loop();
+        }
+    }
+    Ok(())
+}
+
 /// Invalidate all TLB entries on the current CPU for all PCIDs (excluding
 /// global mappings). Uses INVPCID type=3 if supported; otherwise toggles
 /// CR4.PCIDE which has the same effect.

@@ -13,11 +13,46 @@
 //! enters the idle loop.
 
 use super::acpi;
+use super::cpu_local::CpuLocalHead;
 use super::{apic, tsc};
 use crate::page_allocator::{alloc_pages, AllocPageFlags};
 use crate::arch::PAGE_SIZE;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering, fence};
 use core::ptr;
+
+/// Maximum CPUs supported — matches flight_recorder::MAX_CPUS.
+pub const MAX_CPUS: usize = 8;
+
+/// Pointers to each online CPU's CpuLocalHead, indexed by cpu_id.
+///
+/// Populated by the BSP (slot 0) in `bsp_early_init` and by each AP in
+/// `ap_rust_entry`, after `cpu_local::init` has set GSBASE.  Readers
+/// (e.g. the Vm::Drop grace-period scan in `paging::read_all_qsc_counters`)
+/// use this table to read each CPU's `qsc_counter` without having to
+/// execute on that CPU.
+///
+/// A slot is null until the corresponding CPU has finished its per-CPU
+/// init; consumers must skip null slots.
+pub static CPU_LOCAL_HEADS: [AtomicPtr<CpuLocalHead>; MAX_CPUS] = [
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+    AtomicPtr::new(ptr::null_mut()),
+];
+
+/// Register the currently-executing CPU's CpuLocalHead pointer into the
+/// global table.  Must be called AFTER `cpu_local::init` has set GSBASE.
+pub fn register_cpu_local_head(cpu_id: u32) {
+    if (cpu_id as usize) >= MAX_CPUS {
+        return;
+    }
+    let head = super::cpu_local::cpu_local_head() as *mut CpuLocalHead;
+    CPU_LOCAL_HEADS[cpu_id as usize].store(head, Ordering::Release);
+}
 
 // ── AP stack and cpu_local sizing ─────────────────────────────────────
 

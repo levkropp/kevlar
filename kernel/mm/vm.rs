@@ -855,23 +855,51 @@ impl Drop for Vm {
         };
         let Some(kind) = kind else { return };
 
-        // ALWAYS defer, regardless of IF state.  Previously this defer was
-        // only taken when IF=0 (for the IPI-ack deadlock), but with broad
-        // sti in syscall_entry a mid-syscall Arc drop can trigger teardown
-        // while another CPU's hardware walker is actively traversing a
-        // shared-via-CoW intermediate PT page.  The immediate-teardown
-        // path frees those pages back to PT_PAGE_POOL fast enough that
-        // the walker's next access can hit a freshly-recycled page —
-        // producing the `PT page cookie corrupted` panic from blog 194.
-        //
-        // Deferring into `process_deferred_vm_teardowns` (drained from
-        // `gc_exited_processes` in interval_work) gives every other CPU
-        // at least one idle/context-switch quiescent point between the
-        // drop and the teardown, so no walker that started before the
-        // drop is still in flight when we free the pages.  This is a
-        // crude RCU-like grace period, sufficient for the common case.
         let pml4 = self.page_table.pml4();
         self.page_table.clear_pml4_for_defer();
-        DEFERRED_VM_TEARDOWNS.lock_no_irq().push(DeferredTeardown { pml4, kind });
+
+        // IF=0 caller (e.g., IRQ bottom half): cannot synchronously wait
+        // for remote CPUs' QSC counters to advance — the grace period
+        // requires those CPUs to take IRQ-return quiescent points, and
+        // if this CPU had to send anything (like a TLB IPI) to trigger
+        // that, IF=0 would block it.  Defer to the existing
+        // DEFERRED_VM_TEARDOWNS queue, drained from gc_exited_processes.
+        if !kevlar_platform::arch::interrupts_enabled() {
+            DEFERRED_VM_TEARDOWNS.lock_no_irq()
+                .push(DeferredTeardown { pml4, kind });
+            return;
+        }
+
+        // IF=1 caller: attempt a synchronous grace period via per-CPU
+        // quiescent-state counters (see platform/x64/paging.rs).
+        // Produces no queue accumulation under fork-exit storms, where
+        // the deferred-drain path (at interval_work's 100 Hz) was
+        // outpaced by producers under broad sti.
+        //
+        // Mechanism: snapshot every online CPU's qsc_counter, then
+        // spin-wait until each has advanced by >=1.  Any CPU that
+        // advances its counter has passed through a kernel-transition
+        // quiescent point (syscall entry, IRQ return, or context switch),
+        // meaning any hardware page walker active before our snapshot
+        // has retired.  Safe then to free PT pages back to the pool.
+        let snap = kevlar_platform::arch::read_all_qsc_counters();
+        match kevlar_platform::arch::wait_for_qsc_grace_period(&snap) {
+            Ok(()) => {
+                // Grace period elapsed — safe to free synchronously.
+                let mut pt = PageTable::from_pml4_for_teardown(pml4);
+                match kind {
+                    DeferredTeardownKind::Forked       => pt.teardown_forked_pages(),
+                    DeferredTeardownKind::GhostForked  => pt.teardown_ghost_pages(),
+                }
+            }
+            Err(()) => {
+                // Timeout (>50 ms) — a remote CPU is stuck in a long
+                // IF=0 kernel region.  Spill to the deferred queue;
+                // `interval_work` on the idle CPU will drain it once
+                // the remote CPU exits its critical section.
+                DEFERRED_VM_TEARDOWNS.lock_no_irq()
+                    .push(DeferredTeardown { pml4, kind });
+            }
+        }
     }
 }

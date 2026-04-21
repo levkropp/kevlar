@@ -1,7 +1,10 @@
-// Offsets in CpuLocalHead.
-.set GS_RSP0, 0
-.set GS_RSP3, 8
+// Offsets in CpuLocalHead.  Must match the struct in cpu_local.rs
+// (static_assert at bottom of that file enforces it).
+.set GS_RSP0,          0
+.set GS_RSP3,          8
 .set GS_PREEMPT_COUNT, 16
+.set GS_NEED_RESCHED,  20
+.set GS_QSC_COUNTER,   24
 
 .global syscall_entry
 syscall_entry:
@@ -36,6 +39,12 @@ syscall_entry:
     // Switch to the kernel stack.
     mov gs:[GS_RSP3], rsp
     mov rsp, gs:[GS_RSP0]
+
+    // QSC: entering kernel via SYSCALL is a quiescent point.  Any prior
+    // user-space hardware page walker has retired before the CPU
+    // transitioned into kernel mode.  Vm::Drop reads every CPU's
+    // qsc_counter to implement a grace period before freeing PT pages.
+    inc qword ptr gs:[GS_QSC_COUNTER]
 
     // Save SYSRET context and registers (pt_regs) onto the kernel stack.
     push 32           // User SS (USER_DS). FIXME: Hardcoded.
@@ -237,6 +246,12 @@ do_switch_thread:
        handler observes a mismatched preempt_count/need_resched state. */
     pop rax
     mov dword ptr gs:[GS_PREEMPT_COUNT], eax
+
+    /* QSC: the CPU just finished loading a fresh thread's context; any
+       page walker from the outgoing thread is retired (its stack is
+       parked on a runqueue).  IF still 0 here so no nested IRQ can
+       double-count this. */
+    inc qword ptr gs:[GS_QSC_COUNTER]
 
     popfq       /* Restores IF — re-enables interrupts if they were on. */
 

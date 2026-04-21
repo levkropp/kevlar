@@ -3,6 +3,10 @@
 //
 .set INTERRUPT_HANDLER_SIZE, 16
 
+// Must match the struct in cpu_local.rs (static_assert at bottom of that
+// file enforces it).
+.set GS_QSC_COUNTER, 24
+
 .align INTERRUPT_HANDLER_SIZE
 .global interrupt_handlers
 interrupt_handlers:
@@ -105,6 +109,13 @@ interrupt_common:
     call x64_check_signal_on_irq_return
     add rsp, 8
 1:
+    // QSC: interrupt is about to return.  IF is still 0 here (set by the
+    // interrupt stub) so no nested IRQ can double-count.  Any hardware
+    // walker that started before this interrupt has retired: the
+    // interrupt vectored the CPU into kernel mode, which serializes
+    // with prior walks.  See Vm::Drop for the grace-period consumer.
+    inc qword ptr gs:[GS_QSC_COUNTER]
+
     pop rax
     pop rbx
     pop rcx

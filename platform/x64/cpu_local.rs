@@ -84,22 +84,45 @@ macro_rules! cpu_local {
 }
 
 /// The cpu-local structure at the beginning of the GSBASE.
+///
+/// Field offsets MUST match the `GS_*` constants in `usermode.S` and
+/// `trap.S` — the asm does direct `gs:[imm]` accesses by numeric offset.
 #[repr(C, packed)]
 pub struct CpuLocalHead {
-    /// The kernel stack in the syscall context.
+    /// The kernel stack in the syscall context.  Offset 0.
     pub rsp0: u64,
     /// The temporary save space for the user stack in the syscall context.
+    /// Offset 8.
     pub rsp3: u64,
     /// Preemption disable count.  Incremented at the start of `switch()` and
     /// decremented after `do_switch_thread` returns.  The timer preemption
     /// handler skips `process::switch()` while this is non-zero, preventing
-    /// nested context switches on the same CPU.
+    /// nested context switches on the same CPU.  Offset 16.
     pub preempt_count: u32,
     /// Set by the timer handler when preemption is disabled but a context
     /// switch is due.  Checked by `preempt_enable()` to reschedule
-    /// immediately.  Matches Linux's TIF_NEED_RESCHED.
+    /// immediately.  Matches Linux's TIF_NEED_RESCHED.  Offset 20.
     pub need_resched: u32,
+    /// Quiescent-state counter.  Incremented by the owning CPU at three
+    /// points: syscall entry, interrupt return, and context switch (load
+    /// side).  Readable atomically from any CPU via the `CPU_LOCAL_HEADS`
+    /// table in `smp.rs` as part of the Vm::Drop grace period.  Plain u64
+    /// here; the asm increments are single `inc qword ptr gs:[24]` which
+    /// x86-TSO makes atomically visible, and the reader uses a volatile
+    /// read.  Offset 24.
+    pub qsc_counter: u64,
 }
+
+// Static assertions so the asm `GS_*` constants stay in sync with this
+// struct.  Compile-time error if a field is moved or resized.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(CpuLocalHead, rsp0)          == 0);
+    assert!(offset_of!(CpuLocalHead, rsp3)          == 8);
+    assert!(offset_of!(CpuLocalHead, preempt_count) == 16);
+    assert!(offset_of!(CpuLocalHead, need_resched)  == 20);
+    assert!(offset_of!(CpuLocalHead, qsc_counter)   == 24);
+};
 
 #[used]
 #[unsafe(link_section = ".cpu_local_head")]
