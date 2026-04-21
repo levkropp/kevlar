@@ -151,6 +151,7 @@ def compile_all_local():
         ("testing/test_xfce.c",          "test-xfce",        []),
         ("testing/test_xfce_idle.c",     "test-xfce-idle",   []),
         ("testing/test_xfce_panel_probe.c", "test-xfce-panel-probe", []),
+        ("testing/test_unix_stream_corruption.c", "test-unix-stream", ["-pthread"]),
         ("testing/test_x11_visible.c",   "test-x11-visible", []),
         ("testing/test_xfce_direct.c",   "test-xfce-direct", []),
         ("testing/test_kxserver_visible.c", "test-kxserver-visible", []),
