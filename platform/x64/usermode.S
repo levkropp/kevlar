@@ -72,7 +72,15 @@ syscall_entry:
     mov rcx, r10 // arg3
     push rsp     // syscall frame
     push rax     // syscall number
+    // Re-enable interrupts for the syscall body.  SYSCALL masks IF=0 via
+    // IA32_FMASK; leaving IF=0 silently degrades flush_tlb_remote to a
+    // PCID-generation bump only (blog 188), producing kernel-pointer
+    // leaks via stale TLB entries.  Safe now because the per-CPU QSC
+    // grace period (commit 253821f) serializes Vm::Drop against
+    // in-flight hardware page walkers.
+    sti
     call x64_handle_syscall
+    cli
     add rsp, 16
 
     // Restore registers.

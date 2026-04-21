@@ -1826,7 +1826,19 @@ impl Process {
         };
 
         entry.vm.page_table().switch();
-        *current.vm.borrow_mut() = Some(Arc::new(SpinLock::new(entry.vm)));
+        // Replace the Vm, then drop the old one *outside* the borrow_mut
+        // scope.  Vm::Drop can take milliseconds (synchronous QSC grace
+        // period, commit 253821f), and during that time any other CPU
+        // that does `current.vm()` would observe a held mutable borrow
+        // and panic "already mutably borrowed".  Using mem::replace
+        // limits the borrow_mut to the swap itself.
+        let _old_vm = core::mem::replace(
+            &mut *current.vm.borrow_mut(),
+            Some(Arc::new(SpinLock::new(entry.vm))),
+        );
+        // `_old_vm` (an Option<Arc<SpinLock<Vm>>>) is dropped here with
+        // no vm borrow held.  The Arc may not be the last reference —
+        // Vm::Drop only fires when refcount hits zero.
 
         // Ghost-fork: restore parent's writable PTEs using the saved list.
         if let Some(ref addrs) = ghost_cow_addrs {
