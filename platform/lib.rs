@@ -82,6 +82,7 @@ pub mod arch {
         if_trace_enable, enable_preempt_check, assert_preempt_safe,
         syscall_counter_read, last_syscall_nr_read, syscall_dump_histogram,
         read_all_qsc_counters, wait_for_qsc_grace_period, QscSnapshot,
+        flush_tlb_remote_all_pcids,
         x64_specific, tsc, vdso,
         Backtrace, PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
@@ -98,6 +99,10 @@ pub mod arch {
     }
     #[cfg(target_arch = "aarch64")]
     pub fn bump_global_pcid_generation() {}
+
+    /// Broadcast TLB flush to all other CPUs. ARM64 stub — TODO.
+    #[cfg(target_arch = "aarch64")]
+    pub fn flush_tlb_remote_all_pcids() {}
 
     /// Load the kernel bootstrap PML4 into CR3.  Called by the scheduler
     /// when switching to a task that has no Vm (typically the idle thread):

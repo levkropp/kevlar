@@ -132,12 +132,28 @@ impl<'a> SyscallHandler<'a> {
             cursor += PAGE_SIZE;
         }
 
-        if !to_free.is_empty() {
-            vm.page_table().flush_tlb_remote();
-        }
-
-        // Drop VM lock before doing file I/O (writeback + page free).
+        // Drop the Vm lock BEFORE the cross-CPU TLB flush. Remote
+        // flush_tlb_remote() spin-waits for each other CPU to ACK the
+        // TLB shootdown IPI; if a remote CPU is in its own page-fault
+        // handler spinning on this Vm's lock_no_irq() with IF=0 (the
+        // IDT interrupt gate cleared it), it cannot ACK the IPI until
+        // it re-enables interrupts — which it can only do after
+        // acquiring the very lock we hold. Dropping first lets the
+        // remote CPU complete its page fault, return to userspace
+        // (IF=1 restored), and ACK the IPI.
+        //
+        // Safety: physical pages in `to_free` remain allocated until
+        // the free loop below, so stale TLB entries cleared by the
+        // broadcast cannot resolve to pages belonging to a different
+        // process. Any racing mmap of the same VA by another thread
+        // of this process will install a new PTE; the subsequent
+        // broadcast flushes every CPU's entry for our PCID, so the
+        // racing thread re-faults and picks up the new mapping.
+        let had_unmaps = !to_free.is_empty();
         drop(vm);
+        if had_unmaps {
+            kevlar_platform::arch::flush_tlb_remote_all_pcids();
+        }
 
         // Write back MAP_SHARED dirty pages to files.
         // For each page, write only data up to the last non-zero byte if the

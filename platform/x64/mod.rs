@@ -122,6 +122,15 @@ pub fn syscall_dump_histogram(cpu: usize) {
 /// See `paging::read_all_qsc_counters` for details.
 pub use paging::{read_all_qsc_counters, wait_for_qsc_grace_period, QscSnapshot};
 
+/// Broadcast-TLB-shootdown-all-PCIDs IPI. Same as
+/// `PageTable::flush_tlb_remote()` but callable without a `&PageTable`,
+/// so it can be invoked AFTER the Vm spinlock has been dropped — a
+/// critical ordering to avoid deadlock with a remote CPU's page-fault
+/// handler spinning on `vm.lock_no_irq()` with IF=0. See munmap.rs.
+pub fn flush_tlb_remote_all_pcids() {
+    apic::tlb_remote_flush_all_pcids();
+}
+
 /// Periodic watchdog check — called from handle_timer_irq.
 pub fn watchdog_check() {
     apic::watchdog_check();
