@@ -74,6 +74,21 @@ extern "C" fn x64_handle_syscall(
             }
         }
     }
+    // Slow-syscall warn: flag unusually long syscalls so we can see where
+    // a process is blocking without userspace strace. Two thresholds:
+    //
+    // - 2e9 TSC (~1 s at 2.4 GHz) for non-wait syscalls (anything other
+    //   than poll/select/futex/nanosleep/wait). A CoW fault or mmap
+    //   taking a second is definitely interesting.
+    // - 10e9 TSC (~5 s) for wait-bound syscalls. poll/select routinely
+    //   wait; only an unusually long poll hints at "the thing I'm
+    //   waiting for never comes" — which is the XSM/ICE handshake
+    //   pattern we're chasing.
+    let is_wait = matches!(n, 7 | 23 | 35 | 202 | 232 | 247 | 271 | 61);
+    let threshold: u64 = if is_wait { 10_000_000_000 } else { 2_000_000_000 };
+    if dt > threshold {
+        log::warn!("SLOW_SYSCALL: cpu={} nr={} tsc_dt={}", cpu, n, dt);
+    }
     ret
 }
 

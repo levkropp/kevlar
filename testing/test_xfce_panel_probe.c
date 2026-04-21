@@ -153,6 +153,70 @@ int main(void) {
              "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/.dbus-session-sock; "
              "exec /usr/bin/xfce4-session >/tmp/xfce-session.log 2>&1");
 
+    // Once xfwm4 is running, dump its /proc/<pid>/environ to see if
+    // SESSION_MANAGER is set. If it isn't, XSM registration will never
+    // happen and xfce4-session's ~23s-per-client timeout fires
+    // unconditionally.
+    for (int t = 0; t < 10; t++) {
+        sleep(1);
+        struct procinfo r = scan_procs();
+        if (r.wm_pid > 0) {
+            // List ICE sockets in /mnt/tmp/.ICE-unix/
+            printf("=== /mnt/tmp/.ICE-unix/ contents ===\n");
+            DIR *ice = opendir("/mnt/tmp/.ICE-unix");
+            if (ice) {
+                struct dirent *de2;
+                while ((de2 = readdir(ice)) != NULL) {
+                    if (de2->d_name[0] == '.') continue;
+                    char p[128];
+                    snprintf(p, sizeof(p), "/mnt/tmp/.ICE-unix/%s", de2->d_name);
+                    struct stat st;
+                    if (stat(p, &st) == 0) {
+                        printf("  %s type=%s size=%d\n", de2->d_name,
+                            S_ISSOCK(st.st_mode) ? "socket" :
+                            S_ISREG(st.st_mode) ? "regular" : "other",
+                            (int)st.st_size);
+                    } else {
+                        printf("  %s (stat errno=%d)\n", de2->d_name, errno);
+                    }
+                }
+                closedir(ice);
+            } else {
+                printf("  (opendir errno=%d)\n", errno);
+            }
+            // List xfce4-session's and xfwm4's open fds.
+            int fd_pids[] = { r.session_pid, r.wm_pid };
+            const char *fd_names[] = { "xfce4-session", "xfwm4" };
+            for (int k = 0; k < 2; k++) {
+                if (fd_pids[k] < 0) continue;
+                char fd_path[64];
+                snprintf(fd_path, sizeof(fd_path), "/proc/%d/fd", fd_pids[k]);
+                DIR *fd_dir = opendir(fd_path);
+                if (fd_dir) {
+                    printf("=== %s pid=%d open fds ===\n",
+                           fd_names[k], fd_pids[k]);
+                    struct dirent *de3;
+                    while ((de3 = readdir(fd_dir)) != NULL) {
+                        if (de3->d_name[0] == '.') continue;
+                        char link_path[64], link_dst[256] = {0};
+                        snprintf(link_path, sizeof(link_path),
+                            "/proc/%d/fd/%s", fd_pids[k], de3->d_name);
+                        int n = readlink(link_path, link_dst, sizeof(link_dst) - 1);
+                        if (n > 0) {
+                            link_dst[n] = 0;
+                            printf("  %s -> %s\n", de3->d_name, link_dst);
+                        }
+                    }
+                    closedir(fd_dir);
+                } else {
+                    printf("  (no /proc/%d/fd, errno=%d)\n", fd_pids[k], errno);
+                }
+            }
+            fflush(stdout);
+            break;
+        }
+    }
+
     // Probe every second for 120 s. If a client takes ~25s per registration
     // timeout, the panel might appear around T+75-T+100.
     int panel_first_seen = -1;
