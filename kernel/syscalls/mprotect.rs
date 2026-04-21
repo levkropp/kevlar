@@ -62,8 +62,17 @@ impl<'a> SyscallHandler<'a> {
             }
             cursor += PAGE_SIZE;
         }
+        // Drop the Vm lock BEFORE the cross-CPU TLB flush — mirrors the
+        // munmap fix (blog 199). A remote CPU's page-fault handler spins
+        // on this Vm's lock_no_irq() with IF=0, cannot ACK the TLB
+        // shootdown IPI until the lock frees. Dropping first breaks the
+        // deadlock. Safe: PTE flag updates are already committed to our
+        // page table (local invlpg'd); remote CPUs still have stale
+        // flags until the broadcast completes, matching Linux's
+        // non-atomic-across-CPUs mprotect semantics.
+        drop(vm);
         if any_flushed {
-            vm.page_table().flush_tlb_remote();
+            kevlar_platform::arch::flush_tlb_remote_all_pcids();
         }
 
         Ok(0)
