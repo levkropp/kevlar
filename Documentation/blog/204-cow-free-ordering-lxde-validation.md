@@ -293,5 +293,64 @@ results lands:
    non-TLB channel (direct kernel write via copy_to_user, shared-
    mapping mismatch, etc.).
 
-Each outcome points at a disjoint fix path.  Committing and measuring
-next turn.
+### Actual result: outcome 1
+
+4-run XFCE sample landed outcome 1 decisively:
+
+- 2 `KERNEL_PTR_LEAK` events (xfce4-panel + xfwm4)
+- 6 `PAGE_ZERO_MISS` events:
+  - 5 at `PREZEROED_POOL` pop time
+  - 1 at `PREZEROED_PREPUSH_REFILL` (right after `zero_page()`)
+- Leaked value consistently `0xffff800000221310` (kernel
+  `UserVAddr::write_bytes` text address, offset 0x30 — i.e. a saved
+  return address from a caller that just entered `write_bytes`)
+- Density per scanned leaked page: up to **170 kernel-pointer words**
+  in one 4 KB page
+
+That density is the smoking gun.  170 kernel pointers in a single
+page is not "one coincidental value" — it's a full kernel stack's
+frames, complete with saved return addresses, locals, and
+cross-frame stack pointers.  The paddr being in `PREZEROED_POOL`
+means the allocator thinks the page is free, but some thread has it
+as a live RSP.
+
+### What's NOT the mechanism
+
+Added a third detector, `FREE_LIVE_STACK`, that panics when
+`free_pages(paddr, num_pages>1)` runs on a paddr still registered as
+a kernel stack via `stack_cache::is_stack_paddr`.  Did not fire in a
+post-instrumentation XFCE run that reached 3/5.  So the bug is NOT
+"some path skips unregister_stack and free_pages the registered
+stack" — `unregister_stack` runs correctly before every multi-page
+free that goes through `free_kernel_stack`.
+
+### What IS the mechanism (remaining hypotheses)
+
+Given the evidence so far:
+
+1. **Remote store buffer drain after unregister.** A CPU writes to a
+   stack frame; the store sits in its store buffer; the thread
+   exits (unregister + free happens on another CPU); the store then
+   drains to physical memory, past the point where the page was
+   zeroed.  TSO should make this rare — store-buffer drain is
+   microseconds — but a long-held lock or NMI could widen the
+   window.
+2. **Arc<ArchTask> dropped while thread is still on its stack.**
+   If the refcount going to 0 doesn't actually mean "no one using
+   this task," the free runs early.  Arc<Process> owns ArchTask
+   through `arch: arch::Process`, not as a separate Arc, so this
+   would be Arc<Process> itself dropping with a thread still
+   running — which shouldn't happen if the scheduler's per-CPU
+   `CURRENT: Arc<Process>` is still referencing it.
+3. **Hardware page walker writing A/D bits after unregister.** The
+   CPU's hardware walker may have started a walk through the
+   to-be-freed stack's PT page, and the A/D-bit write-back lands
+   after the free.  Blog 194 territory; the QSC grace period in
+   blog 195 was supposed to cover this but may miss the stack page
+   itself (QSC protects PT pages, not leaf data pages).
+
+`tools/analyze-leak-log.py` summarizes these detectors' output into
+one screen (counts by site/ip/cmd, density histogram).  Good enough
+to triage a 10-run batch.  Next turn: probe the three hypotheses
+with targeted tooling (per-CPU "last RSP seen" check at free_pages
+time; QSC extension to leaf pages; store-buffer fence audit).
