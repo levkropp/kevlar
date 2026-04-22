@@ -342,6 +342,39 @@ fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
                         paddr.value(), SINGLE_FREE_RING_SIZE,
                     );
                 }
+                // Dump up to 16 kernel-VA words scattered through the page.
+                // This shows the full leak pattern (first + last offsets,
+                // target paddr distribution) so we can identify the
+                // underlying data structure.
+                if kernel_ptr_count > 0 {
+                    let mut dumped = 0;
+                    let mut min_off = usize::MAX;
+                    let mut max_off = 0;
+                    let mut min_target = u64::MAX;
+                    let mut max_target = 0u64;
+                    for i in 0..(PAGE_SIZE / 8) {
+                        let v = core::ptr::read_volatile(ptr.add(i));
+                        if (v >> 47) == 0x1ffff {
+                            let target = v & 0x0000_7fff_ffff_ffff;
+                            if i * 8 < min_off { min_off = i * 8; }
+                            if i * 8 > max_off { max_off = i * 8; }
+                            if target < min_target { min_target = target; }
+                            if target > max_target { max_target = target; }
+                            if dumped < 16 {
+                                log::warn!(
+                                    "    KVA[+{:#05x}] = {:#018x}  (target paddr={:#x})",
+                                    i * 8, v, target,
+                                );
+                                dumped += 1;
+                            }
+                        }
+                    }
+                    log::warn!(
+                        "    KVA_SUMMARY: {} kernel-VA words in page, \
+                         offsets [{:#x}..{:#x}], target paddrs [{:#x}..{:#x}]",
+                        kernel_ptr_count, min_off, max_off, min_target, max_target,
+                    );
+                }
                 // Dump a 64-byte window around the first non-zero word.
                 let start = first.saturating_sub(4);
                 let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
