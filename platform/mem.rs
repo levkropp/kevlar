@@ -64,7 +64,9 @@ pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         // rep stosb with ERMS/FSRMS is hardware-optimized for bulk fills.
+        // Defensive cld: same hazard as memcpy/zero_page (task #25).
         core::arch::asm!(
+            "cld",
             "rep stosb",
             inout("rdi") dest => _,
             inout("rcx") n => _,
