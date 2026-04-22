@@ -619,17 +619,18 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
         .set_rsp0((next.interrupt_stack.as_ref().unwrap().as_vaddr().value() + 2 * PAGE_SIZE) as u64);
 
     // INSTRUMENTATION (task #25 / task #17): record the incoming thread's
-    // kernel stack paddr in the per-CPU CURRENT_STACK_BASES array so
-    // free_pages can detect if anyone tries to free a paddr that's the
-    // live kernel stack of a currently-running thread on this or any
-    // other CPU.  Runs ~10 ns (atomic store).
+    // kernel / interrupt / syscall stack paddrs in per-CPU arrays so
+    // free_pages can detect if anyone tries to free any of them.
     {
         use core::sync::atomic::Ordering;
         let cpu = super::cpu_id() as usize;
         if cpu < super::smp::MAX_CPUS {
-            let stack_paddr = next.kernel_stack.as_ref()
-                .map(|s| (**s).value()).unwrap_or(0);
-            super::smp::CURRENT_STACK_BASES[cpu].store(stack_paddr, Ordering::Release);
+            let ks = next.kernel_stack.as_ref().map(|s| (**s).value()).unwrap_or(0);
+            let is = next.interrupt_stack.as_ref().map(|s| (**s).value()).unwrap_or(0);
+            let ss = next.syscall_stack.as_ref().map(|s| (**s).value()).unwrap_or(0);
+            super::smp::CURRENT_STACK_BASES[cpu].store(ks, Ordering::Release);
+            super::smp::CURRENT_IST_BASES[cpu].store(is, Ordering::Release);
+            super::smp::CURRENT_SYSCALL_BASES[cpu].store(ss, Ordering::Release);
         }
     }
 
