@@ -612,6 +612,32 @@ run-alpine-xfce: build/alpine-xfce.img
 		--arch $(ARCH) --kvm --gui --disk build/alpine-xfce.img \
 		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
 
+# Build Alpine LXDE disk image (1GB with LXDE, openbox, D-Bus, fonts, icons)
+build/alpine-lxde.img:
+	$(PROGRESS) "MKDISK" "Alpine LXDE (1GB)"
+	$(PYTHON3) tools/build-alpine-lxde.py build/alpine-lxde.img
+
+# Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
+.PHONY: test-lxde
+test-lxde: build/alpine-lxde.img
+	$(PROGRESS) "TEST" "LXDE desktop startup"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-lxde"
+	timeout 300 $(PYTHON3) tools/run-qemu.py \
+		--kvm --batch --arch $(ARCH) --disk build/alpine-lxde.img \
+		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-lxde-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-lxde-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-lxde-$(PROFILE).log || echo "(no summary)"
+
+# Run Alpine LXDE interactively (with QEMU window)
+.PHONY: run-alpine-lxde
+run-alpine-lxde: build/alpine-lxde.img
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm --gui --disk build/alpine-lxde.img \
+		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
+
 # M10 Phase A: apk add integration test
 .PHONY: test-m10-apk
 test-m10-apk: alpine-disk
