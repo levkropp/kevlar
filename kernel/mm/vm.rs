@@ -13,6 +13,29 @@ use kevlar_platform::{
 };
 use kevlar_utils::alignment::{align_up, is_aligned};
 
+/// Returned by `Vm::expand_heap_to` / `expand_heap_by` when the heap shrunk.
+/// The caller MUST drop the vm lock before committing this — see
+/// [`HeapShrinkResult::commit`]. Holding the lock across the cross-CPU
+/// TLB flush would deadlock against any remote CPU spinning on
+/// `vm.lock_no_irq()` in its page-fault handler (blog 199 pattern).
+#[must_use = "HeapShrinkResult must be committed (lock dropped first) to flush and free"]
+pub struct HeapShrinkResult {
+    to_free: alloc::vec::Vec<kevlar_platform::address::PAddr>,
+}
+
+impl HeapShrinkResult {
+    /// Broadcast TLB flush to remote CPUs and free the collected pages.
+    /// Safe to call after the vm lock has been dropped.
+    pub fn commit(self) {
+        if !self.to_free.is_empty() {
+            kevlar_platform::arch::flush_tlb_remote_all_pcids();
+            for paddr in self.to_free {
+                kevlar_platform::page_allocator::free_pages(paddr, 1);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum VmAreaType {
     Anonymous,
@@ -372,21 +395,22 @@ impl Vm {
         self.valloc_next = addr;
     }
 
-    pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<()> {
+    pub fn expand_heap_to(&mut self, new_heap_end: UserVAddr) -> Result<HeapShrinkResult> {
         if new_heap_end < self.heap_bottom {
             return Err(Errno::EINVAL.into());
         }
 
         if new_heap_end < self.heap_end {
-            // Shrink: unmap pages in the freed region. Defer page free
-            // until after the remote TLB shootdown — see alloc_vaddr_range
-            // for the full rationale (stale entries on other CPUs can
-            // corrupt the page's next owner).
+            // Shrink: unmap pages in the freed region. Collect pages to
+            // free and return them — caller MUST drop the vm lock BEFORE
+            // calling the cross-CPU TLB flush + free_pages (blog 199
+            // pattern). Doing the flush under this &mut self (which means
+            // the caller holds the vm lock) would deadlock against any
+            // remote CPU's page-fault handler spinning on vm.lock_no_irq().
             let free_start = new_heap_end.value();
             let free_end = self.heap_end.value();
             let start_aligned = kevlar_utils::alignment::align_up(free_start, PAGE_SIZE);
 
-            let mut cleared = 0usize;
             let mut to_free: alloc::vec::Vec<kevlar_platform::address::PAddr> =
                 alloc::vec::Vec::new();
             for addr in (start_aligned..free_end).step_by(PAGE_SIZE) {
@@ -396,21 +420,13 @@ impl Vm {
                         if kevlar_platform::page_refcount::page_ref_dec(paddr) {
                             to_free.push(paddr);
                         }
-                        cleared += 1;
                     }
                 }
             }
-            if cleared > 0 {
-                self.page_table.flush_tlb_remote();
-            }
-            for paddr in to_free {
-                kevlar_platform::page_allocator::free_pages(paddr, 1);
-            }
 
             self.heap_end = new_heap_end;
-            // Shrink or remove the heap VMA covering [new_heap_end, old_end).
             self.remove_vma_range(new_heap_end, free_end - free_start)?;
-            return Ok(());
+            return Ok(HeapShrinkResult { to_free });
         }
 
         // Expand: ensure the new region has a VMA for page fault handling.
@@ -481,10 +497,10 @@ impl Vm {
             }
         }
         self.heap_end = new_heap_end;
-        Ok(())
+        Ok(HeapShrinkResult { to_free: alloc::vec::Vec::new() })
     }
 
-    pub fn expand_heap_by(&mut self, increment: usize) -> Result<()> {
+    pub fn expand_heap_by(&mut self, increment: usize) -> Result<HeapShrinkResult> {
         let increment = align_up(increment, PAGE_SIZE);
         let new_end = self.heap_end.add(increment);
         self.expand_heap_to(new_end)
