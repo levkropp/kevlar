@@ -363,6 +363,30 @@ fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
                         paddr.value(), rip, SINGLE_FREE_RING_SIZE,
                     );
                 }
+                // INSTRUMENTATION (task #17): dump recent usercopy trace.
+                // The leaked pages have stack-frame-like content at
+                // specific offsets — consistent with copy_to_user writing
+                // a kernel-side buffer to a user VA that stale-TLB-resolves
+                // to this paddr.  The trace shows every copy_to_user /
+                // copy_from_user since enable() with its (dst, src, len,
+                // ret_addr) — we can look for a copy_to_user whose dst
+                // translates to our leaked paddr.
+                #[cfg(target_arch = "x86_64")]
+                if crate::usercopy_trace::is_enabled() {
+                    let entries = crate::usercopy_trace::snapshot();
+                    let n = entries.len();
+                    let start = n.saturating_sub(8);
+                    log::warn!(
+                        "    UCOPY_TRACE: {} entries, showing last {}",
+                        n, n - start,
+                    );
+                    for e in &entries[start..] {
+                        log::warn!(
+                            "      ucopy dst={:#x} src={:#x} len={:#x} ret={:#x}",
+                            e.dst, e.src, e.len, e.ret_addr,
+                        );
+                    }
+                }
                 // Dump up to 16 kernel-VA words scattered through the page.
                 // This shows the full leak pattern (first + last offsets,
                 // target paddr distribution) so we can identify the

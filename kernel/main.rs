@@ -486,6 +486,13 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     // APs will have registered their APIC IDs by the time they call
     // start_ap_preemption_timer(), which happens before switch().
     kevlar_platform::arch::watchdog_enable();
+
+    // Enable the assembly-level usercopy trace so PAGE_ZERO_MISS can dump
+    // recent copy_to_user / copy_from_user events.  Task #17: identify
+    // which kernel code path is writing stale data to freed paddrs via
+    // stale user TLB entries.
+    #[cfg(target_arch = "x86_64")]
+    kevlar_platform::usercopy_trace::enable();
     profiler.lap_time("process init");
 
     // Create the init process.
