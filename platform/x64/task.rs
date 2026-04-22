@@ -618,6 +618,21 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     TSS.as_mut()
         .set_rsp0((next.interrupt_stack.as_ref().unwrap().as_vaddr().value() + 2 * PAGE_SIZE) as u64);
 
+    // INSTRUMENTATION (task #25 / task #17): record the incoming thread's
+    // kernel stack paddr in the per-CPU CURRENT_STACK_BASES array so
+    // free_pages can detect if anyone tries to free a paddr that's the
+    // live kernel stack of a currently-running thread on this or any
+    // other CPU.  Runs ~10 ns (atomic store).
+    {
+        use core::sync::atomic::Ordering;
+        let cpu = super::cpu_id() as usize;
+        if cpu < super::smp::MAX_CPUS {
+            let stack_paddr = next.kernel_stack.as_ref()
+                .map(|s| (**s).value()).unwrap_or(0);
+            super::smp::CURRENT_STACK_BASES[cpu].store(stack_paddr, Ordering::Release);
+        }
+    }
+
     // Save and restore the XSAVE area (FPU/SSE/AVX registers).
     // Uses inline asm instead of Rust _xsave64/_xrstor64 intrinsics, which
     // corrupt the kernel stack under the soft-float target (the intrinsics

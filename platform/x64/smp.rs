@@ -86,6 +86,34 @@ pub fn is_ap_stack_paddr(paddr: crate::address::PAddr) -> bool {
     false
 }
 
+/// Per-CPU paddr of the current thread's kernel stack.  Updated by
+/// `switch_task` on every context switch.  Used by free_pages to
+/// detect "a thread is currently running on the paddr being freed" —
+/// the core bug for task #25 if the thread's ArchTask's stack_cache
+/// entry was already unregistered.
+pub static CURRENT_STACK_BASES: [core::sync::atomic::AtomicUsize; MAX_CPUS] = [
+    const { core::sync::atomic::AtomicUsize::new(0) }; MAX_CPUS
+];
+
+/// Kernel stack size per thread (4 pages = 16 KiB).  Hard-coded here
+/// so is_current_stack_paddr doesn't need the ArchTask struct.
+pub const KERNEL_STACK_PAGES: usize = 4;
+
+/// Returns true if `paddr` is inside ANY online CPU's current thread's
+/// kernel stack range.  Iterates CURRENT_STACK_BASES which is updated
+/// by switch_task.
+pub fn is_current_stack_paddr(paddr: crate::address::PAddr) -> bool {
+    use core::sync::atomic::Ordering;
+    let p = paddr.value();
+    for slot in CURRENT_STACK_BASES.iter() {
+        let base = slot.load(Ordering::Relaxed);
+        if base != 0 && p >= base && p < base + KERNEL_STACK_PAGES * crate::arch::PAGE_SIZE {
+            return true;
+        }
+    }
+    false
+}
+
 /// The cpu_local area VAddr for the AP currently being started.
 /// The BSP writes this before sending SIPI; the AP reads it on entry.
 /// APs are started one at a time so a single cell suffices.

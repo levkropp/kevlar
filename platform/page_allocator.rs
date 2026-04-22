@@ -781,6 +781,20 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
                 paddr.value(),
             );
         }
+        // Cross-CPU current-thread stack check: catches the case where a
+        // thread is still running on paddr despite its stack_cache entry
+        // having been unregistered (the race we suspect for task #25).
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::x64::smp::is_current_stack_paddr(paddr) {
+                panic!(
+                    "FREE_CURRENT_STACK: paddr={:#x} is the active kernel \
+                     stack of a currently-running thread on some CPU!  \
+                     (Caller is freeing a user page whose paddr is live.)",
+                    paddr.value(),
+                );
+            }
+        }
     }
 
     if num_pages > 1 {
