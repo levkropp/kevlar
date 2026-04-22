@@ -266,6 +266,27 @@ pub fn set_page_zero_check_enabled(on: bool) {
     PAGE_ZERO_CHECK_ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Check if `paddr` is currently queued in PAGE_CACHE or PREZEROED_4K_POOL.
+/// Used by `alloc_kernel_stack` post-alloc to detect if the newly-allocated
+/// stack paddr overlaps with a queued-for-user-reuse paddr — the smoking-gun
+/// buddy bug for task #25.
+pub fn is_paddr_in_user_pools(paddr: PAddr) -> bool {
+    let target = paddr.value();
+    {
+        let cache = PAGE_CACHE.lock();
+        if cache.pages[..cache.count].iter().any(|&p| p == target) {
+            return true;
+        }
+    }
+    {
+        let pool = PREZEROED_4K_POOL.lock();
+        if pool.pages[..pool.count].iter().any(|&p| p == target) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Scan a freshly-zeroed page to verify it really is zero, and flag any
 /// kernel-direct-map-shaped values we find.  This is the on-hand
 /// instrumentation for task #25: a freshly-handed-to-user page that

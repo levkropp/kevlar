@@ -114,6 +114,25 @@ pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError
 
     // Cache miss: allocate from buddy.
     let stack = alloc_pages_owned(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+
+    // INSTRUMENTATION (task #25): verify none of the stack's constituent
+    // pages is ALSO queued in PAGE_CACHE or PREZEROED_4K_POOL.  Any
+    // overlap proves buddy handed out a paddr to alloc_pages(multi) that
+    // was simultaneously queued for single-page consumers — the bug we
+    // suspect for stack paddrs ending up in the prezeroed pool while
+    // still in live use.
+    for i in 0..num_pages {
+        let p = crate::address::PAddr::new((*stack).value() + i * crate::arch::PAGE_SIZE);
+        if crate::page_allocator::is_paddr_in_user_pools(p) {
+            panic!(
+                "STACK_POOL_OVERLAP: alloc_kernel_stack got paddr={:#x} \
+                 (stack base={:#x}, page {}/{}) already queued in \
+                 PAGE_CACHE or PREZEROED_4K_POOL",
+                p.value(), (*stack).value(), i, num_pages,
+            );
+        }
+    }
+
     install_guard(&stack);
     register_stack(*stack, num_pages);
     Ok(stack)
