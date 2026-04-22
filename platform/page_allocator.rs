@@ -323,6 +323,18 @@ fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
                         koff * 8, kval, kval & 0x0000_7fff_ffff_ffff,
                     );
                 }
+                // INSTRUMENTATION (task #25): correlate with recent
+                // multi-page frees.  If this paddr is within a range that
+                // was just freed as 4 pages (stack) or 2 pages (xsave),
+                // report the allocation size + age.  Tells us whether
+                // this paddr came from a recent stack-release path.
+                if let Some((base, npages, _tsc)) = recent_multi_free_match(paddr) {
+                    log::warn!(
+                        "    MULTI_FREE_MATCH: within recent {}-page free \
+                         starting at paddr={:#x} (offset_into_alloc={:#x})",
+                        npages, base, paddr.value() - base,
+                    );
+                }
                 // Dump a 64-byte window around the first non-zero word.
                 let start = first.saturating_sub(4);
                 let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
@@ -637,6 +649,27 @@ pub fn is_managed_page(paddr: PAddr) -> bool {
     false
 }
 
+/// Ring buffer of recent multi-page free_pages calls (paddr, num_pages, tsc).
+/// On PAGE_ZERO_MISS we can correlate: was this paddr just freed as part of
+/// a multi-page release?  Useful for identifying the source of leak paddrs.
+const MULTI_FREE_RING_SIZE: usize = 32;
+static MULTI_FREE_RING: SpinLock<[(usize, usize, u64); MULTI_FREE_RING_SIZE]> =
+    SpinLock::new([(0, 0, 0); MULTI_FREE_RING_SIZE]);
+static MULTI_FREE_IDX: AtomicUsize = AtomicUsize::new(0);
+
+/// Check if `paddr` is within a recent multi-page free (last 32 frees).
+/// Returns (num_pages, tsc) of the matching free, or None.
+pub fn recent_multi_free_match(paddr: PAddr) -> Option<(usize, usize, u64)> {
+    let ring = MULTI_FREE_RING.lock();
+    let target = paddr.value();
+    for &(base, num, tsc) in ring.iter() {
+        if num > 1 && target >= base && target < base + num * PAGE_SIZE {
+            return Some((base, num, tsc));
+        }
+    }
+    None
+}
+
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
 
     // INSTRUMENTATION (task #25): panic if we're about to return a paddr
@@ -656,6 +689,17 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
                     p.value(), num_pages, paddr.value(),
                 );
             }
+        }
+
+        // Record the multi-page free in the ring buffer so that a later
+        // PAGE_ZERO_MISS can correlate: did this paddr come from a
+        // multi-page allocation that just got freed?
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+            let idx = MULTI_FREE_IDX.fetch_add(1, Ordering::Relaxed) % MULTI_FREE_RING_SIZE;
+            let mut ring = MULTI_FREE_RING.lock();
+            ring[idx] = (paddr.value(), num_pages, tsc);
         }
     }
 
