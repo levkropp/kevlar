@@ -68,13 +68,17 @@ static uint32_t xrand(uint32_t *state) {
     return x;
 }
 
+// Side arena for mremap testing — kept separate from the main arena
+// so the reader isn't racing with VA removal/relocation.
+static uint8_t *side_arena;
+
 static void *writer_thread(void *_arg) {
     (void)_arg;
     uint32_t rng = 0xabcd1234;
     for (uint32_t i = 0; i < WRITER_ITERS; i++) {
         uint32_t region = xrand(&rng) % NREGIONS;
         uint8_t *p = arena + region * REGION_BYTES;
-        uint32_t op = xrand(&rng) % 4;
+        uint32_t op = xrand(&rng) % 5;
         switch (op) {
             case 0:
                 // mprotect cycle: RW → NONE → RW. Two TLB flushes.
@@ -95,6 +99,29 @@ static void *writer_thread(void *_arg) {
                 // Double-madvise, then write — forces demand-fault cycle.
                 madvise(p, REGION_BYTES, MADV_DONTNEED);
                 ((volatile uint32_t *)p)[0] = i;
+                break;
+            case 4:
+                // mremap shrink path on the side arena (not the main
+                // one — reader doesn't touch this). Exercises the
+                // blog-199-pattern TLB flush on mremap.
+                if (side_arena) {
+                    // Shrink from 64 KiB to 16 KiB: unmaps 48 KiB worth
+                    // of pages + TLB flush. Then recreate to restore
+                    // the arena for the next iteration.
+                    munmap(side_arena, 64 * 1024);
+                    side_arena = mmap(NULL, 64 * 1024,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS,
+                                      -1, 0);
+                    if (side_arena == MAP_FAILED) side_arena = NULL;
+                    else {
+                        // Touch a page to ensure it's mapped.
+                        side_arena[0] = (uint8_t)i;
+                        // Now shrink with mremap. old=64K new=16K.
+                        void *np = mremap(side_arena, 64 * 1024, 16 * 1024, 0);
+                        if (np != MAP_FAILED) side_arena = np;
+                    }
+                }
                 break;
         }
     }
@@ -163,6 +190,14 @@ int main(void) {
     if (arena == MAP_FAILED) {
         printf("FAIL mmap arena: errno=%d\n", errno); return 1;
     }
+
+    // Separate arena for mremap stress — reader never touches it.
+    side_arena = mmap(NULL, 64 * 1024, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (side_arena == MAP_FAILED) {
+        printf("FAIL mmap side_arena: errno=%d\n", errno); return 1;
+    }
+    side_arena[0] = 0;
 
     // Touch every page so they're all mapped before the stress starts.
     for (int i = 0; i < ARENA_BYTES; i += 4096) arena[i] = 0;
