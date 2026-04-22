@@ -646,8 +646,6 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // the OwnedPages is handed to OwnedPages::drop -> free_pages — so a
     // positive hit here proves some OTHER path is calling free_pages
     // on a live stack (the exact live-page-to-buddy bug we're hunting).
-    // Only check if the registry has entries (common case: no free during
-    // early boot).
     if num_pages > 1 {
         for i in 0..num_pages {
             let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
@@ -655,6 +653,23 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
                 panic!(
                     "FREE_LIVE_STACK: paddr={:#x} (within multi-page free of \
                      {} starting at {:#x}) is a live kernel stack!",
+                    p.value(), num_pages, paddr.value(),
+                );
+            }
+        }
+    }
+
+    // INSTRUMENTATION (task #25): AP kernel stacks are never freed.
+    // Panic if anyone tries to free (any size) into an AP-stack range.
+    // Cheap check: AP_STACK_BASES is MAX_CPUS atomics.
+    #[cfg(target_arch = "x86_64")]
+    {
+        for i in 0..num_pages {
+            let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
+            if crate::x64::smp::is_ap_stack_paddr(p) {
+                panic!(
+                    "FREE_AP_STACK: paddr={:#x} (within free of {} pages from \
+                     {:#x}) is a live AP kernel stack!",
                     p.value(), num_pages, paddr.value(),
                 );
             }

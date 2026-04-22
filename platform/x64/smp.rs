@@ -63,6 +63,29 @@ pub const AP_STACK_PAGES: usize = 16;
 /// BSP is not counted here; add 1 to get total online CPUs.
 pub static AP_ONLINE_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Paddr ranges of the AP stacks allocated at boot.  Exposed to
+/// `platform/page_allocator.rs::free_pages` so we can panic if anyone
+/// tries to free a single page within a live AP-stack allocation — the
+/// AP stack is never freed for the kernel's lifetime, so a free here
+/// is a smoking-gun bug (task #25 hunting).  Indexed by cpu_id (BSP
+/// is cpu 0 which never registers — it uses the static boot stack).
+pub static AP_STACK_BASES: [core::sync::atomic::AtomicUsize; MAX_CPUS] = [
+    const { core::sync::atomic::AtomicUsize::new(0) }; MAX_CPUS
+];
+
+/// Returns true if `paddr` is inside any AP's live kernel stack range.
+pub fn is_ap_stack_paddr(paddr: crate::address::PAddr) -> bool {
+    use core::sync::atomic::Ordering;
+    let p = paddr.value();
+    for slot in AP_STACK_BASES.iter() {
+        let base = slot.load(Ordering::Relaxed);
+        if base != 0 && p >= base && p < base + AP_STACK_PAGES * crate::arch::PAGE_SIZE {
+            return true;
+        }
+    }
+    false
+}
+
 /// The cpu_local area VAddr for the AP currently being started.
 /// The BSP writes this before sending SIPI; the AP reads it on entry.
 /// APs are started one at a time so a single cell suffices.
@@ -123,6 +146,14 @@ pub unsafe fn init() {
                 continue;
             }
         };
+        // Register the AP stack's paddr so is_ap_stack_paddr() detects
+        // anyone trying to free into this region.
+        if (next_cpu_id as usize) < MAX_CPUS {
+            AP_STACK_BASES[next_cpu_id as usize].store(
+                stack_paddr.value(),
+                Ordering::Release,
+            );
+        }
         // Stack pointer is at the top of the allocated region.
         let stack_top = stack_paddr.add(AP_STACK_PAGES * PAGE_SIZE).as_vaddr().value() as u64;
 
