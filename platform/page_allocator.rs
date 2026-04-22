@@ -695,12 +695,12 @@ pub fn is_managed_page(paddr: PAddr) -> bool {
 /// (→ CoW path / mmap teardown).  The multi-page ring answers "was this
 /// paddr part of a stack/xsave release?"  (→ task-drop path).  Distinct
 /// rings because single-page frees fire 10-100x more often than multi.
-const MULTI_FREE_RING_SIZE: usize = 32;
+const MULTI_FREE_RING_SIZE: usize = 64;
 static MULTI_FREE_RING: SpinLock<[(usize, usize, u64); MULTI_FREE_RING_SIZE]> =
     SpinLock::new([(0, 0, 0); MULTI_FREE_RING_SIZE]);
 static MULTI_FREE_IDX: AtomicUsize = AtomicUsize::new(0);
 
-const SINGLE_FREE_RING_SIZE: usize = 128;
+const SINGLE_FREE_RING_SIZE: usize = 512;
 /// (paddr, tsc, caller_rip) — caller_rip is captured via RBP walk at
 /// free_pages entry.  Requires frame pointers in the kernel build (we
 /// have -Cforce-frame-pointers=yes via the target spec).

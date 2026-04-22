@@ -149,7 +149,13 @@ impl BuddyAllocator {
             let count = 1usize << target_order;
             for i in 0..count {
                 let page = block + i * PAGE_SIZE;
-                debug_assert!(!bitmap_is_allocated(page),
+                // ALWAYS-on assertion (task #25): if a page in the free
+                // list is marked allocated in the bitmap, the buddy's
+                // state is corrupted — usually because free_pages was
+                // called on a still-allocated paddr, double-queueing it
+                // into the free lists.  Panic so we get a crash dump
+                // instead of silently re-handing out a live paddr.
+                assert!(!bitmap_is_allocated(page),
                     "buddy_alloc: double alloc page {:#x} block {:#x} order {}",
                     page, block, target_order);
                 bitmap_set_allocated(page);
@@ -181,7 +187,7 @@ impl BuddyAllocator {
         let count = 1usize << target_order;
         for i in 0..count {
             let page = block + i * PAGE_SIZE;
-            debug_assert!(!bitmap_is_allocated(page),
+            assert!(!bitmap_is_allocated(page),
                 "buddy_alloc: double alloc (split) page {:#x} block {:#x} order {}",
                 page, block, target_order);
             bitmap_set_allocated(page);
@@ -196,7 +202,11 @@ impl BuddyAllocator {
         let count = 1usize << order;
         for i in 0..count {
             let page = ptr + i * PAGE_SIZE;
-            debug_assert!(bitmap_is_allocated(page),
+            // ALWAYS-on assertion (task #25): freeing a page that isn't
+            // currently marked allocated means free_pages is being called
+            // twice on the same paddr (or called on a paddr that was
+            // never allocated).  Either way the buddy state is corrupt.
+            assert!(bitmap_is_allocated(page),
                 "buddy_alloc: double free page {:#x} block {:#x} order {}",
                 page, ptr, order);
             bitmap_clear_allocated(page);
