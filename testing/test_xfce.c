@@ -540,6 +540,14 @@ phase5:
             if (has_session) pass("xfce4_session_running");
             else fail("xfce4_session_running", "session not found");
 
+            // Force a known paint: xsetroot sets the root window to a solid
+            // color. If this doesn't reach fb0, the X→fbdev→shadow→fb0
+            // copy chain is broken. If it does, any remaining blackness
+            // is XFCE not painting (xfdesktop hasn't run, compositing off,
+            // etc.) rather than a kernel/Xorg pathway bug.
+            sh_run("DISPLAY=:0 xsetroot -solid '#336699' 2>/dev/null", 3000);
+            sleep(1); // Let the paint propagate to fb0.
+
             // Framebuffer pixel check — is anything actually DRAWN on screen?
             // Component "running" in /proc doesn't prove xfwm4/xfce4-session
             // actually rendered. Read /dev/fb0 directly and count non-black
@@ -606,14 +614,17 @@ phase5:
                 const char *logs[] = {
                     "/tmp/xfce-session.log",
                     "/tmp/xorg-stdout.log",
+                    "/var/log/Xorg.0.log",
                     NULL,
                 };
                 for (int li = 0; logs[li]; li++) {
-                    char b[4096];
-                    char cmd[128];
+                    char b[8192];
+                    char cmd[192];
+                    // Xorg log is verbose; tail more lines for it.
+                    int n = (strstr(logs[li], "Xorg.0") ? 120 : 40);
                     snprintf(cmd, sizeof(cmd),
-                             "echo '== %s =='; tail -40 %s 2>/dev/null",
-                             logs[li], logs[li]);
+                             "echo '== %s =='; tail -%d %s 2>/dev/null",
+                             logs[li], n, logs[li]);
                     if (sh_capture(cmd, b, sizeof(b), 3000) == 0 && b[0]) {
                         printf("%s", b);
                     }
