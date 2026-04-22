@@ -43,11 +43,14 @@ impl<'a> SyscallHandler<'a> {
                 cursor += PAGE_SIZE;
             }
 
-            // Remote TLB shootdown must happen BEFORE free_pages, otherwise
-            // other CPUs can write through stale user VA translations into
-            // a newly-reissued kernel page (slab, stack, PT, etc.).
+            // Drop the Vm lock BEFORE the cross-CPU TLB flush — same
+            // deadlock rationale as munmap (blog 199). Safe because the
+            // pages in to_free aren't freed until after the broadcast
+            // completes, so stale TLB entries can't resolve to a page
+            // belonging to a different process during the window.
+            drop(vm);
             if cleared_any {
-                vm.page_table().flush_tlb_remote();
+                kevlar_platform::arch::flush_tlb_remote_all_pcids();
             }
             for paddr in to_free {
                 free_pages(paddr, 1);
