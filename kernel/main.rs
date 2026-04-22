@@ -95,29 +95,12 @@ impl kevlar_platform::Handler for Handler {
     }
 
     fn handle_timer_irq(&self) -> bool {
-        // COW debug: check PID 1's stack for "kevlar" corruption on every timer tick
-        #[allow(unsafe_code)]
-        {
-            use crate::process::current_process;
-            let pid = current_process().pid().as_i32();
-            if pid == 1 {
-                if let Some(vm) = current_process().vm().clone() {
-                    {
-                    let lock = vm.lock_no_irq();
-                        if let Some(paddr) = lock.page_table().lookup_paddr(
-                            kevlar_platform::address::UserVAddr::new_nonnull(0x9ffffd000).unwrap()
-                        ) {
-                            let val = unsafe { *((paddr.as_vaddr().value() + 0xbd8) as *const u64) };
-                            if val == 0x6c76656b00000000 {
-                                let rc = kevlar_platform::page_refcount::page_ref_count(paddr);
-                                panic!("COW BUG caught by timer! pid=1 paddr={:#x} refcount={} has 'kevlar'",
-                                       paddr.value(), rc);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // (Removed: per-tick COW-bug stack scanner that took vm.lock_no_irq()
+        // inside the timer IRQ. Under heavy munmap/brk activity it would
+        // deadlock — timer IRQ on CPU A spinning on vm lock held by CPU B's
+        // mm syscall. The historical COW corruption it chased was fixed by
+        // the blog-199 / blog-202 / task-#4 round of TLB and atomicity
+        // fixes. Reintroduce behind a debug flag + try_lock if needed.)
 
         crate::deferred_job::run_deferred_jobs();
 
@@ -593,18 +576,7 @@ pub fn interval_work() {
     // RIP is a valid kernel pointer. A kernel stack zeroed by a stale
     // user-TLB write produces saved_rip=0/2 long before the switch_in
     // that crashes — this scanner catches it within ~10 ms of the write.
-    // Scan frequency: every 50 interval-work ticks instead of 5. Reason:
-    // scan_suspended_task_corruption reads Process.state() via
-    // AtomicCell<ProcessState>, which falls back to crossbeam's SeqLock
-    // because ProcessState is a non-primitive enum. Under heavy process
-    // churn (XFCE fork/exec storm), SeqLock contention causes the scan
-    // to livelock — NMI watchdog observed this consistently after brk
-    // heap-shrink TLB fix (which increased scheduling pressure).
-    //
-    // 50x1 = 500 ms typical scan interval is still plenty fast to catch
-    // the "RIP zeroed by stale user TLB" persistence signal this
-    // diagnostic was built for.
-    if iw_count % 50 == 0 {
+    if iw_count % 5 == 0 {
         process::scan_suspended_task_corruption();
         // Disabled: live-stack scanner fires on page-recycling residue
         // (harmless) and the warn!() output interleaves with structured

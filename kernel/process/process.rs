@@ -227,6 +227,61 @@ pub enum ProcessState {
     ExitedBySignal(c_int),
 }
 
+impl ProcessState {
+    /// Pack into u64: high byte is tag, low 32 bits hold the i32 payload
+    /// (signal number / exit code). Used by AtomicProcessState.
+    #[inline(always)]
+    const fn pack(self) -> u64 {
+        let (tag, payload) = match self {
+            ProcessState::Runnable => (0u8, 0i32),
+            ProcessState::BlockedSignalable => (1, 0),
+            ProcessState::Stopped(s) => (2, s),
+            ProcessState::ExitedWith(c) => (3, c),
+            ProcessState::ExitedBySignal(c) => (4, c),
+        };
+        ((tag as u64) << 32) | (payload as u32 as u64)
+    }
+
+    #[inline(always)]
+    const fn unpack(raw: u64) -> ProcessState {
+        let tag = (raw >> 32) as u8;
+        let payload = raw as u32 as i32;
+        match tag {
+            0 => ProcessState::Runnable,
+            1 => ProcessState::BlockedSignalable,
+            2 => ProcessState::Stopped(payload),
+            3 => ProcessState::ExitedWith(payload),
+            _ => ProcessState::ExitedBySignal(payload),
+        }
+    }
+}
+
+/// Lock-free atomic ProcessState. Replaces `AtomicCell<ProcessState>`,
+/// which fell back to crossbeam's SeqLock (since Rust can't prove a
+/// non-primitive enum is lock-free-atomic). The SeqLock livelocked
+/// under heavy process churn from `scan_suspended_task_corruption`.
+/// Manual u64 packing sidesteps the problem — ProcessState fits in
+/// 5 tags × i32 payload.
+pub struct AtomicProcessState(core::sync::atomic::AtomicU64);
+
+impl AtomicProcessState {
+    pub const fn new(state: ProcessState) -> Self {
+        AtomicProcessState(core::sync::atomic::AtomicU64::new(state.pack()))
+    }
+    #[inline(always)]
+    pub fn load(&self) -> ProcessState {
+        ProcessState::unpack(self.0.load(core::sync::atomic::Ordering::Acquire))
+    }
+    #[inline(always)]
+    pub fn store(&self, state: ProcessState) {
+        self.0.store(state.pack(), core::sync::atomic::Ordering::Release);
+    }
+    #[inline(always)]
+    pub fn swap(&self, state: ProcessState) -> ProcessState {
+        ProcessState::unpack(self.0.swap(state.pack(), core::sync::atomic::Ordering::AcqRel))
+    }
+}
+
 /// Build a pre-computed `struct utsname` (390 bytes) from a UTS namespace.
 /// Used to cache the result so sys_uname becomes a single memcpy.
 fn build_cached_utsname(uts: &crate::namespace::UtsNamespace) -> [u8; 390] {
@@ -260,7 +315,7 @@ pub struct Process {
     tgid: PId,
     /// Session ID — PID of the session leader. Set by setsid(), inherited by fork().
     session_id: AtomicI32,
-    state: AtomicCell<ProcessState>,
+    state: AtomicProcessState,
     parent: Weak<Process>,
     cmdline: AtomicRefCell<Cmdline>,
     children: SpinLock<Vec<Arc<Process>>>,
@@ -428,7 +483,7 @@ impl Process {
             is_idle: true,
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             arch: arch::Process::new_idle_thread(),
-            state: AtomicCell::new(ProcessState::Runnable),
+            state: AtomicProcessState::new(ProcessState::Runnable),
             parent: Weak::new(),
             cmdline: AtomicRefCell::new(Cmdline::new()),
             environ: SpinLock::new(alloc::vec::Vec::new()),
@@ -556,7 +611,7 @@ impl Process {
             session_id: AtomicI32::new(1), // PID 1 is its own session leader
             parent: Weak::new(),
             children: SpinLock::new(Vec::new()),
-            state: AtomicCell::new(ProcessState::Runnable),
+            state: AtomicProcessState::new(ProcessState::Runnable),
             cmdline: AtomicRefCell::new(Cmdline::from_argv(argv)),
             environ: SpinLock::new(envp_to_vec(&[])),
             arch: arch::Process::new_user_thread(entry.ip, entry.user_sp),
@@ -1941,7 +1996,7 @@ impl Process {
             pid,
             tgid: pid, // fork creates a new thread group; child becomes its own leader
             session_id: AtomicI32::new(parent.session_id()),
-            state: AtomicCell::new(ProcessState::Runnable),
+            state: AtomicProcessState::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
@@ -2065,7 +2120,7 @@ impl Process {
             pid,
             tgid: pid,
             session_id: AtomicI32::new(parent.session_id()),
-            state: AtomicCell::new(ProcessState::Runnable),
+            state: AtomicProcessState::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
@@ -2183,7 +2238,7 @@ impl Process {
             pid,
             tgid: if is_thread { parent.tgid } else { pid },
             session_id: AtomicI32::new(parent.session_id()),
-            state: AtomicCell::new(ProcessState::Runnable),
+            state: AtomicProcessState::new(ProcessState::Runnable),
             parent: Arc::downgrade(parent),
             cmdline: AtomicRefCell::new(parent.cmdline().clone()),
             environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
