@@ -83,13 +83,16 @@ the three-commit `cld` series):
 
 | sample | KERNEL_PTR_LEAK runs | total events | PAGE_ZERO_MISS runs | total events |
 |---|---|---|---|---|
-| post blog-204 | 4/10 | 11 events | 7/10 | 14 events |
-| post blog-205 (first 6-run)  | 0/6 | 0 events | 4/6 | 7 events |
-| **post blog-205 (8-run confirmation)** | **2/8** | **5 events** | 6/8 | 11 events |
-| **combined 14-run post-fix** | **2/14** | **5 events** | 10/14 | 18 events |
+| pre-fix (blog 204 baseline) | ~4/10 | 11 events | 7/10 | 14 events |
+| V (6 runs, per-primitive cld) | 0/6 | 0 events | 4/6 | 7 events |
+| W (8 runs, per-primitive cld) | 2/8 | 5 events | 6/8 | 11 events |
+| X (8 runs, + switch-boundary cld) | 0/8 | 0 events | 5/8 | 8 events |
+| Y (10 runs, + switch-boundary cld) | 3/10 | 9 events | 3/10 | 5 events |
+| **combined post-fix (32 runs)** | **5/32 ≈ 16%** | **14 events** | 18/32 | 31 events |
 
-The `KERNEL_PTR_LEAK` rate dropped from ~40% of runs to ~14%.  That's
-a significant improvement, not a closure.  The initial 6-run
+The `KERNEL_PTR_LEAK` rate dropped from ~40% of runs to ~16%.  That's
+a significant improvement — roughly 60% fewer runs exhibit the bug —
+but the residual shows DF=1 was **not the sole cause**.  The initial 6-run
 "zero leaks" result was a lucky streak; the 8-run confirmation shows
 two residual leaks (W6 in xfce4-panel systray plugin, W7 in xfwm4).
 
