@@ -12,6 +12,73 @@ use crate::{
     },
 };
 
+/// Scan the 4KB user page at `user_va` for kernel-direct-map-shaped
+/// 8-byte values.  Reports density + offsets + paddr distribution.
+/// Used by task #25's KERNEL_PTR_LEAK detector to answer the critical
+/// question: did one pointer coincidentally land here, or is this page
+/// fulla-kernel-data (= stale TLB to a recycled kernel page)?
+///
+/// Reads via the kernel direct map of the user's paddr, which is
+/// always safe to read (kernel straight-map is RO-readable everywhere).
+#[allow(unsafe_code)]
+fn scan_user_page_for_kernel_ptrs(user_va: u64, gpr_name: &str) {
+    use kevlar_platform::address::UserVAddr;
+    let page_va = user_va & !0xFFF;
+    let Some(uva) = UserVAddr::new(page_va as usize) else { return };
+    let current = current_process();
+    let vm_ref = current.vm();
+    let Some(vm_arc) = vm_ref.as_ref() else { return };
+    let vm = vm_arc.lock_no_irq();
+    let Some(paddr) = vm.page_table().lookup_paddr(uva) else { return };
+    drop(vm);
+    // Safe to read via kernel straight-map: paddr maps to a kernel VA
+    // inside [KERNEL_BASE_ADDR, KERNEL_BASE_ADDR + straight_map_end].
+    let ptr = paddr.as_ptr::<u64>();
+    let mut kptr_count = 0usize;
+    let mut first_kptr: Option<(usize, u64)> = None;
+    let mut all_paddrs_kernel_image = true;  // are they all < 47MB (kernel image)?
+    let mut all_paddrs_kernel_heap = true;   // are they all > 64MB (heap region)?
+    for i in 0..(kevlar_platform::arch::PAGE_SIZE / 8) {
+        let v = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        if (v >> 47) == 0x1ffff {
+            kptr_count += 1;
+            if first_kptr.is_none() { first_kptr = Some((i, v)); }
+            let target_paddr = v & 0x0000_7fff_ffff_ffff;
+            if target_paddr >= 0x3_000_000 { all_paddrs_kernel_image = false; }
+            if target_paddr < 0x4_000_000 { all_paddrs_kernel_heap = false; }
+        }
+    }
+    if kptr_count > 0 {
+        let region = if all_paddrs_kernel_image { "kernel-image"
+                    } else if all_paddrs_kernel_heap { "kernel-heap"
+                    } else { "mixed" };
+        log::warn!(
+            "  LEAK_PAGE_SCAN {}: vaddr={:#x} paddr={:#x} kernel_ptrs={} \
+             in {} region (page_size=4096)",
+            gpr_name, page_va, paddr.value(), kptr_count, region,
+        );
+        if let Some((off, val)) = first_kptr {
+            log::warn!(
+                "    first kernel-VA at +{:#05x} = {:#018x} (target paddr={:#x})",
+                off * 8, val, val & 0x0000_7fff_ffff_ffff,
+            );
+        }
+        // Dump offsets of up to 8 kernel-VA words so we can see the
+        // pattern (clustered at struct-member offsets vs scattered).
+        if kptr_count <= 64 {
+            let mut logged = 0;
+            for i in 0..(kevlar_platform::arch::PAGE_SIZE / 8) {
+                let v = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+                if (v >> 47) == 0x1ffff {
+                    log::warn!("    [+{:#05x}] = {:#018x}", i * 8, v);
+                    logged += 1;
+                    if logged >= 8 { break; }
+                }
+            }
+        }
+    }
+}
+
 /// Deliver SIGSEGV to the current process. If the default action is Terminate
 /// (no user handler installed), kill the process immediately instead of
 /// queuing the signal. This prevents infinite fault loops where the faulting
@@ -45,6 +112,22 @@ fn deliver_sigsegv_fatal() {
             if (v >> 47) == 0x1ffff {
                 warn!("  KERNEL_PTR_LEAK: {}={:#x} is a kernel direct-map pointer (paddr={:#x})",
                       name, v, v & 0x0000_7fff_ffff_ffff);
+            }
+        }
+        // LEAK_PAGE_SCAN: on a KERNEL_PTR_LEAK, scan the user pages
+        // pointed to by RDI/RBP/RSI for additional kernel-VA-shaped
+        // values.  Whichever user page contained the leaked pointer
+        // likely has RDI or RBP pointing at or near it (most musl/
+        // glibc allocator paths load via `mov reg, [rdi+off]`).  The
+        // kernel-ptr *density* tells us whether the page has one
+        // coincidental leaked value or is fulla-kernel-data (= stale
+        // TLB to a recycled kernel page).
+        if (fault_addr >> 47) == 0x1ffff {
+            let user_regs = [("RDI", r.rdi), ("RBP", r.rbp), ("RSI", r.rsi)];
+            for (name, v) in user_regs {
+                if v > 0x1000 && (v >> 47) == 0 {
+                    scan_user_page_for_kernel_ptrs(v, name);
+                }
             }
         }
         // If RIP=0 (NULL function pointer call), dump the object at RBP
@@ -765,6 +848,9 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                   name, v, v & 0x0000_7fff_ffff_ffff);
                         }
                     }
+                    // LEAK_PAGE_SCAN runs inside deliver_sigsegv_fatal()
+                    // below, which runs after vm is dropped (avoiding a
+                    // self-deadlock on vm_arc.lock_no_irq()).
                 }
             }
             // Free the page we allocated since we won't map it.

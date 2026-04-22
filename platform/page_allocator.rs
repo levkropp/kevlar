@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
 use core::ops::Deref;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::{address::PAddr, arch::PAGE_SIZE, bootinfo::RamArea, spinlock::SpinLock};
 use arrayvec::ArrayVec;
@@ -240,51 +240,101 @@ pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     Err(PageAllocError)
 }
 
-/// Scan a freshly-zeroed page to verify it really is zero. If not, a
-/// concurrent writer touched the page between memset and return —
-/// log the first non-zero offset + value + site so we can track the
-/// race back to its source. (Blog 186: kernel direct-map pointers
-/// landing in user pages.)
+/// Runtime-enable flag for the zero-fill-on-alloc detector.  Cheap enough
+/// (~1µs/alloc on 4KB page) to leave on during XFCE/LXDE/kernel tests but
+/// we want the option to silence it in microbenchmarks.  Toggle via
+/// `page_zero_check::set_enabled(false)`.  Default on.
+static PAGE_ZERO_CHECK_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Count of zero-fill miss events.  Incremented regardless of whether the
+/// sampled log fires (rate-limited below).  Dumpable via /proc helpers.
+static PAGE_ZERO_MISS_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PAGE_ZERO_MISS_WITH_KERNEL_PTR: AtomicUsize = AtomicUsize::new(0);
+
+/// Rate-limit log output: first N misses log full detail, rest silently
+/// bump the counter.
+const PAGE_ZERO_MISS_LOG_LIMIT: usize = 32;
+
+pub fn page_zero_check_stats() -> (usize, usize) {
+    (
+        PAGE_ZERO_MISS_COUNT.load(Ordering::Relaxed),
+        PAGE_ZERO_MISS_WITH_KERNEL_PTR.load(Ordering::Relaxed),
+    )
+}
+
+pub fn set_page_zero_check_enabled(on: bool) {
+    PAGE_ZERO_CHECK_ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Scan a freshly-zeroed page to verify it really is zero, and flag any
+/// kernel-direct-map-shaped values we find.  This is the on-hand
+/// instrumentation for task #25: a freshly-handed-to-user page that
+/// still contains kernel data is the exact bug we're hunting.
 ///
-/// Only compiled in debug builds — the scan is ~512 cache-line-aligned
-/// loads per alloc, too much overhead for release.
+/// Two passes in one loop:
+/// 1. Any non-zero word → this page escaped memset somewhere
+/// 2. Upper 17 bits = 0x1ffff → that word is a kernel direct-map VA
+///    (the fault signature from blogs 186/187)
+///
+/// Cost: 512 volatile u64 loads (~1-2µs on a 4GHz core).  Acceptable
+/// for the alloc-path because we already pay tens of µs here for
+/// memset itself.
 #[inline(always)]
-#[cfg(debug_assertions)]
 fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
+    if !PAGE_ZERO_CHECK_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     #[allow(unsafe_code)]
     unsafe {
         let ptr = paddr.as_ptr::<u64>();
         let mut first_hit: Option<usize> = None;
         let mut kernel_ptr_count = 0usize;
+        let mut first_kernel_ptr: Option<(usize, u64)> = None;
         let mut nonzero_count = 0usize;
         for i in 0..(PAGE_SIZE / 8) {
             let v = core::ptr::read_volatile(ptr.add(i));
             if v != 0 {
                 nonzero_count += 1;
                 if first_hit.is_none() { first_hit = Some(i); }
-                if (v >> 47) == 0x1ffff { kernel_ptr_count += 1; }
+                if (v >> 47) == 0x1ffff {
+                    kernel_ptr_count += 1;
+                    if first_kernel_ptr.is_none() {
+                        first_kernel_ptr = Some((i, v));
+                    }
+                }
             }
         }
         if let Some(first) = first_hit {
-            log::warn!(
-                "alloc_page: zero-fill miss site={} paddr={:#x} first_nz_off={:#x} nonzero_words={} kernel_ptr_words={}",
-                site, paddr.value(), first * 8, nonzero_count, kernel_ptr_count,
-            );
-            // Dump a 64-byte window around the first non-zero word.
-            let start = first.saturating_sub(4);
-            let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
-            for i in start..end {
-                let v = core::ptr::read_volatile(ptr.add(i));
-                let mark = if i == first { " <<<" } else { "" };
-                log::warn!("    +{:#05x}: {:#018x}{}", i * 8, v, mark);
+            let n = PAGE_ZERO_MISS_COUNT.fetch_add(1, Ordering::Relaxed);
+            if kernel_ptr_count > 0 {
+                PAGE_ZERO_MISS_WITH_KERNEL_PTR.fetch_add(1, Ordering::Relaxed);
+            }
+            if n < PAGE_ZERO_MISS_LOG_LIMIT {
+                log::warn!(
+                    "PAGE_ZERO_MISS site={} paddr={:#x} first_nz_off={:#x} \
+                     nonzero_words={} kernel_ptr_words={} (seen #{})",
+                    site, paddr.value(), first * 8,
+                    nonzero_count, kernel_ptr_count, n + 1,
+                );
+                if let Some((koff, kval)) = first_kernel_ptr {
+                    log::warn!(
+                        "    first kernel-VA word: paddr+{:#05x} = {:#018x} \
+                         (target paddr={:#x})",
+                        koff * 8, kval, kval & 0x0000_7fff_ffff_ffff,
+                    );
+                }
+                // Dump a 64-byte window around the first non-zero word.
+                let start = first.saturating_sub(4);
+                let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
+                for i in start..end {
+                    let v = core::ptr::read_volatile(ptr.add(i));
+                    let mark = if i == first { " <<<" } else { "" };
+                    log::warn!("    +{:#05x}: {:#018x}{}", i * 8, v, mark);
+                }
             }
         }
     }
 }
-
-#[inline(always)]
-#[cfg(not(debug_assertions))]
-fn debug_assert_page_is_zero(_paddr: PAddr, _site: &'static str) {}
 
 /// Smoking-gun check: panic if the buddy/cache returned a paddr that
 /// the stack_cache has registered as a live kernel stack — that's the
@@ -486,6 +536,12 @@ pub fn prefill_prezeroed_pages() {
         match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
             Ok(paddr) => {
                 zero_page(paddr);
+                // INSTRUMENTATION (task #25): verify the page is actually
+                // zero right after zero_page().  If it isn't, buddy handed
+                // us a page that's still being written to — either the
+                // allocator's double-free detector is broken, or some code
+                // path is freeing a page that's still live.
+                debug_assert_page_is_zero(paddr, "PREZEROED_PREPUSH");
                 let mut pool = PREZEROED_4K_POOL.lock();
                 if !pool.push(paddr) {
                     drop(pool);
@@ -515,6 +571,11 @@ pub fn refill_prezeroed_pages() -> usize {
         match alloc_page(AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
             Ok(paddr) => {
                 zero_page(paddr);
+                // Same INSTRUMENTATION as prefill.  refill() is called
+                // periodically from the idle thread, so a corruption here
+                // would point at a live kernel write to a supposedly-freed
+                // paddr — exactly the task #25 signature.
+                debug_assert_page_is_zero(paddr, "PREZEROED_PREPUSH_REFILL");
                 let mut pool = PREZEROED_4K_POOL.lock();
                 if pool.push(paddr) {
                     PREZEROED_4K_COUNT.fetch_add(1, Ordering::Relaxed);
