@@ -335,6 +335,13 @@ fn debug_assert_page_is_zero(paddr: PAddr, site: &'static str) {
                         npages, base, paddr.value() - base,
                     );
                 }
+                if let Some(_tsc) = recent_single_free_match(paddr) {
+                    log::warn!(
+                        "    SINGLE_FREE_MATCH: paddr={:#x} freed as single \
+                         page within the last {} frees",
+                        paddr.value(), SINGLE_FREE_RING_SIZE,
+                    );
+                }
                 // Dump a 64-byte window around the first non-zero word.
                 let start = first.saturating_sub(4);
                 let end = core::cmp::min(first + 8, PAGE_SIZE / 8);
@@ -649,13 +656,21 @@ pub fn is_managed_page(paddr: PAddr) -> bool {
     false
 }
 
-/// Ring buffer of recent multi-page free_pages calls (paddr, num_pages, tsc).
-/// On PAGE_ZERO_MISS we can correlate: was this paddr just freed as part of
-/// a multi-page release?  Useful for identifying the source of leak paddrs.
+/// Ring buffer of recent free_pages calls (paddr, num_pages, tsc).
+/// On PAGE_ZERO_MISS we can correlate: was this paddr just freed?  The
+/// single-page ring answers "did free_pages(paddr, 1) happen recently?"
+/// (→ CoW path / mmap teardown).  The multi-page ring answers "was this
+/// paddr part of a stack/xsave release?"  (→ task-drop path).  Distinct
+/// rings because single-page frees fire 10-100x more often than multi.
 const MULTI_FREE_RING_SIZE: usize = 32;
 static MULTI_FREE_RING: SpinLock<[(usize, usize, u64); MULTI_FREE_RING_SIZE]> =
     SpinLock::new([(0, 0, 0); MULTI_FREE_RING_SIZE]);
 static MULTI_FREE_IDX: AtomicUsize = AtomicUsize::new(0);
+
+const SINGLE_FREE_RING_SIZE: usize = 128;
+static SINGLE_FREE_RING: SpinLock<[(usize, u64); SINGLE_FREE_RING_SIZE]> =
+    SpinLock::new([(0, 0); SINGLE_FREE_RING_SIZE]);
+static SINGLE_FREE_IDX: AtomicUsize = AtomicUsize::new(0);
 
 /// Check if `paddr` is within a recent multi-page free (last 32 frees).
 /// Returns (num_pages, tsc) of the matching free, or None.
@@ -665,6 +680,19 @@ pub fn recent_multi_free_match(paddr: PAddr) -> Option<(usize, usize, u64)> {
     for &(base, num, tsc) in ring.iter() {
         if num > 1 && target >= base && target < base + num * PAGE_SIZE {
             return Some((base, num, tsc));
+        }
+    }
+    None
+}
+
+/// Check if `paddr` was recently freed as a single page (last 128 frees).
+/// Returns the TSC of the matching free, or None.
+pub fn recent_single_free_match(paddr: PAddr) -> Option<u64> {
+    let ring = SINGLE_FREE_RING.lock();
+    let target = paddr.value();
+    for &(p, tsc) in ring.iter() {
+        if p == target {
+            return Some(tsc);
         }
     }
     None
@@ -722,6 +750,17 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
 
     // Single page — try to push to cache.
     if num_pages == 1 {
+        // INSTRUMENTATION (task #25): record the free in the single-page
+        // ring so PAGE_ZERO_MISS can correlate.  Cheap: one lock + one
+        // store.  Ring size (128) keeps ~50 µs of recent frees under
+        // typical XFCE load.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+            let idx = SINGLE_FREE_IDX.fetch_add(1, Ordering::Relaxed) % SINGLE_FREE_RING_SIZE;
+            let mut ring = SINGLE_FREE_RING.lock();
+            ring[idx] = (paddr.value(), tsc);
+        }
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
             let mut cache = PAGE_CACHE.lock();
             if cache.push(paddr) {
