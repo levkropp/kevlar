@@ -852,10 +852,17 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         dst_frame.write(0, &tmp);
                     }
                     kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                    // Determine whether we'll free old_paddr, but DEFER the
+                    // actual free until after flush_tlb below. See task #25:
+                    // between free_pages and the cross-CPU flush, a sibling
+                    // thread on another CPU can still write to V via its
+                    // stale TLB entry — landing the write on a paddr that
+                    // the allocator has already handed to someone else.
+                    let mut should_free_old = false;
                     if !is_ghost {
                         kevlar_platform::page_refcount::page_ref_dec(old_paddr);
                         if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
-                            kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                            should_free_old = true;
                         }
                     }
                     vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
@@ -871,6 +878,9 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     // This was the root cause of the xfce4-session/xfwm4/iceauth
                     // crashes in blogs 175–177.
                     vm.page_table().flush_tlb(aligned_vaddr);
+                    if should_free_old {
+                        kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    }
                     return;
                 }
                 // Sole owner: just update flags to writable.
@@ -1358,17 +1368,31 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                         dst_frame.write(0, &tmp);
                     }
                     kevlar_platform::page_refcount::page_ref_init(new_paddr);
+                    // Same defer-free-until-after-flush pattern as the
+                    // CoW-write-to-shared-RO site above (task #25): a
+                    // sibling thread on another CPU may still have
+                    // V→old_paddr cached, so the page must not be
+                    // recycled until the cross-CPU flush completes.
+                    let mut should_free_old = false;
                     if !is_ghost {
                         // Decrement twice: once for our pin, once for the PTE removal.
-                        // The first dec undoes our pin. The second removes our reference.
                         kevlar_platform::page_refcount::page_ref_dec(old_paddr);
                         if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
-                            kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                            should_free_old = true;
                         }
                     }
                     // Ghost fork: DON'T decrement — refcount was never incremented.
                     vm.page_table_mut().map_user_page_with_prot(aligned_vaddr, new_paddr, prot_flags);
-                    vm.page_table().flush_tlb_local(aligned_vaddr);
+                    // Cross-CPU flush: when we're the sole owner across
+                    // processes we may still be multi-threaded, and sibling
+                    // threads on other CPUs have PCID-tagged entries pointing
+                    // to old_paddr.  Local-only flush leaves them live.
+                    if should_free_old {
+                        vm.page_table().flush_tlb(aligned_vaddr);
+                        kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    } else {
+                        vm.page_table().flush_tlb_local(aligned_vaddr);
+                    }
                     return;
                 }
                 // refcount == 1 and not ghost: sole owner, just make writable.
@@ -1412,9 +1436,17 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                     vm.page_table_mut().unmap_user_page(aligned_vaddr);
                     vm.page_table_mut().map_user_page_with_prot(
                         aligned_vaddr, new_paddr, prot_flags | 2);
-                    vm.page_table().flush_tlb_local(aligned_vaddr);
-                    if kevlar_platform::page_refcount::page_ref_dec(old_paddr) {
+                    // Task #25: use cross-CPU flush when we're about to free
+                    // old_paddr (sibling threads on other CPUs may still have
+                    // V→old_paddr cached and could write through a stale TLB
+                    // entry to a page that's been reissued by the allocator).
+                    let should_free_old =
+                        kevlar_platform::page_refcount::page_ref_dec(old_paddr);
+                    if should_free_old {
+                        vm.page_table().flush_tlb(aligned_vaddr);
                         kevlar_platform::page_allocator::free_pages(old_paddr, 1);
+                    } else {
+                        vm.page_table().flush_tlb_local(aligned_vaddr);
                     }
                     return;
                 }
