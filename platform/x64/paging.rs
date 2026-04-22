@@ -897,6 +897,21 @@ pub struct PageTable {
 /// Stale TLB entries from a previous generation are flushed on first use.
 static PCID_STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// Per-CPU last-seen global PCID generation.  Updated by `switch()` after
+/// a `flush_all_pcids()` on that CPU.  When the global generation is
+/// bumped (by `bump_global_pcid_generation()` or `alloc_pcid()` wrap), the
+/// next `switch()` on every CPU sees `CPU_LAST_SEEN_GEN[cpu] < global_gen`
+/// and flushes — regardless of which process is switching.
+///
+/// This closes the hole where a freshly-allocated process stores the
+/// already-bumped generation in its own `pcid_gen`, then switches without
+/// flushing, leaving stale entries tagged with a recycled PCID alive
+/// across the transition (blog 187 hypothesis #1, task #25).
+static CPU_LAST_SEEN_GEN: [core::sync::atomic::AtomicU64; super::smp::MAX_CPUS] = {
+    const ZERO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [ZERO; super::smp::MAX_CPUS]
+};
+
 /// Bump the global PCID generation so that every process's next
 /// `PageTable::switch()` sees a generation mismatch and does a full
 /// CR3 reload (flushing all TLB entries for that PCID).  Used as
@@ -1037,35 +1052,62 @@ impl PageTable {
                 return;
             }
 
-            let my_gen = my_pcid_gen & !0xFFF;
+            // Per-CPU generation check (task #25 / blog 187 hypothesis #1).
+            //
+            // The previous design compared the process's stored generation
+            // against the global generation. That caught one case — a process
+            // whose generation predated a bump. But when `alloc_pcid()` wraps
+            // the 12-bit PCID counter, it bumps global_gen and hands the new
+            // process a pcid_gen with `my_gen == global_gen`. The fresh
+            // process's switch() then took the fast path, never flushing —
+            // but its PCID is a *recycled* tag, and the TLB on this CPU may
+            // still hold entries from the previous owner of that PCID tagged
+            // with the older generation. Those entries keep translating the
+            // recycled-PCID lookups, leaking physical pages.
+            //
+            // Per-CPU tracking closes this: any bump forces the next switch
+            // on every CPU to flush, regardless of what process is switching.
+            // The per-process pcid_gen field is still used as bookkeeping at
+            // alloc time; the authoritative check is per-CPU.
+            //
+            // Preemption is disabled by the scheduler around switch(), so
+            // `cpu_id()` is stable and `CPU_LAST_SEEN_GEN[cpu]` is only
+            // written by this CPU (single-writer, many-reader is safe with
+            // Relaxed since ordering is imposed by `flush_all_pcids()`'s
+            // INVPCID serializing semantics).
             let global_gen = PCID_STATE.load(Ordering::Relaxed) & !0xFFF;
+            let cpu = super::cpu_id() as usize;
+            let cpu_gen = if cpu < super::smp::MAX_CPUS {
+                CPU_LAST_SEEN_GEN[cpu].load(Ordering::Relaxed)
+            } else {
+                // Out-of-range cpu (shouldn't happen in practice): force
+                // flush path to stay safe.
+                0
+            };
 
-            if my_gen == global_gen {
-                // Same generation: TLB entries for this PCID are valid.
-                // Bit 63 = no-invalidate — preserves other PCIDs' entries.
+            if cpu_gen == global_gen {
+                // Fast path: this CPU has flushed for the current generation.
+                // Bit 63 = no-invalidate — preserves this PCID's entries.
                 let cr3_val = self.pml4.value() as u64 | pcid | (1u64 << 63);
                 x86::controlregs::cr3_write(cr3_val);
             } else {
-                // Stale generation: the global generation has been bumped
-                // since we last refreshed our pcid_gen. That bump signals
-                // "stale TLB entries exist — possibly with THIS PCID, but
-                // also possibly with OTHER PCIDs that dead processes left
-                // behind on this CPU." If we only flush the current PCID
-                // (CR3 write without bit 63), entries tagged with a recycled
-                // PCID from a pre-bump process survive and are re-used by a
-                // future process whose fresh PCID collides with the old tag —
-                // leaking that old process's physical pages into the new
-                // process's address space. (Task #25 / blog 186 root cause:
-                // a user heap page serving kernel data via such a stale
-                // entry, including kernel direct-map pointers.)
-                //
-                // Fix: invalidate ALL PCIDs on this CPU (INVPCID type=3 or
-                // CR4.PCIDE toggle), then load CR3 with bit 63 set (the
-                // entries we care about are already gone).
+                // Stale generation on this CPU: one or more
+                // `bump_global_pcid_generation()` calls happened since the
+                // last flush here. Invalidate ALL PCIDs (INVPCID type=3 or
+                // CR4.PCIDE toggle) and record the generation we just
+                // flushed for. A concurrent bump that happens *after* our
+                // global_gen load is caught by the next switch (our stored
+                // cpu_gen will lag the new global_gen).
                 flush_all_pcids();
+                if cpu < super::smp::MAX_CPUS {
+                    CPU_LAST_SEEN_GEN[cpu].store(global_gen, Ordering::Relaxed);
+                }
                 let cr3_val = self.pml4.value() as u64 | pcid | (1u64 << 63);
                 x86::controlregs::cr3_write(cr3_val);
-                // Update stored generation so subsequent switches are fast.
+                // Also refresh the per-process pcid_gen so fellow consumers
+                // (if any) see the newer generation. Not load-bearing for
+                // correctness — per-CPU is authoritative — but keeps the
+                // field consistent.
                 self.pcid_gen.store(global_gen | pcid, Ordering::Relaxed);
             }
         }
