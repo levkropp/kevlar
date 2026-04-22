@@ -431,6 +431,32 @@ pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, Pag
                 }
             }
 
+            // INSTRUMENTATION (task #25): also check whether the paddr is
+            // currently queued in PAGE_CACHE or PREZEROED_4K_POOL.  If so,
+            // buddy is about to hand the same paddr to a multi-page
+            // caller (us) while it's also queued for a single-page
+            // consumer — that's the page-in-two-pools bug.
+            for i in 0..num_pages {
+                let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
+                let target = p.value();
+                let cache = PAGE_CACHE.lock();
+                let in_cache = cache.pages[..cache.count].iter().any(|&x| x == target);
+                drop(cache);
+                if in_cache {
+                    panic!("BUDDY_POOL_OVERLAP: paddr={:#x} handed by zone \
+                           while in PAGE_CACHE (multi-page alloc of {} from {:#x})",
+                        p.value(), num_pages, paddr.value());
+                }
+                let prezeroed = PREZEROED_4K_POOL.lock();
+                let in_prezeroed = prezeroed.pages[..prezeroed.count].iter().any(|&x| x == target);
+                drop(prezeroed);
+                if in_prezeroed {
+                    panic!("BUDDY_POOL_OVERLAP: paddr={:#x} handed by zone \
+                           while in PREZEROED_POOL (multi-page alloc of {} from {:#x})",
+                        p.value(), num_pages, paddr.value());
+                }
+            }
+
             if !flags.contains(AllocPageFlags::DIRTY_OK) {
                 unsafe {
                     paddr.as_mut_ptr::<u8>().write_bytes(0, num_pages * PAGE_SIZE);
