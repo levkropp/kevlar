@@ -593,7 +593,18 @@ pub fn interval_work() {
     // RIP is a valid kernel pointer. A kernel stack zeroed by a stale
     // user-TLB write produces saved_rip=0/2 long before the switch_in
     // that crashes — this scanner catches it within ~10 ms of the write.
-    if iw_count % 5 == 0 {
+    // Scan frequency: every 50 interval-work ticks instead of 5. Reason:
+    // scan_suspended_task_corruption reads Process.state() via
+    // AtomicCell<ProcessState>, which falls back to crossbeam's SeqLock
+    // because ProcessState is a non-primitive enum. Under heavy process
+    // churn (XFCE fork/exec storm), SeqLock contention causes the scan
+    // to livelock — NMI watchdog observed this consistently after brk
+    // heap-shrink TLB fix (which increased scheduling pressure).
+    //
+    // 50x1 = 500 ms typical scan interval is still plenty fast to catch
+    // the "RIP zeroed by stale user TLB" persistence signal this
+    // diagnostic was built for.
+    if iw_count % 50 == 0 {
         process::scan_suspended_task_corruption();
         // Disabled: live-stack scanner fires on page-recycling residue
         // (harmless) and the warn!() output interleaves with structured
