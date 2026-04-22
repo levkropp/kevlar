@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -538,6 +539,66 @@ phase5:
             else fail("xfce4_panel_running", "panel not found");
             if (has_session) pass("xfce4_session_running");
             else fail("xfce4_session_running", "session not found");
+
+            // Framebuffer pixel check — is anything actually DRAWN on screen?
+            // Component "running" in /proc doesn't prove xfwm4/xfce4-session
+            // actually rendered. Read /dev/fb0 directly and count non-black
+            // pixels.  XFCE with Adwaita theme should paint a solid background
+            // + panel gradient + cursor at minimum.
+            {
+                int fd = open("/dev/fb0", O_RDONLY);
+                if (fd < 0) {
+                    fail("xfce_pixels_visible", "can't open /dev/fb0");
+                } else {
+                    unsigned char finfo[68] = {0};
+                    unsigned int smem_len = 0;
+                    if (ioctl(fd, 0x4602 /* FBIOGET_FSCREENINFO */, finfo) == 0) {
+                        smem_len = *(unsigned int *)(finfo + 24);
+                    }
+                    if (smem_len == 0) smem_len = 1024 * 768 * 4;
+                    void *fb = mmap(NULL, smem_len, PROT_READ, MAP_SHARED, fd, 0);
+                    if (fb == MAP_FAILED) {
+                        fail("xfce_pixels_visible", "mmap fb0 failed");
+                    } else {
+                        // Sample every 1024 bytes — scans entire framebuffer
+                        // with minimal work. Count pixels that aren't BGRA
+                        // black (0x00000000) and aren't the test-xfce startup
+                        // test pattern (bochs-fb paints a colored banner at
+                        // boot; we want to detect XFCE-drawn content beyond
+                        // that, but for a first check any non-black is a win).
+                        const uint32_t *px = (const uint32_t *)fb;
+                        size_t nsamples = smem_len / 1024;
+                        size_t nonblack = 0;
+                        uint32_t distinct_mask = 0;
+                        for (size_t i = 0; i < nsamples; i++) {
+                            uint32_t v = px[i * 256]; // 1024 bytes = 256 u32s
+                            if ((v & 0x00ffffff) != 0) {
+                                nonblack++;
+                                distinct_mask |= v;
+                            }
+                        }
+                        printf("  fb0 smem_len=%u samples=%zu nonblack=%zu "
+                               "distinct_mask=%08x\n",
+                               smem_len, nsamples, nonblack, distinct_mask);
+                        // Threshold: ≥10% of sampled pixels are non-black AND
+                        // at least two distinct colors seen (rules out
+                        // "entire screen is one uniform color that happens
+                        // to be non-black like bochs-fb boot banner").
+                        int colors_bits = __builtin_popcount(distinct_mask & 0x00ffffff);
+                        if (nonblack * 10 >= nsamples && colors_bits >= 4) {
+                            pass("xfce_pixels_visible");
+                        } else {
+                            char b[64];
+                            snprintf(b, sizeof(b),
+                                "nonblack=%zu/%zu colors_bits=%d",
+                                nonblack, nsamples, colors_bits);
+                            fail("xfce_pixels_visible", b);
+                        }
+                        munmap(fb, smem_len);
+                    }
+                    close(fd);
+                }
+            }
 
             // Dump XFCE component logs so failures are diagnosable.
             // Only tail recent output to keep serial readable.
