@@ -84,12 +84,38 @@ the three-commit `cld` series):
 | sample | KERNEL_PTR_LEAK runs | total events | PAGE_ZERO_MISS runs | total events |
 |---|---|---|---|---|
 | post blog-204 | 4/10 | 11 events | 7/10 | 14 events |
-| **post blog-205 (6-run)** | **0/6** | **0 events** | 4/6 | 7 events |
-| post blog-205 (8-run confirmation) | pending | pending | pending | pending |
+| post blog-205 (first 6-run)  | 0/6 | 0 events | 4/6 | 7 events |
+| **post blog-205 (8-run confirmation)** | **2/8** | **5 events** | 6/8 | 11 events |
+| **combined 14-run post-fix** | **2/14** | **5 events** | 10/14 | 18 events |
 
-The `KERNEL_PTR_LEAK` rate dropped from ~40% of runs to 0%.  User-
-visible SIGSEGVs from kernel-pointer derefs are eliminated in the
-sample.
+The `KERNEL_PTR_LEAK` rate dropped from ~40% of runs to ~14%.  That's
+a significant improvement, not a closure.  The initial 6-run
+"zero leaks" result was a lucky streak; the 8-run confirmation shows
+two residual leaks (W6 in xfce4-panel systray plugin, W7 in xfwm4).
+
+### What the residual leaks look like
+
+- **W6**: fault_addr=`0xffff80000022689f` in pid=61 (xfce4-panel systray
+  plugin).  RDI=`0xfefefefefefefeff` (a poison-pattern — user heap was
+  hit by a write that's not the usual kernel-pointer value).  Looks
+  like a different corruption shape.
+- **W7**: fault_addr=`0xffff800002d2d760` in xfwm4.  Same rodata-byte-
+  offset signature as pre-fix.  Suggests the same underlying mechanism
+  is still happening, just less frequently.
+
+So the `cld` fix addressed *one* significant source of DF=1-backward
+writes but didn't close all paths.  The residual mechanism is either:
+
+1. Another rep-using primitive we haven't cld'd (we grep'd for six,
+   but the user crates we depend on — `buddy_system_allocator`,
+   `hashbrown` — may have their own).
+2. A truly different writer class (raw-pointer-past-free or a
+   hardware page walker writeback).
+
+The always-on instrumentation stack (PAGE_ZERO_MISS, SINGLE_FREE_MATCH,
+UCOPY_TRACE, LEAK_PAGE_SCAN) continues to fire and gives us
+residual-signature data for each occurrence — the next investigation
+turn can use it to narrow further.
 
 `PAGE_ZERO_MISS` still fires — about 4/6 runs have at least one event.
 The signature has changed though: the leaked pages now have fewer
