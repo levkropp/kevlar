@@ -764,6 +764,25 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // the OwnedPages is handed to OwnedPages::drop -> free_pages — so a
     // positive hit here proves some OTHER path is calling free_pages
     // on a live stack (the exact live-page-to-buddy bug we're hunting).
+    // INSTRUMENTATION (task #25): single-page variant of FREE_LIVE_STACK.
+    // free_pages(paddr, 1) of a page that's still registered as part of
+    // a live multi-page kernel stack is the exact overlap bug we're
+    // hunting.  Munmap was identified (via SINGLE_FREE_MATCH) as the
+    // dominant caller producing paddrs that come back from PREZEROED_POOL
+    // with stack-frame content.  Panic here to catch the collision
+    // directly — a user page somehow acquired a paddr that's part of a
+    // live kernel stack.
+    if num_pages == 1 {
+        if crate::stack_cache::is_stack_paddr(paddr) {
+            panic!(
+                "FREE_LIVE_STACK_1P: single-page free of paddr={:#x} that \
+                 is a page of a LIVE kernel stack!  Caller is freeing a \
+                 user page whose paddr collides with a kernel stack.",
+                paddr.value(),
+            );
+        }
+    }
+
     if num_pages > 1 {
         for i in 0..num_pages {
             let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
