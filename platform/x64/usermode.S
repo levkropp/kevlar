@@ -263,5 +263,17 @@ do_switch_thread:
 
     popfq       /* Restores IF — re-enables interrupts if they were on. */
 
+    /* Force DF=0 after restoring RFLAGS.  popfq restores the per-thread
+       DF bit, which is almost always 0 but could leak to 1 if any
+       kernel-side inline asm in the outgoing thread set DF and didn't
+       clear it before being preempted.  A DF=1 thread hitting rep
+       stosq/movsb/stosb (zero_page, memcpy, memset) runs BACKWARD,
+       writing to memory below the intended target — the root cause of
+       task #25's PAGE_ZERO_MISS leak class (blog 205).  Rather than
+       rely on every rep primitive to cld defensively, enforce DF=0 at
+       the context-switch boundary so every Rust kernel code path
+       observes DF=0 as promised by the x86-64 SysV ABI. */
+    cld
+
     /* Resume the next thread. */
     ret
