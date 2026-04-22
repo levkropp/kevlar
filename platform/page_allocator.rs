@@ -613,6 +613,28 @@ pub fn is_managed_page(paddr: PAddr) -> bool {
 
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
 
+    // INSTRUMENTATION (task #25): panic if we're about to return a paddr
+    // to the allocator while it's still registered as an active kernel
+    // stack.  The `is_stack_paddr` registry is populated by
+    // `alloc_kernel_stack` and cleared by `free_kernel_stack` BEFORE
+    // the OwnedPages is handed to OwnedPages::drop -> free_pages — so a
+    // positive hit here proves some OTHER path is calling free_pages
+    // on a live stack (the exact live-page-to-buddy bug we're hunting).
+    // Only check if the registry has entries (common case: no free during
+    // early boot).
+    if num_pages > 1 {
+        for i in 0..num_pages {
+            let p = PAddr::new(paddr.value() + i * PAGE_SIZE);
+            if crate::stack_cache::is_stack_paddr(p) {
+                panic!(
+                    "FREE_LIVE_STACK: paddr={:#x} (within multi-page free of \
+                     {} starting at {:#x}) is a live kernel stack!",
+                    p.value(), num_pages, paddr.value(),
+                );
+            }
+        }
+    }
+
     // Single page — try to push to cache.
     if num_pages == 1 {
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
