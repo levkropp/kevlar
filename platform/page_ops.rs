@@ -11,6 +11,14 @@ pub fn zero_page(paddr: PAddr) {
     unsafe {
         let ptr = paddr.as_mut_ptr::<u64>();
         core::arch::asm!(
+            // Defensive cld: x86_64 SysV ABI requires DF=0 on function
+            // entry, but inline-asm callers can violate that without the
+            // borrow checker complaining.  A rep stosq with DF=1 would
+            // run BACKWARD from paddr, writing zeros to memory BELOW the
+            // page — leaving the intended page fully dirty.  That's the
+            // exact signature we've been seeing in PAGE_ZERO_MISS events
+            // (task #25).  Trivial cost (~1 cycle).
+            "cld",
             "rep stosq",
             inout("rdi") ptr => _,
             inout("rcx") (PAGE_SIZE / 8) => _,

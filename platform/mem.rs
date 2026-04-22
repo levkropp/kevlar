@@ -10,7 +10,12 @@ pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut
     #[cfg(target_arch = "x86_64")]
     unsafe {
         // rep movsb with ERMS/FSRMS is hardware-optimized for bulk copies.
+        // Defensive cld: SysV ABI requires DF=0 on function entry, but an
+        // inline-asm caller with DF=1 would flip rep movsb into backward
+        // copy, corrupting memory BELOW the destination rather than the
+        // intended region.  Same class of hazard as task #25's zero_page.
         core::arch::asm!(
+            "cld",
             "rep movsb",
             inout("rdi") dest => _,
             inout("rsi") src => _,

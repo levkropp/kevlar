@@ -103,6 +103,10 @@ pub fn page_ref_init_huge(base: PAddr) {
     unsafe {
         let ptr = REFCOUNTS[base_idx].as_ptr();
         core::arch::asm!(
+            // Defensive cld (task #25 hazard): rep stosw with DF=1 would
+            // write 1s BACKWARD from REFCOUNTS[base_idx], corrupting
+            // lower-index refcount slots.
+            "cld",
             "rep stosw",
             inout("rdi") ptr => _,
             inout("rcx") 512usize => _,
