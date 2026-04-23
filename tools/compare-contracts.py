@@ -83,7 +83,7 @@ def kevlar_bin_name(src: Path, contracts_dir: Path) -> str:
     return f"contract-{stem}"
 
 
-def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tuple[str, bool]:
+def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int, accel: str = "tcg") -> tuple[str, bool]:
     """Run a contract test binary (by /bin/<name>) in Kevlar via QEMU.
     The binary must already be present in the kernel's embedded initramfs.
     Returns (serial_output, timed_out)."""
@@ -124,9 +124,11 @@ def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tupl
             ]
         else:
             qemu_bin = "qemu-system-aarch64"
+            # HVF on Apple Silicon requires -cpu host; TCG uses cortex-a72.
+            cpu_model = "host" if accel == "hvf" else "cortex-a72"
             qemu_args = [
                 "-machine", "virt",
-                "-cpu", "cortex-a72",
+                "-cpu", cpu_model,
                 "-m", "1024",
                 "-nographic",
                 "-no-reboot",
@@ -139,6 +141,8 @@ def run_kevlar(init_bin: str, kernel_elf: Path, arch: str, timeout: int) -> tupl
                 "-kernel", kernel_path,
                 "-append", f"init={init_path} debug=ktrace",
             ]
+            if accel != "tcg":
+                qemu_args = ["-accel", accel] + qemu_args
 
         try:
             result = subprocess.run(
@@ -276,6 +280,8 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--trace", action="store_true",
                         help="On FAIL/DIVERGE, auto-run diff-syscall-traces.py to diagnose")
+    parser.add_argument("--accel", choices=["tcg", "kvm", "hvf"], default="tcg",
+                        help="QEMU accelerator for Kevlar.  hvf uses Apple Hypervisor.framework on macOS arm64")
     args = parser.parse_args()
 
     repo_root = Path(__file__).parent.parent
@@ -336,7 +342,7 @@ def main():
         if not args.no_kevlar:
             init_bin = kevlar_bin_name(src, contracts_dir)
             t0 = time.monotonic()
-            kevlar_out, kevlar_timeout = run_kevlar(init_bin, kernel_elf, args.arch, args.timeout)
+            kevlar_out, kevlar_timeout = run_kevlar(init_bin, kernel_elf, args.arch, args.timeout, args.accel)
             kevlar_time = time.monotonic() - t0
         else:
             kevlar_time = 0.0
