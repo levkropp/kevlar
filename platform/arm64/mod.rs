@@ -32,6 +32,7 @@ pub use interrupt::SavedInterruptStatus;
 pub use gic::enable_irq;
 pub use paging::{PageFaultReason, PageTable};
 pub use profile::read_clock_counter;
+pub use timer::nanoseconds_since_boot;
 pub use semihosting::{semihosting_halt, SemihostingExitStatus};
 pub use syscall::PtRegs;
 
@@ -71,9 +72,19 @@ pub fn broadcast_halt_ipi() {
     // PANICKED=true and halt on their next interrupt.
 }
 
-/// Read RTC epoch seconds. ARM64 has no CMOS; returns 0 (boot-relative).
+/// Read RTC epoch seconds from the QEMU virt PL031 RTC.
+///
+/// PL031 lives at paddr 0x09010000 (QEMU virt board).  Its data register
+/// (offset 0x00) returns a 32-bit count of seconds since the Unix epoch
+/// (QEMU initialises it from the host clock at VM startup).  Low paddrs are
+/// mapped by boot.S as Device memory (AttrIndx=0), so we access it through
+/// the straight kernel map.  Returns 0 if the RTC reads back zero (no host
+/// clock seed — e.g. semihosting-only boot).
 pub fn read_rtc_epoch_secs() -> u64 {
-    0
+    const PL031_DR_PADDR: usize = 0x09010000;
+    let vaddr = KERNEL_BASE_ADDR + PL031_DR_PADDR;
+    let secs: u32 = unsafe { core::ptr::read_volatile(vaddr as *const u32) };
+    secs as u64
 }
 
 pub const PAGE_SIZE: usize = 4096;

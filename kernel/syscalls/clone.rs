@@ -50,7 +50,10 @@ impl<'a> SyscallHandler<'a> {
 
         if flags & CLONE_VM != 0 {
             // Shared VM: thread or posix_spawn-style clone.
-            if child_stack == 0 {
+            // vfork (CLONE_VM|CLONE_VFORK) legitimately passes child_stack=0 —
+            // the child runs on the parent's stack until it execs or _exits.
+            // Threads (without CLONE_VFORK) must provide their own stack.
+            if child_stack == 0 && flags & CLONE_VFORK == 0 {
                 return Err(Errno::EINVAL.into());
             }
 

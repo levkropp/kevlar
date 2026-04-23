@@ -71,3 +71,18 @@ pub fn counter() -> u64 {
     unsafe { asm!("mrs {}, cntpct_el0", out(reg) val) };
     val
 }
+
+/// Nanoseconds since boot derived from CNTPCT_EL0.  Used by the monotonic
+/// clock so /proc/uptime and clock_gettime(MONOTONIC) have sub-tick
+/// resolution — otherwise a process reading /proc/uptime within the first
+/// timer tick sees 0.00 and contract tests requiring uptime > 0 fail.
+pub fn nanoseconds_since_boot() -> u64 {
+    let freq = cntfrq();
+    if freq == 0 {
+        return 0;
+    }
+    let cnt = counter();
+    // Compute cnt * 1e9 / freq without overflow.  Typical freq is 24 MHz,
+    // so cnt * 1e9 overflows u64 at ~18.5 s — use u128 for the multiply.
+    ((cnt as u128) * 1_000_000_000u128 / (freq as u128)) as u64
+}

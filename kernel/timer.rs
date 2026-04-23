@@ -128,11 +128,8 @@ impl MonotonicClock {
     }
 
     pub fn nanosecs(self) -> usize {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if self.ns_snapshot != 0 {
-                return self.ns_snapshot;
-            }
+        if self.ns_snapshot != 0 {
+            return self.ns_snapshot;
         }
         // Fallback to tick-based timing.
         self.ticks * 1_000_000_000 / TICK_HZ
@@ -155,8 +152,10 @@ pub fn read_monotonic_clock() -> MonotonicClock {
                 0
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        { 0 }
+        #[cfg(target_arch = "aarch64")]
+        {
+            kevlar_platform::arch::nanoseconds_since_boot() as usize
+        }
     };
     MonotonicClock {
         ticks: MONOTONIC_TICKS.load(Ordering::Relaxed),
