@@ -20,6 +20,9 @@ fn cntfrq() -> u64 {
     val
 }
 
+/// Public wrapper for `read_clock_frequency` in profile.rs.
+pub fn cntfrq_public() -> u64 { cntfrq() }
+
 /// Cached tval to avoid re-reading CNTFRQ on every rearm.
 static mut TVAL: u64 = 0;
 

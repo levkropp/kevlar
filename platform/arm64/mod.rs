@@ -31,7 +31,7 @@ pub use idle::{halt, idle};
 pub use interrupt::SavedInterruptStatus;
 pub use gic::enable_irq;
 pub use paging::{PageFaultReason, PageTable};
-pub use profile::read_clock_counter;
+pub use profile::{read_clock_counter, read_clock_frequency};
 pub use timer::nanoseconds_since_boot;
 pub use semihosting::{semihosting_halt, SemihostingExitStatus};
 pub use syscall::PtRegs;

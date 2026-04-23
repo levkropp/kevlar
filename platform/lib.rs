@@ -76,7 +76,7 @@ pub mod arch {
         enable_irq, halt, idle,
         enable_interrupts, in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, set_need_resched, set_resched_fn,
-        read_clock_counter, read_rtc_epoch_secs,
+        read_clock_counter, read_clock_frequency, read_rtc_epoch_secs,
         semihosting_halt,
         start_ap_preemption_timer, lapic_timer_diag_log,
         register_cpu_apic_id, watchdog_enable, watchdog_check,
@@ -138,7 +138,8 @@ pub mod arch {
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
         broadcast_halt_ipi, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
-        num_online_cpus, preempt_disable, preempt_enable, read_clock_counter, read_rtc_epoch_secs,
+        num_online_cpus, preempt_disable, preempt_enable,
+        read_clock_counter, read_clock_frequency, read_rtc_epoch_secs,
         semihosting_halt, nanoseconds_since_boot,
         set_need_resched, set_resched_fn,
         register_cpu_apic_id, watchdog_enable, watchdog_check, if_trace_enable,

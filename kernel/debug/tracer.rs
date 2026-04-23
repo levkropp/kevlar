@@ -170,10 +170,7 @@ pub fn dump_span_profile() {
 }
 
 fn tsc_freq_hz() -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    { kevlar_platform::arch::tsc::frequency_hz() }
-    #[cfg(not(target_arch = "x86_64"))]
-    { 0 }
+    kevlar_platform::arch::read_clock_frequency()
 }
 
 fn cycles_to_ns(cycles: u64, freq: u64) -> u64 {
