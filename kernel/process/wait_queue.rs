@@ -163,10 +163,16 @@ impl WaitQueue {
         // VecDeque buffer (bad Arc would crash inside resume() and again
         // when Vec<Arc> is dropped). Drain so we have ownership and can
         // forget the bad ones instead of dropping them.
+        //
+        // Arch-specific kernel base: x86_64 uses 0xffff_8000_0000_0000 (high
+        // half starts at bit 47), ARM64 uses 0xffff_0000_0000_0000 (high half
+        // starts at bit 48).  Hardcoding the x86 value previously caused every
+        // valid arm64 kernel Arc to be treated as corrupt — silently dropping
+        // every wait-queue wakeup.  Use the platform's KERNEL_BASE_ADDR.
         let mut warned = false;
         for process in waiters.into_iter() {
             let raw = Arc::as_ptr(&process) as usize;
-            if raw < 0xffff_8000_0000_0000 {
+            if raw < kevlar_platform::arch::KERNEL_BASE_ADDR {
                 if !warned {
                     log::warn!(
                         "WAITQ CORRUPT: queue={:p} bad arc={:#x} — forgetting",
