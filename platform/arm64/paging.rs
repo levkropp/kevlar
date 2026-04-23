@@ -845,15 +845,6 @@ impl PageTable {
     }
 
     pub fn switch(&self) {
-        // One-shot arch-state dump on first user-process switch — feeds the
-        // ASID / HVF investigation.  Compared against the same dump emitted
-        // from Linux's patched cpu_do_switch_mm.
-        static FIRST: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(true);
-        if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
-            super::dump_arch_state("first_switch");
-        }
-
         // `dsb ish` is the lighter barrier — inner-shareable domain is enough
         // for the local `tlbi vmalle1` below (not an _is_ broadcast).  `dsb sy`
         // costs extra on Apple Silicon HVF because it forces full-system
@@ -1022,6 +1013,12 @@ impl PageTable {
     }
 
     pub fn flush_tlb(&self, vaddr: UserVAddr) {
+        // `tlbi vale1, {op}` operand: VA[55:12] in bits [43:0], ASID in
+        // bits [63:48].  With TCR.AS=0 and TTBR0 always written with
+        // ASID=0, this operand's ASID field is always 0 — correct.
+        // When we later enable ASID tagging (blog 216 / 217), this
+        // site needs to thread the live ASID through, or ASID-tagged
+        // entries will stay stale after the kernel fixes the PTE.
         unsafe {
             let addr = vaddr.value() >> 12;
             core::arch::asm!(

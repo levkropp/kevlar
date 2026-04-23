@@ -1,7 +1,14 @@
 # ASID / HVF Investigation Plan
 
-**Status:** Phase-1/2 progress made this session — see "Results so far"
-below.  Blog 216 has the prior findings.
+**Status: CLOSED (2026-04-23).**  Root cause found, not the hypervisor.
+See blog 217.  Short version: `PageTable::flush_tlb` issued
+`tlbi vale1` with a zero ASID field, which worked by accident while
+Kevlar ran ASID=0 everywhere but livelocks any CoW/permission fault
+once ASID tagging turns on.  Fixing the livelock revealed the ASID
+fast-path itself is a wash on fork_exit at Apple M2 TLB sizes (~4 µs
+per-iter slower than `tlbi vmalle1`, because parent+child both
+refill the 192-entry L1 DTLB regardless).  ASID is not the lever for
+the 38 µs fork_exit gap to Linux.
 **Goal:** explain why `cpu_do_switch_mm` runs at hardware speed on Linux/HVF/Apple
 Silicon but costs ~5–8 ms per TTBR-with-ASID MSR in Kevlar on the same host.
 
