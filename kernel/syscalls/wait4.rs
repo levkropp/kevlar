@@ -48,6 +48,7 @@ impl<'a> SyscallHandler<'a> {
         }
 
         let _wait_span = debug::tracer::span_guard(debug::tracer::span::WAIT_TOTAL);
+        let _syswait_span = debug::tracer::span_guard(debug::tracer::span::SYS_WAIT4_TOTAL);
         let (got_pid, encoded_status) = JOIN_WAIT_QUEUE.sleep_signalable_until(|| {
             let current = current_process();
             let children = current.children();

@@ -39,6 +39,16 @@ pub mod span {
     // demand fault experiments
     pub const FORK_GHOST: u16 = 20;
     pub const EXEC_TEMPLATE: u16 = 21;
+    // fork sub-phases (post FP-off investigation, blog 216)
+    pub const FORK_ARCH: u16 = 22;       // parent.arch.fork — stack alloc + FP snapshot
+    pub const FORK_STRUCT: u16 = 23;     // Arc::new(Process { ... })
+    pub const FORK_REGISTER: u16 = 24;   // cgroup + namespace + process_table + scheduler
+    pub const FORK_ALLOC_PID: u16 = 25;  // alloc_pid scan of PROCESSES
+    pub const FORK_FILES_CLONE: u16 = 26; // opened_files.clone
+    pub const FORK_INNER_CLONES: u16 = 27; // cmdline/environ/signals/comm/rootfs/exe_path
+    pub const SYS_CLONE_TOTAL: u16 = 28;   // entire sys_clone syscall (incl Process::fork)
+    pub const SYS_EXIT_TOTAL: u16 = 29;    // entire sys_exit syscall (child side)
+    pub const SYS_WAIT4_TOTAL: u16 = 30;   // entire sys_wait4 (parent side)
 }
 
 struct SpanStats {
@@ -139,6 +149,15 @@ fn span_name(id: u16) -> &'static str {
         span::WAIT_TOTAL => "wait.total",
         span::FORK_GHOST => "fork.ghost",
         span::EXEC_TEMPLATE => "exec.template",
+        span::FORK_ARCH => "fork.arch",
+        span::FORK_STRUCT => "fork.struct",
+        span::FORK_REGISTER => "fork.register",
+        span::FORK_ALLOC_PID => "fork.alloc_pid",
+        span::FORK_FILES_CLONE => "fork.files_clone",
+        span::FORK_INNER_CLONES => "fork.inner_clones",
+        span::SYS_CLONE_TOTAL => "sys_clone.total",
+        span::SYS_EXIT_TOTAL => "sys_exit.total",
+        span::SYS_WAIT4_TOTAL => "sys_wait4.total",
         _ => "unknown",
     }
 }

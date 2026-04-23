@@ -38,6 +38,8 @@ impl<'a> SyscallHandler<'a> {
         ctid_or_newtls: usize,
         newtls_or_ctid: usize,
     ) -> Result<isize> {
+        let _clone_span = crate::debug::tracer::span_guard(
+            crate::debug::tracer::span::SYS_CLONE_TOTAL);
         // x86_64: (flags, child_stack, ptid, ctid, newtls)
         // ARM64:  (flags, child_stack, ptid, newtls, ctid)
         // We want: ctid = address in child's address space, newtls = TLS base

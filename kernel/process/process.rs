@@ -328,12 +328,16 @@ pub struct Process {
     signal_pending: AtomicU32,
     /// Stack of saved register contexts for nested signal delivery.
     /// Each signal handler pushes its interrupted context; rt_sigreturn pops it.
-    signaled_frame_stack: SpinLock<arrayvec::ArrayVec<PtRegs, 4>>,
+    ///
+    /// Lazy-allocated (None until first signal delivery) so fork() doesn't pay
+    /// ~1 KB of inline zero-init — rare signal-handler use didn't warrant that
+    /// cost on every process.  See blog 216.
+    signaled_frame_stack: SpinLock<Option<alloc::boxed::Box<arrayvec::ArrayVec<PtRegs, 4>>>>,
     /// Stack of user-stack context base addresses for nested signal delivery.
     /// Paired with signaled_frame_stack: setup_signal_stack pushes ctx_base,
     /// setup_sigreturn_stack pops it. Needed when signal is delivered on an
     /// alternate stack (SA_ONSTACK) since signaled_frame.rsp is the pre-switch RSP.
-    signal_ctx_base_stack: SpinLock<arrayvec::ArrayVec<usize, 4>>,
+    signal_ctx_base_stack: SpinLock<Option<alloc::boxed::Box<arrayvec::ArrayVec<usize, 4>>>>,
     sigset: AtomicU64,
     umask: AtomicCell<u32>,
     // UID/GID tracking (Phase 5) + saved IDs (M10.4).
@@ -496,8 +500,8 @@ impl Process {
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
-            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -620,8 +624,8 @@ impl Process {
             root_fs: AtomicRefCell::new(root_fs),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
-            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(0),
             umask: AtomicCell::new(0o022),
             uid: AtomicU32::new(0),
@@ -1252,7 +1256,10 @@ impl Process {
 
     /// Terminates the **current** process.
     pub fn exit(status: c_int) -> ! {
-        let _exit_span = debug::tracer::span_guard(debug::tracer::span::EXIT_TOTAL);
+        // Process::exit diverges — the SpanGuard's Drop never runs, so record
+        // the exit span manually at the "point of no return" below (just
+        // before `switch()` that doesn't return here).
+        let _exit_start = debug::tracer::span_enter();
         let current = current_process();
         if current.pid == PId::new(1) {
             // Dump syscall profile before halting (if profiling was enabled).
@@ -1416,6 +1423,10 @@ impl Process {
         }
 
         JOIN_WAIT_QUEUE.wake_all();
+        // Exit path complete up to this point — record the span now, since
+        // `switch()` below never returns here so any SpanGuard's Drop wouldn't
+        // fire.
+        debug::tracer::span_exit(debug::tracer::span::EXIT_TOTAL, _exit_start);
         switch();
         unreachable!();
     }
@@ -1559,7 +1570,9 @@ impl Process {
     /// stack has saved contexts). Used to detect nested faults — if SIGSEGV
     /// fires while already handling a signal, the process must be killed.
     pub fn is_in_signal_handler(&self) -> bool {
-        !self.signaled_frame_stack.lock_no_irq().is_empty()
+        self.signaled_frame_stack.lock_no_irq()
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
     }
 
     /// Returns `true` if there's a deliverable (pending AND unblocked) signal.
@@ -1692,7 +1705,9 @@ impl Process {
                         #[cfg(target_arch = "aarch64")]
                         let original_rsp = { frame.sp };
                         {
-                            let mut stack = current.signaled_frame_stack.lock_no_irq();
+                            let mut guard = current.signaled_frame_stack.lock_no_irq();
+                            let stack = guard.get_or_insert_with(
+                                || alloc::boxed::Box::new(arrayvec::ArrayVec::new()));
                             if !stack.is_full() {
                                 stack.push(*frame);
                             }
@@ -1732,7 +1747,9 @@ impl Process {
 
                         // Store ctx_base for sigreturn (needed for alt stack).
                         if let Ok(ctx_base) = &result {
-                            let mut cbs = current.signal_ctx_base_stack.lock_no_irq();
+                            let mut guard = current.signal_ctx_base_stack.lock_no_irq();
+                            let cbs = guard.get_or_insert_with(
+                                || alloc::boxed::Box::new(arrayvec::ArrayVec::new()));
                             if !cbs.is_full() {
                                 cbs.push(*ctx_base);
                             }
@@ -1787,8 +1804,10 @@ impl Process {
     /// So-called `sigreturn`: restores the user context when the signal is
     /// delivered to a signal handler.
     pub fn restore_signaled_user_stack(current: &Arc<Process>, current_frame: &mut PtRegs) {
-        let popped = current.signaled_frame_stack.lock_no_irq().pop();
-        let ctx_base = current.signal_ctx_base_stack.lock_no_irq().pop().unwrap_or(0);
+        let popped = current.signaled_frame_stack.lock_no_irq()
+            .as_mut().and_then(|s| s.pop());
+        let ctx_base = current.signal_ctx_base_stack.lock_no_irq()
+            .as_mut().and_then(|s| s.pop()).unwrap_or(0);
         if let Some(signaled_frame) = popped {
             let saved_mask = current
                 .arch
@@ -1897,7 +1916,9 @@ impl Process {
         {
             let _g = debug::tracer::span_guard(debug::tracer::span::EXEC_SIGNAL_RESET);
             current.signals.lock_no_irq().reset_on_exec();
-            current.signaled_frame_stack.lock_no_irq().clear();
+            if let Some(s) = current.signaled_frame_stack.lock_no_irq().as_mut() {
+                s.clear();
+            }
         }
 
         // Ghost-fork: extract cow_addrs from the OLD VM before replacing it.
@@ -1960,9 +1981,15 @@ impl Process {
 
         let parent_weak = Arc::downgrade(parent);
         let mut process_table = PROCESSES.lock();
-        let pid = alloc_pid(&mut process_table)?;
-        let arch = parent.arch.fork(parent_frame)
-            .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?;
+        let pid = {
+            let _s = debug::tracer::span_guard(debug::tracer::span::FORK_ALLOC_PID);
+            alloc_pid(&mut process_table)?
+        };
+        let arch = {
+            let _s = debug::tracer::span_guard(debug::tracer::span::FORK_ARCH);
+            parent.arch.fork(parent_frame)
+                .map_err(|_| crate::result::Error::new(Errno::ENOMEM))?
+        };
         // Ghost-fork: duplicate page tables but skip refcount operations.
         // The parent is blocked until the child exec's or exits.
         // CoW faults in the child copy pages on demand (typically 2-3 pages
@@ -1977,7 +2004,10 @@ impl Process {
             let forked = parent.vm().as_ref().unwrap().lock().fork()?;
             Some(Arc::new(SpinLock::new(forked)))
         };
-        let opened_files = parent.opened_files().lock().clone();
+        let opened_files = {
+            let _s = debug::tracer::span_guard(debug::tracer::span::FORK_FILES_CLONE);
+            parent.opened_files().lock().clone()
+        };
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
         let parent_umask = parent.umask.load();
@@ -1990,6 +2020,23 @@ impl Process {
             &child_utsname,
         ).map(|p| p.value() as u64).unwrap_or(0);
 
+        // Hoist per-field clones out of Arc::new so they can be measured
+        // independently from the big Process-struct allocation.
+        let (cloned_cmdline, cloned_environ, cloned_signals, cloned_comm,
+             cloned_rootfs, cloned_exe_path, cloned_groups) = {
+            let _s = debug::tracer::span_guard(debug::tracer::span::FORK_INNER_CLONES);
+            (
+                parent.cmdline().clone(),
+                parent.environ.lock_no_irq().clone(),
+                parent.signals.lock_no_irq().fork_clone(),
+                parent.comm.lock_no_irq().clone(),
+                parent.root_fs().lock().clone(),
+                parent.exe_path.lock_no_irq().clone(),
+                parent.groups(),
+            )
+        };
+
+        let _fork_struct_span = debug::tracer::span_guard(debug::tracer::span::FORK_STRUCT);
         let child = Arc::new(Process {
             is_idle: false,
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
@@ -1998,23 +2045,17 @@ impl Process {
             session_id: AtomicI32::new(parent.session_id()),
             state: AtomicProcessState::new(ProcessState::Runnable),
             parent: parent_weak,
-            cmdline: AtomicRefCell::new(parent.cmdline().clone()),
-            environ: SpinLock::new(parent.environ.lock_no_irq().clone()),
+            cmdline: AtomicRefCell::new(cloned_cmdline),
+            environ: SpinLock::new(cloned_environ),
             children: SpinLock::new(Vec::new()),
             vm: AtomicRefCell::new(vm),
             opened_files: Arc::new(SpinLock::new(opened_files)),
-            root_fs: AtomicRefCell::new({
-                // Clone RootFs so child gets its own cwd — chdir in the child
-                // must not affect the parent (POSIX semantics).
-                let parent_fs = parent.root_fs();
-                let cloned = parent_fs.lock().clone();
-                Arc::new(SpinLock::new(cloned))
-            }),
+            root_fs: AtomicRefCell::new(Arc::new(SpinLock::new(cloned_rootfs))),
             arch,
-            signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
+            signals: Arc::new(SpinLock::new(cloned_signals)),
             signal_pending: AtomicU32::new(0),
-            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
-            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent_umask),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -2025,18 +2066,18 @@ impl Process {
             sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
             nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
-            comm: SpinLock::new(parent.comm.lock_no_irq().clone()),
+            comm: SpinLock::new(cloned_comm),
             clear_child_tid: AtomicUsize::new(0), // POSIX: not inherited across fork
             vfork_parent: if ghost { Some(parent.pid()) } else { None },
             start_ticks: crate::timer::monotonic_ticks() as u64,
             utime: AtomicU64::new(0),
             stime: AtomicU64::new(0),
-            groups: SpinLock::new(parent.groups()),
+            groups: SpinLock::new(cloned_groups),
             cgroup: AtomicRefCell::new(None),
             namespaces: AtomicRefCell::new(None),
             ns_pid: AtomicI32::new(pid.as_i32()),
             syscall_trace: SyscallTrace::new(),
-            exe_path: SpinLock::new(parent.exe_path.lock_no_irq().clone()),
+            exe_path: SpinLock::new(cloned_exe_path),
             ghost_fork_done: AtomicBool::new(false),
             sigsuspend_saved_mask: AtomicU64::new(0),
             sigsuspend_has_mask: AtomicBool::new(false),
@@ -2056,7 +2097,9 @@ impl Process {
             #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
         });
+        drop(_fork_struct_span);
 
+        let _fork_reg_span = debug::tracer::span_guard(debug::tracer::span::FORK_REGISTER);
         // Inherit parent's cgroup and register child.
         let parent_cg = parent.cgroup();
         *child.cgroup.borrow_mut() = Some(parent_cg.clone());
@@ -2135,8 +2178,8 @@ impl Process {
             arch,
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
             signal_pending: AtomicU32::new(0),
-            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
-            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
@@ -2260,8 +2303,8 @@ impl Process {
                 Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone()))
             },
             signal_pending: AtomicU32::new(0),
-            signaled_frame_stack: SpinLock::new(arrayvec::ArrayVec::new()),
-            signal_ctx_base_stack: SpinLock::new(arrayvec::ArrayVec::new()),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(parent.sigset_load().bits()),
             umask: AtomicCell::new(parent.umask.load()),
             uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
