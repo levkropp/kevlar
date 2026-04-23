@@ -35,6 +35,10 @@ unsafe extern "C" fn bsp_early_init(dtb_paddr: u64) -> ! {
     page_allocator::init(&boot_info.ram_areas);
     println!("page_allocator OK");
 
+    // Runtime arch state snapshot for the ASID / HVF investigation.
+    // See Documentation/optimization/asid-hvf-investigation.md.
+    super::dump_arch_state("bsp_early_init");
+
     logger::set_log_filter(&boot_info.log_filter);
 
     // Initialize CPU-local area for BSP.

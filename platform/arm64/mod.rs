@@ -91,6 +91,51 @@ pub const PAGE_SIZE: usize = 4096;
 pub const HUGE_PAGE_SIZE: usize = 512 * PAGE_SIZE; // 2MB with 4KB granule (stub)
 pub const TICK_HZ: usize = 50;
 
+/// Dump a standard set of EL1 system registers to the serial console in a
+/// one-line-per-register format that matches the same dump emitted by our
+/// patched Linux kernel's `cpu_do_switch_mm`.  Used by the ASID / HVF
+/// investigation (Documentation/optimization/asid-hvf-investigation.md) to
+/// diff runtime state between Linux and Kevlar on the same hypervisor.
+///
+/// `label` is free-form — typically a call site like "bsp_early_init" or
+/// "first_switch".  Safe to call from any EL1 context where the kernel
+/// serial is live.
+pub fn dump_arch_state(label: &str) {
+    use core::arch::asm;
+    macro_rules! rd {
+        ($reg:literal) => {{
+            let v: u64;
+            unsafe { asm!(concat!("mrs {}, ", $reg), out(reg) v) };
+            v
+        }};
+    }
+    let cpu = cpu_id();
+    crate::println!("KVR-STATE label={} cpu={}", label, cpu);
+    crate::println!("  SCTLR_EL1       = {:#018x}", rd!("sctlr_el1"));
+    crate::println!("  TCR_EL1         = {:#018x}", rd!("tcr_el1"));
+    crate::println!("  TTBR0_EL1       = {:#018x}", rd!("ttbr0_el1"));
+    crate::println!("  TTBR1_EL1       = {:#018x}", rd!("ttbr1_el1"));
+    crate::println!("  MAIR_EL1        = {:#018x}", rd!("mair_el1"));
+    crate::println!("  CPACR_EL1       = {:#018x}", rd!("cpacr_el1"));
+    crate::println!("  CONTEXTIDR_EL1  = {:#018x}", rd!("contextidr_el1"));
+    crate::println!("  CNTKCTL_EL1     = {:#018x}", rd!("cntkctl_el1"));
+    crate::println!("  SPSR_EL1        = {:#018x}", rd!("spsr_el1"));
+    crate::println!("  ID_AA64MMFR0_EL1= {:#018x}", rd!("id_aa64mmfr0_el1"));
+    crate::println!("  ID_AA64MMFR1_EL1= {:#018x}", rd!("id_aa64mmfr1_el1"));
+    crate::println!("  ID_AA64MMFR2_EL1= {:#018x}", rd!("id_aa64mmfr2_el1"));
+    crate::println!("  ID_AA64PFR0_EL1 = {:#018x}", rd!("id_aa64pfr0_el1"));
+    crate::println!("  ID_AA64PFR1_EL1 = {:#018x}", rd!("id_aa64pfr1_el1"));
+    crate::println!("  ID_AA64ISAR0_EL1= {:#018x}", rd!("id_aa64isar0_el1"));
+    crate::println!("  ID_AA64ISAR1_EL1= {:#018x}", rd!("id_aa64isar1_el1"));
+    crate::println!("  ID_AA64ISAR2_EL1= {:#018x}", rd!("id_aa64isar2_el1"));
+    crate::println!("  MIDR_EL1        = {:#018x}", rd!("midr_el1"));
+    crate::println!("  REVIDR_EL1      = {:#018x}", rd!("revidr_el1"));
+    crate::println!("  MPIDR_EL1       = {:#018x}", rd!("mpidr_el1"));
+    crate::println!("  VBAR_EL1        = {:#018x}", rd!("vbar_el1"));
+    crate::println!("  CurrentEL       = {:#018x}", rd!("currentel"));
+    crate::println!("KVR-STATE end label={}", label);
+}
+
 /// Returns true if hardware interrupts are currently enabled (DAIF.I = 0).
 #[inline(always)]
 pub fn interrupts_enabled() -> bool {

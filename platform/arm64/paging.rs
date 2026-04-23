@@ -845,6 +845,15 @@ impl PageTable {
     }
 
     pub fn switch(&self) {
+        // One-shot arch-state dump on first user-process switch — feeds the
+        // ASID / HVF investigation.  Compared against the same dump emitted
+        // from Linux's patched cpu_do_switch_mm.
+        static FIRST: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(true);
+        if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            super::dump_arch_state("first_switch");
+        }
+
         // `dsb ish` is the lighter barrier — inner-shareable domain is enough
         // for the local `tlbi vmalle1` below (not an _is_ broadcast).  `dsb sy`
         // costs extra on Apple Silicon HVF because it forces full-system
