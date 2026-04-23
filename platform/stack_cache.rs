@@ -228,7 +228,10 @@ pub fn scan_live_stack_corruption() {
     let self_rsp: u64;
     #[allow(unsafe_code)]
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("mov {}, rsp", out(reg) self_rsp, options(nomem, nostack));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("mov {}, sp", out(reg) self_rsp, options(nomem, nostack));
     }
     let self_page_va = self_rsp & !0xfff;
     for &p in snapshot.iter() {

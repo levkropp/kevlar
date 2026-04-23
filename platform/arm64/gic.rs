@@ -15,11 +15,21 @@ fn gicc_base() -> usize {
 }
 
 unsafe fn mmio_read(addr: usize) -> u32 {
-    core::ptr::read_volatile(addr as *const u32)
+    let v: u32;
+    // Plain `ldr w, [x]` — no post-/pre-index.  HVF's EC_DATAABORT path
+    // asserts ESR.ISV in qemu target/arm/hvf/hvf.c; post-indexed loads
+    // clear ISV on Apple Silicon's stage-2 trap, crashing the hypervisor.
+    // The inline-asm form fixes the encoding so HVF always sees a valid
+    // syndrome.
+    core::arch::asm!("ldr {v:w}, [{a}]", v = out(reg) v, a = in(reg) addr,
+                     options(nostack, preserves_flags, readonly));
+    v
 }
 
 unsafe fn mmio_write(addr: usize, val: u32) {
-    core::ptr::write_volatile(addr as *mut u32, val);
+    // Plain `str w, [x]` — see `mmio_read` for rationale.
+    core::arch::asm!("str {v:w}, [{a}]", v = in(reg) val, a = in(reg) addr,
+                     options(nostack, preserves_flags));
 }
 
 // Distributor registers.
