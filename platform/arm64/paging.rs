@@ -39,6 +39,12 @@ const ATTR_AF: u64 = 1 << 10;        // Access Flag
 const ATTR_PXN: u64 = 1 << 53;       // Privileged Execute Never
 const ATTR_UXN: u64 = 1 << 54;       // Unprivileged Execute Never (XN)
 
+// Software-reserved PTE bits (ARMv8 descriptors allocate bits 55-58 to the OS).
+/// "Was writable before ghost-fork CoW."  Set alongside ATTR_AP_RO on a page
+/// that the ghost child CoW-marked; `restore_writable_from_list` uses it to
+/// clear ATTR_AP_RO on the parent's PTEs after the child exits / execs.
+const PTE_WAS_WRITABLE: u64 = 1 << 55;
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct PageFaultReason: u32 {
@@ -178,40 +184,59 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
-    // Zero the new table first (entries will be filled in below).
-    unsafe { new_table.cast::<u8>().write_bytes(0, PAGE_SIZE); }
+    // Bulk-copy the entire 4 KB page table in one shot; null entries are
+    // copied as zeros, so skipped slots stay zero without a separate memset.
+    // Matches the x86_64 path.
+    unsafe {
+        ptr::copy_nonoverlapping(orig_table, new_table, ENTRIES_PER_TABLE as usize);
+    }
 
     debug_assert!(level > 0);
 
     if level == 1 {
         // Leaf page table (PTE level): implement CoW sharing.
-        // Share physical pages between parent and child: increment refcount
-        // and make writable pages read-only in both PTEs.  The page fault
-        // handler will copy-on-write for private mappings (refcount > 1)
-        // or restore write permission for MAP_SHARED mappings.
-        for i in 0..ENTRIES_PER_TABLE {
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-            if paddr.is_null() {
+        // The bulk copy already placed every entry.  Now we need to:
+        //   1. bump refcount on each user page
+        //   2. set ATTR_AP_RO on user-writable pages in BOTH parent and child
+        // Sparse-table batch skip: OR 8 entries; if all zero, skip the batch.
+        // Typical user page tables have <32 entries out of 512, so this
+        // eliminates ~94% of the iteration work.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base)     | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
                 continue;
             }
+            for i in base..base + 8 {
+                let entry = unsafe { *orig_table.offset(i) };
+                let paddr = entry_paddr(entry);
+                if paddr.is_null() {
+                    continue;
+                }
+                // Share the physical page (bump refcount parent→2).
+                crate::page_refcount::page_ref_inc(paddr);
 
-            // Share the physical page (bump refcount parent→2).
-            crate::page_refcount::page_ref_inc(paddr);
-
-            let flags = entry_flags(entry);
-            let new_flags = if flags & ATTR_AP_USER != 0 && flags & ATTR_AP_RO == 0 {
-                // User-writable: make read-only in both parent and child for CoW.
-                let ro_flags = flags | ATTR_AP_RO;
-                unsafe { *orig_table.offset(i) = paddr.value() as u64 | ro_flags; }
-                ro_flags
-            } else {
-                flags
-            };
-            unsafe { *new_table.offset(i) = paddr.value() as u64 | new_flags; }
+                let flags = entry_flags(entry);
+                if flags & ATTR_AP_USER != 0 && flags & ATTR_AP_RO == 0 {
+                    // User-writable: make read-only in both parent and child.
+                    let cow_entry = paddr.value() as u64 | (flags | ATTR_AP_RO);
+                    unsafe {
+                        *orig_table.offset(i) = cow_entry;
+                        *new_table.offset(i) = cow_entry;
+                    }
+                }
+                // Non-writable pages: bulk copy already placed them correctly.
+            }
         }
     } else {
-        // Intermediate table (PGD/PUD/PMD): recurse into sub-tables.
+        // Intermediate table (PGD/PUD/PMD): the bulk copy left child pointers
+        // pointing at the parent's sub-tables — we must rewrite each with a
+        // fresh duplicated sub-table.
         for i in 0..ENTRIES_PER_TABLE {
             let entry = unsafe { *orig_table.offset(i) };
             let paddr = entry_paddr(entry);
@@ -226,6 +251,136 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     }
 
     Ok(new_table_paddr)
+}
+
+/// Ghost-fork duplicate: same PT structure + CoW marking as `duplicate_table`,
+/// but skips every refcount mutation.  The parent is blocked until the child
+/// exec's or _exits, so no concurrent reader needs the refcount bump for
+/// safety; skipping it saves ~40 ns per writable PTE (typical ~200 pages =
+/// ~8 µs).  Collects the CoW-marked virtual addresses so the eventual
+/// `restore_writable_from_list` scan is O(cow_pages) not O(all_PTEs).
+///
+/// Mirrors `platform/x64/paging.rs::duplicate_table_ghost`.  ARM64 has no
+/// huge-page code path (see `map_huge_user_page` — it splits to 4 KB),
+/// so we omit the level-2 block descriptor case that exists on x86_64.
+fn duplicate_table_ghost(
+    original_table_paddr: PAddr,
+    level: usize,
+    base_vaddr: usize,
+    cow_addrs: &mut Vec<usize>,
+) -> Result<PAddr, PageAllocError> {
+    let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
+    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    unsafe {
+        ptr::copy_nonoverlapping(orig_table, new_table, ENTRIES_PER_TABLE as usize);
+    }
+
+    debug_assert!(level > 0);
+
+    if level == 1 {
+        // Leaf PTEs: CoW-mark writable user pages without touching refcount.
+        // Leave non-writable and kernel pages alone — they're already shared
+        // correctly by the bulk copy.
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            let flags = entry_flags(entry);
+            if flags & ATTR_AP_USER == 0 {
+                continue;
+            }
+            if flags & ATTR_AP_RO == 0 {
+                // Parent+child PTE: set ATTR_AP_RO, remember original writability
+                // via PTE_WAS_WRITABLE so restore_writable_from_list can reverse it.
+                let cow_entry = paddr.value() as u64 | flags | ATTR_AP_RO | PTE_WAS_WRITABLE;
+                unsafe {
+                    *orig_table.offset(i) = cow_entry;
+                    *new_table.offset(i) = cow_entry;
+                }
+                cow_addrs.push(base_vaddr | ((i as usize) << 12));
+            }
+        }
+    } else {
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            let shift = (level - 1) * 9 + 12;
+            let child_base = base_vaddr | ((i as usize) << shift);
+            let new_child_paddr = duplicate_table_ghost(paddr, level - 1, child_base, cow_addrs)?;
+            unsafe {
+                *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
+            }
+        }
+    }
+
+    Ok(new_table_paddr)
+}
+
+/// Free page-table pages from a ghost-forked page table.  Data pages owned
+/// by the parent are left alone (they were never refcount-bumped during the
+/// ghost fork).  Child-owned CoW-copies — PTEs that lost both ATTR_AP_RO and
+/// PTE_WAS_WRITABLE during a CoW fault — are decremented and freed.
+fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
+    if table_paddr.is_null() {
+        return;
+    }
+    let table = table_paddr.as_mut_ptr::<PageTableEntry>();
+
+    for i in 0..ENTRIES_PER_TABLE {
+        let entry = unsafe { *table.offset(i) };
+        let paddr = entry_paddr(entry);
+        if paddr.is_null() {
+            continue;
+        }
+
+        if level == 1 {
+            let flags = entry_flags(entry);
+            if flags & ATTR_AP_USER == 0 {
+                continue;
+            }
+            // Child-owned if the CoW fault rewrote this PTE: writable and no
+            // PTE_WAS_WRITABLE (CoW writes install a fresh writable PTE
+            // pointing at a newly-allocated paddr).
+            if flags & ATTR_AP_RO == 0 && entry & PTE_WAS_WRITABLE == 0 {
+                let rc = crate::page_refcount::page_ref_count(paddr);
+                if rc == 1 {
+                    crate::page_refcount::page_ref_dec(paddr);
+                    crate::page_allocator::free_pages(paddr, 1);
+                }
+            }
+            // Else: parent-owned (either read-only shared, or still CoW-marked).
+            // Leave untouched.
+        } else {
+            teardown_table_ghost(paddr, level - 1);
+            crate::page_allocator::free_pages(paddr, 1);
+        }
+    }
+}
+
+/// Targeted restore of writability: clear ATTR_AP_RO | PTE_WAS_WRITABLE on
+/// every PTE the ghost fork marked, using the collected address list.
+/// O(cow_pages) rather than O(all_PTEs).
+fn restore_writable_from_list(pgd: PAddr, addrs: &[usize]) {
+    for &vaddr in addrs {
+        let uva = unsafe { UserVAddr::new_unchecked(vaddr) };
+        if let Some(mut pte) = traverse(pgd, uva, false) {
+            let entry = unsafe { *pte.as_ptr() };
+            if entry & PTE_WAS_WRITABLE != 0 {
+                let restored = (entry & !ATTR_AP_RO) & !PTE_WAS_WRITABLE;
+                unsafe {
+                    *pte.as_mut() = restored;
+                    core::arch::asm!("dsb ish", "isb", options(nostack));
+                }
+            }
+        }
+    }
 }
 
 fn allocate_pgd() -> Result<PAddr, PageAllocError> {
@@ -583,30 +738,41 @@ impl PageTable {
         PageTable { pgd }
     }
 
-    /// Ghost-fork: duplicate page table structure for fork() with the
-    /// intent that the parent will be blocked until the child exec's/exits.
-    /// The x86_64 version collects CoW-marked addresses so `restore_writable_from`
-    /// can undo them quickly. ARM64's ghost-fork optimization is not yet ported;
-    /// fall back to a plain eager duplicate and return an empty CoW-addr list.
+    /// Ghost-fork: duplicate page-table structure, CoW-mark writable leaves
+    /// without touching refcounts, collect the CoW-marked virtual addresses
+    /// so `restore_writable_from` is O(cow_pages) on the ghost-child exit.
+    /// Safe only when the parent is blocked (enforced by sys_fork's
+    /// GHOST_FORK_ENABLED path and sys_clone's vfork path).
     pub fn duplicate_from_ghost(original: &PageTable)
         -> Result<(PageTable, Vec<usize>), PageAllocError>
     {
-        let new_pgd = duplicate_table(original.pgd, 4)?;
-        Ok((PageTable { pgd: new_pgd }, Vec::new()))
+        let mut cow_addrs = Vec::new();
+        let new_pgd = duplicate_table_ghost(original.pgd, 4, 0, &mut cow_addrs)?;
+        // Make the CoW demotions visible to the parent's TLB before the
+        // child starts running; the flush happens via `flush_tlb_all()`
+        // in the vfork / ghost fork exit path, but an earlier ISB keeps
+        // the parent from executing a stale writable translation on
+        // SMP boundaries.
+        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)); }
+        Ok((PageTable { pgd: new_pgd }, cow_addrs))
     }
 
-    /// Teardown for a ghost-forked page table. Since the ARM64 ghost-fork
-    /// currently falls back to a plain eager duplicate (no special CoW
-    /// structure), teardown is identical to `teardown_forked_pages`.
+    /// Teardown for a ghost-forked page table: free page-table pages and
+    /// any child-allocated CoW copies, but leave parent-owned data pages
+    /// alone (they were never refcount-bumped during the ghost fork).
     pub fn teardown_ghost_pages(&mut self) {
-        self.teardown_forked_pages();
+        teardown_table_ghost(self.pgd, 4);
+        let pgd = self.pgd;
+        self.pgd = PAddr::new(0);
+        crate::page_allocator::free_pages(pgd, 1);
     }
 
-    /// Restore WRITABLE on PTEs listed in `addrs` (collected during ghost fork).
-    /// ARM64's ghost-fork isn't implemented yet, so `duplicate_from_ghost`
-    /// returns an empty Vec and this is always called with `addrs.is_empty()`.
-    /// Safe no-op under that invariant.
-    pub fn restore_writable_from(&mut self, _addrs: &[usize]) {}
+    /// Restore ATTR_AP_RO → writable on the parent's PTEs listed in `addrs`,
+    /// clearing PTE_WAS_WRITABLE at the same time.  Called after the ghost
+    /// child exec's or _exits.
+    pub fn restore_writable_from(&mut self, addrs: &[usize]) {
+        restore_writable_from_list(self.pgd, addrs);
+    }
 
     /// Map a device memory page (MMIO). Uses MAIR attr0 = Device-nGnRnE so
     /// writes bypass the cache and go directly to hardware — required for
