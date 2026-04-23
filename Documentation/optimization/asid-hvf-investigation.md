@@ -1,6 +1,7 @@
 # ASID / HVF Investigation Plan
 
-**Status:** open, see blog 216 for the prior session's findings.
+**Status:** Phase-1/2 progress made this session — see "Results so far"
+below.  Blog 216 has the prior findings.
 **Goal:** explain why `cpu_do_switch_mm` runs at hardware speed on Linux/HVF/Apple
 Silicon but costs ~5–8 ms per TTBR-with-ASID MSR in Kevlar on the same host.
 
@@ -259,3 +260,143 @@ Either:
 
 If neither is reached within the estimated budget, blog the findings,
 commit the reproducer, and move to Phase 5 fallbacks.
+
+## Results so far (2026-04-23)
+
+### Prereqs (done)
+
+- Linux-on-HVF harness at `tools/linux-on-hvf/Makefile` — `make bench`
+  / `make fork_exit` reproduce the 15.5 µs/iter baseline against the
+  pre-built Alpine arm64 kernel.  Image + initramfs wired in.
+- Linux v6.12 source cloned into `build/linux-src/` (shallow).  Native
+  build on macOS blocked on musl-vs-macOS header conflicts and the
+  sysroot mixing that follows from fixing them one header at a time.
+  Deferred to a future session with a Linux VM.
+
+### Phase 1 — runtime state dump (partial)
+
+- Kevlar side: `platform/arm64::dump_arch_state()` added, called at
+  `bsp_early_init` and on first `PageTable::switch`.  Emits SCTLR, TCR,
+  TTBRx, MAIR, CPACR, CONTEXTIDR, CNTKCTL, SPSR, full ID_AA64MMFR /
+  PFR / ISAR set, MIDR/REVIDR/MPIDR/VBAR/CurrentEL.
+- Linux side: skipped.  Instead, computed Linux's expected
+  `INIT_SCTLR_EL1_MMU_ON` and `__cpu_setup` TCR from source.
+
+**Kevlar actual (baseline, no changes):**
+
+```
+SCTLR_EL1 = 0x0000_0000_3495_1185
+TCR_EL1   = 0x0000_0025_B510_3510
+```
+
+**Linux expected (derived):**
+
+```
+SCTLR_EL1 = 0x0200_0020_34F4_D91D   (+ SA, SA0, EOS, DZE, UCT, IESB, ITFSB, EPAN)
+TCR_EL1   = 0x0000_00B5_B550_3510   (+ AS, A1, HA)
+```
+
+**Bit diff:**
+
+| Register | Bit(s) | Linux | Kevlar | Flipped in Kevlar | fork_exit result |
+|---|---|---|---|---|---|
+| SCTLR | 3 (SA) | 1 | 0 | → 1 | **hangs** at first user ret (usermode entry unaligned SP) |
+| SCTLR | 4 (SA0) | 1 | 0 | → 1 | **hangs** (same as SA) |
+| SCTLR | 11 (EOS) | 1 | 0 | → 1 | 53 µs (no change) |
+| SCTLR | 14 (DZE) | 1 | 0 | → 1 | 53 µs (no change) |
+| SCTLR | 15 (UCT) | 1 | 0 | → 1 | 53 µs (no change) |
+| SCTLR | 21 (IESB) | 1 | 0 | → 1 | 53 µs (no change) |
+| SCTLR | 37 (ITFSB) | 1 | 0 | → 1 | silently dropped (MTE not implemented) |
+| SCTLR | 57 (EPAN) | 1 | 0 | → 1 | **hangs** (copy_from_user path isn't PAN-aware) |
+| SCTLR | 16 (nTWI) | 0 | 1 | → 0 (not tried this session) | — |
+
+### Phase 2 — bit-bisection (done for the safe SCTLR set; no win)
+
+With **all safe** Linux-matching SCTLR bits set (EOS, DZE, UCT, IESB)
+and TCR still bit-for-bit baseline, fork_exit stays at 53-56 µs/iter.
+So none of the Linux SCTLR bits we could safely flip affect the
+ASID-MSR pathology.  When we then lay in TCR.AS=1 + write TTBR0 with
+`asid << 48`, **same 11 ms/iter regression** as before (blog 216's
+measurement).  SCTLR isn't the link.
+
+### Phase 3 (early) — instrumenting the switch path
+
+Added per-switch cycle timing via `cntvct_el0`.  Key results (ASID=1
+fixed, tlbi vmalle1, SCTLR with safe Linux bits):
+
+- **The `msr ttbr0_el1, <pgd|asid<<48>` instruction itself is free on
+  HVF.**  Measured 0-1 ticks at 24 MHz resolution (< 41 ns).  The
+  5-8 ms "per-MSR" from blog 216 was a **misattribution** — the cost
+  was accumulated somewhere downstream and blamed on the most recent
+  MSR.
+- **Time between switches (on the same CPU) has a bimodal
+  distribution:** sampled on every switch across a 500-iter bench:
+
+  | Bucket (time to next switch) | Baseline (ASID=0) | ASID=1 in TTBR0 |
+  |---|---|---|
+  | < 10 µs  | 473 | **0** |
+  | < 100 µs | 431 | 506 |
+  | < 1 ms   | 96  | 118 |
+  | < 10 ms  | 0   | **147** |
+  | < 100 ms | 1   | **243** |
+
+  Half the switches are "fast" (<100 µs), the other half blow out to
+  1-100 ms each when ASID bits are in TTBR0.  That's ~400 switches
+  per 1000 that move from fast into the slow tail.
+- **Linux-style reserved-TTBR0 parking doesn't help** — park TTBR0 at
+  the (constant-PA) kernel identity pgd between writes: same
+  distribution.
+- **`tlbi aside1` instead of `tlbi vmalle1` doesn't help** — same
+  distribution, same bench total.
+
+### Updated mental model
+
+The cost isn't in the MSR, isn't in the TLBI scope, isn't in the PA
+of the TTBR write, and isn't explained by the SCTLR bits we can
+safely match against Linux.
+
+It lives in "time until this CPU re-enters `PageTable::switch`" for
+about half the switches.  That window contains:
+
+1. Kernel-side scheduler epilog after `switch()`
+2. `eret` back to user
+3. User-space work (one fork_exit half — either child's tight `_exit`
+   or parent's `fork() / wait4()`)
+4. Next SVC trap into kernel
+5. Kernel-side scheduler until next `switch()` call
+
+The MSR being free means HVF doesn't trap on the write itself.  But
+**some later event** (eret? user-space TLB miss?  SVC entry?) is
+paying the amortized cost.  Next session should time these windows
+separately to narrow which bucket takes the 10-100 ms.
+
+### Concrete next steps (ordered)
+
+1. **Instrument exception entry/exit cost with ASID in TTBR0.**  Time
+   across `eret` (exit to user) and across `SVC` (user → kernel)
+   with a `cntvct_el0` delta, binned as we did for switches.  If the
+   slow ms/µs shows up at one of these boundaries, we know HVF is
+   invalidating nested-TLB / stage-2 state on that transition.
+2. **Time user-space first-access latency.**  Park the user program
+   at an `nop` loop after the trap return and measure the first page
+   access's latency.  This tells us whether TLB refill is what's
+   slow, vs the transition itself.
+3. **Direct per-switch latency graph.**  Drop the bucketing and log
+   every between-switch delta to a pre-allocated ring buffer, dump
+   at bench end.  Confirms whether "every other switch" is the
+   exact pattern, and which direction (parent→child vs
+   child→parent) is the slow one.
+4. **Revisit the Linux build** in a Linux VM (Colima/OrbStack).  Patch
+   `cpu_do_switch_mm` to capture the same per-switch histogram in
+   Linux on HVF.  If Linux's distribution is flat at <100 µs, we
+   have a direct reproducer for the asymmetry.
+
+### Artifacts retained
+
+- `platform/arm64::dump_arch_state()` — live EL1 state snapshot.  One-shot,
+  cheap, useful well beyond this investigation.
+- `tools/linux-on-hvf/Makefile` — reproducible Linux-on-HVF driver.
+- `Documentation/optimization/linux-on-hvf-baseline.txt` — full
+  Linux bench suite captured this session.
+- `build/linux-src/` (git-ignored) — linux v6.12 shallow clone ready
+  for a VM-based build.
