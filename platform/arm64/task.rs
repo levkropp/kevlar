@@ -13,8 +13,18 @@ use crate::arch::arm64_specific::cpu_local_head;
 use crate::arch::PtRegs;
 use crossbeam::atomic::AtomicCell;
 
-/// Kernel stack size: 256 pages = 1 MiB.
-pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 256;
+/// Main kernel stack: 8 pages = 32 KiB.  Matches `platform/x64/task.rs::
+/// KERNEL_STACK_SIZE`.  The previous value of 256 pages (1 MiB) multiplied
+/// by three stacks per task made every fork pay for 3 MiB of buddy allocs
+/// (167 µs fork_exit vs Linux's 16 µs).
+pub const KERNEL_STACK_SIZE: usize = PAGE_SIZE * 8;
+
+/// Auxiliary stacks (interrupt / syscall entry).  2 pages = 8 KiB is plenty
+/// for a PtRegs push (~264 B) plus a handful of call frames, and it matches
+/// the 2-page `stack_cache` size class so subsequent forks can reuse freed
+/// stacks from the cache.
+pub const AUX_STACK_PAGES: usize = 2;
+pub const AUX_STACK_SIZE: usize = PAGE_SIZE * AUX_STACK_PAGES;
 
 /// End of the user virtual address allocation region.
 pub const USER_VALLOC_END: UserVAddr = unsafe { UserVAddr::new_unchecked(0x0000_0fff_0000_0000) };
@@ -62,12 +72,12 @@ impl ArchTask {
     #[allow(unused)]
     pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate syscall stack");
@@ -119,12 +129,12 @@ impl ArchTask {
         )
         .expect("failed to allocate kernel stack");
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate syscall stack");
@@ -183,12 +193,12 @@ impl ArchTask {
 
     pub fn new_idle_thread() -> ArchTask {
         let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate interrupt stack");
         let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
+            AUX_STACK_PAGES,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
         )
         .expect("failed to allocate syscall stack");
@@ -319,8 +329,8 @@ impl ArchTask {
         const KERNEL_BASE: u64 = super::KERNEL_BASE_ADDR as u64;
         for (label, stack, num_pages) in [
             ("kernel_stack", &self.kernel_stack, KERNEL_STACK_SIZE),
-            ("interrupt_stack", &self.interrupt_stack, KERNEL_STACK_SIZE),
-            ("syscall_stack", &self.syscall_stack, KERNEL_STACK_SIZE),
+            ("interrupt_stack", &self.interrupt_stack, AUX_STACK_SIZE),
+            ("syscall_stack", &self.syscall_stack, AUX_STACK_SIZE),
         ] {
             let base = (**stack).value() as u64 + KERNEL_BASE;
             if vaddr >= base && vaddr < base + num_pages as u64 {
@@ -478,7 +488,7 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     let head = cpu_local_head();
 
     // Set kernel stack for next thread's exception entry.
-    head.sp_el1 = (next.syscall_stack.as_vaddr().value() + KERNEL_STACK_SIZE) as u64;
+    head.sp_el1 = (next.syscall_stack.as_vaddr().value() + AUX_STACK_SIZE) as u64;
 
     // Save the current (prev) task's TPIDR_EL0 before switching away.
     // User processes can write TPIDR_EL0 directly via `msr tpidr_el0`
