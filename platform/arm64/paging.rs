@@ -195,12 +195,15 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
 
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    // DIRTY_OK: we immediately bulk-copy over the page, so pre-zeroing would
+    // be pure waste.  Saves ~8 µs/fork on a 4-level tree (zero 4 KB ×
+    // 8 PT pages at cached-DRAM speed).  Safe because every byte we
+    // don't copy explicitly stays whatever the allocator handed us,
+    // and ptr::copy_nonoverlapping covers the entire 4 KB PT.
+    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
-    // Bulk-copy the entire 4 KB page table in one shot; null entries are
-    // copied as zeros, so skipped slots stay zero without a separate memset.
-    // Matches the x86_64 path.
+    // Bulk-copy the entire 4 KB page table in one shot.
     unsafe {
         ptr::copy_nonoverlapping(orig_table, new_table, ENTRIES_PER_TABLE as usize);
     }
@@ -284,7 +287,8 @@ fn duplicate_table_ghost(
     cow_addrs: &mut Vec<usize>,
 ) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    // Same DIRTY_OK rationale as duplicate_table — we're about to bulk-copy.
+    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
     unsafe {
