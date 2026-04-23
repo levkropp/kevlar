@@ -185,6 +185,8 @@ impl kevlar_platform::Handler for Handler {
         n: usize,
         frame: *mut PtRegs,
     ) -> isize {
+        let _svc_span = crate::debug::tracer::span_guard(
+            crate::debug::tracer::span::SVC_HANDLE);
         #[allow(unsafe_code)]
         let frame_ref = unsafe { &mut *frame };
         let mut handler = SyscallHandler::new(frame_ref);

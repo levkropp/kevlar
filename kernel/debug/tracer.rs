@@ -49,6 +49,13 @@ pub mod span {
     pub const SYS_CLONE_TOTAL: u16 = 28;   // entire sys_clone syscall (incl Process::fork)
     pub const SYS_EXIT_TOTAL: u16 = 29;    // entire sys_exit syscall (child side)
     pub const SYS_WAIT4_TOTAL: u16 = 30;   // entire sys_wait4 (parent side)
+    pub const CTX_SWITCH: u16 = 31;        // kernel/process/switch.rs::switch() body
+    pub const SLEEP_ENQUEUE: u16 = 32;     // wait_queue enqueue + set state before switch()
+    pub const SLEEP_RESUME: u16 = 33;      // post-switch condition re-check
+    pub const WAIT4_REAP: u16 = 34;        // wait4 post-sleep: evict, EXITED_PROCESSES push, gc
+    pub const PT_SWITCH: u16 = 35;         // arm64 PageTable::switch (msr ttbr0 + tlbi + dsb)
+    pub const DO_SWITCH_THREAD: u16 = 36;  // asm ctx switch only (stp/ldp GPRs + FP)
+    pub const SVC_HANDLE: u16 = 37;        // arm64_handle_syscall (SVC entry → dispatch → return)
 }
 
 struct SpanStats {
@@ -158,6 +165,13 @@ fn span_name(id: u16) -> &'static str {
         span::SYS_CLONE_TOTAL => "sys_clone.total",
         span::SYS_EXIT_TOTAL => "sys_exit.total",
         span::SYS_WAIT4_TOTAL => "sys_wait4.total",
+        span::CTX_SWITCH => "ctx_switch",
+        span::SLEEP_ENQUEUE => "sleep.enqueue",
+        span::SLEEP_RESUME => "sleep.resume",
+        span::WAIT4_REAP => "wait4.reap",
+        span::PT_SWITCH => "pt_switch",
+        span::DO_SWITCH_THREAD => "do_switch_thread",
+        span::SVC_HANDLE => "svc_handle",
         _ => "unknown",
     }
 }

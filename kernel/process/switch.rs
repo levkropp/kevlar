@@ -23,6 +23,8 @@ static PREV_EXITED: SpinLock<Option<Arc<Process>>> = SpinLock::new(None);
 /// Returns `true` if we actually switched to a different thread, `false` if
 /// we kept running the current thread (no other runnable threads were found).
 pub fn switch() -> bool {
+    let _switch_span = crate::debug::tracer::span_guard(
+        crate::debug::tracer::span::CTX_SWITCH);
     // Prevent the per-CPU timer preemption handler from calling switch()
     // re-entrantly while we are already in the middle of a context switch.
     // Without this, a timer IRQ could nest switch() on the same CPU, causing
@@ -123,6 +125,8 @@ pub fn switch() -> bool {
 
     if let Some(vm) = next.vm().clone() {
         let lock = vm.lock_no_irq();
+        let _pt_span = crate::debug::tracer::span_guard(
+            crate::debug::tracer::span::PT_SWITCH);
         lock.page_table().switch();
     } else {
         // Task has no Vm (idle thread, kernel thread).  Load the kernel
@@ -193,7 +197,11 @@ pub fn switch() -> bool {
         *slot = Some(prev.clone());
     }
 
-    arch::switch_thread(prev.arch(), next.arch());
+    {
+        let _dst = crate::debug::tracer::span_guard(
+            crate::debug::tracer::span::DO_SWITCH_THREAD);
+        arch::switch_thread(prev.arch(), next.arch());
+    }
 
     // We are now executing on the next thread's kernel stack.
     // Re-enable preemption so the timer can preempt this thread normally.

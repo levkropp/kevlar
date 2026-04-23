@@ -73,6 +73,8 @@ impl WaitQueue {
             // Enqueue and sleep. Hold queue lock across state change + push
             // to prevent lost-wakeup race with preemption timer.
             {
+                let _s = crate::debug::tracer::span_guard(
+                    crate::debug::tracer::span::SLEEP_ENQUEUE);
                 let mut q = self.queue.lock();
                 current_process().set_state(ProcessState::BlockedSignalable);
                 q.push_back(current_process().clone());
@@ -92,6 +94,8 @@ impl WaitQueue {
             // zombie. If we checked signals first, we'd return EINTR without
             // ever seeing the exited child.
 
+            let _resume_span = crate::debug::tracer::span_guard(
+                crate::debug::tracer::span::SLEEP_RESUME);
             htrace::enter(htrace::id::SLEEP_CALLBACK, 1);
             let result = condition();
             htrace::exit(htrace::id::SLEEP_CALLBACK, 1);

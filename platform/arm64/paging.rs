@@ -841,11 +841,16 @@ impl PageTable {
     }
 
     pub fn switch(&self) {
+        // `dsb ish` is the lighter barrier — inner-shareable domain is enough
+        // for the local `tlbi vmalle1` below (not an _is_ broadcast).  `dsb sy`
+        // costs extra on Apple Silicon HVF because it forces full-system
+        // ordering that the hypervisor has to arbitrate.  Linux arm64's
+        // switch_mm uses `dsb ish` for the same reason.
         unsafe {
             core::arch::asm!(
                 "msr ttbr0_el1, {}",
                 "tlbi vmalle1",
-                "dsb sy",
+                "dsb ish",
                 "isb",
                 in(reg) self.pgd.value() as u64,
             );
@@ -1029,10 +1034,14 @@ impl PageTable {
     pub fn flush_tlb_remote(&self) {}
 
     pub fn flush_tlb_all(&self) {
+        // `dsb ish` — inner-shareable barrier.  Matches Linux arm64 (see
+        // arch/arm64/include/asm/tlbflush.h `__flush_tlb_all`).  `dsb sy`
+        // costs extra on HVF because it serializes against host-level
+        // memory ordering.
         unsafe {
             core::arch::asm!(
                 "tlbi vmalle1",
-                "dsb sy",
+                "dsb ish",
                 "isb",
             );
         }
