@@ -91,16 +91,21 @@ impl SizeCache {
     }
 }
 
-// Stack caches for common sizes: 4-page (kernel) and 2-page (IST).
-static CACHE_4PAGE: SpinLock<SizeCache> = SpinLock::new(SizeCache::new());
+// Stack caches for common sizes:
+//   2-page — x86_64 IST / syscall stacks, arm64 interrupt / syscall stacks
+//   4-page — (historical; unused on current arches but kept for the size class)
+//   8-page — x86_64 and arm64 main kernel stacks (KERNEL_STACK_SIZE)
 static CACHE_2PAGE: SpinLock<SizeCache> = SpinLock::new(SizeCache::new());
+static CACHE_4PAGE: SpinLock<SizeCache> = SpinLock::new(SizeCache::new());
+static CACHE_8PAGE: SpinLock<SizeCache> = SpinLock::new(SizeCache::new());
 
 /// Allocate a kernel stack, preferring the cache over the buddy allocator.
 /// Cached stacks are warm in L1/L2 cache from recent use.
 pub fn alloc_kernel_stack(num_pages: usize) -> Result<OwnedPages, PageAllocError> {
     let cache = match num_pages {
-        4 => Some(&CACHE_4PAGE),
         2 => Some(&CACHE_2PAGE),
+        4 => Some(&CACHE_4PAGE),
+        8 => Some(&CACHE_8PAGE),
         _ => None,
     };
 
@@ -338,8 +343,9 @@ pub fn free_kernel_stack(stack: OwnedPages, num_pages: usize) {
     unregister_stack(*stack, num_pages);
 
     let cache = match num_pages {
-        4 => Some(&CACHE_4PAGE),
         2 => Some(&CACHE_2PAGE),
+        4 => Some(&CACHE_4PAGE),
+        8 => Some(&CACHE_8PAGE),
         _ => None,
     };
 

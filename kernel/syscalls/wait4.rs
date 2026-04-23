@@ -114,6 +114,23 @@ impl<'a> SyscallHandler<'a> {
             r?;
         }
 
+        // Drain EXITED_PROCESSES after a reap.  Without this, tight fork +
+        // wait loops pile zombie Process Arcs — EXITED_PROCESSES grows
+        // unbounded until idle eventually runs gc.  Running gc right after
+        // a successful reap is the natural point: the parent just confirmed
+        // the child is truly done, so dropping its Arc (→ ArchTask::drop →
+        // stacks return to the per-size cache, → Vm::drop → page tables
+        // freed) is safe and immediately productive.
+        //
+        // Note: this alone does NOT refill the stack cache on tight loops —
+        // there's a separate Arc<Process> ref leak (not yet identified)
+        // that keeps the child alive even after this gc drains
+        // EXITED_PROCESSES.  Tracked as a follow-up; see blog commit
+        // notes for task #18.  The gc call is still correct and helps
+        // longer-running workloads.
+        if got_pid.as_i32() > 0 {
+            crate::process::gc_exited_processes();
+        }
 
         Ok(got_pid.as_i32() as isize)
     }

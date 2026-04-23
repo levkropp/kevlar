@@ -46,12 +46,33 @@ pub struct ArchTask {
     /// on this flag before enqueuing the task, preventing another CPU from
     /// loading a stale SP while the save is in flight.
     pub context_saved: AtomicBool,
-    kernel_stack: OwnedPages,
-    interrupt_stack: OwnedPages,
-    syscall_stack: OwnedPages,
+    // Option<OwnedPages> lets `release_stacks` and `Drop` `.take()` each
+    // stack and route it through `stack_cache::free_kernel_stack` instead
+    // of the buddy allocator — subsequent forks get warm, pre-sized stacks
+    // from the per-size cache (2-page and 8-page classes).
+    kernel_stack: Option<OwnedPages>,
+    interrupt_stack: Option<OwnedPages>,
+    syscall_stack: Option<OwnedPages>,
 }
 
 unsafe impl Sync for ArchTask {}
+
+impl Drop for ArchTask {
+    fn drop(&mut self) {
+        // Route remaining stacks through the per-size cache instead of the
+        // buddy allocator.  Stacks are None if `release_stacks` ran earlier;
+        // the `.take()` pattern is idempotent.
+        if let Some(stack) = self.kernel_stack.take() {
+            crate::stack_cache::free_kernel_stack(stack, KERNEL_STACK_SIZE / PAGE_SIZE);
+        }
+        if let Some(stack) = self.interrupt_stack.take() {
+            crate::stack_cache::free_kernel_stack(stack, AUX_STACK_PAGES);
+        }
+        if let Some(stack) = self.syscall_stack.take() {
+            crate::stack_cache::free_kernel_stack(stack, AUX_STACK_PAGES);
+        }
+    }
+}
 
 unsafe extern "C" {
     fn kthread_entry();
@@ -71,21 +92,12 @@ unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
 impl ArchTask {
     #[allow(unused)]
     pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> ArchTask {
-        let interrupt_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate interrupt stack");
-        let syscall_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate syscall stack");
-        let kernel_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate kernel stack");
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate interrupt stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate syscall stack");
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)
+            .expect("failed to allocate kernel stack");
 
         let sp = unsafe {
             let mut sp: *mut u64 = stack_top.as_mut_ptr();
@@ -115,29 +127,20 @@ impl ArchTask {
         ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(0),
-            interrupt_stack,
-            syscall_stack,
+            interrupt_stack: Some(interrupt_stack),
+            syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
-            kernel_stack,
+            kernel_stack: Some(kernel_stack),
         }
     }
 
     pub fn new_user_thread(ip: UserVAddr, user_sp: UserVAddr) -> ArchTask {
-        let kernel_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate kernel stack");
-        let interrupt_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate interrupt stack");
-        let syscall_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate syscall stack");
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)
+            .expect("failed to allocate kernel stack");
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate interrupt stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate syscall stack");
 
         let sp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -184,37 +187,28 @@ impl ArchTask {
         ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(0),
-            interrupt_stack,
-            syscall_stack,
+            interrupt_stack: Some(interrupt_stack),
+            syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
-            kernel_stack,
+            kernel_stack: Some(kernel_stack),
         }
     }
 
     pub fn new_idle_thread() -> ArchTask {
-        let interrupt_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate interrupt stack");
-        let syscall_stack = alloc_pages_owned(
-            AUX_STACK_PAGES,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate syscall stack");
-        let kernel_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )
-        .expect("failed to allocate kernel stack");
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate interrupt stack");
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
+            .expect("failed to allocate syscall stack");
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)
+            .expect("failed to allocate kernel stack");
 
         ArchTask {
             sp: UnsafeCell::new(0),
             tpidr_el0: AtomicCell::new(0),
-            interrupt_stack,
-            syscall_stack,
+            interrupt_stack: Some(interrupt_stack),
+            syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
-            kernel_stack,
+            kernel_stack: Some(kernel_stack),
         }
     }
 
@@ -231,10 +225,7 @@ impl ArchTask {
         // Also update the stored field so switch_task restores it correctly.
         self.tpidr_el0.store(current_tpidr);
 
-        let kernel_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)?;
 
         let sp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -271,32 +262,42 @@ impl ArchTask {
             sp
         };
 
-        let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
-        let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
 
         Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(current_tpidr),
-            interrupt_stack,
-            syscall_stack,
+            interrupt_stack: Some(interrupt_stack),
+            syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
-            kernel_stack,
+            kernel_stack: Some(kernel_stack),
         })
     }
 
-    /// Stub: ARM64 stacks are freed when ArchTask drops (OwnedPages auto-frees).
-    /// This is a no-op placeholder for interface parity with x86_64.
+    /// Eagerly return kernel stacks to the per-size cache.
     ///
-    /// SAFETY: same contract as x64 — caller guarantees task is off all CPUs.
+    /// Called from `switch()` after context-switching away from an exiting
+    /// task — the stacks are guaranteed to be off all CPUs at that point.
+    /// Routes through `stack_cache::free_kernel_stack` so subsequent forks
+    /// can allocate from a warm cache instead of the buddy allocator.
+    ///
+    /// SAFETY: caller must guarantee this task is no longer executing on any
+    /// CPU and no remote CPU is about to resume it.
     #[allow(unsafe_code)]
     pub unsafe fn release_stacks(&self) {
-        // OwnedPages frees itself on drop; no Option<> wrapper needed.
+        let this = self as *const Self as *mut Self;
+        unsafe {
+            if let Some(stack) = (*this).kernel_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, KERNEL_STACK_SIZE / PAGE_SIZE);
+            }
+            if let Some(stack) = (*this).interrupt_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, AUX_STACK_PAGES);
+            }
+            if let Some(stack) = (*this).syscall_stack.take() {
+                crate::stack_cache::free_kernel_stack(stack, AUX_STACK_PAGES);
+            }
+        }
     }
 
     /// Returns the current TLS base (TPIDR_EL0) value.
@@ -319,7 +320,7 @@ impl ArchTask {
 
     /// Returns the physical base of the kernel stack (for diagnostics).
     pub fn kernel_stack_paddr(&self) -> Option<PAddr> {
-        Some(*self.kernel_stack)
+        self.kernel_stack.as_ref().map(|s| **s)
     }
 
     /// Returns the label of the kernel stack that contains `vaddr`, or None.
@@ -328,13 +329,15 @@ impl ArchTask {
     pub fn rsp_in_owned_stack(&self, vaddr: u64) -> Option<&'static str> {
         const KERNEL_BASE: u64 = super::KERNEL_BASE_ADDR as u64;
         for (label, stack, num_pages) in [
-            ("kernel_stack", &self.kernel_stack, KERNEL_STACK_SIZE),
-            ("interrupt_stack", &self.interrupt_stack, AUX_STACK_SIZE),
-            ("syscall_stack", &self.syscall_stack, AUX_STACK_SIZE),
+            ("kernel_stack", self.kernel_stack.as_ref(), KERNEL_STACK_SIZE),
+            ("interrupt_stack", self.interrupt_stack.as_ref(), AUX_STACK_SIZE),
+            ("syscall_stack", self.syscall_stack.as_ref(), AUX_STACK_SIZE),
         ] {
-            let base = (**stack).value() as u64 + KERNEL_BASE;
-            if vaddr >= base && vaddr < base + num_pages as u64 {
-                return Some(label);
+            if let Some(s) = stack {
+                let base = (**s).value() as u64 + KERNEL_BASE;
+                if vaddr >= base && vaddr < base + num_pages as u64 {
+                    return Some(label);
+                }
             }
         }
         None
@@ -350,10 +353,7 @@ impl ArchTask {
     /// start with sp_el0 = 0 and segfault on the first stack push.
     pub fn new_thread(frame: &PtRegs, child_stack: u64, tpidr_el0_val: u64) -> Result<ArchTask, PageAllocError> {
         let child_stack = if child_stack == 0 { frame.sp } else { child_stack };
-        let kernel_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
+        let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)?;
 
         let sp = unsafe {
             let kernel_sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
@@ -387,22 +387,16 @@ impl ArchTask {
             sp
         };
 
-        let interrupt_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
-        let syscall_stack = alloc_pages_owned(
-            KERNEL_STACK_SIZE / PAGE_SIZE,
-            AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
-        )?;
+        let interrupt_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
+        let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
 
         Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(tpidr_el0_val),
-            interrupt_stack,
-            syscall_stack,
+            interrupt_stack: Some(interrupt_stack),
+            syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
-            kernel_stack,
+            kernel_stack: Some(kernel_stack),
         })
     }
 
@@ -488,7 +482,8 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
     let head = cpu_local_head();
 
     // Set kernel stack for next thread's exception entry.
-    head.sp_el1 = (next.syscall_stack.as_vaddr().value() + AUX_STACK_SIZE) as u64;
+    head.sp_el1 = (next.syscall_stack.as_ref().expect("syscall_stack present")
+        .as_vaddr().value() + AUX_STACK_SIZE) as u64;
 
     // Save the current (prev) task's TPIDR_EL0 before switching away.
     // User processes can write TPIDR_EL0 directly via `msr tpidr_el0`
