@@ -333,7 +333,13 @@ impl ArchTask {
     /// Creates a new thread's arch state.
     /// `child_stack` is the user SP; `tpidr_el0_val` is the TLS base.
     /// x0 = 0 in the child (clone returns 0).
+    ///
+    /// When `child_stack == 0`, the child inherits the parent's userspace SP.
+    /// This matches vfork semantics — the child runs on the parent's stack
+    /// until it execs or _exits.  Without this fallback, vfork's child would
+    /// start with sp_el0 = 0 and segfault on the first stack push.
     pub fn new_thread(frame: &PtRegs, child_stack: u64, tpidr_el0_val: u64) -> Result<ArchTask, PageAllocError> {
+        let child_stack = if child_stack == 0 { frame.sp } else { child_stack };
         let kernel_stack = alloc_pages_owned(
             KERNEL_STACK_SIZE / PAGE_SIZE,
             AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK,
