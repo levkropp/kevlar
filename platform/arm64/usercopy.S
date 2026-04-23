@@ -91,14 +91,38 @@ usercopy4:
     ret
 
 // void memset_user(void *dst, uint8_t value, size_t len)
+//
+// Bulk-fill 32 bytes per iteration; tail byte-by-byte.  Any fault inside
+// [usercopy_start, usercopy_end) is caught by the fault handler.
 .global memset_user
 .global usercopy5
 memset_user:
     cbz     x2, 8f
+    // Replicate byte-value across x3 (8 bytes of the fill value).
+    and     x3, x1, #0xff
+    orr     x3, x3, x3, lsl #8
+    orr     x3, x3, x3, lsl #16
+    orr     x3, x3, x3, lsl #32
+    // ≥32 bytes → bulk 32-byte fill via stp pairs.
+    cmp     x2, #32
+    b.lo    9f
 usercopy5:
-7:  strb    w1, [x0], #1
+7:  stp     x3, x3, [x0], #16
+    stp     x3, x3, [x0], #16
+    sub     x2, x2, #32
+    cmp     x2, #32
+    b.hs    7b
+9:  // Tail: < 32 bytes.  8-byte chunks, then byte-by-byte.
+    cmp     x2, #8
+    b.lo    10f
+11: str     x3, [x0], #8
+    sub     x2, x2, #8
+    cmp     x2, #8
+    b.hs    11b
+10: cbz     x2, 8f
+12: strb    w1, [x0], #1
     subs    x2, x2, #1
-    b.ne    7b
+    b.ne    12b
 8:  ret
 
 .global usercopy_end
