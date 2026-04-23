@@ -35,6 +35,10 @@ const ATTR_AP_USER: u64 = 1 << 6;    // AP[1] = EL0 accessible
 const ATTR_AP_RO: u64 = 1 << 7;      // AP[2] = Read-only
 const ATTR_SH_ISH: u64 = 3 << 8;     // Inner Shareable
 const ATTR_AF: u64 = 1 << 10;        // Access Flag
+// nG (bit 11): non-Global.  Set on user PTEs so they're ASID-tagged in the
+// TLB (required for TCR.AS=1 ASID fast-path switch).  Kernel PTEs leave
+// this clear — kernel mappings are global across all ASIDs.
+const ATTR_NG: u64 = 1 << 11;
 // Upper attributes.
 const ATTR_PXN: u64 = 1 << 53;       // Privileged Execute Never
 const ATTR_UXN: u64 = 1 << 54;       // Unprivileged Execute Never (XN)
@@ -795,7 +799,7 @@ fn allocate_pgd() -> Result<PAddr, PageAllocError> {
 
 /// Translate Linux mmap prot flags to ARM64 PTE attributes for a user page.
 fn prot_to_attrs(prot_flags: i32) -> u64 {
-    let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF;
+    let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF | ATTR_NG;
 
     if prot_flags & 3 != 0 {
         // PROT_READ or PROT_WRITE → user-space accessible (AP[1]=1).
@@ -860,7 +864,7 @@ impl PageTable {
     pub fn map_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr) {
         // Default: RW, no exec.
         let attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH
-            | ATTR_AF | ATTR_AP_USER | ATTR_PXN | ATTR_UXN;
+            | ATTR_AF | ATTR_NG | ATTR_AP_USER | ATTR_PXN | ATTR_UXN;
         crate::page_refcount::page_ref_init(paddr);
         self.map_page(vaddr, paddr, attrs);
     }
@@ -1190,7 +1194,7 @@ impl PageTable {
     pub fn map_device_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
         // Start from device attributes (not ATTR_IDX_NORMAL).
         let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_DEVICE | ATTR_SH_ISH
-            | ATTR_AF | ATTR_AP_USER | ATTR_PXN;
+            | ATTR_AF | ATTR_NG | ATTR_AP_USER | ATTR_PXN;
         // Writable bit is cleared by setting AP[2] (read-only); clear
         // it when PROT_WRITE is requested.
         if prot_flags & 2 == 0 {
