@@ -27,6 +27,22 @@ pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut
     #[cfg(not(target_arch = "x86_64"))]
     {
         let mut i = 0;
+        // Bulk 32-byte copy: four 8-byte loads + stores per iteration.
+        while i + 32 <= n {
+            unsafe {
+                let s = src.add(i) as *const u64;
+                let d = dest.add(i) as *mut u64;
+                let w0 = s.read_unaligned();
+                let w1 = s.add(1).read_unaligned();
+                let w2 = s.add(2).read_unaligned();
+                let w3 = s.add(3).read_unaligned();
+                d.write_unaligned(w0);
+                d.add(1).write_unaligned(w1);
+                d.add(2).write_unaligned(w2);
+                d.add(3).write_unaligned(w3);
+            }
+            i += 32;
+        }
         while i + 8 <= n {
             unsafe {
                 (dest.add(i) as *mut u64).write_unaligned((src.add(i) as *const u64).read_unaligned());
