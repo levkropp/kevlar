@@ -56,6 +56,11 @@ pub mod kind {
     pub const LOCKDEP_RELEASE: u8 = 14;
     pub const IF_TRANSITION:   u8 = 15;
     pub const GUARD_PAGE_HIT:  u8 = 16;
+    // Allocator / VM instrumentation (ARM64 contract-test debugging).
+    pub const PAGE_ALLOC:      u8 = 17;
+    pub const PAGE_FREE:       u8 = 18;
+    pub const UNMAP_USER:      u8 = 19;
+    pub const MAP_USER:        u8 = 20;
 }
 
 /// Global monotonic sequence counter.  Stamped on every event to allow
@@ -131,6 +136,10 @@ fn kind_name(k: u8) -> &'static str {
         kind::LOCKDEP_RELEASE => "LOCKDEP_REL",
         kind::IF_TRANSITION   => "IF_TRANS   ",
         kind::GUARD_PAGE_HIT  => "GUARD_HIT  ",
+        kind::PAGE_ALLOC      => "PAGE_ALLOC ",
+        kind::PAGE_FREE       => "PAGE_FREE  ",
+        kind::UNMAP_USER      => "UNMAP_USER ",
+        kind::MAP_USER        => "MAP_USER   ",
         _                     => "???        ",
     }
 }
@@ -202,6 +211,22 @@ fn print_event_detail(kind: u8, cpu: usize, data0: u32, data1: u64, data2: u64) 
         kind::GUARD_PAGE_HIT => {
             warn!("  CPU={} GUARD_HIT   fault_addr={:#x}",
                 cpu, data1);
+        }
+        kind::PAGE_ALLOC => {
+            warn!("  CPU={} PAGE_ALLOC  paddr={:#x} num_pages={} site={:#x}",
+                cpu, data1, data2, data0);
+        }
+        kind::PAGE_FREE => {
+            warn!("  CPU={} PAGE_FREE   paddr={:#x} num_pages={} site={:#x}",
+                cpu, data1, data2, data0);
+        }
+        kind::UNMAP_USER => {
+            warn!("  CPU={} UNMAP_USER  pid={} vaddr={:#x} paddr={:#x}",
+                cpu, data0, data1, data2);
+        }
+        kind::MAP_USER => {
+            warn!("  CPU={} MAP_USER    pid={} vaddr={:#x} paddr={:#x}",
+                cpu, data0, data1, data2);
         }
         _ => {
             warn!("  CPU={} kind={} data0={:#x} data1={:#x} data2={:#x}",

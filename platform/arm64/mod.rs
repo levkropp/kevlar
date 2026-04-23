@@ -107,10 +107,56 @@ pub fn preempt_disable() {
 }
 
 /// Decrement the per-CPU preemption disable count.
+/// If a reschedule was requested while preemption was disabled (need_resched),
+/// trigger it now.  Mirrors x86's preempt_enable → preempt_check_resched.
 #[inline(always)]
 pub fn preempt_enable() {
-    cpu_local::cpu_local_head().preempt_count -= 1;
+    let head = cpu_local::cpu_local_head();
+    head.preempt_count -= 1;
+    if head.preempt_count == 0 && head.need_resched != 0 {
+        head.need_resched = 0;
+        let f = RESCHED_FN.load(core::sync::atomic::Ordering::Relaxed);
+        if !f.is_null() {
+            let switch_fn: fn() -> bool = unsafe { core::mem::transmute(f) };
+            switch_fn();
+        }
+    }
 }
+
+/// Function pointer for deferred rescheduling from `preempt_enable`.
+/// Set by the kernel during init to `process::switch`.
+static RESCHED_FN: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Register the reschedule function (called from kernel init).
+pub fn set_resched_fn(f: fn() -> bool) {
+    RESCHED_FN.store(f as *mut (), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mark that a reschedule is needed on this CPU (called from timer handler
+/// when preemption is disabled).
+#[inline(always)]
+pub fn set_need_resched() {
+    cpu_local::cpu_local_head().need_resched = 1;
+}
+
+/// Register the current CPU's APIC ID for NMI watchdog targeting.
+/// ARM64 equivalent would be MPIDR_EL1-based GIC affinity routing — not yet
+/// implemented. No-op stub keeps the cross-arch kernel init path working.
+pub fn register_cpu_apic_id(_cpu_index: u32) {}
+
+/// Enable the NMI watchdog (hard lockup detector).
+/// ARM64: would need GIC-based non-maskable interrupt support (GICv3 NMI /
+/// FIQ-based watchdog). No-op stub until ported.
+pub fn watchdog_enable() {}
+
+/// Periodic watchdog check — called from handle_timer_irq.
+/// No-op until ARM64 GIC NMI support is ported.
+pub fn watchdog_check() {}
+
+/// Enable the interrupt state tracker.
+/// ARM64: would track DAIF.I transitions. No-op until ported.
+pub fn if_trace_enable() {}
 
 /// Returns true if preemption is currently disabled (preempt_count > 0).
 #[inline(always)]

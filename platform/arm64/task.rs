@@ -6,7 +6,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::address::{AccessError, UserVAddr, VAddr};
+use crate::address::{AccessError, PAddr, UserVAddr, VAddr};
 use crate::page_allocator::{alloc_pages_owned, AllocPageFlags, OwnedPages, PageAllocError};
 use crate::arch::PAGE_SIZE;
 use crate::arch::arm64_specific::cpu_local_head;
@@ -292,6 +292,42 @@ impl ArchTask {
     /// Returns the current TLS base (TPIDR_EL0) value.
     pub fn fsbase(&self) -> u64 {
         self.tpidr_el0.load()
+    }
+
+    /// Read the saved-by-do_switch_thread context frame.
+    ///
+    /// Cross-arch API parity with x86_64: the tuple is (saved_sp, saved_pc,
+    /// saved_fp) — i.e. (SP, LR/PC, x29) on ARM64.  The layout depends on
+    /// exactly what `do_switch_thread` stores on the kernel stack; reading
+    /// it safely requires an ARM64-specific port of the x86_64 introspection.
+    /// Until that's done, return `None` so the corruption detector in
+    /// `kernel/process/process.rs::scan_corrupt_tasks` skips this task
+    /// rather than reporting garbage.
+    pub fn saved_context_summary(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
+
+    /// Returns the physical base of the kernel stack (for diagnostics).
+    pub fn kernel_stack_paddr(&self) -> Option<PAddr> {
+        Some(*self.kernel_stack)
+    }
+
+    /// Returns the label of the kernel stack that contains `vaddr`, or None.
+    /// Used by the corruption detector to distinguish "saved SP points into
+    /// a stack we own" from "saved SP is garbage / dangling pointer".
+    pub fn rsp_in_owned_stack(&self, vaddr: u64) -> Option<&'static str> {
+        const KERNEL_BASE: u64 = super::KERNEL_BASE_ADDR as u64;
+        for (label, stack, num_pages) in [
+            ("kernel_stack", &self.kernel_stack, KERNEL_STACK_SIZE),
+            ("interrupt_stack", &self.interrupt_stack, KERNEL_STACK_SIZE),
+            ("syscall_stack", &self.syscall_stack, KERNEL_STACK_SIZE),
+        ] {
+            let base = (**stack).value() as u64 + KERNEL_BASE;
+            if vaddr >= base && vaddr < base + num_pages as u64 {
+                return Some(label);
+            }
+        }
+        None
     }
 
     /// Creates a new thread's arch state.

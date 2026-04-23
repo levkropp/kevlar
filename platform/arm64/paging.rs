@@ -8,6 +8,7 @@
 use super::PAGE_SIZE;
 use crate::address::{PAddr, UserVAddr};
 use crate::page_allocator::{alloc_pages, AllocPageFlags, PageAllocError};
+use alloc::vec::Vec;
 use bitflags::bitflags;
 use core::{
     debug_assert,
@@ -23,6 +24,7 @@ const DESC_VALID: u64 = 1 << 0;
 const DESC_TABLE: u64 = 1 << 1; // Table descriptor (levels 0-2)
 const DESC_PAGE: u64 = 1 << 1;  // Page descriptor (level 3)
 // Lower attributes.
+const ATTR_IDX_DEVICE: u64 = 0 << 2; // MAIR index 0 = Device-nGnRnE (MMIO)
 const ATTR_IDX_NORMAL: u64 = 1 << 2; // MAIR index 1 = Normal WB
 // AP[2:1] (bits [7:6]):
 //   00 = EL1 RW, EL0 no access
@@ -322,7 +324,7 @@ impl PageTable {
             Some(ptr) => ptr,
             None => return false,
         };
-        unsafe {
+        let ok = unsafe {
             let atom = &*(entry_ptr.as_ptr() as *const core::sync::atomic::AtomicU64);
             let new_val = paddr.value() as u64 | attrs;
             let ok = atom.compare_exchange(0, new_val,
@@ -332,7 +334,14 @@ impl PageTable {
                 core::arch::asm!("dsb ish", "isb", options(nostack));
             }
             ok
+        };
+        if ok {
+            crate::flight_recorder::record(
+                crate::flight_recorder::kind::MAP_USER,
+                0, vaddr.value() as u64, paddr.value() as u64,
+            );
         }
+        ok
     }
 
     /// Batch-map contiguous user pages, traversing the page table hierarchy only
@@ -375,6 +384,11 @@ impl PageTable {
                     core::sync::atomic::Ordering::Relaxed).is_ok()
                 {
                     mapped |= 1 << i;
+                    let vaddr_val = start_vaddr.value() + i * PAGE_SIZE;
+                    crate::flight_recorder::record(
+                        crate::flight_recorder::kind::MAP_USER,
+                        0, vaddr_val as u64, paddrs[i].value() as u64,
+                    );
                 }
                 idx += 1;
                 i += 1;
@@ -426,6 +440,11 @@ impl PageTable {
             *entry_ptr.as_ptr() = 0;
         }
 
+        crate::flight_recorder::record(
+            crate::flight_recorder::kind::UNMAP_USER,
+            0, vaddr.value() as u64, paddr.value() as u64,
+        );
+
         Some(paddr)
     }
 
@@ -474,6 +493,10 @@ impl PageTable {
             // ISB ensures the CPU fetches new translations.
             core::arch::asm!("dsb ish", "isb", options(nostack));
         }
+        crate::flight_recorder::record(
+            crate::flight_recorder::kind::MAP_USER,
+            0, vaddr.value() as u64, paddr.value() as u64,
+        );
     }
 
     // ── Lookup helpers ────────────────────────────────────────────────────────
@@ -538,5 +561,69 @@ impl PageTable {
     #[inline(always)]
     pub fn update_huge_page_flags(&mut self, _vaddr: UserVAddr, _prot_flags: i32) -> bool {
         false
+    }
+
+    /// Returns the physical address of the top-level page table (PGD).
+    /// Named `pml4` for cross-arch API compatibility with x86_64.
+    pub fn pml4(&self) -> PAddr {
+        self.pgd
+    }
+
+    /// Zero out the root-table field so the original's drop path won't
+    /// double-free after we've handed it off to the deferred teardown list.
+    pub fn clear_pml4_for_defer(&mut self) {
+        self.pgd = PAddr::new(0);
+    }
+
+    /// Construct a PageTable from an existing root for the sole purpose of
+    /// running `teardown_forked_pages` on it. Mirror of x86_64's
+    /// `from_pml4_for_teardown` — the name uses x86 terminology for API
+    /// parity with the deferred-Vm-drop path in kernel/mm/vm.rs.
+    pub fn from_pml4_for_teardown(pgd: PAddr) -> PageTable {
+        PageTable { pgd }
+    }
+
+    /// Ghost-fork: duplicate page table structure for fork() with the
+    /// intent that the parent will be blocked until the child exec's/exits.
+    /// The x86_64 version collects CoW-marked addresses so `restore_writable_from`
+    /// can undo them quickly. ARM64's ghost-fork optimization is not yet ported;
+    /// fall back to a plain eager duplicate and return an empty CoW-addr list.
+    pub fn duplicate_from_ghost(original: &PageTable)
+        -> Result<(PageTable, Vec<usize>), PageAllocError>
+    {
+        let new_pgd = duplicate_table(original.pgd, 4)?;
+        Ok((PageTable { pgd: new_pgd }, Vec::new()))
+    }
+
+    /// Teardown for a ghost-forked page table. Since the ARM64 ghost-fork
+    /// currently falls back to a plain eager duplicate (no special CoW
+    /// structure), teardown is identical to `teardown_forked_pages`.
+    pub fn teardown_ghost_pages(&mut self) {
+        self.teardown_forked_pages();
+    }
+
+    /// Restore WRITABLE on PTEs listed in `addrs` (collected during ghost fork).
+    /// ARM64's ghost-fork isn't implemented yet, so `duplicate_from_ghost`
+    /// returns an empty Vec and this is always called with `addrs.is_empty()`.
+    /// Safe no-op under that invariant.
+    pub fn restore_writable_from(&mut self, _addrs: &[usize]) {}
+
+    /// Map a device memory page (MMIO). Uses MAIR attr0 = Device-nGnRnE so
+    /// writes bypass the cache and go directly to hardware — required for
+    /// framebuffers and similar BAR-backed regions.
+    #[inline(always)]
+    pub fn map_device_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
+        // Start from device attributes (not ATTR_IDX_NORMAL).
+        let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_DEVICE | ATTR_SH_ISH
+            | ATTR_AF | ATTR_AP_USER | ATTR_PXN;
+        // Writable bit is cleared by setting AP[2] (read-only); clear
+        // it when PROT_WRITE is requested.
+        if prot_flags & 2 == 0 {
+            attrs |= ATTR_AP_RO;
+        }
+        // Always UXN (no exec) for device memory.
+        attrs |= ATTR_UXN;
+        // Device pages are not page-allocator-managed — no refcount.
+        self.map_page(vaddr, paddr, attrs);
     }
 }

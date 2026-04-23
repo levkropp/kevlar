@@ -89,8 +89,15 @@ fn deliver_sigsegv_fatal() {
     let current = current_process();
     let pid = current.pid().as_i32();
     let cmdline = current.cmdline();
-    // Read the fault address from CR2 and stashed registers for diagnostics.
+    // Read the fault address from the arch-specific register for diagnostics.
+    #[cfg(target_arch = "x86_64")]
     let fault_addr = unsafe { x86::controlregs::cr2() };
+    #[cfg(target_arch = "aarch64")]
+    let fault_addr: usize = {
+        let far: u64;
+        unsafe { core::arch::asm!("mrs {}, far_el1", out(reg) far) };
+        far as usize
+    };
     let cpu = kevlar_platform::arch::cpu_id() as usize;
     let regs = kevlar_platform::crash_regs::take(cpu);
     warn!("SIGSEGV: pid={} cmd={} fault_addr={:#x}", pid, cmdline.as_str(), fault_addr);

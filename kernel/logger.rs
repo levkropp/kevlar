@@ -6,7 +6,7 @@ use kevlar_utils::ring_buffer::RingBuffer;
 use crate::lang_items::PANICKED;
 use core::sync::atomic::Ordering;
 
-pub const KERNEL_LOG_BUF_SIZE: usize = 8192;
+pub const KERNEL_LOG_BUF_SIZE: usize = 65536;
 // We use spin::Mutex here because SpinLock's debugging features may cause a
 // problem (capturing a backtrace requires memory allocation).
 pub static KERNEL_LOG_BUF: spin::Mutex<RingBuffer<u8, KERNEL_LOG_BUF_SIZE>> =

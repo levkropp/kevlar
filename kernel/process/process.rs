@@ -3759,6 +3759,11 @@ pub fn gc_exited_processes() {
     crate::mm::vm::process_deferred_vm_teardowns();
     if was_if_off {
         #[allow(unsafe_code)]
-        unsafe { core::arch::asm!("cli", options(nomem, nostack)); }
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            core::arch::asm!("cli", options(nomem, nostack));
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        }
     }
 }

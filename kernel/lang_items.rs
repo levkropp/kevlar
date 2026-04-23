@@ -13,7 +13,7 @@ struct KernelDump {
     /// The length of the kernel log.
     len: u32,
     /// The kernel log (including the panic message).
-    log: [u8; 4096],
+    log: [u8; 65536],
 }
 
 impl KernelDump {
@@ -21,7 +21,7 @@ impl KernelDump {
         KernelDump {
             magic: 0,
             len: 0,
-            log: [0; 4096],
+            log: [0; 65536],
         }
     }
 }
@@ -60,6 +60,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         unsafe {
             #[cfg(target_arch = "x86_64")]
             core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
         }
         loop { kevlar_platform::arch::halt(); }
     }

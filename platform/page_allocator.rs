@@ -192,6 +192,18 @@ fn refill_page_cache() -> usize {
 /// Allocate a single physical page.
 #[inline(always)]
 pub fn alloc_page(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
+    let r = alloc_page_inner(flags);
+    if let Ok(p) = r {
+        crate::flight_recorder::record(
+            crate::flight_recorder::kind::PAGE_ALLOC,
+            0, p.value() as u64, 1,
+        );
+    }
+    r
+}
+
+#[inline(always)]
+fn alloc_page_inner(flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     // Fastest path: pre-zeroed page — no memset needed.
     if !flags.contains(AllocPageFlags::DIRTY_OK) {
         if PREZEROED_4K_COUNT.load(Ordering::Relaxed) > 0 {
@@ -505,6 +517,20 @@ pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
 }
 
 pub fn alloc_pages(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
+    let r = alloc_pages_inner(num_pages, flags);
+    if let Ok(p) = r {
+        if num_pages > 1 {
+            crate::flight_recorder::record(
+                crate::flight_recorder::kind::PAGE_ALLOC,
+                0, p.value() as u64, num_pages as u64,
+            );
+        }
+        // num_pages == 1 already records via alloc_page's wrapper.
+    }
+    r
+}
+
+fn alloc_pages_inner(num_pages: usize, flags: AllocPageFlags) -> Result<PAddr, PageAllocError> {
     if num_pages == 1 {
         return alloc_page(flags);
     }
@@ -780,6 +806,13 @@ pub fn recent_single_free_match(paddr: PAddr) -> Option<(u64, u64)> {
 }
 
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
+    // Flight recorder: record every call, before any early returns.
+    crate::flight_recorder::record(
+        crate::flight_recorder::kind::PAGE_FREE,
+        0,
+        paddr.value() as u64,
+        num_pages as u64,
+    );
 
     // INSTRUMENTATION (task #25): panic if we're about to return a paddr
     // to the allocator while it's still registered as an active kernel

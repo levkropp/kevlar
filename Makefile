@@ -113,7 +113,10 @@ else
     PYTHON3    ?= $(shell command -v uv >/dev/null 2>&1 && echo "uv run python" || echo "python3")
     CARGO      ?= cargo
     BOCHS      ?= bochs
-    LLVM_BIN_DIR := $(shell rustc --print sysroot 2>/dev/null || echo "")/lib/rustlib/x86_64-unknown-linux-gnu/bin
+    # Detect the host triple so llvm-tools resolve on macOS (aarch64-apple-darwin,
+    # x86_64-apple-darwin) as well as Linux x86_64.
+    RUSTC_HOST := $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+    LLVM_BIN_DIR := $(shell rustc --print sysroot 2>/dev/null || echo "")/lib/rustlib/$(RUSTC_HOST)/bin
     # Unix: use printf with ANSI colors
     PROGRESS   := printf "  \\033[1;96m%8s\\033[0m  \\033[1;m%s\\033[0m\\n"
     # Unix: use standard cp command
@@ -1381,6 +1384,12 @@ else
 	$(PYTHON3) tools/build-initramfs.py $@
 endif
 endif
+
+# ARM64 initramfs. build-initramfs.py reads ARCH from the environment
+# (set by `make ARCH=arm64`) and downloads pre-built Alpine aarch64
+# binaries — no cross-compiler needed on the host.
+build/testing.arm64.initramfs: $(wildcard testing/*) $(wildcard testing/*/*) $(wildcard testing/*/*/*) $(wildcard benchmarks/*) $(wildcard tests/*) Makefile
+	ARCH=arm64 $(PYTHON3) tools/build-initramfs.py --arch arm64 $@
 
 build/$(IMAGE_FILENAME).initramfs: tools/docker2initramfs.py Makefile
 	$(PROGRESS) "EXPORT" $(IMAGE)

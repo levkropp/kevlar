@@ -15,6 +15,7 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use kevlar_api::address::PAddr;
+#[cfg(target_arch = "x86_64")]
 use kevlar_api::driver::ioport::IoPort;
 use kevlar_api::driver::{register_driver_prober, DeviceProber};
 #[cfg(target_arch = "x86_64")]
@@ -95,6 +96,7 @@ pub fn bpp() -> u32 {
 
 // ─── VBE Register Access ────────────────────────────────────────────────────
 
+#[cfg(target_arch = "x86_64")]
 fn vbe_write(index: u16, value: u16) {
     let port = IoPort::new(VBE_DISPI_IOPORT_INDEX);
     port.write16(0, index);
@@ -102,6 +104,7 @@ fn vbe_write(index: u16, value: u16) {
     data.write16(0, value);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn vbe_read(index: u16) -> u16 {
     let port = IoPort::new(VBE_DISPI_IOPORT_INDEX);
     port.write16(0, index);
@@ -110,6 +113,7 @@ fn vbe_read(index: u16) -> u16 {
 }
 
 /// Program the Bochs VBE registers to set a linear framebuffer mode.
+#[cfg(target_arch = "x86_64")]
 fn set_mode(width: u16, height: u16, bpp: u16) {
     // Disable display first
     vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
