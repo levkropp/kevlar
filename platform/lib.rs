@@ -36,6 +36,7 @@ pub mod crash_regs;
 pub mod flight_recorder;
 pub mod page_allocator;
 pub mod page_refcount;
+pub mod pt_refcount;
 pub mod stack_cache;
 pub mod profile;
 pub mod spinlock;

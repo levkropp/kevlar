@@ -44,6 +44,16 @@ const ATTR_UXN: u64 = 1 << 54;       // Unprivileged Execute Never (XN)
 /// that the ghost child CoW-marked; `restore_writable_from_list` uses it to
 /// clear ATTR_AP_RO on the parent's PTEs after the child exits / execs.
 const PTE_WAS_WRITABLE: u64 = 1 << 55;
+/// "This descriptor points at a shared leaf-PT page."  Set on a level-2
+/// (PMD) descriptor whose target level-1 (leaf) PT is shared between
+/// multiple Vms (typically parent and child after fork).  Lazy CoW: any
+/// write path that walks into a SHARED PT via `traverse_mut` copies up
+/// the PT before returning the leaf pointer, updates this descriptor to
+/// point at the fresh PT, and clears this bit.  Invariant (nominally):
+/// SHARED ⇒ pt_refcount > 1, though a stale SHARED with refcount == 1
+/// is tolerated and self-healed by the sole-owner fast path in
+/// `traverse_mut`.
+const PTE_SHARED_PT: u64 = 1 << 56;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +96,11 @@ fn traverse(
             if !allocate {
                 return None;
             }
-            let new_table =
-                alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            // Use alloc_pt_page so pt_refcount is initialized to 1.  Leaf PTs
+            // allocated here get shared at fork time via share_leaf_pt; the
+            // share path's pt_ref_inc only works correctly if the count starts
+            // at 1, not 0.
+            let new_table = alloc_pt_page().expect("failed to allocate page table");
             unsafe {
                 new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
                 *entry = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
@@ -128,8 +141,7 @@ fn traverse_to_pt(
             if !allocate {
                 return None;
             }
-            let new_table =
-                alloc_pages(1, AllocPageFlags::KERNEL).expect("failed to allocate page table");
+            let new_table = alloc_pt_page().expect("failed to allocate page table");
             unsafe {
                 new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
                 *entry = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
@@ -146,6 +158,168 @@ fn traverse_to_pt(
 #[inline(always)]
 fn leaf_pt_index(vaddr_value: usize) -> usize {
     (vaddr_value >> 12) & 0x1FF
+}
+
+/// Allocate a new page-table page.  Caller receives DIRTY memory (random
+/// bytes); initialize with write_bytes or bulk-copy before use.  Registers
+/// the page's paddr in the PT refcount table at count=1.
+#[inline]
+fn alloc_pt_page() -> Result<PAddr, PageAllocError> {
+    let paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+    crate::pt_refcount::pt_ref_init(paddr);
+    Ok(paddr)
+}
+
+/// Broadcast TLB flush after a page-table structural change.  Use when
+/// unsharing a PT page: stale walks on other CPUs must stop before the
+/// old PT is freed.
+#[inline(always)]
+fn tlb_flush_all_broadcast() {
+    unsafe {
+        // dsb ishst: earlier stores globally visible
+        // tlbi vmalle1is: invalidate all EL1 TLB entries, inner shareable
+        // dsb ish: wait for completion
+        // isb: stop speculative execution past the flush
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack),
+        );
+    }
+}
+
+/// Copy-up a shared leaf PT — the write-side half of lazy PT-page CoW.
+///
+/// Given `pmd_entry_ptr` = pointer to the level-2 (PMD) descriptor whose
+/// PTE_SHARED_PT bit is set:
+///   - If `pt_refcount > 1`: allocate a fresh PT page, copy the old PT's
+///     contents, update the PMD entry to point at the fresh PT (clearing
+///     SHARED), broadcast-flush TLBs, and dec old PT refcount (freeing
+///     the old PT if we're the last owner).
+///   - If `pt_refcount == 1` (sole owner — stale SHARED bit): just clear
+///     the SHARED bit in the PMD entry in place.  No copy needed.
+///
+/// Returns the (possibly new) level-1 table pointer.
+#[inline]
+fn unshare_leaf_pt(pmd_entry_ptr: *mut PageTableEntry)
+    -> Result<*mut PageTableEntry, PageAllocError>
+{
+    let pmd_entry = unsafe { *pmd_entry_ptr };
+    let old_pt_paddr = entry_paddr(pmd_entry);
+    let pmd_flags = entry_flags(pmd_entry) & !PTE_SHARED_PT;
+
+    if crate::pt_refcount::pt_ref_count(old_pt_paddr) > 1 {
+        // Real unshare: allocate fresh PT, copy contents, publish.
+        let fresh = alloc_pt_page()?;
+        let old = old_pt_paddr.as_mut_ptr::<PageTableEntry>();
+        let new = fresh.as_mut_ptr::<PageTableEntry>();
+        unsafe {
+            ptr::copy_nonoverlapping(old, new, ENTRIES_PER_TABLE as usize);
+            *pmd_entry_ptr = fresh.value() as u64 | pmd_flags;
+        }
+        tlb_flush_all_broadcast();
+        if crate::pt_refcount::pt_ref_dec(old_pt_paddr) {
+            crate::page_allocator::free_pages(old_pt_paddr, 1);
+        }
+        Ok(new)
+    } else {
+        // Sole owner — just clear the stale SHARED bit.
+        unsafe {
+            *pmd_entry_ptr = old_pt_paddr.value() as u64 | pmd_flags;
+            core::arch::asm!("dsb ishst", options(nostack));
+        }
+        Ok(old_pt_paddr.as_mut_ptr::<PageTableEntry>())
+    }
+}
+
+/// Walk PGD → PUD → PMD with intent to mutate a leaf PTE.  Unshares any
+/// SHARED leaf PT we encounter before returning the leaf pointer.  Used
+/// by `map_user_page*`, `unmap_user_page`, `update_page_flags`,
+/// `try_map_user_page_with_prot`, and the CoW fault path.
+fn traverse_mut(
+    pgd: PAddr,
+    vaddr: UserVAddr,
+    allocate: bool,
+) -> Option<NonNull<PageTableEntry>> {
+    debug_assert!(is_aligned(vaddr.value(), PAGE_SIZE));
+    let mut table = pgd.as_mut_ptr::<PageTableEntry>();
+
+    for level in (1..=3).rev() {
+        let index = nth_level_table_index(vaddr, level);
+        let entry_ptr = unsafe { table.offset(index) };
+        let entry = unsafe { *entry_ptr };
+        let mut table_paddr = entry_paddr(entry);
+
+        if table_paddr.value() == 0 {
+            if !allocate {
+                return None;
+            }
+            let new_table = alloc_pt_page().expect("failed to allocate page table");
+            unsafe {
+                new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
+                *entry_ptr = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
+                core::arch::asm!("dsb ishst", options(nostack));
+            }
+            table_paddr = new_table;
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+            continue;
+        }
+
+        // At level == 1, this descriptor points at the level-0 (leaf) PT.
+        // If the leaf PT is SHARED, unshare before the caller mutates it.
+        if level == 1 && (entry & PTE_SHARED_PT) != 0 {
+            table = unshare_leaf_pt(entry_ptr).ok()?;
+        } else {
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+        }
+    }
+
+    unsafe {
+        Some(NonNull::new_unchecked(
+            table.offset(nth_level_table_index(vaddr, 0)),
+        ))
+    }
+}
+
+/// Like `traverse_to_pt` but unshares a SHARED leaf PT before returning
+/// its base pointer.  Used by `batch_try_map_user_pages_with_prot`.
+#[inline(always)]
+fn traverse_to_pt_mut(
+    pgd: PAddr,
+    vaddr: UserVAddr,
+    allocate: bool,
+) -> Option<*mut PageTableEntry> {
+    let mut table = pgd.as_mut_ptr::<PageTableEntry>();
+    for level in (1..=3).rev() {
+        let index = nth_level_table_index(vaddr, level);
+        let entry_ptr = unsafe { table.offset(index) };
+        let entry = unsafe { *entry_ptr };
+        let mut table_paddr = entry_paddr(entry);
+
+        if table_paddr.value() == 0 {
+            if !allocate {
+                return None;
+            }
+            let new_table = alloc_pt_page().expect("failed to allocate page table");
+            unsafe {
+                new_table.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
+                *entry_ptr = new_table.value() as u64 | DESC_VALID | DESC_TABLE;
+                core::arch::asm!("dsb ishst", options(nostack));
+            }
+            table_paddr = new_table;
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+            continue;
+        }
+
+        if level == 1 && (entry & PTE_SHARED_PT) != 0 {
+            table = unshare_leaf_pt(entry_ptr).ok()?;
+        } else {
+            table = table_paddr.as_mut_ptr::<PageTableEntry>();
+        }
+    }
+    Some(table)
 }
 
 /// Decrement refcounts on all user pages and free intermediate page table
@@ -184,13 +358,123 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
                     continue;
                 }
                 crate::page_refcount::page_ref_dec(paddr);
+            } else if level == 2 && (entry & PTE_SHARED_PT) != 0 {
+                teardown_leaf_pt_shared(paddr);
+                if crate::pt_refcount::pt_ref_dec(paddr) {
+                    crate::page_allocator::free_pages(paddr, 1);
+                }
             } else {
-                // Intermediate table: recurse, then free the table page.
+                // Intermediate table or non-shared leaf: recurse, then
+                // free the table page.
                 teardown_table_dec_only(paddr, level - 1);
                 crate::page_allocator::free_pages(paddr, 1);
             }
         }
     }
+}
+
+/// Decrement data-page refcounts in a shared leaf PT.  Called by every
+/// owner's teardown (not just the last) so the per-page refcounts stay
+/// balanced.  Does NOT touch the PT page itself — caller handles
+/// `pt_ref_dec` + free.
+#[inline]
+fn teardown_leaf_pt_shared(pt_paddr: PAddr) {
+    let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
+    for batch in 0..64isize {
+        let base = batch * 8;
+        let any = unsafe {
+            *pt.offset(base)     | *pt.offset(base + 1)
+            | *pt.offset(base + 2) | *pt.offset(base + 3)
+            | *pt.offset(base + 4) | *pt.offset(base + 5)
+            | *pt.offset(base + 6) | *pt.offset(base + 7)
+        };
+        if any == 0 { continue; }
+        for i in base..base + 8 {
+            let entry = unsafe { *pt.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() { continue; }
+            let rc = crate::page_refcount::page_ref_count(paddr);
+            if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                continue;
+            }
+            crate::page_refcount::page_ref_dec(paddr);
+        }
+    }
+}
+
+/// Prepare a leaf PT for sharing between parent and child: iterate in
+/// place, bump data-page refcounts, set ATTR_AP_RO on writable entries
+/// (so any subsequent write from either owner takes a CoW fault), and
+/// publish PTE_SHARED_PT + pt_ref_inc.  Ordering (issue #2 from design
+/// review): RO-stamp BEFORE publishing the SHARED bit, with `dsb ish`
+/// between, so a concurrent CoW fault on a sibling CPU can't interleave
+/// with the stamping loop.
+///
+/// Called from `duplicate_table` at level == 2 (PMD) for each non-null
+/// entry pointing at a level-1 leaf PT.
+#[inline]
+fn share_leaf_pt(
+    pt_paddr: PAddr,
+    parent_pmd_entry_ptr: *mut PageTableEntry,
+    child_pmd_entry_ptr: *mut PageTableEntry,
+) {
+    let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
+    // Step 1: RO-stamp pass — bump data-page refcounts, set AP_RO on writable
+    // entries in the shared PT.  Sparse-table batch skip for sparse mappings.
+    for batch in 0..64isize {
+        let base = batch * 8;
+        let any = unsafe {
+            *pt.offset(base)     | *pt.offset(base + 1)
+            | *pt.offset(base + 2) | *pt.offset(base + 3)
+            | *pt.offset(base + 4) | *pt.offset(base + 5)
+            | *pt.offset(base + 6) | *pt.offset(base + 7)
+        };
+        if any == 0 {
+            continue;
+        }
+        for i in base..base + 8 {
+            let entry = unsafe { *pt.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
+                continue;
+            }
+            // Bump data-page refcount (new owner = child).
+            crate::page_refcount::page_ref_inc(paddr);
+
+            let flags = entry_flags(entry);
+            if flags & ATTR_AP_USER != 0 && flags & ATTR_AP_RO == 0 {
+                // Set AP_RO so writes from either owner fault into the CoW
+                // handler.  Writes go through the shared PT until unshared.
+                unsafe {
+                    *pt.offset(i) = paddr.value() as u64 | (flags | ATTR_AP_RO);
+                }
+            }
+        }
+    }
+
+    // Step 2: barrier — make all stamping stores visible globally before we
+    // publish the SHARED marker.  A CoW fault on a remote CPU that reads
+    // SHARED then walks into the PT must see the RO-stamped entries.
+    unsafe { core::arch::asm!("dsb ish", options(nostack)); }
+
+    // Step 3: bump PT-page refcount — child now shares ownership.
+    crate::pt_refcount::pt_ref_inc(pt_paddr);
+
+    // Step 4: publish SHARED bit on both PMD descriptors (in place for
+    // parent, OR-in for child — child's PMD already points at the same
+    // pt_paddr from the bulk copy of the PMD table above).
+    unsafe {
+        let parent_entry = *parent_pmd_entry_ptr;
+        *parent_pmd_entry_ptr = parent_entry | PTE_SHARED_PT;
+        let child_entry = *child_pmd_entry_ptr;
+        *child_pmd_entry_ptr = child_entry | PTE_SHARED_PT;
+    }
+    // Parent's TLB may have cached writable entries for this PT's range
+    // from before share_leaf_pt stamped AP_RO in place.  Without a flush,
+    // parent will continue writing (via cached TLB) through the shared
+    // page, corrupting the shared data visible to the child.  Flush all
+    // TLB entries in the inner-shareable domain.
+    tlb_flush_all_broadcast();
 }
 
 fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
@@ -200,7 +484,7 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     // 8 PT pages at cached-DRAM speed).  Safe because every byte we
     // don't copy explicitly stays whatever the allocator handed us,
     // and ptr::copy_nonoverlapping covers the entire 4 KB PT.
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+    let new_table_paddr = alloc_pt_page()?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
     // Bulk-copy the entire 4 KB page table in one shot.
@@ -211,13 +495,10 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
     debug_assert!(level > 0);
 
     if level == 1 {
-        // Leaf page table (PTE level): implement CoW sharing.
-        // The bulk copy already placed every entry.  Now we need to:
-        //   1. bump refcount on each user page
-        //   2. set ATTR_AP_RO on user-writable pages in BOTH parent and child
-        // Sparse-table batch skip: OR 8 entries; if all zero, skip the batch.
-        // Typical user page tables have <32 entries out of 512, so this
-        // eliminates ~94% of the iteration work.
+        // Leaf page table (PTE level): only reachable via the non-sharing
+        // ghost-fork path.  Preserved for completeness; regular fork uses
+        // leaf sharing via the level == 2 branch below and never recurses
+        // here.
         for batch in 0..64isize {
             let base = batch * 8;
             let any = unsafe {
@@ -235,25 +516,67 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
                 if paddr.is_null() {
                     continue;
                 }
-                // Share the physical page (bump refcount parent→2).
                 crate::page_refcount::page_ref_inc(paddr);
-
                 let flags = entry_flags(entry);
                 if flags & ATTR_AP_USER != 0 && flags & ATTR_AP_RO == 0 {
-                    // User-writable: make read-only in both parent and child.
                     let cow_entry = paddr.value() as u64 | (flags | ATTR_AP_RO);
                     unsafe {
                         *orig_table.offset(i) = cow_entry;
                         *new_table.offset(i) = cow_entry;
                     }
                 }
-                // Non-writable pages: bulk copy already placed them correctly.
+            }
+        }
+    } else if level == 2 {
+        // PMD level: entries point at leaf PT pages.  Instead of recursing
+        // into level 1 (which would alloc a fresh leaf PT per entry and
+        // bulk-copy it), *share* each leaf PT with the child.  This is the
+        // lazy-CoW win: skip ~1.2 µs per leaf PT alloc+memcpy.
+        //
+        // The bulk copy above already placed the same leaf-PT paddrs in
+        // child's PMD entries.  `share_leaf_pt` handles the rest in place.
+        for i in 0..ENTRIES_PER_TABLE {
+            let entry = unsafe { *orig_table.offset(i) };
+            let pt_paddr = entry_paddr(entry);
+            if pt_paddr.is_null() {
+                continue;
+            }
+            // If the entry is already SHARED from a prior fork, we're
+            // adding a third (or Nth) owner: just pt_ref_inc, no need to
+            // RO-stamp again (the PT is already RO'd) and no need to
+            // re-store the SHARED bit (already set).
+            if entry & PTE_SHARED_PT != 0 {
+                // Still need to bump data-page refcounts for the new owner.
+                let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
+                for batch in 0..64isize {
+                    let base = batch * 8;
+                    let any = unsafe {
+                        *pt.offset(base)     | *pt.offset(base + 1)
+                        | *pt.offset(base + 2) | *pt.offset(base + 3)
+                        | *pt.offset(base + 4) | *pt.offset(base + 5)
+                        | *pt.offset(base + 6) | *pt.offset(base + 7)
+                    };
+                    if any == 0 { continue; }
+                    for j in base..base + 8 {
+                        let e = unsafe { *pt.offset(j) };
+                        let p = entry_paddr(e);
+                        if !p.is_null() {
+                            crate::page_refcount::page_ref_inc(p);
+                        }
+                    }
+                }
+                crate::pt_refcount::pt_ref_inc(pt_paddr);
+                // child's PMD entry carries SHARED (copied from parent).
+            } else {
+                let parent_pmd = unsafe { orig_table.offset(i) };
+                let child_pmd = unsafe { new_table.offset(i) };
+                share_leaf_pt(pt_paddr, parent_pmd, child_pmd);
             }
         }
     } else {
-        // Intermediate table (PGD/PUD/PMD): the bulk copy left child pointers
-        // pointing at the parent's sub-tables — we must rewrite each with a
-        // fresh duplicated sub-table.
+        // Intermediate table (PGD/PUD): recurse to duplicate sub-tables.
+        // The bulk copy left child pointers pointing at the parent's
+        // sub-tables — we must rewrite each with a fresh duplicated one.
         for i in 0..ENTRIES_PER_TABLE {
             let entry = unsafe { *orig_table.offset(i) };
             let paddr = entry_paddr(entry);
@@ -288,7 +611,7 @@ fn duplicate_table_ghost(
 ) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     // Same DIRTY_OK rationale as duplicate_table — we're about to bulk-copy.
-    let new_table_paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+    let new_table_paddr = alloc_pt_page()?;
     let new_table = new_table_paddr.as_mut_ptr::<PageTableEntry>();
 
     unsafe {
@@ -329,11 +652,40 @@ fn duplicate_table_ghost(
             if paddr.is_null() {
                 continue;
             }
+            // If the parent's PMD entry points at a SHARED leaf PT (from
+            // a prior regular fork), unshare the parent side FIRST so
+            // the ghost fork's in-place AP_RO stamping doesn't leak
+            // into the other owner's view of the PT.  After unshare,
+            // parent has an exclusive fresh leaf PT, and the ghost
+            // fork recursion proceeds on that.  (Design review issue
+            // #12: ghost-fork coexistence with lazy-CoW sharing.)
+            let (effective_paddr, effective_entry_flags) =
+                if level == 2 && (entry & PTE_SHARED_PT) != 0 {
+                    let parent_pmd = unsafe { orig_table.offset(i) };
+                    // Unshare the parent side; now parent_pmd points at a
+                    // fresh (exclusive) PT.  Read the new paddr from the
+                    // updated PMD entry.
+                    let _ = unshare_leaf_pt(parent_pmd)
+                        .map_err(|_| PageAllocError)?;
+                    let updated_parent_entry = unsafe { *parent_pmd };
+                    let unshared_paddr = entry_paddr(updated_parent_entry);
+                    // Clear SHARED on child's bulk-copied PMD entry so the
+                    // recursion below proceeds as a normal duplicate.
+                    unsafe {
+                        let child_entry = *new_table.offset(i);
+                        *new_table.offset(i) = child_entry & !PTE_SHARED_PT;
+                    }
+                    (unshared_paddr, entry_flags(updated_parent_entry))
+                } else {
+                    (paddr, entry_flags(entry))
+                };
             let shift = (level - 1) * 9 + 12;
             let child_base = base_vaddr | ((i as usize) << shift);
-            let new_child_paddr = duplicate_table_ghost(paddr, level - 1, child_base, cow_addrs)?;
+            let new_child_paddr = duplicate_table_ghost(
+                effective_paddr, level - 1, child_base, cow_addrs)?;
             unsafe {
-                *new_table.offset(i) = new_child_paddr.value() as u64 | entry_flags(entry);
+                *new_table.offset(i) = new_child_paddr.value() as u64
+                    | effective_entry_flags;
             }
         }
     }
@@ -387,6 +739,16 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
                 }
                 // Else: parent-owned (read-only shared or still CoW-marked);
                 // leave untouched.
+            } else if level == 2 && (entry & PTE_SHARED_PT) != 0 {
+                // Shared leaf PT (regular fork semantics, not ghost): same
+                // teardown rules as `teardown_table_dec_only`.  Ghost fork
+                // shouldn't ordinarily produce SHARED entries because
+                // `duplicate_table_ghost` unshares them first, but handle
+                // defensively in case the interaction is reached.
+                teardown_leaf_pt_shared(paddr);
+                if crate::pt_refcount::pt_ref_dec(paddr) {
+                    crate::page_allocator::free_pages(paddr, 1);
+                }
             } else {
                 teardown_table_ghost(paddr, level - 1);
                 crate::page_allocator::free_pages(paddr, 1);
@@ -401,7 +763,10 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
 fn restore_writable_from_list(pgd: PAddr, addrs: &[usize]) {
     for &vaddr in addrs {
         let uva = unsafe { UserVAddr::new_unchecked(vaddr) };
-        if let Some(mut pte) = traverse(pgd, uva, false) {
+        // `traverse_mut` (not `traverse`) so we unshare any SHARED leaf PT
+        // before clearing AP_RO — otherwise we'd silently make the other
+        // owner's PTE writable too (design review issue #1).
+        if let Some(mut pte) = traverse_mut(pgd, uva, false) {
             let entry = unsafe { *pte.as_ptr() };
             if entry & PTE_WAS_WRITABLE != 0 {
                 let restored = (entry & !ATTR_AP_RO) & !PTE_WAS_WRITABLE;
@@ -416,8 +781,12 @@ fn restore_writable_from_list(pgd: PAddr, addrs: &[usize]) {
 
 fn allocate_pgd() -> Result<PAddr, PageAllocError> {
     // Allocate a fresh user PGD (TTBR0). No kernel entries needed since
-    // kernel uses TTBR1 exclusively.
-    let pgd = alloc_pages(1, AllocPageFlags::KERNEL)?;
+    // kernel uses TTBR1 exclusively.  Goes through `alloc_pt_page` so the
+    // PGD gets pt_refcount=1 for symmetry — the PGD is never shared but
+    // teardown_forked_pages + teardown_user_pages call `free_pages` on it
+    // without going through `pt_ref_dec`, which is fine: unused pt_ref
+    // slots are benign.
+    let pgd = alloc_pt_page()?;
     unsafe {
         pgd.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
     }
@@ -506,7 +875,7 @@ impl PageTable {
         prot_flags: i32,
     ) -> bool {
         let attrs = prot_to_attrs(prot_flags);
-        let entry_ptr = match traverse(self.pgd, vaddr, true) {
+        let entry_ptr = match traverse_mut(self.pgd, vaddr, true) {
             Some(ptr) => ptr,
             None => return false,
         };
@@ -547,7 +916,7 @@ impl PageTable {
 
         while i < count {
             let vaddr_value = start_vaddr.value() + i * PAGE_SIZE;
-            let pt_base = match traverse_to_pt(
+            let pt_base = match traverse_to_pt_mut(
                 self.pgd,
                 UserVAddr::new_nonnull(vaddr_value).unwrap(),
                 true,
@@ -588,7 +957,7 @@ impl PageTable {
     }
 
     pub fn update_page_flags(&mut self, vaddr: UserVAddr, prot_flags: i32) -> bool {
-        let entry_ptr = match traverse(self.pgd, vaddr, false) {
+        let entry_ptr = match traverse_mut(self.pgd, vaddr, false) {
             Some(ptr) => ptr,
             None => return false,
         };
@@ -608,7 +977,7 @@ impl PageTable {
     }
 
     pub fn unmap_user_page(&mut self, vaddr: UserVAddr) -> Option<PAddr> {
-        let entry_ptr = match traverse(self.pgd, vaddr, false) {
+        let entry_ptr = match traverse_mut(self.pgd, vaddr, false) {
             Some(ptr) => ptr,
             None => return None,
         };
@@ -671,7 +1040,7 @@ impl PageTable {
 
     fn map_page(&mut self, vaddr: UserVAddr, paddr: PAddr, attrs: u64) {
         debug_assert!(is_aligned(vaddr.value(), PAGE_SIZE));
-        let mut entry = traverse(self.pgd, vaddr, true).unwrap();
+        let mut entry = traverse_mut(self.pgd, vaddr, true).unwrap();
         unsafe {
             *entry.as_mut() = paddr.value() as u64 | attrs;
             // ARM ARM B2.9: DSB ensures the PTE store is visible to the page
