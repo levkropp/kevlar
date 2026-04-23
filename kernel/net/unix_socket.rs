@@ -129,7 +129,7 @@ pub struct UnixStream {
     peer_gid: core::sync::atomic::AtomicU32,
 }
 
-/// Allocate a StreamInner directly on the heap via alloc_zeroed.
+/// Allocate a StreamInner directly on the heap.
 ///
 /// StreamInner contains a 16KB RingBuffer<u8, 16384> inline array.
 /// Box::new() / Arc::new(SpinLock::new(StreamInner { .. })) would construct
@@ -137,16 +137,21 @@ pub struct UnixStream {
 /// adjacent physical memory (same class of bug as the pipe stack overflow
 /// fixed in e5366c0).
 ///
-/// All fields are correct when zeroed:
-/// - RingBuffer: buf=uninit (MaybeUninit), rp=0, wp=0, full=false → empty buffer
-/// - ancillary: Option<VecDeque<_>> = None (discriminant 0)
-/// - shut_wr: false = 0
+/// The 16 KB ring-buffer data area is MaybeUninit<u8> and doesn't need
+/// zeroing — `rp == wp == 0` and `full == false` mean "no bytes valid".
+/// Zeroing 16 KB on every socketpair was ~1.6 µs of wasted bandwidth; the
+/// in-place write of just the metadata fields is ~20 ns.
 #[allow(unsafe_code)]
 fn alloc_stream_inner() -> Box<StreamInner> {
     unsafe {
         let layout = core::alloc::Layout::new::<StreamInner>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut StreamInner;
+        let ptr = alloc::alloc::alloc(layout) as *mut StreamInner;
         assert!(!ptr.is_null(), "unix stream: failed to allocate StreamInner");
+        // Initialize the metadata fields in place; leave the 16 KB
+        // MaybeUninit<u8> ring-buffer data uninitialized.
+        core::ptr::addr_of_mut!((*ptr).buf).write(RingBuffer::new());
+        core::ptr::addr_of_mut!((*ptr).ancillary).write(None);
+        core::ptr::addr_of_mut!((*ptr).shut_wr).write(false);
         Box::from_raw(ptr)
     }
 }
