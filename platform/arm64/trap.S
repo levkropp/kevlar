@@ -5,6 +5,11 @@
 // The vector table must be 2KB-aligned, with each entry 128 bytes (32 insns).
 // Since SAVE_REGS/RESTORE_REGS exceed 32 instructions, each vector entry
 // branches to an out-of-line handler.
+//
+// Kernel is compiled -neon,-fp-armv8; re-enable FP+SIMD at the asm level so
+// the (unused-but-retained) SAVE_FP_REGS / RESTORE_FP_REGS macros below
+// assemble cleanly.  FP save/restore itself has moved to do_switch_thread.
+.arch armv8-a+fp+simd
 
 .macro SAVE_REGS
     // Save all general-purpose registers + special regs onto the stack.
@@ -62,12 +67,18 @@
     add     sp, sp, #(34 * 8)
 .endm
 
-// FP/NEON register save/restore for user-mode exceptions.
+// FP/NEON register save/restore.
 //
-// User code (musl memset, etc.) uses NEON registers v0-v31.  The kernel is
-// compiled with -neon,-fp-armv8 so it never touches them, but we save/restore
-// here for correctness during context switches (preemption while in user mode)
-// and as defense-in-depth.
+// The kernel is compiled -neon,-fp-armv8 (see kernel/arch/arm64/arm64.json),
+// so EL1 code never writes v-regs.  User FP state therefore survives
+// EL0→EL1→EL0 round-trips untouched — no save needed on exception entry.
+// FP state is saved/restored only when we actually swap tasks, inside
+// `do_switch_thread` (platform/arm64/usermode.S).  That matches Linux arm64's
+// `-mgeneral-regs-only` + `fpsimd_save_state`/`fpsimd_load_state`.
+//
+// The macros below are retained for the (currently unused) paths that may
+// want to snapshot HW FP onto a stack frame — see also `kevlar_save_fp_to`
+// in usermode.S for the pointer-based variant used by fork().
 //
 // Frame layout (528 bytes, 16-byte aligned):
 //   [sp+0]   .. [sp+511]  : v0-v31  (32 × 16 bytes)
@@ -211,31 +222,29 @@ handle_curr_spx_irq:
     RESTORE_REGS
     eret
 
-// User-mode exceptions: save/restore FP/NEON so user SIMD state survives
-// the exception handler (page faults, syscalls) and preemptive scheduling.
+// User-mode exceptions.  FP/NEON state is NOT saved here — the kernel is
+// compiled -neon,-fp-armv8 and cannot clobber v-regs, so user FP state is
+// preserved across the EL0→EL1→EL0 round-trip without our help.  FP save
+// happens only on task swap, in do_switch_thread.
 handle_lower_a64_sync:
     SAVE_REGS
-    SAVE_FP_REGS
     mov     x0, #1          // from_user = true
-    add     x1, sp, #FP_FRAME_SZ   // PtRegs is above FP frame
+    mov     x1, sp           // PtRegs pointer
     bl      arm64_handle_exception
     // Deliver any pending signal before returning to user.
-    add     x0, sp, #FP_FRAME_SZ
+    mov     x0, sp
     bl      arm64_check_signal_on_return
-    RESTORE_FP_REGS
     RESTORE_REGS
     eret
 
 handle_lower_a64_irq:
     SAVE_REGS
-    SAVE_FP_REGS
     mov     x0, #3          // type = IRQ, from user
-    add     x1, sp, #FP_FRAME_SZ
+    mov     x1, sp
     bl      arm64_handle_irq
     // Deliver any signal pending after the IRQ (e.g. SIGALRM from timer).
-    add     x0, sp, #FP_FRAME_SZ
+    mov     x0, sp
     bl      arm64_check_signal_on_return
-    RESTORE_FP_REGS
     RESTORE_REGS
     eret
 

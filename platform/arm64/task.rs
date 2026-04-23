@@ -3,6 +3,7 @@
 //!
 //! This module was moved from kernel/arch/arm64/process.rs to consolidate
 //! all unsafe code in the platform crate.
+use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,6 +13,31 @@ use crate::arch::PAGE_SIZE;
 use crate::arch::arm64_specific::cpu_local_head;
 use crate::arch::PtRegs;
 use crossbeam::atomic::AtomicCell;
+
+/// FP/NEON register state: v0-v31 (512 B) + FPCR (8 B) + FPSR (8 B) = 528 B.
+///
+/// Kept per-task and swapped by `do_switch_thread` on context switch.  The
+/// kernel itself is compiled `-neon,-fp-armv8` (see `kernel/arch/arm64/
+/// arm64.json`) so EL1 code never writes v-regs; FP state therefore survives
+/// EL0→EL1→EL0 round-trips naturally, and the old per-exception save/restore
+/// in `trap.S` was moved into context-switch.  That matches what Linux arm64
+/// does with `-mgeneral-regs-only` + `fpsimd_save_state`/`fpsimd_load_state`.
+#[repr(C, align(16))]
+pub struct FpState {
+    pub v: [u128; 32],
+    pub fpcr: u64,
+    pub fpsr: u64,
+}
+
+impl FpState {
+    pub fn zeroed() -> Box<Self> {
+        Box::new(FpState {
+            v: [0u128; 32],
+            fpcr: 0,
+            fpsr: 0,
+        })
+    }
+}
 
 /// Main kernel stack: 8 pages = 32 KiB.  Matches `platform/x64/task.rs::
 /// KERNEL_STACK_SIZE`.  The previous value of 256 pages (1 MiB) multiplied
@@ -56,6 +82,9 @@ pub struct ArchTask {
     // through the single `syscall_stack` (sp_el1), so we don't need one.
     kernel_stack: Option<OwnedPages>,
     syscall_stack: Option<OwnedPages>,
+    /// Per-task FP/NEON state (528 B).  Saved on context-switch by
+    /// `do_switch_thread`; see `FpState` docs.
+    fp_state: Box<FpState>,
 }
 
 unsafe impl Sync for ArchTask {}
@@ -78,7 +107,18 @@ unsafe extern "C" {
     fn kthread_entry();
     fn userland_entry();
     fn forked_child_entry();
-    fn do_switch_thread(prev_sp: *mut u64, next_sp: *const u64, ctx_saved: *mut u8);
+    fn do_switch_thread(
+        prev_sp: *mut u64,
+        next_sp: *const u64,
+        ctx_saved: *mut u8,
+        prev_fp: *mut FpState,
+        next_fp: *const FpState,
+    );
+    /// Snapshot the live hardware FP/NEON state (v0-v31, FPCR, FPSR) into
+    /// `dst`.  Used in `fork()` to copy the parent's FP state into the child:
+    /// at SVC entry the parent's v-regs are still live in HW because the
+    /// trap handler no longer saves/restores them.
+    fn kevlar_save_fp_to(dst: *mut FpState);
 }
 
 unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
@@ -128,6 +168,7 @@ impl ArchTask {
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
+            fp_state: FpState::zeroed(),
         }
     }
 
@@ -185,6 +226,7 @@ impl ArchTask {
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
+            fp_state: FpState::zeroed(),
         }
     }
 
@@ -200,6 +242,7 @@ impl ArchTask {
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
+            fp_state: FpState::zeroed(),
         }
     }
 
@@ -255,12 +298,23 @@ impl ArchTask {
 
         let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
 
+        // Snapshot the parent's live HW FP/NEON state into the child.  At this
+        // point we are in EL1 handling the fork SVC; the trap handler no
+        // longer saves v-regs, so the parent's FP state is still in the
+        // hardware registers.
+        let mut fp_state = FpState::zeroed();
+        #[allow(unsafe_code)]
+        unsafe {
+            kevlar_save_fp_to(&mut *fp_state as *mut FpState);
+        }
+
         Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(current_tpidr),
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
+            fp_state,
         })
     }
 
@@ -374,12 +428,23 @@ impl ArchTask {
 
         let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)?;
 
+        // Snapshot parent's live HW FP/NEON state — same reasoning as `fork`.
+        // pthread children inherit v-regs across the clone SVC so that caller-
+        // saved FP values in the parent aren't mysteriously zeroed on the
+        // first context switch into the child.
+        let mut fp_state = FpState::zeroed();
+        #[allow(unsafe_code)]
+        unsafe {
+            kevlar_save_fp_to(&mut *fp_state as *mut FpState);
+        }
+
         Ok(ArchTask {
             sp: UnsafeCell::new(sp as u64),
             tpidr_el0: AtomicCell::new(tpidr_el0_val),
             syscall_stack: Some(syscall_stack),
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
+            fp_state,
         })
     }
 
@@ -488,6 +553,8 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
             prev.sp.get(),
             next.sp.get(),
             prev.context_saved.as_ptr() as *mut u8,
+            &*prev.fp_state as *const FpState as *mut FpState,
+            &*next.fp_state as *const FpState,
         );
     }
 }
