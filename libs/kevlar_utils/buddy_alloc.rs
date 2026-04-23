@@ -15,8 +15,18 @@ const PAGE_SIZE: usize = 4096;
 /// Maximum block order: 2^MAX_ORDER pages = 4MB.
 const MAX_ORDER: usize = 10;
 
-/// Maximum pages tracked by the global bitmap (supports up to 1GB).
-const MAX_BITMAP_PAGES: usize = 262144;
+/// Maximum pages tracked by the global bitmap.
+///
+/// Bitmap is indexed by absolute paddr / PAGE_SIZE, so the range must cover
+/// every paddr the allocator manages — starting from paddr 0, not the zone
+/// base.  ARM64 QEMU virt places RAM at 0x40000000 (1 GiB), so to cover RAM
+/// at all we need MAX ≥ 262144.  To support up to 16 GiB of RAM on any arch,
+/// we size the bitmap at 4M pages (512 KB static).  Out-of-range indices
+/// early-return from the bitmap helpers below; an allocator attempting to
+/// free a paddr past this range used to trip the "double free" assert in
+/// `free_coalesce` because `bitmap_is_allocated` silently returned false —
+/// the bigger bitmap closes that asymmetric-behaviour bug.
+const MAX_BITMAP_PAGES: usize = 4 * 1024 * 1024;
 const BITMAP_BYTES: usize = MAX_BITMAP_PAGES / 8;
 
 /// Global allocation bitmap shared by all zones.
