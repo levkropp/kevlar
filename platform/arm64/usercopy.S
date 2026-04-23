@@ -30,15 +30,40 @@ usercopy2:
 
 // Copy bytes from user to kernel or kernel to user.
 // usercopy_memcpy(dst: *mut u8, src: *const u8, len: usize)
+//
+// Bulk-copy 32 bytes per iteration via ldp/stp (pair of 128-bit registers
+// would require FP; use 64-bit pair for no-neon kernels — two ldp/stp of
+// 64-bit pairs per iteration = 32 bytes with a 4-wide pipeline).  Tail is
+// byte-by-byte.  Any fault inside [usercopy_start, usercopy_end) is
+// caught by the page-fault handler and mapped to an AccessError; no
+// specific label needed beyond the range check.
 .global usercopy_memcpy
 usercopy_memcpy:
     cbz     x2, 2f
-1:
+    // Fast path: ≥32 bytes remaining → bulk 32-byte copies.
+    cmp     x2, #32
+    b.lo    3f
 usercopy3:
-    ldrb    w3, [x1], #1
+1:  ldp     x3, x4, [x1], #16
+    ldp     x5, x6, [x1], #16
+    stp     x3, x4, [x0], #16
+    stp     x5, x6, [x0], #16
+    sub     x2, x2, #32
+    cmp     x2, #32
+    b.hs    1b
+3:  // Tail: < 32 bytes.  Try 8-byte chunks first, then byte-by-byte.
+    cmp     x2, #8
+    b.lo    5f
+4:  ldr     x3, [x1], #8
+    str     x3, [x0], #8
+    sub     x2, x2, #8
+    cmp     x2, #8
+    b.hs    4b
+5:  cbz     x2, 2f
+6:  ldrb    w3, [x1], #1
     strb    w3, [x0], #1
     subs    x2, x2, #1
-    b.ne    1b
+    b.ne    6b
 2:
     ret
 
