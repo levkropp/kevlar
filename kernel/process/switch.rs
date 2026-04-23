@@ -7,6 +7,16 @@ use crate::arch::{self};
 use alloc::sync::Arc;
 
 use core::mem::{self};
+use kevlar_platform::spinlock::SpinLock;
+
+/// finish_task_switch pickup slot.  When a task exits and calls switch(),
+/// we can't release its kernel stacks from the exiting context — the
+/// assembly switch hasn't happened yet and the code after `switch_thread`
+/// runs on the incoming task's frame, not the outgoing one.  Stash the
+/// exiting Arc here; the *next* task to run on this CPU cleans it up.
+///
+/// Single-CPU for now — extend to per-CPU array when SMP lands.
+static PREV_EXITED: SpinLock<Option<Arc<Process>>> = SpinLock::new(None);
 
 /// Yields execution to another thread.
 ///
@@ -152,28 +162,42 @@ pub fn switch() -> bool {
     }
 
     CURRENT.as_mut().set(next.clone());
+    let prev_exited = matches!(prev_state,
+        ProcessState::ExitedWith(_) | ProcessState::ExitedBySignal(_));
+
+    // Before switching, finish any *previous* switch's pending cleanup:
+    // the outgoing task on the last switch may have parked its Arc in
+    // PREV_EXITED for us to reap now that we're off its stack.  This
+    // mirrors Linux's finish_task_switch — cleanup runs in the incoming
+    // task's context after the switch-in has already happened, so
+    // releasing the outgoing task's kernel stacks is safe.
+    if let Some(earlier_exited) = PREV_EXITED.lock().take() {
+        #[allow(unsafe_code)]
+        unsafe { earlier_exited.arch().release_stacks(); }
+        // Drop the Arc explicitly outside the lock.
+        drop(earlier_exited);
+    }
+
+    // Stash the currently-exiting prev for the next task on this CPU to
+    // clean up (see finish_task_switch above).  Single-CPU-only wiring;
+    // extend to per-CPU array when SMP lands.
+    if prev_exited {
+        let mut slot = PREV_EXITED.lock();
+        // If the previous exiting task is still pending (nobody ran
+        // between two exits), release it now — we'll stash ourselves next.
+        if let Some(stale) = slot.take() {
+            #[allow(unsafe_code)]
+            unsafe { stale.arch().release_stacks(); }
+            drop(stale);
+        }
+        *slot = Some(prev.clone());
+    }
+
     arch::switch_thread(prev.arch(), next.arch());
 
     // We are now executing on the next thread's kernel stack.
     // Re-enable preemption so the timer can preempt this thread normally.
     kevlar_platform::arch::preempt_enable();
-
-    // DO NOT eagerly free prev's kernel stacks here.  Another CPU's
-    // wait-queue or scheduler entry can still hold a weak/strong
-    // reference to `prev` for a window after switch_thread returns —
-    // e.g., a futex waker that sampled the runqueue and is about to
-    // call resume() on this PID.  Freeing now can corrupt a
-    // subsequent switch INTO prev's kernel stack.  Blog 147 first
-    // documented this; under broad sti in syscall_entry the window
-    // widens (mid-syscall preemption), and the panic
-    //   "switch_thread BUG: saved_rsp_off=0xffffffff...ba80"
-    // (kstack_base well below saved_rsp) shows the stack has been
-    // freed and re-issued as data pages.
-    //
-    // Lazy-free via gc_exited_processes → Drop of the last Arc<Process>
-    // instead.  Costs ~32KB per zombie until wait4() reaps, which is
-    // well below the memory savings from the always-defer Vm::Drop
-    // change (commit 0c39aa7).
 
     // Drop the `prev` clone here (decrements strong count by 1, mirroring the
     // clone() at the top of this function).  The exiting thread remains alive
