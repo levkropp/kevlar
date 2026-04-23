@@ -277,7 +277,30 @@ def main():
     if args.gdb:
         argv += ["-gdb", "tcp::7789", "-S"]
     if args.kvm:
-        argv += ["-accel", "kvm"]
+        # --kvm selects the native-speed hypervisor for the host/guest pairing:
+        #   Linux x64/arm64 + matching guest → KVM
+        #   macOS arm64 + arm64 guest       → Hypervisor.framework (hvf)
+        #   macOS x64 + x64 guest           → hvf
+        # Fall back to kvm label if the host isn't macOS so CI/Linux flows stay
+        # unchanged.
+        if platform.system() == "Darwin":
+            argv += ["-accel", "hvf"]
+            # HVF requires -cpu host (it cannot emulate a different ARM CPU
+            # model).  Replace the default -cpu cortex-a72 if present.
+            if args.arch == "arm64":
+                new_argv = []
+                skip = False
+                for a in argv:
+                    if a == "-cpu":
+                        skip = True
+                        continue
+                    if skip:
+                        skip = False
+                        continue
+                    new_argv.append(a)
+                argv = new_argv + ["-cpu", "host"]
+        else:
+            argv += ["-accel", "kvm"]
     if args.disk:
         disk_path = args.disk.replace('\\', '/') if platform.system() == "Windows" else args.disk
         if args.arch == "arm64":
