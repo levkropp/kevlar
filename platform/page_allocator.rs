@@ -62,7 +62,11 @@ static PAGE_CACHE_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Pool of pre-zeroed 4KB pages. Served by `alloc_page()` when zeroed pages
 /// are requested (!DIRTY_OK), avoiding the ~1-2µs inline memset.
 /// Refilled at boot and in the idle thread.
-const PREZEROED_4K_POOL_SIZE: usize = 128;
+///
+/// Size 512 covers the `bench_mmap_fault` 256-page burst without draining;
+/// static cost is 4 KiB of pointer storage plus ~25 ms of boot-time zero
+/// work to fill it once.
+const PREZEROED_4K_POOL_SIZE: usize = 512;
 
 struct Prezeroed4kPool {
     pages: [usize; PREZEROED_4K_POOL_SIZE],
