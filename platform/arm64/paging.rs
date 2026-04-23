@@ -156,25 +156,39 @@ fn teardown_table_dec_only(table_paddr: PAddr, level: usize) {
     }
     let table = table_paddr.as_mut_ptr::<PageTableEntry>();
 
-    for i in 0..ENTRIES_PER_TABLE {
-        let entry = unsafe { *table.offset(i) };
-        let paddr = entry_paddr(entry);
-
-        if paddr.is_null() {
+    // Sparse-table batch skip: OR 8 entries; if all zero, skip the batch.
+    // Matches the optimization in `duplicate_table` — typical user page
+    // tables have <32 non-null entries of 512, so this eliminates ~94%
+    // of iteration work on the exit path too.
+    for batch in 0..64isize {
+        let base = batch * 8;
+        let any = unsafe {
+            *table.offset(base)     | *table.offset(base + 1)
+            | *table.offset(base + 2) | *table.offset(base + 3)
+            | *table.offset(base + 4) | *table.offset(base + 5)
+            | *table.offset(base + 6) | *table.offset(base + 7)
+        };
+        if any == 0 {
             continue;
         }
-
-        if level == 1 {
-            // Leaf PTE: decrement refcount only, never free.
-            let rc = crate::page_refcount::page_ref_count(paddr);
-            if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+        for i in base..base + 8 {
+            let entry = unsafe { *table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
                 continue;
             }
-            crate::page_refcount::page_ref_dec(paddr);
-        } else {
-            // Intermediate table: recurse, then free the table page.
-            teardown_table_dec_only(paddr, level - 1);
-            crate::page_allocator::free_pages(paddr, 1);
+            if level == 1 {
+                // Leaf PTE: decrement refcount only, never free.
+                let rc = crate::page_refcount::page_ref_count(paddr);
+                if rc == 0 || rc == crate::page_refcount::PAGE_REF_KERNEL_IMAGE {
+                    continue;
+                }
+                crate::page_refcount::page_ref_dec(paddr);
+            } else {
+                // Intermediate table: recurse, then free the table page.
+                teardown_table_dec_only(paddr, level - 1);
+                crate::page_allocator::free_pages(paddr, 1);
+            }
         }
     }
 }
@@ -333,33 +347,46 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
     }
     let table = table_paddr.as_mut_ptr::<PageTableEntry>();
 
-    for i in 0..ENTRIES_PER_TABLE {
-        let entry = unsafe { *table.offset(i) };
-        let paddr = entry_paddr(entry);
-        if paddr.is_null() {
+    // Same sparse-table batch skip used in `teardown_table_dec_only`.
+    for batch in 0..64isize {
+        let base = batch * 8;
+        let any = unsafe {
+            *table.offset(base)     | *table.offset(base + 1)
+            | *table.offset(base + 2) | *table.offset(base + 3)
+            | *table.offset(base + 4) | *table.offset(base + 5)
+            | *table.offset(base + 6) | *table.offset(base + 7)
+        };
+        if any == 0 {
             continue;
         }
-
-        if level == 1 {
-            let flags = entry_flags(entry);
-            if flags & ATTR_AP_USER == 0 {
+        for i in base..base + 8 {
+            let entry = unsafe { *table.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() {
                 continue;
             }
-            // Child-owned if the CoW fault rewrote this PTE: writable and no
-            // PTE_WAS_WRITABLE (CoW writes install a fresh writable PTE
-            // pointing at a newly-allocated paddr).
-            if flags & ATTR_AP_RO == 0 && entry & PTE_WAS_WRITABLE == 0 {
-                let rc = crate::page_refcount::page_ref_count(paddr);
-                if rc == 1 {
-                    crate::page_refcount::page_ref_dec(paddr);
-                    crate::page_allocator::free_pages(paddr, 1);
+
+            if level == 1 {
+                let flags = entry_flags(entry);
+                if flags & ATTR_AP_USER == 0 {
+                    continue;
                 }
+                // Child-owned if the CoW fault rewrote this PTE: writable and
+                // no PTE_WAS_WRITABLE (CoW writes install a fresh writable
+                // PTE pointing at a newly-allocated paddr).
+                if flags & ATTR_AP_RO == 0 && entry & PTE_WAS_WRITABLE == 0 {
+                    let rc = crate::page_refcount::page_ref_count(paddr);
+                    if rc == 1 {
+                        crate::page_refcount::page_ref_dec(paddr);
+                        crate::page_allocator::free_pages(paddr, 1);
+                    }
+                }
+                // Else: parent-owned (read-only shared or still CoW-marked);
+                // leave untouched.
+            } else {
+                teardown_table_ghost(paddr, level - 1);
+                crate::page_allocator::free_pages(paddr, 1);
             }
-            // Else: parent-owned (either read-only shared, or still CoW-marked).
-            // Leave untouched.
-        } else {
-            teardown_table_ghost(paddr, level - 1);
-            crate::page_allocator::free_pages(paddr, 1);
         }
     }
 }
