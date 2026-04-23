@@ -594,6 +594,19 @@ mod syscall_numbers {
     pub const SYS_PPOLL: usize = 73;
     pub const SYS_PSELECT6: usize = 72;
     pub const SYS_PRLIMIT64: usize = 261;
+    // SysV shared memory syscalls (asm-generic/unistd.h).  Added here because
+    // the match arms in do_dispatch would otherwise treat these identifiers as
+    // unbound variable bindings that silently catch every subsequent syscall.
+    pub const SYS_SHMGET: usize = 194;
+    pub const SYS_SHMCTL: usize = 195;
+    pub const SYS_SHMAT: usize = 196;
+    pub const SYS_SHMDT: usize = 197;
+    // ARM64 uses prlimit64 (261) exclusively — no direct setrlimit/getrlimit
+    // syscalls.  We still need the constants in scope so the match arms don't
+    // become catch-all variable bindings; use dummy values that will never be
+    // reached (ARM64 tests go through prlimit64).
+    pub const SYS_SETRLIMIT: usize = 0xF010;
+    pub const SYS_GETRLIMIT: usize = 0xF011;
     pub const SYS_FCHMODAT: usize = 53;
     pub const SYS_FCHOWNAT: usize = 54;
     pub const SYS_PREAD64: usize = 67;
