@@ -240,3 +240,103 @@ In rough order of "smells like it could matter":
   ARM state that triggers it.
 
 Planning this out comprehensively is the next post.
+
+---
+
+## Update (same day, later session)
+
+The "~5 ms per MSR" headline was **wrong**.  The MSR is free.  The
+cost is real — but it lives somewhere else, and running careful cycle
+timing shifts the picture completely.
+
+### The MSR itself is free
+
+Wrapping the `msr ttbr0_el1, <pgd|asid<<48>` in `mrs cntvct_el0`
+reads before and after, across 1000 bench switches:
+
+```
+ASID-MSR call=0    cycles=0
+ASID-MSR call=100  cycles=0
+ASID-MSR call=200  cycles=1
+ASID-MSR call=500  cycles=0
+ASID-MSR call=1000 cycles=0
+```
+
+`cntvct_el0` ticks at 24 MHz → one tick = 41.7 ns.  The MSR costs
+under a tick.  Regardless of ASID content.
+
+The earlier "5 ms per MSR" was derived by dividing (bench total -
+baseline) by the switch count.  That arithmetic is valid for
+*average* per-switch overhead — but it incorrectly pins the cost on
+the MSR instruction because the MSR is the only *obviously-new*
+thing that fires per switch.
+
+### The real shape: half-of-switches are slow
+
+Bucketed every between-switch cycle delta (= time this CPU spends
+outside `PageTable::switch`, which is scheduler epilog + eret + user
+work + SVC + scheduler prolog).  Across 1000 fork_exit switches:
+
+| Between-switch time | Baseline (no ASID) | ASID=1 in TTBR0 |
+|--------------------:|-------------------:|----------------:|
+| < 10 µs             | 473                | **0**           |
+| < 100 µs            | 431                | 506             |
+| < 1 ms              | 96                 | 118             |
+| < 10 ms             | 0                  | **147**         |
+| < 100 ms            | 1                  | **243**         |
+
+About 400 switches per 1000 (≈ every other switch) move from fast
+(<100 µs) into the **1-100 ms** slow tail when TTBR0 has non-zero
+ASID bits.  The other half stay fast.  The cost isn't uniform —
+it's bimodal.  fork_exit alternates between two half-iterations
+(parent→child and child→parent), and exactly one of those two gets
+the 10-100 ms slug.
+
+### What we ruled out this session
+
+- **SCTLR alignment with Linux**: computed
+  `INIT_SCTLR_EL1_MMU_ON = 0x0200_0020_34F4_D91D`, flipped every bit
+  we safely could (EOS, DZE, UCT, IESB).  fork_exit unchanged.
+- **SA/SA0/EPAN**: hangs Kevlar (usermode entry isn't aligned-safe;
+  our copy_user path isn't PAN-aware).
+- **Reserved-TTBR0 parking** (Linux's trick — park TTBR0 at a
+  constant-PA pgd between writes so HVF can keep its internal state
+  warm): no effect on the distribution.
+- **`tlbi aside1` instead of `vmalle1`**: no effect.
+- **TLBI presence**: removing TLBI entirely doesn't help.
+
+### What the asymmetry means
+
+The cost must live in one of these boundaries, not in the MSR:
+
+1. `eret` back to user (kernel → EL0)
+2. User-space execution (page walks, speculation-driven stage-2
+   refills)
+3. The first `SVC` trap back into kernel
+4. The scheduler prolog before the next `PageTable::switch`
+
+The ~50/50 split points to an asymmetry across the fork_exit cycle:
+one half-iteration runs the full user-code path (parent doing
+fork() / wait4() syscalls against a newly-loaded TTBR0), the other
+half is a tight user→_exit path that probably doesn't touch user
+memory at all.  **Whichever half touches user memory eats the
+10-100 ms**, which is consistent with HVF doing per-ASID stage-2
+shadow invalidation on the first EL0 access after a TTBR0 write.
+
+### What's needed next
+
+- **Time `eret` and the next `svc` separately.**  Pre-measure
+  `cntvct_el0` before eret to user, and on entry to the SVC handler.
+  That bifurcates "user-space work" from "eret cost" from "syscall
+  entry cost".
+- **User-space first-access latency.**  Land at an `nop` loop, time
+  the first user memory load after the TTBR0 write.  Measures raw
+  TLB+stage-2 refill cost.
+- **Linux-side histogram.**  Instrument `cpu_do_switch_mm` with the
+  same bucketing in a Linux kernel built in a Linux VM, compare
+  directly.  If Linux's distribution is flat at <100 µs, we have a
+  direct side-by-side reproducer.
+
+The investigation plan at
+`Documentation/optimization/asid-hvf-investigation.md` tracks this
+work end-to-end and has the corrected mental model.
