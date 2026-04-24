@@ -2639,20 +2639,84 @@ fn apply_prefault_template(vm: &mut Vm, file_ptr: usize) {
         }
     }
 
-    // Map 4KB pages, skipping those inside huge page regions.
-    for &(vaddr, paddr, flags) in &template.entries {
-        if let Ok(uaddr) = UserVAddr::new_nonnull(vaddr) {
-            let huge_base = align_down(vaddr, HUGE_PAGE_SIZE);
-            if let Ok(huge_uaddr) = UserVAddr::new_nonnull(huge_base) {
-                if vm.page_table().is_huge_mapped(huge_uaddr).is_some() {
-                    continue;
-                }
-            }
-            kevlar_platform::page_refcount::page_ref_inc(paddr);
-            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, paddr, flags) {
-                kevlar_platform::page_refcount::page_ref_dec(paddr);
+    // Map 4KB pages, skipping those inside huge page regions.  Batch
+    // contiguous same-prot entries through `batch_try_map_user_pages_with_prot`
+    // to walk each leaf PT once instead of once per page — cuts ~4 µs of
+    // per-iter overhead for busybox-sized binaries (~260 entries before
+    // batching became a noticeable fraction of execve time).
+    let entries = &template.entries;
+    if entries.is_empty() { return; }
+
+    let mut i = 0;
+    // Reusable scratch for batch calls.  32 == batch primitive's per-call max.
+    let mut batch_paddrs: [kevlar_platform::address::PAddr; 32] =
+        [kevlar_platform::address::PAddr::new(0); 32];
+
+    while i < entries.len() {
+        let (vaddr_i, _, flags_i) = entries[i];
+        // Skip entries inside huge-mapped regions (templated huge pages may
+        // cover the 4K slots that follow).
+        let huge_base_i = align_down(vaddr_i, HUGE_PAGE_SIZE);
+        if let Ok(huge_uaddr) = UserVAddr::new_nonnull(huge_base_i) {
+            if vm.page_table().is_huge_mapped(huge_uaddr).is_some() {
+                i += 1;
+                continue;
             }
         }
+
+        // Find the end of a contiguous-VA, same-prot run starting at i.
+        let mut run_end = i + 1;
+        while run_end < entries.len() {
+            let (v, _, f) = entries[run_end];
+            let (v_prev, _, f_prev) = entries[run_end - 1];
+            if v != v_prev + PAGE_SIZE || f != f_prev { break; }
+            if run_end - i >= batch_paddrs.len() { break; }
+            // Also stop the run at huge-page boundaries to preserve the
+            // skip-inside-huge semantics (next iteration re-checks).
+            if align_down(v, HUGE_PAGE_SIZE) != huge_base_i { break; }
+            run_end += 1;
+        }
+
+        let run_len = run_end - i;
+        if run_len == 1 {
+            // Single-page fallback — same as before.
+            let (_, paddr, _) = entries[i];
+            if let Ok(uaddr) = UserVAddr::new_nonnull(vaddr_i) {
+                kevlar_platform::page_refcount::page_ref_inc(paddr);
+                if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, paddr, flags_i) {
+                    kevlar_platform::page_refcount::page_ref_dec(paddr);
+                }
+            }
+            i = run_end;
+            continue;
+        }
+
+        // Bump refcounts for the run up-front; undo for any that fail to
+        // install (duplicate PTE already present).
+        for k in 0..run_len {
+            batch_paddrs[k] = entries[i + k].1;
+            kevlar_platform::page_refcount::page_ref_inc(batch_paddrs[k]);
+        }
+        let start_uaddr = match UserVAddr::new_nonnull(vaddr_i) {
+            Ok(u) => u,
+            Err(_) => {
+                for k in 0..run_len {
+                    kevlar_platform::page_refcount::page_ref_dec(batch_paddrs[k]);
+                }
+                i = run_end;
+                continue;
+            }
+        };
+        let mapped = vm.page_table_mut().batch_try_map_user_pages_with_prot(
+            start_uaddr, &batch_paddrs[..run_len], run_len, flags_i,
+        );
+        // Undo refcount for entries that weren't mapped.
+        for k in 0..run_len {
+            if mapped & (1 << k) == 0 {
+                kevlar_platform::page_refcount::page_ref_dec(batch_paddrs[k]);
+            }
+        }
+        i = run_end;
     }
 }
 
