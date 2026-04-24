@@ -184,12 +184,31 @@ def print_comparison(data, format='terminal'):
         else: status = '✗ REGRESS'
         print(f'{color}{name:<20} {format_ns(l):>8} {format_ns(k):>8} {ratio:>6.2f}x  {status}{RESET}')
 
-    # New benchmarks (no Linux baseline)
+    # Kevlar-unique benchmarks (e.g. *_spawn variants using SYS_KVLR_SPAWN
+    # that Linux BENCH_SKIPs).  If a `NAME_spawn` variant has a plain `NAME`
+    # Linux baseline, surface the "best primitive vs best primitive"
+    # comparison explicitly — otherwise the header-line ratio misleadingly
+    # shows Kevlar's unchanged legacy fork+exec path at its Linux ratio.
     kevlar_only = sorted(set(kevlar.keys()) - set(linux.keys()))
     if kevlar_only:
-        print(f'\n\033[36mNew benchmarks (no Linux baseline):\033[0m')
+        print(f'\n\033[36mKevlar-only benchmarks (Linux BENCH_SKIPs — compared to the nearest Linux baseline where applicable):\033[0m')
         for name in kevlar_only:
-            print(f'  {name:<20} {format_ns(kevlar[name]):>8}')
+            # Pair *_spawn → plain name on Linux (kvlr_spawn vs fork+exec).
+            paired = None
+            if name.endswith('_spawn') and name[:-len('_spawn')] in linux:
+                paired = name[:-len('_spawn')]
+            if paired is not None:
+                l, k = linux[paired], kevlar[name]
+                ratio = k / l if l > 0 else 0.0
+                color = ratio_color(ratio)
+                note = f'(vs Linux {paired})'
+                if ratio <= 0.9: status = '✓ faster'
+                elif ratio <= 1.0: status = '= ok'
+                elif ratio <= 1.1: status = '▽ marginal'
+                else: status = '✗ REGRESS'
+                print(f'  {color}{name:<20} {format_ns(l):>8} {format_ns(k):>8} {ratio:>6.2f}x  {status} {note}{RESET}')
+            else:
+                print(f'  {name:<20} {"":>8} {format_ns(kevlar[name]):>8}  (no Linux equivalent)')
 
     print(f'\n\033[1mSummary:\033[0m '
           f'\033[32m{len(faster)} faster\033[0m, '
