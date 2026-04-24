@@ -2408,7 +2408,27 @@ impl Process {
         }
         *child.namespaces.borrow_mut() = Some(parent_ns);
 
-        process_group.lock().add(Arc::downgrade(&child));
+        // v2.1 attr: POSIX_SPAWN_SETPGROUP — move child to a specific process
+        // group.  attr.pgid == 0 means "use child's PID as the new pgid"
+        // (posix_spawn(3) semantics, matches musl's behavior).  Applied
+        // BEFORE adding child to its initial process group so it lands
+        // directly in the target group with no transient membership in the
+        // parent's group.
+        use crate::syscalls::kvlr_spawn::KVLR_SPAWN_SETPGROUP;
+        let use_setpgroup = attr.map(|a| a.flags & KVLR_SPAWN_SETPGROUP != 0).unwrap_or(false);
+        if use_setpgroup {
+            let target_pgid = attr.map(|a| a.pgid).unwrap_or(0);
+            let effective_pgid = if target_pgid == 0 {
+                crate::process::process_group::PgId::new(pid.as_i32())
+            } else {
+                crate::process::process_group::PgId::new(target_pgid)
+            };
+            let new_pg = crate::process::process_group::ProcessGroup::find_or_create_by_pgid(effective_pgid);
+            new_pg.lock().add(Arc::downgrade(&child));
+            child.set_process_group(Arc::downgrade(&new_pg));
+        } else {
+            process_group.lock().add(Arc::downgrade(&child));
+        }
         parent.children().push(child.clone());
         process_table.insert(pid, child.clone());
         drop(process_table);

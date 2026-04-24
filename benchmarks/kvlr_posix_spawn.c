@@ -179,11 +179,7 @@ static long kvlr_spawn_call(const char *path,
         const int *attr_flags_ptr = (const int *)attr;
         int flags = attr_flags_ptr[0];
         if (flags & (POSIX_SPAWN_SETSCHEDPARAM | POSIX_SPAWN_SETSCHEDULER)) {
-            return -ENOSYS;
-        }
-        /* Same goes for SETPGROUP and SETSIGDEF — kvlr_spawn v2 parses
-         * but doesn't yet apply these, so fall through to musl. */
-        if (flags & (POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF)) {
+            /* Scheduler attrs: still unsupported by kvlr_spawn — fallback. */
             return -ENOSYS;
         }
         if (flags & POSIX_SPAWN_RESETIDS)   ka.flags |= KVLR_SPAWN_RESETIDS;
@@ -194,6 +190,22 @@ static long kvlr_spawn_call(const char *path,
             ka.sigmask = *(const unsigned long long *)m;
         }
         if (flags & POSIX_SPAWN_SETSID)     ka.flags |= KVLR_SPAWN_SETSID;
+        if (flags & POSIX_SPAWN_SETPGROUP) {
+            /* musl stores pgrp at offset 4 (after flags). */
+            ka.flags |= KVLR_SPAWN_SETPGROUP;
+            ka.pgid = *(const int *)((const char *)attr + sizeof(int));
+        }
+        if (flags & POSIX_SPAWN_SETSIGDEF) {
+            /* kvlr_spawn's Process::spawn constructs a fresh
+             * SignalDelivery, so every signal is already SIG_DFL in the
+             * child — SETSIGDEF's "reset these to SIG_DFL" is trivially
+             * satisfied.  The sigdefault mask still gets passed so a
+             * future kernel change that inherits signal handlers can
+             * honour it. */
+            ka.flags |= KVLR_SPAWN_SETSIGDEF;
+            const sigset_t *d = (const sigset_t *)((const char *)attr + 8);
+            ka.sigdefault = *(const unsigned long long *)d;
+        }
     }
 
     return syscall(SYS_kvlr_spawn,
