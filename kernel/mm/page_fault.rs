@@ -1252,6 +1252,19 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                             // prints the first divergent byte so we can
                             // see what the corrupted byte should have
                             // been vs what it actually is.
+                            // Executable-page corruption check (full 4 KB
+                            // re-read + diff).  Originally diagnostic for
+                            // an SMP page-corruption bug tracked down via
+                            // xfce4-session; leaving it always-on charged
+                            // every executable page-fault a second
+                            // file.read(4KB) and a per-byte compare loop.
+                            // That's ~2-4 us per exec-page fault on HVF,
+                            // and it fires hundreds of times during the
+                            // demand-paging warm-up of a real binary.
+                            // Gate behind profile-fortress so the safer
+                            // build keeps the diagnostic but balanced /
+                            // performance / ludicrous strip it.
+                            #[cfg(feature = "profile-fortress")]
                             if vma.prot().bits() & 4 != 0 && copy_len >= 8 {
                                 let mut expected = [0u8; PAGE_SIZE];
                                 let re_read = file.read(
