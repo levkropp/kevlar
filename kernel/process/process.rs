@@ -3344,28 +3344,35 @@ fn prefault_small_anonymous(vm: &mut Vm) {
             kevlar_platform::page_refcount::page_ref_init(pages[i]);
         }
 
-        // Map each page into the VMA.
-        let mut addr = prefault_start;
-        for i in 0..allocated {
-            let uaddr = match UserVAddr::new_nonnull(addr) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Free remaining pages.
-                    for j in i..allocated {
-                        if kevlar_platform::page_refcount::page_ref_dec(pages[j]) {
-                            kevlar_platform::page_allocator::free_pages(pages[j], 1);
-                        }
+        // Batch-map: one traversal + one DSB/ISB for up to 32 contiguous
+        // pages.  MAX_PREFAULT_PAGES = 8 so the 32-slot cap is plenty.
+        let start_uaddr = match UserVAddr::new_nonnull(prefault_start) {
+            Ok(v) => v,
+            Err(_) => {
+                for j in 0..allocated {
+                    if kevlar_platform::page_refcount::page_ref_dec(pages[j]) {
+                        kevlar_platform::page_allocator::free_pages(pages[j], 1);
                     }
-                    break;
                 }
-            };
-            if !vm.page_table_mut().try_map_user_page_with_prot(uaddr, pages[i], prot_flags) {
-                // Already mapped — free the page.
+                continue;
+            }
+        };
+        let batch_n = core::cmp::min(allocated, 32);
+        let mapped = vm.page_table_mut().batch_try_map_user_pages_with_prot(
+            start_uaddr, &pages[..batch_n], batch_n, prot_flags,
+        );
+        for i in 0..batch_n {
+            if mapped & (1 << i) == 0 {
                 if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
                     kevlar_platform::page_allocator::free_pages(pages[i], 1);
                 }
             }
-            addr += PAGE_SIZE;
+        }
+        // Free anything past the batch cap (shouldn't happen at MAX=8).
+        for i in batch_n..allocated {
+            if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
+                kevlar_platform::page_allocator::free_pages(pages[i], 1);
+            }
         }
     }
 }
@@ -3716,9 +3723,25 @@ fn do_elf_binfmt(
             envp,
             &auxv,
         )?;
-        for i in 0..(init_stack_len / PAGE_SIZE) {
+        // Batch-map the init stack pages (4KB each).  The init frame is
+        // typically 1-4 pages for a small binary, up to ~32 for a shell
+        // with a big env — fits in the batch primitive's 32-page cap.
+        let n_pages = init_stack_len / PAGE_SIZE;
+        let stack_base_uaddr = init_stack_top.sub(n_pages * PAGE_SIZE);
+        let mut stack_paddrs = [kevlar_platform::address::PAddr::new(0); 32];
+        let batch_n = core::cmp::min(n_pages, 32);
+        for i in 0..batch_n {
+            stack_paddrs[i] = init_stack_pages.add(i * PAGE_SIZE);
+            kevlar_platform::page_refcount::page_ref_init(stack_paddrs[i]);
+        }
+        let _ = vm.page_table_mut().batch_try_map_user_pages_with_prot(
+            stack_base_uaddr, &stack_paddrs[..batch_n], batch_n,
+            3, // PROT_READ | PROT_WRITE
+        );
+        // Fallback for any pages past the batch cap (very unusual).
+        for i in batch_n..n_pages {
             vm.page_table_mut().map_user_page(
-                init_stack_top.sub(((init_stack_len / PAGE_SIZE) - i) * PAGE_SIZE),
+                init_stack_top.sub((n_pages - i) * PAGE_SIZE),
                 init_stack_pages.add(i * PAGE_SIZE),
             );
         }
