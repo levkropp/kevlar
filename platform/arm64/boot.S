@@ -137,7 +137,13 @@ _start:
     //   IRGN0/ORGN0 = 0b01 (WB-WA)
     //   IRGN1/ORGN1 = 0b01 (WB-WA)
     //   SH0/SH1 = 0b11 (Inner Shareable)
-    ldr     x0, =0x00000025B5103510
+    //   AS   = 1    (16-bit ASID, 65535 contexts; ASID in TTBR0[63:48])
+    //   TBI0 = 1    (top-byte-ignore on TTBR0 user accesses)
+    //   HA   = 1    (hardware Access-Flag update — Apple Silicon + Linux
+    //                enable this unconditionally; CPU advertises HAFDBS)
+    //   A1   = 0    (ASID source = TTBR0_EL1 — single-MSR switch path)
+    // Encoded: 0x000000B5_B5103510.
+    ldr     x0, =0x000000B5B5103510
     msr     tcr_el1, x0
 
     // Set TTBR0 and TTBR1.
@@ -201,8 +207,8 @@ secondary_entry:
     mov     x0, #0xFF00
     msr     mair_el1, x0
 
-    // TCR_EL1 (same as BSP).
-    ldr     x0, =0x00000025B5103510
+    // TCR_EL1 (same as BSP — see BSP block for field breakdown).
+    ldr     x0, =0x000000B5B5103510
     msr     tcr_el1, x0
 
     // TTBR0: identity map (reuse BSP's page tables).

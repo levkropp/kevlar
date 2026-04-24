@@ -99,11 +99,20 @@ pub mod arch {
         super::x64::paging::bump_global_pcid_generation();
     }
     #[cfg(target_arch = "aarch64")]
-    pub fn bump_global_pcid_generation() {}
+    pub fn bump_global_pcid_generation() {
+        super::arm64::paging::bump_global_asid_generation();
+    }
 
-    /// Broadcast TLB flush to all other CPUs. ARM64 stub — TODO.
+    /// Broadcast TLB flush to all other CPUs.  ARM64 TLBI-IS broadcasts
+    /// in hardware for kernel-scope flushes, but the ASID fast-path
+    /// relies on the per-CPU generation check to decide when to locally
+    /// flush.  Bumping the generation forces every CPU whose next
+    /// switch lands on an affected ASID to slow-path through a
+    /// `tlbi vmalle1` once.
     #[cfg(target_arch = "aarch64")]
-    pub fn flush_tlb_remote_all_pcids() {}
+    pub fn flush_tlb_remote_all_pcids() {
+        super::arm64::paging::bump_global_asid_generation();
+    }
 
     /// Load the kernel bootstrap PML4 into CR3.  Called by the scheduler
     /// when switching to a task that has no Vm (typically the idle thread):

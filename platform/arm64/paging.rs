@@ -820,19 +820,105 @@ fn prot_to_attrs(prot_flags: i32) -> u64 {
     attrs
 }
 
+// ── ASID management (mirror of x64 PCID at platform/x64/paging.rs).
+//
+// TCR.AS=1 gives 16-bit ASIDs (65535 usable contexts; ASID 0 is reserved
+// for untagged / teardown wrappers).  TCR.A1=0 so the ASID lives in
+// TTBR0_EL1[63:48] alongside the user pgd — one MSR installs both.
+//
+// Per-PageTable state is a packed AtomicU64:
+//   [15:0]   ASID
+//   [63:16]  generation
+//
+// The global `ASID_STATE` allocator hands out fresh `(gen | asid)` pairs;
+// wrapping at ASID_MAX bumps the generation so every per-CPU tracker
+// picks up the rollover on its next switch.
+//
+// `CPU_LAST_SEEN_ASID_GEN[cpu]` records the generation this CPU last
+// flushed for.  Fast path (gen match): MSR TTBR0, ISB.  Slow path (gen
+// mismatch): `tlbi vmalle1` once, then MSR + tracker update.
+//
+// This matches x64's PCID structurally — mask widths differ (0xFFFF here
+// vs 0xFFF there), so don't cross-port mask constants.
+const ASID_MASK: u64 = 0xFFFF;
+const ASID_GEN_INCR: u64 = 1 << 16;
+const ASID_MAX: u16 = 0xFFFF;
+
+static ASID_STATE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(1); // gen=0, next asid=1
+
+static CPU_LAST_SEEN_ASID_GEN: [core::sync::atomic::AtomicU64; super::smp::MAX_CPUS] = {
+    const Z: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    [Z; super::smp::MAX_CPUS]
+};
+
+/// Bump the global ASID generation.  Used as a deferred "flush everyone's
+/// TLB for all ASIDs" signal — every CPU's next `PageTable::switch()`
+/// slow-paths a local `tlbi vmalle1` once.  Called from the cross-arch
+/// `flush_tlb_remote_all_pcids` shim in platform/lib.rs.
+pub fn bump_global_asid_generation() {
+    use core::sync::atomic::Ordering;
+    loop {
+        let s = ASID_STATE.load(Ordering::Relaxed);
+        let generation = s & !ASID_MASK;
+        let asid_part = s & ASID_MASK;
+        let new_s = (generation + ASID_GEN_INCR) | asid_part;
+        if ASID_STATE
+            .compare_exchange_weak(s, new_s, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+fn alloc_asid() -> u64 {
+    use core::sync::atomic::Ordering;
+    loop {
+        let s = ASID_STATE.load(Ordering::Relaxed);
+        let generation = s & !ASID_MASK;
+        let next = (s & ASID_MASK) as u16;
+        if next >= ASID_MAX {
+            // Wrap the ASID space: bump generation, restart at 1.
+            let new_s = (generation + ASID_GEN_INCR) | 1;
+            if ASID_STATE
+                .compare_exchange_weak(s, new_s, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return new_s;
+            }
+            continue;
+        }
+        let new_s = generation | ((next + 1) as u64);
+        if ASID_STATE
+            .compare_exchange_weak(s, new_s, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            return generation | (next as u64);
+        }
+    }
+}
+
 pub struct PageTable {
     pgd: PAddr,
+    /// Packed `(generation << 16) | asid`.  AtomicU64 so `switch()` can
+    /// refresh the generation on slow-path promotion with `&self`.
+    asid_gen: core::sync::atomic::AtomicU64,
 }
 
 impl PageTable {
     pub fn new() -> Result<PageTable, PageAllocError> {
         let pgd = allocate_pgd()?;
-        Ok(PageTable { pgd })
+        Ok(PageTable {
+            pgd,
+            asid_gen: core::sync::atomic::AtomicU64::new(alloc_asid()),
+        })
     }
 
     pub fn duplicate_from(original: &mut PageTable) -> Result<PageTable, PageAllocError> {
         Ok(PageTable {
             pgd: duplicate_table(original.pgd, 4)?,
+            asid_gen: core::sync::atomic::AtomicU64::new(alloc_asid()),
         })
     }
 
@@ -844,21 +930,63 @@ impl PageTable {
         self.pgd = PAddr::new(0);
     }
 
+    #[inline]
+    fn asid(&self) -> u64 {
+        self.asid_gen.load(core::sync::atomic::Ordering::Relaxed) & ASID_MASK
+    }
+
     pub fn switch(&self) {
-        // `dsb ish` is the lighter barrier — inner-shareable domain is enough
-        // for the local `tlbi vmalle1` below (not an _is_ broadcast).  `dsb sy`
-        // costs extra on Apple Silicon HVF because it forces full-system
-        // ordering that the hypervisor has to arbitrate.  Linux arm64's
-        // switch_mm uses `dsb ish` for the same reason.
+        use core::sync::atomic::Ordering;
+
+        let my = self.asid_gen.load(Ordering::Relaxed);
+        let asid = my & ASID_MASK;
+
+        // ASID 0 is reserved (kernel / teardown wrappers).  Full flush.
+        if asid == 0 {
+            unsafe {
+                core::arch::asm!(
+                    "msr ttbr0_el1, {pgd}",
+                    "tlbi vmalle1",
+                    "dsb ish",
+                    "isb",
+                    pgd = in(reg) self.pgd.value() as u64,
+                );
+            }
+            return;
+        }
+
+        let ttbr0 = (self.pgd.value() as u64) | (asid << 48);
+        let global_gen = ASID_STATE.load(Ordering::Relaxed) & !ASID_MASK;
+        let cpu = super::cpu_id() as usize;
+        let cpu_gen = CPU_LAST_SEEN_ASID_GEN[cpu].load(Ordering::Relaxed);
+
+        if cpu_gen == global_gen {
+            // Fast path: tagged TLB is trusted for this generation on
+            // this CPU.  Single MSR + ISB, no TLBI.
+            unsafe {
+                core::arch::asm!(
+                    "msr ttbr0_el1, {t0}",
+                    "isb",
+                    t0 = in(reg) ttbr0,
+                );
+            }
+            return;
+        }
+
+        // Slow path: generation bumped since this CPU's last flush.
+        // Invalidate the local TLB once, then install TTBR0.  `dsb ish`
+        // — inner-shareable is enough; `dsb sy` is costlier on HVF.
         unsafe {
             core::arch::asm!(
-                "msr ttbr0_el1, {}",
+                "msr ttbr0_el1, {t0}",
                 "tlbi vmalle1",
                 "dsb ish",
                 "isb",
-                in(reg) self.pgd.value() as u64,
+                t0 = in(reg) ttbr0,
             );
         }
+        CPU_LAST_SEEN_ASID_GEN[cpu].store(global_gen, Ordering::Relaxed);
+        self.asid_gen.store(global_gen | asid, Ordering::Relaxed);
     }
 
     pub fn map_user_page(&mut self, vaddr: UserVAddr, paddr: PAddr) {
@@ -1013,14 +1141,13 @@ impl PageTable {
     }
 
     pub fn flush_tlb(&self, vaddr: UserVAddr) {
-        // `tlbi vale1, {op}` operand: VA[55:12] in bits [43:0], ASID in
-        // bits [63:48].  With TCR.AS=0 and TTBR0 always written with
-        // ASID=0, this operand's ASID field is always 0 — correct.
-        // When we later enable ASID tagging (blog 216 / 217), this
-        // site needs to thread the live ASID through, or ASID-tagged
-        // entries will stay stale after the kernel fixes the PTE.
+        // `tlbi vale1, {op}` operand layout: VA[55:12] in bits [43:0],
+        // ASID in bits [63:48].  We MUST include the running ASID or
+        // this TLBI only invalidates ASID=0 entries and the ASID-tagged
+        // entries for the current process stay stale — that was the
+        // 200x regression investigated in blogs 216 / 217.
+        let addr = ((vaddr.value() >> 12) as u64) | (self.asid() << 48);
         unsafe {
-            let addr = vaddr.value() >> 12;
             core::arch::asm!(
                 "tlbi vale1, {}",
                 "dsb ish",
@@ -1044,16 +1171,24 @@ impl PageTable {
     pub fn flush_tlb_remote(&self) {}
 
     pub fn flush_tlb_all(&self) {
-        // `dsb ish` — inner-shareable barrier.  Matches Linux arm64 (see
-        // arch/arm64/include/asm/tlbflush.h `__flush_tlb_all`).  `dsb sy`
-        // costs extra on HVF because it serializes against host-level
-        // memory ordering.
+        // Flush only entries tagged with THIS PageTable's ASID via
+        // `tlbi aside1`.  Untagged (asid==0) wrappers fall back to
+        // `tlbi vmalle1` (everything).  `dsb ish` matches Linux
+        // __flush_tlb_all; `dsb sy` is costlier on HVF.
+        let asid = self.asid();
         unsafe {
-            core::arch::asm!(
-                "tlbi vmalle1",
-                "dsb ish",
-                "isb",
-            );
+            if asid == 0 {
+                core::arch::asm!("tlbi vmalle1", "dsb ish", "isb");
+            } else {
+                // tlbi aside1 operand: ASID in [63:48], rest zero.
+                let operand = asid << 48;
+                core::arch::asm!(
+                    "tlbi aside1, {x}",
+                    "dsb ish",
+                    "isb",
+                    x = in(reg) operand,
+                );
+            }
         }
     }
 
@@ -1154,7 +1289,12 @@ impl PageTable {
     /// `from_pml4_for_teardown` — the name uses x86 terminology for API
     /// parity with the deferred-Vm-drop path in kernel/mm/vm.rs.
     pub fn from_pml4_for_teardown(pgd: PAddr) -> PageTable {
-        PageTable { pgd }
+        // Teardown-only wrapper: asid=0 so any TLB op that fires on this
+        // wrapper routes through the untagged vmalle1 path.
+        PageTable {
+            pgd,
+            asid_gen: core::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     /// Ghost-fork: duplicate page-table structure, CoW-mark writable leaves
@@ -1173,7 +1313,13 @@ impl PageTable {
         // the parent from executing a stale writable translation on
         // SMP boundaries.
         unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)); }
-        Ok((PageTable { pgd: new_pgd }, cow_addrs))
+        Ok((
+            PageTable {
+                pgd: new_pgd,
+                asid_gen: core::sync::atomic::AtomicU64::new(alloc_asid()),
+            },
+            cow_addrs,
+        ))
     }
 
     /// Teardown for a ghost-forked page table: free page-table pages and

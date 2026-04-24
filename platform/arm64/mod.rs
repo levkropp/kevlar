@@ -17,7 +17,7 @@ pub mod debugcon;
 mod gic;
 mod idle;
 mod interrupt;
-mod paging;
+pub mod paging;
 mod profile;
 mod semihosting;
 mod serial;

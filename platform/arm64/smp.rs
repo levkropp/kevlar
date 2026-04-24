@@ -36,6 +36,12 @@ pub static AP_ENTRY_STACK_TOP: AtomicU64 = AtomicU64::new(0);
 
 // ── Sizing ────────────────────────────────────────────────────────────
 
+/// Upper bound on supported CPUs.  Sized at compile time by
+/// `CPU_LAST_SEEN_ASID_GEN` and similar per-CPU statics.  Arm64 currently
+/// probes up to 8 MPIDRs via PSCI in this file (see `max_probe_mpidr`),
+/// so this matches reality.
+pub const MAX_CPUS: usize = 8;
+
 const AP_STACK_PAGES: usize = 16; // 64 KiB kernel stack per AP
 
 // ── PSCI constants ────────────────────────────────────────────────────
