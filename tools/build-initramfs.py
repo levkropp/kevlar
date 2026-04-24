@@ -162,11 +162,19 @@ def compile_all_local():
         ("testing/test_kxserver.c",      "test-kxserver",    []),
         ("testing/fb0_probe.c",          "fb0-probe",        []),
     ]
+    # kvlr_posix_spawn.c is a drop-in override for musl's posix_spawn() that
+    # routes through SYS_KVLR_SPAWN when available, falling back to
+    # vfork+execve on -ENOSYS.  Link BEFORE -lc (implicit via the .c file
+    # appearing early in the command line) so the static linker satisfies
+    # posix_spawn/posix_spawnp from our .c file and skips musl's version.
+    # See blog 227.
+    kvlr_shim = ROOT / "benchmarks/kvlr_posix_spawn.c"
     for src_rel, name, extra in musl_bins:
         src = ROOT / src_rel
         out = LOCAL_BIN / name
         jobs.append(("musl-gcc", src, out,
-                      ["-static", "-O2", "-Wall", "-Wno-unused-result"] + extra))
+                      ["-static", "-O2", "-Wall", "-Wno-unused-result",
+                       str(kvlr_shim)] + extra))
 
     # ── Contract tests (musl-gcc static) ──
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):

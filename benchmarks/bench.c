@@ -743,6 +743,43 @@ static void bench_exec_true_spawn(void) {
         report("exec_true_spawn", completed, now_ns() - start);
 }
 
+/* posix_spawn path: exercises the kvlr_posix_spawn.c shim (which routes
+ * through SYS_KVLR_SPAWN when available).  Unlike exec_true_spawn which
+ * calls the syscall directly, this uses the standard POSIX API — proves
+ * that patched-libc routing gets the fast path transparently.  Matches
+ * the shape of bench_exec_true. */
+#include <spawn.h>
+extern char **environ;
+static void bench_exec_true_posix_spawn(void) {
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    /* Empty file_actions: the most common shape in real programs is
+     * actually non-empty (stdout redirect), but empty is enough to
+     * verify the routing + spawn overhead. */
+    char *argv[] = { "true", NULL };
+    pid_t probe_pid;
+    int r = posix_spawn(&probe_pid, "/bin/true", &fa, NULL, argv, environ);
+    if (r != 0) {
+        posix_spawn_file_actions_destroy(&fa);
+        printf("BENCH_SKIP exec_true_posix_spawn (posix_spawn failed: %d)\n", r);
+        return;
+    }
+    waitpid(probe_pid, NULL, 0);
+
+    int iters = ITERS(200, 100);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        pid_t pid;
+        if (posix_spawn(&pid, "/bin/true", &fa, NULL, argv, environ) != 0) break;
+        waitpid(pid, NULL, 0);
+        completed++;
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    if (completed > 0)
+        report("exec_true_posix_spawn", completed, now_ns() - start);
+}
+
 /* v2 smoke test: spawn /bin/true with an empty file_actions array and a
  * zero-flag attr via KVLR_SPAWN_F_EXTENDED.  Verifies the extended-args
  * parser works end-to-end without exercising any semantic change.
@@ -1242,6 +1279,7 @@ static bench_entry benchmarks[] = {
     {"fork_exit_kvlr",   bench_fork_kvlr,        0},
     {"exec_true_spawn",  bench_exec_true_spawn,  0},
     {"exec_true_spawn_v2", bench_exec_true_spawn_v2_smoke, 0},
+    {"exec_true_posix_spawn", bench_exec_true_posix_spawn, 0},
     {"shell_noop_spawn", bench_shell_noop_spawn, 0},
     {"pipe_grep",    bench_pipe_grep,      0},
     {"pipe_grep_spawn",    bench_pipe_grep_spawn,      0},
