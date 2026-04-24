@@ -25,6 +25,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <errno.h>
 #include <sys/uio.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
@@ -674,13 +675,47 @@ static void bench_shell_noop(void) {
         report("shell_noop", completed, now_ns() - start);
 }
 
-/* Kevlar-private SYS_KVLR_SPAWN(path, argv, envp, flags).  See blog 224.
- * Returns child PID (no vfork-style block — the user's wait4 handles
- * synchronization).  Linux returns ENOSYS, so the *_spawn benches BENCH_SKIP
- * automatically when this binary runs on Linux. */
+/* Kevlar-private SYS_KVLR_SPAWN(path, argv, envp, flags[, fa, attr]).
+ * See blog 224 (v1) and blog 227 (v2 file_actions + attrs). */
 #ifndef SYS_kvlr_spawn
 #define SYS_kvlr_spawn 500
 #endif
+
+/* v2 flag bit: enables a5 = file_actions ptr, a6 = attr ptr. */
+#define KVLR_SPAWN_F_EXTENDED 1u
+
+#define KVLR_SPAWN_FA_CLOSE 1u
+#define KVLR_SPAWN_FA_OPEN  2u
+#define KVLR_SPAWN_FA_DUP2  3u
+
+#define KVLR_SPAWN_SETSIGMASK 1u
+#define KVLR_SPAWN_SETSIGDEF  2u
+#define KVLR_SPAWN_SETPGROUP  4u
+#define KVLR_SPAWN_SETSID     8u
+#define KVLR_SPAWN_RESETIDS   16u
+
+struct kvlr_spawn_file_action {
+    unsigned int op;
+    int fd;
+    int newfd;
+    int oflag;
+    unsigned int mode;
+    unsigned int _pad;
+    const char *path;
+};
+
+struct kvlr_spawn_file_actions_hdr {
+    unsigned int count;
+    unsigned int _pad;
+    /* followed by struct kvlr_spawn_file_action actions[count] */
+};
+
+struct kvlr_spawn_attr {
+    unsigned int flags;
+    int pgid;
+    unsigned long long sigmask;
+    unsigned long long sigdefault;
+};
 
 static void bench_exec_true_spawn(void) {
     /* Probe once: if kvlr_spawn isn't supported, skip without burning
@@ -706,6 +741,41 @@ static void bench_exec_true_spawn(void) {
     }
     if (completed > 0)
         report("exec_true_spawn", completed, now_ns() - start);
+}
+
+/* v2 smoke test: spawn /bin/true with an empty file_actions array and a
+ * zero-flag attr via KVLR_SPAWN_F_EXTENDED.  Verifies the extended-args
+ * parser works end-to-end without exercising any semantic change.
+ * Real measurement of file_actions overhead comes once musl's posix_spawn
+ * routes through this syscall (blog 227-follow-up). */
+static void bench_exec_true_spawn_v2_smoke(void) {
+    struct kvlr_spawn_file_actions_hdr empty_fa = { .count = 0, ._pad = 0 };
+    struct kvlr_spawn_attr empty_attr = { 0, 0, 0, 0 };
+
+    char *probe_argv[] = { "true", NULL };
+    char *probe_envp[] = { NULL };
+    long probe = syscall(SYS_kvlr_spawn, "/bin/true", probe_argv, probe_envp,
+                         KVLR_SPAWN_F_EXTENDED, &empty_fa, &empty_attr);
+    if (probe < 0) {
+        printf("BENCH_SKIP exec_true_spawn_v2 (kvlr_spawn v2 unsupported)\n");
+        return;
+    }
+    waitpid((pid_t)probe, NULL, 0);
+
+    int iters = ITERS(200, 100);
+    int completed = 0;
+    char *argv[] = { "true", NULL };
+    char *envp[] = { NULL };
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        long pid = syscall(SYS_kvlr_spawn, "/bin/true", argv, envp,
+                           KVLR_SPAWN_F_EXTENDED, &empty_fa, &empty_attr);
+        if (pid < 0) break;
+        waitpid((pid_t)pid, NULL, 0);
+        completed++;
+    }
+    if (completed > 0)
+        report("exec_true_spawn_v2", completed, now_ns() - start);
 }
 
 static void bench_shell_noop_spawn(void) {
@@ -1171,6 +1241,7 @@ static bench_entry benchmarks[] = {
     {"shell_noop",   bench_shell_noop,     0},
     {"fork_exit_kvlr",   bench_fork_kvlr,        0},
     {"exec_true_spawn",  bench_exec_true_spawn,  0},
+    {"exec_true_spawn_v2", bench_exec_true_spawn_v2_smoke, 0},
     {"shell_noop_spawn", bench_shell_noop_spawn, 0},
     {"pipe_grep",    bench_pipe_grep,      0},
     {"pipe_grep_spawn",    bench_pipe_grep_spawn,      0},

@@ -32,7 +32,7 @@ mod dup2;
 mod execve;
 mod exit;
 mod exit_group;
-mod kvlr_spawn;
+pub mod kvlr_spawn;
 mod kvlr_vfork;
 pub mod fcntl;
 mod fork;
@@ -1319,6 +1319,8 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new_nonnull(a2)?,
                 UserVAddr::new_nonnull(a3)?,
                 a4 as u32,
+                a5,     // KVLR_SPAWN_F_EXTENDED: file_actions ptr (0 = none)
+                a6,     // KVLR_SPAWN_F_EXTENDED: attr ptr (0 = none)
             ),
             SYS_KVLR_VFORK => self.sys_kvlr_vfork(),
             SYS_FORK => self.sys_fork(),

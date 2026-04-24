@@ -2175,6 +2175,8 @@ impl Process {
         executable: Arc<PathComponent>,
         argv: &[&[u8]],
         envp: &[&[u8]],
+        file_actions: &[crate::syscalls::kvlr_spawn::SpawnFileAction],
+        attr: Option<&crate::syscalls::kvlr_spawn::SpawnAttr>,
     ) -> Result<Arc<Process>> {
         // cgroup limit check (same as fork).
         crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
@@ -2202,8 +2204,90 @@ impl Process {
         let mut opened_files = parent.opened_files().lock().clone();
         opened_files.close_cloexec_files();
 
+        // v2 file_actions: applied in order on the child's freshly-cloned
+        // fd table, between CLOEXEC close and child construction.  This
+        // is the "posix_spawn slot" — the conceptual window between
+        // vfork() returning in the child and execve() starting, where
+        // dup2(stdin→pipefd) and friends happen.
+        use crate::syscalls::kvlr_spawn::SpawnFileAction;
+        use crate::fs::opened_file::Fd;
+        use crate::fs::opened_file::OpenOptions;
+        for action in file_actions {
+            match action {
+                SpawnFileAction::Close(fd) => {
+                    // POSIX posix_spawn says close failure is NOT fatal —
+                    // closing an already-closed fd is silently OK.
+                    let _ = opened_files.close(Fd::new(*fd));
+                }
+                SpawnFileAction::Dup2 { src, dst } => {
+                    let opts = OpenOptions {
+                        nonblock: false, close_on_exec: false,
+                        append: false, access_mode: 2, sync: false,
+                    };
+                    opened_files.dup2(Fd::new(*src), Fd::new(*dst), opts)?;
+                }
+                SpawnFileAction::Open { fd, path, oflag, mode } => {
+                    // Resolve path against parent's root_fs (child hasn't
+                    // split off yet — rootfs clone happens below).
+                    let path = crate::fs::path::Path::new(path.as_str());
+                    let pc = parent.root_fs().lock().lookup_path(path, true)?;
+                    let opt_flags = crate::fs::opened_file::OpenFlags::from_bits_truncate(*oflag);
+                    let _ = mode;  // TODO: creat mode for O_CREAT
+                    opened_files.open_with_fixed_fd(
+                        Fd::new(*fd),
+                        alloc::sync::Arc::new(crate::fs::opened_file::OpenedFile::new(
+                            pc, opt_flags.into(), 0,
+                        )),
+                        opt_flags.into(),
+                    )?;
+                }
+            }
+        }
+
         // Fresh signal handlers (POSIX exec resets all to SIG_DFL).
         let signals = SignalDelivery::new();
+
+        // v2 attrs → struct-construction-time values.
+        use crate::syscalls::kvlr_spawn::{
+            SpawnAttr, KVLR_SPAWN_SETSIGMASK, KVLR_SPAWN_SETSID, KVLR_SPAWN_RESETIDS,
+        };
+        let initial_sigset: u64 = attr
+            .filter(|a| a.flags & KVLR_SPAWN_SETSIGMASK != 0)
+            .map(|a| a.sigmask)
+            .unwrap_or(0);
+        let setsid = attr.map(|a| a.flags & KVLR_SPAWN_SETSID != 0).unwrap_or(false);
+        let resetids = attr.map(|a| a.flags & KVLR_SPAWN_RESETIDS != 0).unwrap_or(false);
+        let (initial_uid, initial_euid, initial_suid) = if resetids {
+            let uid = parent.uid.load(Ordering::Relaxed);
+            (uid, uid, uid)
+        } else {
+            (
+                parent.uid.load(Ordering::Relaxed),
+                parent.euid.load(Ordering::Relaxed),
+                parent.suid.load(Ordering::Relaxed),
+            )
+        };
+        let (initial_gid, initial_egid, initial_sgid) = if resetids {
+            let gid = parent.gid.load(Ordering::Relaxed);
+            (gid, gid, gid)
+        } else {
+            (
+                parent.gid.load(Ordering::Relaxed),
+                parent.egid.load(Ordering::Relaxed),
+                parent.sgid.load(Ordering::Relaxed),
+            )
+        };
+        let initial_session_id = if setsid {
+            pid.as_i32()
+        } else {
+            parent.session_id()
+        };
+        // SETSID also implies new process group of the child.  SETPGROUP
+        // without SETSID: use attr.pgid (0 means "new pg = child's pid").
+        // For simplicity in v2.0, SETPGROUP is applied AFTER child Arc is
+        // constructed (needs process_group.lock()).  SETSID is handled
+        // at struct time via initial_session_id.
+        let _ = SpawnAttr::default(); // suppress unused warning
 
         // Per-process state inherited from parent.
         let process_group = parent.process_group();
@@ -2236,7 +2320,7 @@ impl Process {
             process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
             pid,
             tgid: pid,
-            session_id: AtomicI32::new(parent.session_id()),
+            session_id: AtomicI32::new(initial_session_id),
             state: AtomicProcessState::new(ProcessState::Runnable),
             parent: parent_weak,
             cmdline: AtomicRefCell::new(Cmdline::from_argv(argv)),
@@ -2264,14 +2348,14 @@ impl Process {
             signal_pending: AtomicU32::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
-            sigset: AtomicU64::new(0),
+            sigset: AtomicU64::new(initial_sigset),
             umask: AtomicCell::new(parent_umask),
-            uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
-            euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
-            suid: AtomicU32::new(parent.suid.load(Ordering::Relaxed)),
-            gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
-            egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
-            sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
+            uid: AtomicU32::new(initial_uid),
+            euid: AtomicU32::new(initial_euid),
+            suid: AtomicU32::new(initial_suid),
+            gid: AtomicU32::new(initial_gid),
+            egid: AtomicU32::new(initial_egid),
+            sgid: AtomicU32::new(initial_sgid),
             nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
             is_child_subreaper: AtomicBool::new(false),
             comm: SpinLock::new(None),
