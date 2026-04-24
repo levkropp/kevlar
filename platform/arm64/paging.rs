@@ -174,6 +174,26 @@ fn alloc_pt_page() -> Result<PAddr, PageAllocError> {
     Ok(paddr)
 }
 
+/// Broadcast TLB flush scoped to a single ASID.  Use after in-place
+/// PTE mutations within a shared leaf PT so remote CPUs (or other
+/// threads sharing this Vm) drop stale writable TLB entries for that
+/// ASID before they can write through them.  Cheaper than vmalle1is
+/// because it leaves every other process's TLB alone.
+#[inline(always)]
+fn tlb_flush_asid_broadcast(asid: u64) {
+    let operand = asid << 48;
+    unsafe {
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi aside1is, {x}",
+            "dsb ish",
+            "isb",
+            x = in(reg) operand,
+            options(nostack),
+        );
+    }
+}
+
 /// Broadcast TLB flush after a page-table structural change.  Use when
 /// unsharing a PT page: stale walks on other CPUs must stop before the
 /// old PT is freed.
@@ -421,6 +441,7 @@ fn share_leaf_pt(
     pt_paddr: PAddr,
     parent_pmd_entry_ptr: *mut PageTableEntry,
     child_pmd_entry_ptr: *mut PageTableEntry,
+    parent_asid: u64,
 ) {
     let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
     // Step 1: RO-stamp pass — bump data-page refcounts, set AP_RO on writable
@@ -476,12 +497,23 @@ fn share_leaf_pt(
     // Parent's TLB may have cached writable entries for this PT's range
     // from before share_leaf_pt stamped AP_RO in place.  Without a flush,
     // parent will continue writing (via cached TLB) through the shared
-    // page, corrupting the shared data visible to the child.  Flush all
-    // TLB entries in the inner-shareable domain.
-    tlb_flush_all_broadcast();
+    // page, corrupting the shared data visible to the child.  Flush
+    // ASID-scoped (parent's ASID only) in the inner-shareable domain —
+    // no reason to blow away every other process's TLB for a single
+    // process's fork.  When parent is untagged (asid=0) fall back to
+    // vmalle1is (the old behaviour).
+    if parent_asid == 0 {
+        tlb_flush_all_broadcast();
+    } else {
+        tlb_flush_asid_broadcast(parent_asid);
+    }
 }
 
-fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, PageAllocError> {
+fn duplicate_table(
+    original_table_paddr: PAddr,
+    level: usize,
+    parent_asid: u64,
+) -> Result<PAddr, PageAllocError> {
     let orig_table = original_table_paddr.as_mut_ptr::<PageTableEntry>();
     // DIRTY_OK: we immediately bulk-copy over the page, so pre-zeroing would
     // be pure waste.  Saves ~8 µs/fork on a 4-level tree (zero 4 KB ×
@@ -574,7 +606,7 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
             } else {
                 let parent_pmd = unsafe { orig_table.offset(i) };
                 let child_pmd = unsafe { new_table.offset(i) };
-                share_leaf_pt(pt_paddr, parent_pmd, child_pmd);
+                share_leaf_pt(pt_paddr, parent_pmd, child_pmd, parent_asid);
             }
         }
     } else {
@@ -604,7 +636,7 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
                 if paddr.is_null() {
                     continue;
                 }
-                let sub_table = duplicate_table(paddr, level - 1)?;
+                let sub_table = duplicate_table(paddr, level - 1, parent_asid)?;
                 unsafe {
                     *new_table.offset(i) = sub_table.value() as u64 | entry_flags(entry);
                 }
@@ -934,8 +966,9 @@ impl PageTable {
     }
 
     pub fn duplicate_from(original: &mut PageTable) -> Result<PageTable, PageAllocError> {
+        let parent_asid = original.asid();
         Ok(PageTable {
-            pgd: duplicate_table(original.pgd, 4)?,
+            pgd: duplicate_table(original.pgd, 4, parent_asid)?,
             asid_gen: core::sync::atomic::AtomicU64::new(alloc_asid()),
         })
     }
