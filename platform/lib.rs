@@ -213,6 +213,23 @@ pub trait Handler: Sync {
 
     #[cfg(debug_assertions)]
     fn usercopy_hook(&self) {}
+
+    /// arm64 only: return a raw pointer to the current task's `FpState`
+    /// (as a u64, since `FpState` is arch-specific and this trait is
+    /// cross-arch).  Used by the EC=0x07 FP-trap handler in
+    /// `platform/arm64/fp.rs` to save/restore FP state lazily without
+    /// having to reach into the kernel's `PROCESSES` map from the
+    /// platform crate.  Returns 0 if the process subsystem isn't
+    /// initialized yet.  Default is 0 (no FP state); the kernel
+    /// overrides on arm64.
+    #[cfg(target_arch = "aarch64")]
+    fn current_task_fp_state_ptr(&self) -> u64 { 0 }
+
+    /// arm64 only: mark the current task's FP state as loaded in HW.
+    /// Called by `handle_fp_trap` after a successful restore.  Default
+    /// no-op.
+    #[cfg(target_arch = "aarch64")]
+    fn mark_current_task_fp_loaded(&self) {}
 }
 
 static HANDLER: StaticCell<&dyn Handler> = StaticCell::new(&NopHandler);

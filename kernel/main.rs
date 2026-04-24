@@ -203,6 +203,22 @@ impl kevlar_platform::Handler for Handler {
         // page fault handler when copying caused a page fault.
         debug_assert!(!current_process().vm().as_ref().unwrap().is_locked());
     }
+
+    #[cfg(target_arch = "aarch64")]
+    fn current_task_fp_state_ptr(&self) -> u64 {
+        match crate::process::current_process_option() {
+            Some(p) => p.arch().fp_state_ptr() as u64,
+            None => 0,
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn mark_current_task_fp_loaded(&self) {
+        use core::sync::atomic::Ordering;
+        if let Some(p) = crate::process::current_process_option() {
+            p.arch().fp_loaded.store(true, Ordering::Release);
+        }
+    }
 }
 
 struct ApiOps;

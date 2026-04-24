@@ -1389,6 +1389,17 @@ impl Process {
         current.ghost_fork_done.store(true, Ordering::Release);
         current.wake_vfork_parent();
 
+        // arm64 lazy FP: if this task currently owns the CPU's v-regs,
+        // clear the owner so the next task to use FP doesn't try to save
+        // into our soon-to-be-freed `fp_state`.  See platform/arm64/fp.rs.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let head = kevlar_platform::arch::arm64_specific::cpu_local_head();
+            if head.fp_owner == current.arch().fp_state_ptr() as u64 {
+                head.fp_owner = 0;
+            }
+        }
+
         if !is_thread {
             if let Some(parent) = current.parent.upgrade() {
                 if parent.signals().lock().nocldwait() {

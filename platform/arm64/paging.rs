@@ -494,19 +494,16 @@ fn share_leaf_pt(
         let child_entry = *child_pmd_entry_ptr;
         *child_pmd_entry_ptr = child_entry | PTE_SHARED_PT;
     }
-    // Parent's TLB may have cached writable entries for this PT's range
-    // from before share_leaf_pt stamped AP_RO in place.  Without a flush,
-    // parent will continue writing (via cached TLB) through the shared
-    // page, corrupting the shared data visible to the child.  Flush
-    // ASID-scoped (parent's ASID only) in the inner-shareable domain —
-    // no reason to blow away every other process's TLB for a single
-    // process's fork.  When parent is untagged (asid=0) fall back to
-    // vmalle1is (the old behaviour).
-    if parent_asid == 0 {
-        tlb_flush_all_broadcast();
-    } else {
-        tlb_flush_asid_broadcast(parent_asid);
-    }
+    // TLB flush deferred to a single broadcast at the end of
+    // `Vm::fork → flush_tlb_all` (now `aside1is`/`vmalle1is`).  Doing one
+    // flush after every leaf PT is shared meant 4-6 broadcasts per fork;
+    // a single end-of-fork flush is sufficient because nothing reads the
+    // freshly RO-stamped PTEs through the parent's TLB until userspace
+    // resumes — and `flush_tlb_all` runs before the parent leaves the
+    // kernel.  Caller (`PageTable::duplicate_from`) is responsible for
+    // performing that final broadcast.  `parent_asid` is kept in the
+    // signature in case a future caller needs per-leaf control.
+    let _ = parent_asid;
 }
 
 fn duplicate_table(
@@ -571,7 +568,24 @@ fn duplicate_table(
         //
         // The bulk copy above already placed the same leaf-PT paddrs in
         // child's PMD entries.  `share_leaf_pt` handles the rest in place.
-        for i in 0..ENTRIES_PER_TABLE {
+        //
+        // 8-wide batch-null skip: typical processes have only 1-3 of 512
+        // PMD slots populated (each leaf PT covers 2 MiB).  OR 8 adjacent
+        // u64s in one register load; if the result is zero the whole batch
+        // is empty.  Same pattern used at PGD/PUD (else branch below) and
+        // inside share_leaf_pt itself.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base)     | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
+                continue;
+            }
+            for i in base..base + 8 {
             let entry = unsafe { *orig_table.offset(i) };
             let pt_paddr = entry_paddr(entry);
             if pt_paddr.is_null() {
@@ -608,7 +622,8 @@ fn duplicate_table(
                 let child_pmd = unsafe { new_table.offset(i) };
                 share_leaf_pt(pt_paddr, parent_pmd, child_pmd, parent_asid);
             }
-        }
+            }  // close inner per-entry for
+        }      // close batch for
     } else {
         // Intermediate table (PGD/PUD): recurse to duplicate sub-tables.
         // The bulk copy left child pointers pointing at the parent's
@@ -815,6 +830,7 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
 /// every PTE the ghost fork marked, using the collected address list.
 /// O(cow_pages) rather than O(all_PTEs).
 fn restore_writable_from_list(pgd: PAddr, addrs: &[usize]) {
+    let mut any = false;
     for &vaddr in addrs {
         let uva = unsafe { UserVAddr::new_unchecked(vaddr) };
         // `traverse_mut` (not `traverse`) so we unshare any SHARED leaf PT
@@ -824,12 +840,18 @@ fn restore_writable_from_list(pgd: PAddr, addrs: &[usize]) {
             let entry = unsafe { *pte.as_ptr() };
             if entry & PTE_WAS_WRITABLE != 0 {
                 let restored = (entry & !ATTR_AP_RO) & !PTE_WAS_WRITABLE;
-                unsafe {
-                    *pte.as_mut() = restored;
-                    core::arch::asm!("dsb ish", "isb", options(nostack));
-                }
+                unsafe { *pte.as_mut() = restored; }
+                any = true;
             }
         }
+    }
+    // Single barrier at the end instead of per-PTE.  arm64 only — x64's
+    // strong memory model needs no barrier here at all (mirror of
+    // platform/x64/paging.rs::restore_writable_from_list).  Per-PTE
+    // dsb/isb cost ~50–200 cycles each; on a typical 200-page exec that
+    // turned restore_writable into the dominant fork+exec cost.
+    if any {
+        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)); }
     }
 }
 
@@ -1223,19 +1245,43 @@ impl PageTable {
     pub fn flush_tlb_remote(&self) {}
 
     pub fn flush_tlb_all(&self) {
-        // Flush only entries tagged with THIS PageTable's ASID via
-        // `tlbi aside1`.  Untagged (asid==0) wrappers fall back to
-        // `tlbi vmalle1` (everything).  `dsb ish` matches Linux
-        // __flush_tlb_all; `dsb sy` is costlier on HVF.
+        // Local TLB flush — ASID-scoped via `tlbi aside1`, untagged falls
+        // back to `tlbi vmalle1`.  Used by single-CPU-correct callers like
+        // the CoW write fault handler where the faulting CPU is the only
+        // one that can have a stale entry for the freshly-mapped paddr.
         let asid = self.asid();
         unsafe {
             if asid == 0 {
                 core::arch::asm!("tlbi vmalle1", "dsb ish", "isb");
             } else {
-                // tlbi aside1 operand: ASID in [63:48], rest zero.
                 let operand = asid << 48;
                 core::arch::asm!(
                     "tlbi aside1, {x}",
+                    "dsb ish",
+                    "isb",
+                    x = in(reg) operand,
+                );
+            }
+        }
+    }
+
+    /// Inner-shareable broadcast TLB flush.  Used by `Vm::fork` after
+    /// `duplicate_from`'s CoW RO-stamps so sibling threads of the parent
+    /// running on other CPUs invalidate their cached writable entries —
+    /// arm64's `flush_tlb_remote` is a no-op, so SMP correctness depends
+    /// on the `is`-suffixed instructions here.  Costlier than `aside1`
+    /// (broadcast vs local), so reserve for paths that genuinely need
+    /// remote-CPU visibility.
+    pub fn flush_tlb_all_broadcast(&self) {
+        let asid = self.asid();
+        unsafe {
+            if asid == 0 {
+                core::arch::asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb");
+            } else {
+                let operand = asid << 48;
+                core::arch::asm!(
+                    "dsb ishst",
+                    "tlbi aside1is, {x}",
                     "dsb ish",
                     "isb",
                     x = in(reg) operand,

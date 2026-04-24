@@ -14,6 +14,7 @@ mod boot;
 mod bootinfo;
 #[cfg(feature = "ktrace")]
 pub mod debugcon;
+pub mod fp;
 mod gic;
 mod idle;
 mod interrupt;

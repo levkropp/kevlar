@@ -39,8 +39,15 @@ _start:
     // Disable interrupts.
     msr     daifset, #0xf
 
-    // Enable FP/NEON (CPACR_EL1.FPEN = 0b11).
-    mov     x0, #(3 << 20)
+    // Lazy FP: trap EL0 FP/NEON access (CPACR_EL1.FPEN = 0b01 — EL1
+    // allowed, EL0 traps).  First time userspace touches FP/SIMD, the
+    // EC=0x07 sync-exception handler in `interrupt.rs` calls
+    // `fp::handle_fp_trap`, which loads this task's FpState into v-regs
+    // and flips FPEN to 0b11 for the rest of this scheduling slice.
+    // Context switch flips FPEN back to 0b01 so the next task traps too.
+    // EL1 itself never touches FP (kernel built `-fp-armv8 -neon`), so
+    // 0b01 is sufficient at boot.
+    mov     x0, #(1 << 20)
     msr     cpacr_el1, x0
     isb
 
@@ -192,8 +199,15 @@ secondary_entry:
     mov     x0, xzr
     msr     cntp_ctl_el0, x0
 
-    // Enable FP/NEON (CPACR_EL1.FPEN = 0b11).
-    mov     x0, #(3 << 20)
+    // Lazy FP: trap EL0 FP/NEON access (CPACR_EL1.FPEN = 0b01 — EL1
+    // allowed, EL0 traps).  First time userspace touches FP/SIMD, the
+    // EC=0x07 sync-exception handler in `interrupt.rs` calls
+    // `fp::handle_fp_trap`, which loads this task's FpState into v-regs
+    // and flips FPEN to 0b11 for the rest of this scheduling slice.
+    // Context switch flips FPEN back to 0b01 so the next task traps too.
+    // EL1 itself never touches FP (kernel built `-fp-armv8 -neon`), so
+    // 0b01 is sufficient at boot.
+    mov     x0, #(1 << 20)
     msr     cpacr_el1, x0
     isb
 

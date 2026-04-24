@@ -512,7 +512,9 @@ impl Vm {
         // read-only (COW) in the parent. Without a flush, stale writable
         // TLB entries let the parent silently write through to the now-shared
         // physical page, corrupting data (including page tables themselves).
-        self.page_table.flush_tlb_all();
+        // Broadcast variant: arm64 share_leaf_pt no longer flushes per-leaf,
+        // so this is the sole point that invalidates sibling-CPU TLBs.
+        self.page_table.flush_tlb_all_broadcast();
         Ok(Vm {
             page_table: new_pt,
             vm_areas: self.vm_areas.clone(),

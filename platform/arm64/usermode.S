@@ -143,18 +143,18 @@ kthread_entry:
 ///     prev_sp: *mut u64,        // x0
 ///     next_sp: *const u64,      // x1
 ///     ctx_saved: *mut u8,       // x2
-///     prev_fp: *mut FpState,    // x3  (save outgoing v0-v31 / FPCR / FPSR here)
-///     next_fp: *const FpState,  // x4  (load incoming v0-v31 / FPCR / FPSR from here)
 /// )
 ///
 /// The store-release to *ctx_saved (via stlrb) ensures that any CPU that
 /// observed context_saved=0 and is spinning in resume() will see the fully
 /// saved SP before being allowed to enqueue this thread.
 ///
-/// FP save/restore: the kernel is compiled -neon,-fp-armv8, so EL1 code
-/// never touches v-regs.  User FP state therefore survives EL0→EL1→EL0
-/// round-trips untouched and only needs to be saved when we actually swap
-/// tasks.  Matches Linux arm64's fpsimd_save_state / fpsimd_load_state.
+/// FP/NEON state is NOT saved or restored here — it's handled lazily by
+/// the EC=0x07 trap handler in `platform/arm64/fp.rs`.  The caller
+/// (`switch_task`) flips CPACR_EL1.FPEN to trap EL0 FP after this
+/// returns, so the next task's first SIMD instruction faults into the
+/// trap handler which loads its `FpState` on demand.  Mirror of Linux
+/// arm64's `TIF_FOREIGN_FPSTATE` model.
 .global do_switch_thread
 do_switch_thread:
     // Save callee-saved registers and LR.
@@ -169,30 +169,6 @@ do_switch_thread:
     mrs     x9, nzcv
     str     x9, [sp, #-8]!
 
-    // Save outgoing FP/NEON state into *prev_fp (x3).  Placed before the
-    // SP save so the full context is captured while other CPUs are still
-    // gated by context_saved=0.
-    stp     q0,  q1,  [x3, #(0  * 32)]
-    stp     q2,  q3,  [x3, #(1  * 32)]
-    stp     q4,  q5,  [x3, #(2  * 32)]
-    stp     q6,  q7,  [x3, #(3  * 32)]
-    stp     q8,  q9,  [x3, #(4  * 32)]
-    stp     q10, q11, [x3, #(5  * 32)]
-    stp     q12, q13, [x3, #(6  * 32)]
-    stp     q14, q15, [x3, #(7  * 32)]
-    stp     q16, q17, [x3, #(8  * 32)]
-    stp     q18, q19, [x3, #(9  * 32)]
-    stp     q20, q21, [x3, #(10 * 32)]
-    stp     q22, q23, [x3, #(11 * 32)]
-    stp     q24, q25, [x3, #(12 * 32)]
-    stp     q26, q27, [x3, #(13 * 32)]
-    stp     q28, q29, [x3, #(14 * 32)]
-    stp     q30, q31, [x3, #(15 * 32)]
-    mrs     x9,  fpcr
-    mrs     x10, fpsr
-    str     x9,  [x3, #512]    // FPCR
-    str     x10, [x3, #520]    // FPSR
-
     // Save current SP to prev->sp, then mark context as saved.
     mov     x9, sp
     str     x9, [x0]
@@ -202,30 +178,6 @@ do_switch_thread:
     // Load next SP.
     ldr     x9, [x1]
     mov     sp, x9
-
-    // Load incoming FP/NEON state from *next_fp (x4).  Placed after the SP
-    // swap so first-run tasks (userland_entry / forked_child_entry / kthread_entry)
-    // eret with the correct v-regs.
-    ldr     x9,  [x4, #512]    // FPCR
-    ldr     x10, [x4, #520]    // FPSR
-    msr     fpcr, x9
-    msr     fpsr, x10
-    ldp     q0,  q1,  [x4, #(0  * 32)]
-    ldp     q2,  q3,  [x4, #(1  * 32)]
-    ldp     q4,  q5,  [x4, #(2  * 32)]
-    ldp     q6,  q7,  [x4, #(3  * 32)]
-    ldp     q8,  q9,  [x4, #(4  * 32)]
-    ldp     q10, q11, [x4, #(5  * 32)]
-    ldp     q12, q13, [x4, #(6  * 32)]
-    ldp     q14, q15, [x4, #(7  * 32)]
-    ldp     q16, q17, [x4, #(8  * 32)]
-    ldp     q18, q19, [x4, #(9  * 32)]
-    ldp     q20, q21, [x4, #(10 * 32)]
-    ldp     q22, q23, [x4, #(11 * 32)]
-    ldp     q24, q25, [x4, #(12 * 32)]
-    ldp     q26, q27, [x4, #(13 * 32)]
-    ldp     q28, q29, [x4, #(14 * 32)]
-    ldp     q30, q31, [x4, #(15 * 32)]
 
     // Restore NZCV flags.
     ldr     x9, [sp], #8
@@ -271,4 +223,35 @@ kevlar_save_fp_to:
     mrs     x2, fpsr
     str     x1, [x0, #512]    // FPCR
     str     x2, [x0, #520]    // FPSR
+    ret
+
+/// Load FP/NEON state from *src into the live v-regs.
+/// fn kevlar_restore_fp_from(src: *const FpState)  // x0 = src
+///
+/// Mirror of `kevlar_save_fp_to`.  Used by the EC=0x07 FP-trap handler to
+/// load the current task's FpState when it first touches SIMD after a
+/// context switch.  Load FPCR/FPSR before the v-regs so rounding-mode and
+/// status flags are live before any SIMD op on the same register file.
+.global kevlar_restore_fp_from
+kevlar_restore_fp_from:
+    ldr     x1, [x0, #512]    // FPCR
+    ldr     x2, [x0, #520]    // FPSR
+    msr     fpcr, x1
+    msr     fpsr, x2
+    ldp     q0,  q1,  [x0, #(0  * 32)]
+    ldp     q2,  q3,  [x0, #(1  * 32)]
+    ldp     q4,  q5,  [x0, #(2  * 32)]
+    ldp     q6,  q7,  [x0, #(3  * 32)]
+    ldp     q8,  q9,  [x0, #(4  * 32)]
+    ldp     q10, q11, [x0, #(5  * 32)]
+    ldp     q12, q13, [x0, #(6  * 32)]
+    ldp     q14, q15, [x0, #(7  * 32)]
+    ldp     q16, q17, [x0, #(8  * 32)]
+    ldp     q18, q19, [x0, #(9  * 32)]
+    ldp     q20, q21, [x0, #(10 * 32)]
+    ldp     q22, q23, [x0, #(11 * 32)]
+    ldp     q24, q25, [x0, #(12 * 32)]
+    ldp     q26, q27, [x0, #(13 * 32)]
+    ldp     q28, q29, [x0, #(14 * 32)]
+    ldp     q30, q31, [x0, #(15 * 32)]
     ret

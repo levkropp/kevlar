@@ -66,6 +66,15 @@ macro_rules! cpu_local {
 }
 
 /// The cpu-local structure at the beginning of TPIDR_EL1.
+///
+/// ASM offsets (hardcoded in `trap.S`, `usermode.S`):
+///   0:   sp_el1
+///   8:   sp_el0_save
+///   16:  preempt_count
+///   20:  need_resched
+///   24:  fp_owner
+/// Do NOT reorder the first four fields — asm accesses them by offset.
+/// New fields must be appended at the end.
 #[repr(C)]
 pub struct CpuLocalHead {
     /// The kernel stack pointer for syscall/exception entry.
@@ -81,6 +90,13 @@ pub struct CpuLocalHead {
     /// switch is due.  Checked by `preempt_enable()` to reschedule immediately.
     /// Matches Linux's TIF_NEED_RESCHED.
     pub need_resched: u32,
+    /// PID of the task whose FP/NEON state is currently loaded in the v-regs
+    /// on this CPU.  0 = no FP owner (v-regs are foreign / undefined).
+    /// Mirror of Linux's per-CPU `fpsimd_last_state` pointer.  Used by the
+    /// EC=0x07 FP-trap handler to decide whose state to save before loading
+    /// the current task's.  Cleared on task exit if the exiting task owns
+    /// the CPU's FP state.
+    pub fp_owner: u64,
 }
 
 #[used]

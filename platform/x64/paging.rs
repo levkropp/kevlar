@@ -1522,6 +1522,15 @@ impl PageTable {
         }
     }
 
+    /// Cross-CPU TLB flush — same shape as the arm64 mirror.  On x64 a
+    /// local CR3 reload only invalidates this CPU's TLB, so when the
+    /// caller (e.g. `Vm::fork`) needs siblings on other CPUs to drop their
+    /// stale entries, route through the IPI-based broadcast.
+    pub fn flush_tlb_all_broadcast(&self) {
+        self.flush_tlb_all();
+        super::apic::tlb_remote_flush_all_pcids();
+    }
+
     #[inline(always)]
     fn map_page(&mut self, vaddr: UserVAddr, paddr: PAddr, attrs: PageAttrs) {
         debug_assert!(is_aligned(vaddr.value(), PAGE_SIZE));

@@ -22,6 +22,7 @@ const EC_DATA_ABORT_LOWER: u32 = 0b100100;  // Data abort from lower EL
 const EC_DATA_ABORT_CURR: u32 = 0b100101;   // Data abort from current EL
 const EC_INST_ABORT_LOWER: u32 = 0b100000;  // Instruction abort from lower EL
 const EC_INST_ABORT_CURR: u32 = 0b100001;   // Instruction abort from current EL
+const EC_FP_ASIMD: u32 = 0b000111;    // Access to Advanced SIMD / FP while CPACR.FPEN traps
 
 /// Called from trap.S for synchronous exceptions.
 /// `from_user`: 0 = kernel, 1 = user.
@@ -45,6 +46,13 @@ extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
             // overwrite regs[0] here — it would clobber the signal
             // number set by try_delivering_signal().
             super::syscall::arm64_handle_syscall(frame);
+        }
+        EC_FP_ASIMD => {
+            // EL0 tried to use FP/SIMD while CPACR.FPEN = 0b01 (trap
+            // EL0).  Lazily restore this task's FpState; `eret` then
+            // re-executes the faulting instruction.  See
+            // platform/arm64/fp.rs for the state machine.
+            super::fp::handle_fp_trap();
         }
         EC_DATA_ABORT_LOWER | EC_INST_ABORT_LOWER => {
             // User-space page fault.

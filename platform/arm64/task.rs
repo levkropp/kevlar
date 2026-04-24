@@ -82,12 +82,30 @@ pub struct ArchTask {
     // through the single `syscall_stack` (sp_el1), so we don't need one.
     kernel_stack: Option<OwnedPages>,
     syscall_stack: Option<OwnedPages>,
-    /// Per-task FP/NEON state (528 B).  Saved on context-switch by
-    /// `do_switch_thread`; see `FpState` docs.
+    /// Per-task FP/NEON state (528 B).  Saved/restored *lazily* by the
+    /// EC=0x07 FP-trap handler, NOT on context switch — see `FpState` docs.
     fp_state: Box<FpState>,
+    /// True when this task's `fp_state` is currently loaded in the v-regs of
+    /// some CPU.  Inverse of Linux's `TIF_FOREIGN_FPSTATE` flag.  Cleared
+    /// by the trap handler when it saves another task's state out of HW
+    /// (this task's state becomes foreign w.r.t. the HW) and by `new_*`
+    /// constructors.  Set when the trap handler loads this task's state.
+    pub fp_loaded: AtomicBool,
 }
 
 unsafe impl Sync for ArchTask {}
+
+impl ArchTask {
+    /// Raw pointer to this task's `FpState`.  Used by the EC=0x07 FP-trap
+    /// handler to save/restore state directly without going through
+    /// `PROCESSES.lock()` (which isn't reachable from the platform crate).
+    /// The pointer is stable for the lifetime of the `ArchTask` — the
+    /// inner `Box<FpState>` is only moved by `Drop`.
+    #[inline(always)]
+    pub fn fp_state_ptr(&self) -> *mut FpState {
+        &*self.fp_state as *const FpState as *mut FpState
+    }
+}
 
 impl Drop for ArchTask {
     fn drop(&mut self) {
@@ -111,14 +129,16 @@ unsafe extern "C" {
         prev_sp: *mut u64,
         next_sp: *const u64,
         ctx_saved: *mut u8,
-        prev_fp: *mut FpState,
-        next_fp: *const FpState,
     );
     /// Snapshot the live hardware FP/NEON state (v0-v31, FPCR, FPSR) into
     /// `dst`.  Used in `fork()` to copy the parent's FP state into the child:
     /// at SVC entry the parent's v-regs are still live in HW because the
     /// trap handler no longer saves/restores them.
-    fn kevlar_save_fp_to(dst: *mut FpState);
+    pub fn kevlar_save_fp_to(dst: *mut FpState);
+    /// Load FP/NEON state (v0-v31, FPCR, FPSR) from `src` into the live HW.
+    /// Used by the EC=0x07 FP-trap handler on first EL0 SIMD use to make the
+    /// current task's saved state live.
+    pub fn kevlar_restore_fp_from(src: *const FpState);
 }
 
 unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
@@ -169,6 +189,7 @@ impl ArchTask {
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
             fp_state: FpState::zeroed(),
+            fp_loaded: AtomicBool::new(false),
         }
     }
 
@@ -227,6 +248,7 @@ impl ArchTask {
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
             fp_state: FpState::zeroed(),
+            fp_loaded: AtomicBool::new(false),
         }
     }
 
@@ -243,6 +265,7 @@ impl ArchTask {
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
             fp_state: FpState::zeroed(),
+            fp_loaded: AtomicBool::new(false),
         }
     }
 
@@ -315,6 +338,7 @@ impl ArchTask {
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
             fp_state,
+            fp_loaded: AtomicBool::new(false),
         })
     }
 
@@ -445,6 +469,7 @@ impl ArchTask {
             context_saved: AtomicBool::new(true),
             kernel_stack: Some(kernel_stack),
             fp_state,
+            fp_loaded: AtomicBool::new(false),
         })
     }
 
@@ -553,9 +578,26 @@ pub fn switch_task(prev: &ArchTask, next: &ArchTask) {
             prev.sp.get(),
             next.sp.get(),
             prev.context_saved.as_ptr() as *mut u8,
-            &*prev.fp_state as *const FpState as *mut FpState,
-            &*next.fp_state as *const FpState,
         );
+        // Lazy FP: usually arm CPACR_EL1.FPEN to trap EL0 SIMD, so the
+        // next task's first FP instruction faults into
+        // `fp::handle_fp_trap` and that handler loads its FpState
+        // on demand.  Skip the trap arming on the fast path — when the
+        // CPU's v-regs already hold `next`'s state (next.fp_loaded &&
+        // CPU's fp_owner points at next.fp_state).  This is the
+        // common case for fork+wait benches where the parent gets
+        // re-scheduled onto the same CPU before any other task uses
+        // FP.  Saves a CPACR MSR (cheap on real HW, but can trap to
+        // the hypervisor under HVF) plus the subsequent FP-trap.
+        let next_fp_ptr = next.fp_state_ptr() as u64;
+        if next.fp_loaded.load(Ordering::Acquire)
+            && cpu_local_head().fp_owner == next_fp_ptr
+        {
+            // Same task back on the same CPU; v-regs are already its.
+            // Leave CPACR at 0b11.
+        } else {
+            super::fp::cpacr_trap_el0_fp();
+        }
     }
 }
 
