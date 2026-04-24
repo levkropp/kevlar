@@ -581,15 +581,33 @@ fn duplicate_table(original_table_paddr: PAddr, level: usize) -> Result<PAddr, P
         // Intermediate table (PGD/PUD): recurse to duplicate sub-tables.
         // The bulk copy left child pointers pointing at the parent's
         // sub-tables — we must rewrite each with a fresh duplicated one.
-        for i in 0..ENTRIES_PER_TABLE {
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-            if paddr.is_null() {
+        //
+        // 8-wide batch-null skip: PGD / PUD tables on real processes have
+        // only a handful of non-null entries out of 512.  OR 8 adjacent
+        // u64s in one register load; if the result is zero the whole
+        // batch is empty and we skip the per-entry check.  Same pattern
+        // used at level 1 / level 2 above.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base)     | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
                 continue;
             }
-            let sub_table = duplicate_table(paddr, level - 1)?;
-            unsafe {
-                *new_table.offset(i) = sub_table.value() as u64 | entry_flags(entry);
+            for i in base..base + 8 {
+                let entry = unsafe { *orig_table.offset(i) };
+                let paddr = entry_paddr(entry);
+                if paddr.is_null() {
+                    continue;
+                }
+                let sub_table = duplicate_table(paddr, level - 1)?;
+                unsafe {
+                    *new_table.offset(i) = sub_table.value() as u64 | entry_flags(entry);
+                }
             }
         }
     }
