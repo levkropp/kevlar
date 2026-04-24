@@ -131,6 +131,9 @@ def print_comparison(data, format='terminal'):
     regression = []
 
     all_benches = sorted(set(linux.keys()) & set(kevlar.keys()))
+    # Skip entries where the Linux baseline rounds to 0 ns/iter
+    # (below the gettime resolution — ratio is undefined).
+    all_benches = [n for n in all_benches if linux[n] > 0]
 
     for name in all_benches:
         l, k = linux[name], kevlar[name]

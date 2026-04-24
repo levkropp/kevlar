@@ -884,9 +884,32 @@ def assemble_rootfs(have_systemd, alpine_pkgs):
     # ── BusyBox symlinks ──
     bb = ROOTFS / "bin" / "busybox"
     if bb.exists():
-        r = run([str(bb), "--list-full"], capture_output=True, text=True)
-        for line in r.stdout.strip().split("\n"):
-            applet = line.strip()
+        # Cross-compiled busybox (x86_64 ELF on macOS arm64 host) can't be
+        # exec'd to enumerate applets — fall back to the same hardcoded list
+        # the arm64 path uses below.
+        try:
+            r = subprocess.run([str(bb), "--list-full"],
+                               capture_output=True, text=True, timeout=5)
+            applets = r.stdout.strip().split("\n") if r.returncode == 0 else []
+        except (OSError, subprocess.SubprocessError):
+            applets = []
+        if not applets:
+            applets = [
+                "bin/sh", "bin/ash", "bin/cat", "bin/echo", "bin/ls",
+                "bin/mkdir", "bin/mount", "bin/umount", "bin/ps",
+                "bin/kill", "bin/sleep", "bin/test", "bin/true",
+                "bin/false", "bin/grep", "bin/sed", "bin/awk",
+                "bin/head", "bin/tail", "bin/wc", "bin/cut",
+                "bin/rm", "bin/rmdir", "bin/cp", "bin/mv",
+                "bin/tar", "bin/sort", "bin/uniq", "bin/find",
+                "bin/chmod", "bin/chown", "bin/ln", "bin/touch",
+                "bin/dd", "bin/stat", "bin/df", "bin/du",
+                "bin/basename", "bin/dirname", "bin/xargs",
+                "sbin/init", "sbin/halt", "sbin/reboot",
+                "usr/bin/env", "usr/bin/id",
+            ]
+        for applet in applets:
+            applet = applet.strip()
             if not applet:
                 continue
             dest = ROOTFS / applet
