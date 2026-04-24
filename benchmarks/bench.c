@@ -690,6 +690,115 @@ static void bench_shell_noop_spawn(void) {
         report("shell_noop_spawn", completed, now_ns() - start);
 }
 
+/* Common helper: run a `/bin/sh -c <cmd>` pipeline N times via SYS_KVLR_SPAWN,
+ * report as `<name>_spawn`.  Returns 1 on success, 0 if kvlr_spawn is
+ * unsupported (Linux, or pre-224 Kevlar) so the caller can BENCH_SKIP.
+ * Skips probing overhead — the outer caller's first iter serves as probe,
+ * and an early -1 from syscall() aborts the loop cleanly. */
+static int run_shell_pipeline_spawn(const char *name, const char *cmd, int iters) {
+    char *probe_argv[] = { "sh", "-c", (char *)cmd, NULL };
+    char *probe_envp[] = { NULL };
+    long probe = syscall(SYS_kvlr_spawn, "/bin/sh", probe_argv, probe_envp, 0);
+    if (probe < 0) {
+        printf("BENCH_SKIP %s_spawn (kvlr_spawn unsupported)\n", name);
+        return 0;
+    }
+    waitpid((pid_t)probe, NULL, 0);
+
+    char *argv[] = { "sh", "-c", (char *)cmd, NULL };
+    char *envp[] = { NULL };
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        long pid = syscall(SYS_kvlr_spawn, "/bin/sh", argv, envp, 0);
+        if (pid < 0) break;
+        waitpid((pid_t)pid, NULL, 0);
+        completed++;
+    }
+    if (completed > 0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s_spawn", name);
+        report(buf, completed, now_ns() - start);
+    }
+    return 1;
+}
+
+static void bench_pipe_grep_spawn(void) {
+    int tmpfd = open("/tmp/bench_grep", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP pipe_grep_spawn\n"); return; }
+    const char *data = "line1 apple\nline2 banana\nline3 apple\n";
+    for (int i = 0; i < 100; i++) write(tmpfd, data, strlen(data));
+    close(tmpfd);
+    run_shell_pipeline_spawn("pipe_grep",
+        "grep apple /tmp/bench_grep > /dev/null", ITERS(100, 50));
+    unlink("/tmp/bench_grep");
+}
+
+static void bench_sed_pipeline_spawn(void) {
+    int tmpfd = open("/tmp/bench_sed", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP sed_pipeline_spawn\n"); return; }
+    for (int i = 0; i < 200; i++) {
+        char line[64];
+        int len = snprintf(line, sizeof(line), "prefix_item_%d_suffix\n", i);
+        write(tmpfd, line, len);
+    }
+    close(tmpfd);
+    run_shell_pipeline_spawn("sed_pipeline",
+        "sed 's/prefix/PRE/;s/suffix/SUF/' /tmp/bench_sed > /dev/null",
+        ITERS(100, 20));
+    unlink("/tmp/bench_sed");
+}
+
+static void bench_sort_uniq_spawn(void) {
+    int tmpfd = open("/tmp/bench_sort", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (tmpfd < 0) { printf("BENCH_SKIP sort_uniq_spawn\n"); return; }
+    const char *words[] = {"apple","banana","cherry","date","elderberry","fig","grape"};
+    for (int i = 0; i < 500; i++) {
+        const char *w = words[i % 7];
+        write(tmpfd, w, strlen(w));
+        write(tmpfd, "\n", 1);
+    }
+    close(tmpfd);
+    run_shell_pipeline_spawn("sort_uniq",
+        "sort /tmp/bench_sort | uniq -c | sort -rn > /dev/null",
+        ITERS(50, 10));
+    unlink("/tmp/bench_sort");
+}
+
+static void bench_tar_extract_spawn(void) {
+    /* Reuse the tar archive built by the non-_spawn bench (runs first in
+     * the suite).  If it isn't there — because bench_tar_extract wasn't
+     * run or its cleanup nuked it — we rebuild one here. */
+    struct stat st;
+    if (stat("/tmp/bench.tar", &st) != 0) {
+        mkdir("/tmp/bench_tar_in", 0755);
+        for (int i = 0; i < 20; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/tmp/bench_tar_in/f%d", i);
+            int fd = open(path, O_CREAT | O_WRONLY, 0644);
+            if (fd >= 0) { write(fd, "benchmark data\n", 15); close(fd); }
+        }
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl("/bin/sh", "sh", "-c", "tar cf /tmp/bench.tar -C /tmp bench_tar_in", NULL);
+            _exit(127);
+        }
+        waitpid(pid, NULL, 0);
+    }
+    run_shell_pipeline_spawn("tar_extract",
+        "rm -rf /tmp/bench_tar_out_spawn; mkdir /tmp/bench_tar_out_spawn; "
+        "tar xf /tmp/bench.tar -C /tmp/bench_tar_out_spawn",
+        ITERS(50, 10));
+    /* Cleanup */
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c",
+              "rm -rf /tmp/bench_tar_in /tmp/bench_tar_out_spawn /tmp/bench.tar", NULL);
+        _exit(127);
+    }
+    waitpid(pid, NULL, 0);
+}
+
 static void bench_pipe_grep(void) {
     /* Simulate: echo <data> | grep <pattern> — measures pipe+fork+exec */
     int iters = ITERS(100, 50);
@@ -1023,10 +1132,14 @@ static bench_entry benchmarks[] = {
     {"exec_true_spawn",  bench_exec_true_spawn,  0},
     {"shell_noop_spawn", bench_shell_noop_spawn, 0},
     {"pipe_grep",    bench_pipe_grep,      0},
+    {"pipe_grep_spawn",    bench_pipe_grep_spawn,      0},
     {"file_tree",    bench_file_tree,      0},
     {"sed_pipeline", bench_sed_pipeline,   0},
+    {"sed_pipeline_spawn", bench_sed_pipeline_spawn,   0},
     {"sort_uniq",    bench_sort_uniq,      0},
+    {"sort_uniq_spawn",    bench_sort_uniq_spawn,      0},
     {"tar_extract",  bench_tar_extract,    0},
+    {"tar_extract_spawn",  bench_tar_extract_spawn,    0},
 
     /* Phase 1/2 benchmarks (9) */
     {"statx",        bench_statx,          0},
