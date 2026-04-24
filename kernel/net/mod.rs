@@ -72,6 +72,14 @@ pub fn poll_if_ready() {
     }
 }
 
+/// True once `init_net` has populated SOCKETS / INTERFACE.  Used by
+/// `sys_socket` to refuse AF_INET creation (would otherwise panic on
+/// `SOCKETS.lock()`) on hosts without an ethernet driver — e.g. the
+/// HVF/QEMU benchmark setup.
+pub fn is_initialized() -> bool {
+    NET_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn process_packets() {
     let mut sockets = SOCKETS.lock();
     let mut iface = INTERFACE.lock();

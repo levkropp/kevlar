@@ -48,12 +48,15 @@ impl<'a> SyscallHandler<'a> {
                     Ok(crate::net::unix_socket::UnixSocket::new_typed(socket_type) as Arc<dyn FileLike>)
                 }
                 (AF_INET, SOCK_DGRAM, 0) | (AF_INET, SOCK_DGRAM, IPPROTO_UDP) => {
+                    if !crate::net::is_initialized() { return Err(Errno::EAFNOSUPPORT.into()); }
                     net.create_udp_socket()
                 }
                 (AF_INET, SOCK_STREAM, 0) | (AF_INET, SOCK_STREAM, IPPROTO_TCP) => {
+                    if !crate::net::is_initialized() { return Err(Errno::EAFNOSUPPORT.into()); }
                     net.create_tcp_socket()
                 }
                 (AF_INET, SOCK_DGRAM, IPPROTO_ICMP) => {
+                    if !crate::net::is_initialized() { return Err(Errno::EAFNOSUPPORT.into()); }
                     net.create_icmp_socket()
                 }
                 (AF_NETLINK, _, _) => {
