@@ -1687,7 +1687,7 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
 
             // Free any pages that weren't mapped (PTE already occupied).
             for i in 0..allocated {
-                if mapped & (1 << i) == 0 {
+                if mapped & (1u64 << i) == 0 {
                     if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
                         kevlar_platform::page_allocator::free_pages(pages[i], 1);
                     }

@@ -2651,9 +2651,12 @@ fn apply_prefault_template(vm: &mut Vm, file_ptr: usize) {
     if entries.is_empty() { return; }
 
     let mut i = 0;
-    // Reusable scratch for batch calls.  32 == batch primitive's per-call max.
-    let mut batch_paddrs: [kevlar_platform::address::PAddr; 32] =
-        [kevlar_platform::address::PAddr::new(0); 32];
+    // Reusable scratch for batch calls.  64 == batch primitive's per-call
+    // max (u64 bitmap return).  For busybox's ~260 template entries,
+    // widening from 32 to 64 halves the number of batch calls (leaf-PT
+    // traversals + DSB/ISB fences).
+    let mut batch_paddrs: [kevlar_platform::address::PAddr; 64] =
+        [kevlar_platform::address::PAddr::new(0); 64];
 
     while i < entries.len() {
         let (vaddr_i, _, flags_i) = entries[i];
@@ -2715,7 +2718,7 @@ fn apply_prefault_template(vm: &mut Vm, file_ptr: usize) {
         );
         // Undo refcount for entries that weren't mapped.
         for k in 0..run_len {
-            if mapped & (1 << k) == 0 {
+            if mapped & (1u64 << k) == 0 {
                 kevlar_platform::page_refcount::page_ref_dec(batch_paddrs[k]);
             }
         }
@@ -3365,7 +3368,7 @@ fn prefault_small_anonymous(vm: &mut Vm) {
             start_uaddr, &pages[..batch_n], batch_n, prot_flags,
         );
         for i in 0..batch_n {
-            if mapped & (1 << i) == 0 {
+            if mapped & (1u64 << i) == 0 {
                 if kevlar_platform::page_refcount::page_ref_dec(pages[i]) {
                     kevlar_platform::page_allocator::free_pages(pages[i], 1);
                 }

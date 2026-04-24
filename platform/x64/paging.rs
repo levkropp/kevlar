@@ -1277,8 +1277,9 @@ impl PageTable {
 
     /// Batch-map contiguous user pages, traversing the page table hierarchy only
     /// once per leaf PT (2MB region) instead of once per page.
-    /// Returns a u32 bitmask: bit i set = page i was mapped.
+    /// Returns a u64 bitmask: bit i set = page i was mapped.
     /// Pages where the PTE was already occupied are NOT overwritten.
+    /// Caller must pass `count <= 64`; larger batches should be chunked.
     #[inline(always)]
     pub fn batch_try_map_user_pages_with_prot(
         &mut self,
@@ -1286,13 +1287,13 @@ impl PageTable {
         paddrs: &[PAddr],
         count: usize,
         prot_flags: i32,
-    ) -> u32 {
+    ) -> u64 {
         let mut attrs = PageAttrs::PRESENT | PageAttrs::USER;
         if prot_flags & 2 != 0 { attrs |= PageAttrs::WRITABLE; }
         if prot_flags & 4 == 0 { attrs |= PageAttrs::NO_EXECUTE; }
         let attrs_bits = attrs.bits();
 
-        let mut mapped: u32 = 0;
+        let mut mapped: u64 = 0;
         let mut i = 0;
 
         while i < count {
@@ -1323,7 +1324,7 @@ impl PageTable {
                     core::sync::atomic::Ordering::AcqRel,
                     core::sync::atomic::Ordering::Relaxed).is_ok()
                 {
-                    mapped |= 1 << i;
+                    mapped |= 1u64 << i;
                 }
                 idx += 1;
                 i += 1;
