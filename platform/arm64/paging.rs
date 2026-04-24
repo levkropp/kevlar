@@ -58,6 +58,15 @@ const PTE_WAS_WRITABLE: u64 = 1 << 55;
 /// is tolerated and self-healed by the sole-owner fast path in
 /// `traverse_mut`.
 const PTE_SHARED_PT: u64 = 1 << 56;
+/// "Shared leaf-PT page via ghost-fork."  Alongside the regular SHARED
+/// bit, lets teardown distinguish ghost-fork sharing (where data-page
+/// refcounts were NOT incremented) from regular-fork sharing (where they
+/// were).  Both set ATTR_AP_RO on writable entries, but only ghost adds
+/// PTE_WAS_WRITABLE — and only regular increments data refs.  The bit is
+/// ORed alongside PTE_SHARED_PT so every code path that checks SHARED
+/// also triggers the unshare gate — the only behavioural difference is
+/// at teardown time.
+const PTE_SHARED_PT_GHOST: u64 = 1 << 57;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +241,9 @@ fn unshare_leaf_pt(pmd_entry_ptr: *mut PageTableEntry)
 {
     let pmd_entry = unsafe { *pmd_entry_ptr };
     let old_pt_paddr = entry_paddr(pmd_entry);
-    let pmd_flags = entry_flags(pmd_entry) & !PTE_SHARED_PT;
+    // Clear BOTH SHARED bits — unshare produces an exclusive PT for the
+    // calling owner, regardless of whether the share was regular or ghost.
+    let pmd_flags = entry_flags(pmd_entry) & !(PTE_SHARED_PT | PTE_SHARED_PT_GHOST);
 
     if crate::pt_refcount::pt_ref_count(old_pt_paddr) > 1 {
         // Real unshare: allocate fresh PT, copy contents, publish.
@@ -506,6 +517,73 @@ fn share_leaf_pt(
     let _ = parent_asid;
 }
 
+/// Ghost-fork variant of `share_leaf_pt`: share the parent's leaf PT
+/// with the ghost child via a `pt_ref_inc` + SHARED bit, *without*
+/// bumping data-page refcounts.  The skipped refcount bumps are
+/// ghost-fork's reason to exist — they save ~100 atomic ops per leaf
+/// on typical processes.
+///
+/// Safety contract: the caller (a kvlr-private vfork-style primitive)
+/// MUST block the parent until the ghost child exits or execs.  Any
+/// concurrent parent write to a ghost-CoW'd page would take the "sole
+/// owner" fast path in the page-fault handler (because data refcount
+/// is 1, not 2) and corrupt the child's view.
+#[inline]
+fn share_leaf_pt_ghost(
+    pt_paddr: PAddr,
+    parent_pmd_entry_ptr: *mut PageTableEntry,
+    child_pmd_entry_ptr: *mut PageTableEntry,
+    base_vaddr: usize,
+    cow_addrs: &mut Vec<usize>,
+) {
+    let pt = pt_paddr.as_mut_ptr::<PageTableEntry>();
+    // RO-stamp pass — set AP_RO + PTE_WAS_WRITABLE on writable user
+    // entries, collect cow_addrs for restore_writable_from_list.
+    // No page_ref_inc — ghost-fork's whole raison d'être.
+    for batch in 0..64isize {
+        let base = batch * 8;
+        let any = unsafe {
+            *pt.offset(base)     | *pt.offset(base + 1)
+            | *pt.offset(base + 2) | *pt.offset(base + 3)
+            | *pt.offset(base + 4) | *pt.offset(base + 5)
+            | *pt.offset(base + 6) | *pt.offset(base + 7)
+        };
+        if any == 0 { continue; }
+        for i in base..base + 8 {
+            let entry = unsafe { *pt.offset(i) };
+            let paddr = entry_paddr(entry);
+            if paddr.is_null() { continue; }
+            let flags = entry_flags(entry);
+            if flags & ATTR_AP_USER == 0 { continue; }
+            if flags & ATTR_AP_RO == 0 {
+                unsafe {
+                    *pt.offset(i) = paddr.value() as u64
+                        | flags | ATTR_AP_RO | PTE_WAS_WRITABLE;
+                }
+                cow_addrs.push(base_vaddr | ((i as usize) << 12));
+            }
+        }
+    }
+
+    unsafe { core::arch::asm!("dsb ish", options(nostack)); }
+
+    // pt_ref_inc: the leaf PT has one more owner now (the ghost child).
+    // Needed for correct unshare behaviour when either owner writes
+    // through a CoW-marked entry.
+    crate::pt_refcount::pt_ref_inc(pt_paddr);
+
+    // Publish SHARED + GHOST bits on both PMD entries.  `traverse_mut`
+    // treats PTE_SHARED_PT as the unshare trigger — GHOST is additional
+    // metadata for the teardown path to recognise the no-data-refcount
+    // ownership pattern.
+    unsafe {
+        let parent_entry = *parent_pmd_entry_ptr;
+        *parent_pmd_entry_ptr = parent_entry | PTE_SHARED_PT | PTE_SHARED_PT_GHOST;
+        let child_entry = *child_pmd_entry_ptr;
+        *child_pmd_entry_ptr = child_entry | PTE_SHARED_PT | PTE_SHARED_PT_GHOST;
+    }
+}
+
 fn duplicate_table(
     original_table_paddr: PAddr,
     level: usize,
@@ -693,68 +771,104 @@ fn duplicate_table_ghost(
         // Leaf PTEs: CoW-mark writable user pages without touching refcount.
         // Leave non-writable and kernel pages alone — they're already shared
         // correctly by the bulk copy.
-        for i in 0..ENTRIES_PER_TABLE {
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-            if paddr.is_null() {
+        //
+        // 8-wide batch-null skip: typical user PTEs are sparse (50-100 of
+        // 512), so OR-ing 8 adjacent u64s in one register load and skipping
+        // empty batches eliminates ~90% of the iteration work.  Same pattern
+        // as `duplicate_table` and `share_leaf_pt`.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base)     | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
                 continue;
             }
-            let flags = entry_flags(entry);
-            if flags & ATTR_AP_USER == 0 {
-                continue;
-            }
-            if flags & ATTR_AP_RO == 0 {
-                // Parent+child PTE: set ATTR_AP_RO, remember original writability
-                // via PTE_WAS_WRITABLE so restore_writable_from_list can reverse it.
-                let cow_entry = paddr.value() as u64 | flags | ATTR_AP_RO | PTE_WAS_WRITABLE;
-                unsafe {
-                    *orig_table.offset(i) = cow_entry;
-                    *new_table.offset(i) = cow_entry;
+            for i in base..base + 8 {
+                let entry = unsafe { *orig_table.offset(i) };
+                let paddr = entry_paddr(entry);
+                if paddr.is_null() {
+                    continue;
                 }
-                cow_addrs.push(base_vaddr | ((i as usize) << 12));
+                let flags = entry_flags(entry);
+                if flags & ATTR_AP_USER == 0 {
+                    continue;
+                }
+                if flags & ATTR_AP_RO == 0 {
+                    // Parent+child PTE: set ATTR_AP_RO, remember original
+                    // writability via PTE_WAS_WRITABLE so
+                    // restore_writable_from_list can reverse it.
+                    let cow_entry = paddr.value() as u64 | flags | ATTR_AP_RO | PTE_WAS_WRITABLE;
+                    unsafe {
+                        *orig_table.offset(i) = cow_entry;
+                        *new_table.offset(i) = cow_entry;
+                    }
+                    cow_addrs.push(base_vaddr | ((i as usize) << 12));
+                }
             }
         }
     } else {
-        for i in 0..ENTRIES_PER_TABLE {
-            let entry = unsafe { *orig_table.offset(i) };
-            let paddr = entry_paddr(entry);
-            if paddr.is_null() {
+        // Intermediate level (PGD / PUD / PMD): same 8-wide batch-null skip.
+        // PGD / PUD typically have 1-2 of 512 entries populated; PMDs are
+        // also sparse for small processes.
+        for batch in 0..64isize {
+            let base = batch * 8;
+            let any = unsafe {
+                *orig_table.offset(base)     | *orig_table.offset(base + 1)
+                | *orig_table.offset(base + 2) | *orig_table.offset(base + 3)
+                | *orig_table.offset(base + 4) | *orig_table.offset(base + 5)
+                | *orig_table.offset(base + 6) | *orig_table.offset(base + 7)
+            };
+            if any == 0 {
                 continue;
             }
-            // If the parent's PMD entry points at a SHARED leaf PT (from
-            // a prior regular fork), unshare the parent side FIRST so
-            // the ghost fork's in-place AP_RO stamping doesn't leak
-            // into the other owner's view of the PT.  After unshare,
-            // parent has an exclusive fresh leaf PT, and the ghost
-            // fork recursion proceeds on that.  (Design review issue
-            // #12: ghost-fork coexistence with lazy-CoW sharing.)
-            let (effective_paddr, effective_entry_flags) =
-                if level == 2 && (entry & PTE_SHARED_PT) != 0 {
+            for i in base..base + 8 {
+                let entry = unsafe { *orig_table.offset(i) };
+                let paddr = entry_paddr(entry);
+                if paddr.is_null() {
+                    continue;
+                }
+                // Level 2 (PMD) fast path: share the leaf PT via
+                // `share_leaf_pt_ghost` — saves the per-leaf-PT alloc +
+                // 4 KB memcpy + recursion that the slow path below
+                // performs.  Only eligible when the parent's leaf PT
+                // isn't already shared from a prior regular fork; the
+                // slow-path unshare keeps correctness for that rare case.
+                if level == 2 && (entry & PTE_SHARED_PT) == 0 {
                     let parent_pmd = unsafe { orig_table.offset(i) };
-                    // Unshare the parent side; now parent_pmd points at a
-                    // fresh (exclusive) PT.  Read the new paddr from the
-                    // updated PMD entry.
-                    let _ = unshare_leaf_pt(parent_pmd)
-                        .map_err(|_| PageAllocError)?;
-                    let updated_parent_entry = unsafe { *parent_pmd };
-                    let unshared_paddr = entry_paddr(updated_parent_entry);
-                    // Clear SHARED on child's bulk-copied PMD entry so the
-                    // recursion below proceeds as a normal duplicate.
-                    unsafe {
-                        let child_entry = *new_table.offset(i);
-                        *new_table.offset(i) = child_entry & !PTE_SHARED_PT;
-                    }
-                    (unshared_paddr, entry_flags(updated_parent_entry))
-                } else {
-                    (paddr, entry_flags(entry))
-                };
-            let shift = (level - 1) * 9 + 12;
-            let child_base = base_vaddr | ((i as usize) << shift);
-            let new_child_paddr = duplicate_table_ghost(
-                effective_paddr, level - 1, child_base, cow_addrs)?;
-            unsafe {
-                *new_table.offset(i) = new_child_paddr.value() as u64
-                    | effective_entry_flags;
+                    let child_pmd = unsafe { new_table.offset(i) };
+                    let pmd_base = base_vaddr | ((i as usize) << 21);
+                    share_leaf_pt_ghost(paddr, parent_pmd, child_pmd, pmd_base, cow_addrs);
+                    continue;
+                }
+                // Slow path for already-regular-SHARED leaf PTs OR
+                // intermediate (PGD/PUD) levels.
+                let (effective_paddr, effective_entry_flags) =
+                    if level == 2 && (entry & PTE_SHARED_PT) != 0 {
+                        let parent_pmd = unsafe { orig_table.offset(i) };
+                        let _ = unshare_leaf_pt(parent_pmd)
+                            .map_err(|_| PageAllocError)?;
+                        let updated_parent_entry = unsafe { *parent_pmd };
+                        let unshared_paddr = entry_paddr(updated_parent_entry);
+                        unsafe {
+                            let child_entry = *new_table.offset(i);
+                            *new_table.offset(i) = child_entry & !PTE_SHARED_PT;
+                        }
+                        (unshared_paddr, entry_flags(updated_parent_entry))
+                    } else {
+                        (paddr, entry_flags(entry))
+                    };
+                let shift = (level - 1) * 9 + 12;
+                let child_base = base_vaddr | ((i as usize) << shift);
+                let new_child_paddr = duplicate_table_ghost(
+                    effective_paddr, level - 1, child_base, cow_addrs)?;
+                unsafe {
+                    *new_table.offset(i) = new_child_paddr.value() as u64
+                        | effective_entry_flags;
+                }
             }
         }
     }
@@ -809,14 +923,26 @@ fn teardown_table_ghost(table_paddr: PAddr, level: usize) {
                 // Else: parent-owned (read-only shared or still CoW-marked);
                 // leave untouched.
             } else if level == 2 && (entry & PTE_SHARED_PT) != 0 {
-                // Shared leaf PT (regular fork semantics, not ghost): same
-                // teardown rules as `teardown_table_dec_only`.  Ghost fork
-                // shouldn't ordinarily produce SHARED entries because
-                // `duplicate_table_ghost` unshares them first, but handle
-                // defensively in case the interaction is reached.
-                teardown_leaf_pt_shared(paddr);
-                if crate::pt_refcount::pt_ref_dec(paddr) {
-                    crate::page_allocator::free_pages(paddr, 1);
+                // Shared leaf PT.  Two flavours:
+                //   - PTE_SHARED_PT_GHOST set: shared via `share_leaf_pt_ghost`,
+                //     no data-page refcount bumps happened.  Decrement
+                //     pt_refcount only; data pages still belong to parent
+                //     (who's alive, since ghost-fork's contract requires the
+                //     parent to be blocked until the child exits).
+                //   - PTE_SHARED_PT_GHOST clear: regular-fork shared leaf PT,
+                //     data refcounts were bumped by share_leaf_pt — mirror
+                //     teardown_table_dec_only.
+                if entry & PTE_SHARED_PT_GHOST != 0 {
+                    if crate::pt_refcount::pt_ref_dec(paddr) {
+                        // Should not happen while parent is alive (parent
+                        // still owns the PT), but free defensively if it does.
+                        crate::page_allocator::free_pages(paddr, 1);
+                    }
+                } else {
+                    teardown_leaf_pt_shared(paddr);
+                    if crate::pt_refcount::pt_ref_dec(paddr) {
+                        crate::page_allocator::free_pages(paddr, 1);
+                    }
                 }
             } else {
                 teardown_table_ghost(paddr, level - 1);
