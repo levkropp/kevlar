@@ -28,15 +28,21 @@ LINUX_BUILD    ?= $(LINUX_SRC_DIR)/arch/arm64/boot/Image
 
 # Defaults: use the pre-built Alpine kernel + the bench-as-init initramfs.
 KERNEL         ?= ../../build/linux-arm64/vmlinuz-virt
-INITRAMFS      ?= /tmp/linux-initramfs.gz
+# Use Kevlar's full initramfs (includes busybox + applet symlinks) so
+# Linux runs the SAME test environment — otherwise benches like
+# tar_extract, sort_uniq, sed_pipeline just exec-fail-fast on Linux
+# because /bin/sh doesn't exist there, making the comparison
+# meaningless.
+INITRAMFS      ?= /tmp/kevlar-rootfs.cpio.gz
 BENCH_SRC      ?= ../../benchmarks/bench.c
 BENCH_BIN      ?= /tmp/linux-initramfs/bin/bench
+KEVLAR_CPIO    ?= ../../build/testing.arm64.initramfs
 
 CROSS_CC       ?= aarch64-linux-musl-gcc
 QEMU           ?= qemu-system-aarch64
 QEMU_ARGS      = -machine virt,accel=hvf -cpu host -m 1024 -mem-prealloc \
                  -kernel $(KERNEL) -initrd $(INITRAMFS) \
-                 -append "console=ttyAMA0 panic=1 init=/init quiet" \
+                 -append "console=ttyAMA0 panic=1 rdinit=/bin/bench quiet -- --full" \
                  -nographic -no-reboot
 
 # Poll the output for completion; HVF reliably finishes in a couple of
@@ -49,8 +55,14 @@ RUN_SCRIPT     = \
    done; \
    kill $$PID 2>/dev/null; sleep 1; kill -9 $$PID 2>/dev/null; wait 2>/dev/null || true)
 
+.PHONY: initramfs
+initramfs: $(KEVLAR_CPIO)
+	@echo "  GZIP    $(KEVLAR_CPIO) -> /tmp/kevlar-rootfs.cpio.gz"
+	@gzip -c $(KEVLAR_CPIO) > /tmp/kevlar-rootfs.cpio.gz
+	@ls -la /tmp/kevlar-rootfs.cpio.gz
+
 .PHONY: fork_exit
-fork_exit:
+fork_exit: initramfs
 	@for i in 1 2 3 4 5; do \
 	  $(call RUN_SCRIPT,/tmp/linux-hvf-fork_exit-$$i.log); \
 	  grep '^BENCH fork_exit' /tmp/linux-hvf-fork_exit-$$i.log | head -1; \
@@ -59,7 +71,7 @@ fork_exit:
 BASELINE_OUT   ?= ../../Documentation/optimization/linux-on-hvf-baseline.txt
 
 .PHONY: bench
-bench:
+bench: initramfs
 	@$(call RUN_SCRIPT,/tmp/linux-hvf-bench.log)
 	@mkdir -p $(dir $(BASELINE_OUT))
 	@echo "# Linux-on-HVF baseline ($(shell date -u +%Y-%m-%dT%H:%M:%SZ))" \

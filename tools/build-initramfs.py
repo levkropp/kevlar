@@ -1200,13 +1200,22 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None):
         except Exception:
             applets = []
         if not applets:
-            # Fallback: hardcode the most important applets
+            # Fallback: hardcode the most important applets.  Mac build
+            # hosts can't exec an arm64 binary, so `busybox --list-full`
+            # fails and we land here — keep this list wide enough that
+            # bench_tar_extract / bench_sort_uniq / bench_sed_pipeline
+            # actually find their tools.
             applets = [
                 "bin/sh", "bin/ash", "bin/cat", "bin/echo", "bin/ls",
                 "bin/mkdir", "bin/mount", "bin/umount", "bin/ps",
                 "bin/kill", "bin/sleep", "bin/test", "bin/true",
                 "bin/false", "bin/grep", "bin/sed", "bin/awk",
                 "bin/head", "bin/tail", "bin/wc", "bin/cut",
+                "bin/rm", "bin/rmdir", "bin/cp", "bin/mv",
+                "bin/tar", "bin/sort", "bin/uniq", "bin/find",
+                "bin/chmod", "bin/chown", "bin/ln", "bin/touch",
+                "bin/dd", "bin/stat", "bin/df", "bin/du",
+                "bin/basename", "bin/dirname", "bin/xargs",
                 "sbin/init", "sbin/halt", "sbin/reboot",
                 "usr/bin/env", "usr/bin/id",
             ]
