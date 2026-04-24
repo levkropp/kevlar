@@ -211,6 +211,23 @@ pub struct InitramFs {
 
 impl InitramFs {
     pub fn new(fs_image: &'static [u8]) -> InitramFs {
+        Self::new_with_align(fs_image, |data| data)
+    }
+
+    /// Same as `new`, but calls `align_fn` on every regular file's data
+    /// slice.  The callback may relocate the bytes into a freshly-
+    /// allocated, page-aligned kernel buffer so `data_vaddr()` returns a
+    /// page-aligned VA — which is required for the demand-pager's
+    /// `DIRECT_MAP_ENABLED` fast path to take over for that file.
+    ///
+    /// The callback is expected to return a `&'static [u8]` view over a
+    /// buffer whose lifetime matches the kernel's.  The callback itself
+    /// can be unsafe internally (the initramfs crate is still
+    /// `forbid(unsafe_code)`).
+    pub fn new_with_align<F: FnMut(&'static [u8]) -> &'static [u8]>(
+        fs_image: &'static [u8],
+        mut align_fn: F,
+    ) -> InitramFs {
         let dev_id = kevlar_vfs::inode::alloc_dev_id();
         let mut image = BytesParser::new(fs_image);
         let mut root_files = HashMap::new();
@@ -325,11 +342,15 @@ impl InitramFs {
                 );
             } else if mode.is_regular_file() {
                 let filename = filename.unwrap();
+                // Relocate the data to a page-aligned kernel buffer so
+                // data_vaddr() is page-aligned and the demand-pager's
+                // DIRECT_MAP fast path can take over.
+                let aligned_data = align_fn(data);
                 files.insert(
                     filename,
                     InitramFsINode::File(Arc::new(InitramFsFile {
                         filename,
-                        data,
+                        data: aligned_data,
                         stat: Stat {
                             inode_no: INodeNo::new(ino),
                             mode,

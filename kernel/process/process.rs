@@ -150,10 +150,13 @@ pub static GHOST_FORK_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Experiment 2: Prefault template (cache prefault mappings, replay on subsequent execs).
 pub static PREFAULT_TEMPLATE_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Experiment 3: Direct physical mapping (map initramfs pages directly, no copy).
-/// Currently disabled — adds conditional overhead to every page fault for
-/// an alignment check that rarely succeeds (CPIO uses 4-byte alignment).
-/// Exp 2 alone is faster. Would need page-aligned initramfs builder to help.
-pub static DIRECT_MAP_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Enabled as of blog 221: `kernel/fs/initramfs.rs::align_file_data` now
+/// relocates every regular file's bytes into a page-aligned, sentinel-
+/// refcounted kernel buffer at boot, so `data_vaddr() % PAGE_SIZE == 0`
+/// and the alignment check succeeds for every initramfs file.  Saves
+/// the per-fault alloc+copy and lets fork's CoW walk short-circuit the
+/// data-page refcount bumps via `PAGE_REF_KERNEL_IMAGE`.
+pub static DIRECT_MAP_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Wait queue for vfork parents. Woken when the child calls _exit or exec.
 pub static VFORK_WAIT_QUEUE: kevlar_utils::once::Once<WaitQueue> = kevlar_utils::once::Once::new();
 
