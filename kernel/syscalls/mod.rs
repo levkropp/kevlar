@@ -33,6 +33,7 @@ mod execve;
 mod exit;
 mod exit_group;
 mod kvlr_spawn;
+mod kvlr_vfork;
 pub mod fcntl;
 mod fork;
 mod fstat;
@@ -481,6 +482,12 @@ mod syscall_numbers {
     /// equivalent; deliberately above the Linux syscall range (~455 today)
     /// so future Linux additions can't collide.  See blog 224.
     pub const SYS_KVLR_SPAWN: usize = 500;
+
+    /// Kevlar-private: vfork-like primitive that uses ghost-fork CoW instead
+    /// of shared-memory semantics.  Parent blocks until child _exit/execve.
+    /// Safe because blocking precludes concurrent parent writes that would
+    /// otherwise corrupt the shared CoW PTEs.  See blog 226.
+    pub const SYS_KVLR_VFORK: usize = 501;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -732,6 +739,9 @@ mod syscall_numbers {
     /// Linux's allocated range so userspace can use the same constant
     /// regardless of arch.  See blog 224.
     pub const SYS_KVLR_SPAWN: usize = 500;
+
+    /// Kevlar-private: vfork with ghost-fork CoW semantics.  See blog 226.
+    pub const SYS_KVLR_VFORK: usize = 501;
 }
 
 use syscall_numbers::*;
@@ -1310,6 +1320,7 @@ impl<'a> SyscallHandler<'a> {
                 UserVAddr::new_nonnull(a3)?,
                 a4 as u32,
             ),
+            SYS_KVLR_VFORK => self.sys_kvlr_vfork(),
             SYS_FORK => self.sys_fork(),
             SYS_CLONE => self.sys_clone(a1, a2, a3, a4, a5),
             SYS_WAIT4 => self.sys_wait4(
@@ -1906,6 +1917,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_VFORK => "vfork",
         SYS_EXECVE => "execve",
         SYS_KVLR_SPAWN => "kvlr_spawn",
+        SYS_KVLR_VFORK => "kvlr_vfork",
         SYS_EXIT => "exit",
         SYS_WAIT4 => "wait4",
         SYS_KILL => "kill",

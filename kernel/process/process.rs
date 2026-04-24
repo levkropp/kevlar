@@ -1989,6 +1989,21 @@ impl Process {
     /// Creates a new process. The calling process (`self`) will be the parent
     /// process of the created process. Returns the created child process.
     pub fn fork(parent: &Arc<Process>, parent_frame: &PtRegs) -> Result<Arc<Process>> {
+        let ghost = GHOST_FORK_ENABLED.load(Ordering::Relaxed);
+        Self::fork_impl(parent, parent_frame, ghost)
+    }
+
+    /// Opt-in ghost fork: caller guarantees the parent will BLOCK until the
+    /// child calls `_exit` or `execve` (same contract as vfork).  Used by
+    /// `sys_kvlr_vfork` to get ghost-fork's ~6 µs page-table savings without
+    /// the global flag's data-corruption hazard (which fires when the parent
+    /// runs concurrently and writes to a CoW page).  Safe because the caller
+    /// enforces blocking via `VFORK_WAIT_QUEUE`.
+    pub fn fork_ghost(parent: &Arc<Process>, parent_frame: &PtRegs) -> Result<Arc<Process>> {
+        Self::fork_impl(parent, parent_frame, true)
+    }
+
+    fn fork_impl(parent: &Arc<Process>, parent_frame: &PtRegs, ghost: bool) -> Result<Arc<Process>> {
         let _fork_span = debug::tracer::span_guard(debug::tracer::span::FORK_TOTAL);
         // Check cgroup pids.max limit before allocating resources.
         crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
@@ -2008,7 +2023,6 @@ impl Process {
         // The parent is blocked until the child exec's or exits.
         // CoW faults in the child copy pages on demand (typically 2-3 pages
         // for musl's _Fork() wrapper). Saves ~8µs per fork.
-        let ghost = GHOST_FORK_ENABLED.load(Ordering::Relaxed);
         let vm = if ghost {
             let _g = debug::tracer::span_guard(debug::tracer::span::FORK_GHOST);
             let forked = parent.vm().as_ref().unwrap().lock().ghost_fork()?;

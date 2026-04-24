@@ -193,10 +193,13 @@ def print_comparison(data, format='terminal'):
     if kevlar_only:
         print(f'\n\033[36mKevlar-only benchmarks (Linux BENCH_SKIPs — compared to the nearest Linux baseline where applicable):\033[0m')
         for name in kevlar_only:
-            # Pair *_spawn → plain name on Linux (kvlr_spawn vs fork+exec).
+            # Pair *_spawn / *_kvlr → plain name on Linux
+            # (Kevlar-private primitives vs Linux's best fork+exec / fork+wait).
             paired = None
-            if name.endswith('_spawn') and name[:-len('_spawn')] in linux:
-                paired = name[:-len('_spawn')]
+            for suffix in ('_spawn', '_kvlr'):
+                if name.endswith(suffix) and name[:-len(suffix)] in linux:
+                    paired = name[:-len(suffix)]
+                    break
             if paired is not None:
                 l, k = linux[paired], kevlar[name]
                 ratio = k / l if l > 0 else 0.0

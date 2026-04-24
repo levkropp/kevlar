@@ -154,6 +154,46 @@ static void bench_fork(void) {
         report("fork_exit", completed, now_ns() - start);
 }
 
+/* Kevlar-private SYS_KVLR_VFORK() — vfork-like with ghost-fork CoW.
+ * See blog 226.  Same shape as bench_fork but uses kvlr_vfork so the
+ * kernel can skip share_leaf_pt's refcount walk + the parent↔child
+ * ctx-switch round-trip. */
+#ifndef SYS_kvlr_vfork
+#define SYS_kvlr_vfork 501
+#endif
+
+static void bench_fork_kvlr(void) {
+    /* Probe — kvlr_vfork returns -ENOSYS on Linux.  From the child side
+     * of the first iter we can't see the errno directly (we just _exit),
+     * so probe from the parent side: a first successful call proves
+     * support.  ghost-fork semantics mean waitpid on parent unblocks
+     * only after child _exit anyway — same shape as fork+wait. */
+    long pid = syscall(SYS_kvlr_vfork);
+    if (pid < 0) {
+        printf("BENCH_SKIP fork_exit_kvlr (kvlr_vfork unsupported)\n");
+        return;
+    }
+    if (pid == 0) {
+        _exit(0);
+    }
+    waitpid((pid_t)pid, NULL, 0);
+
+    int iters = ITERS(500, 200);
+    int completed = 0;
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        long p = syscall(SYS_kvlr_vfork);
+        if (p == 0) {
+            _exit(0);
+        } else if (p > 0) {
+            waitpid((pid_t)p, NULL, 0);
+            completed++;
+        } else break;
+    }
+    if (completed > 0)
+        report("fork_exit_kvlr", completed, now_ns() - start);
+}
+
 static void bench_open_close(void) {
     int fd = open("/tmp/benchfile", O_CREAT | O_WRONLY, 0644);
     if (fd < 0) { printf("BENCH_SKIP open_close\n"); return; }
@@ -1129,6 +1169,7 @@ static bench_entry benchmarks[] = {
     /* Workload benchmarks (7) */
     {"exec_true",    bench_exec_true,      0},
     {"shell_noop",   bench_shell_noop,     0},
+    {"fork_exit_kvlr",   bench_fork_kvlr,        0},
     {"exec_true_spawn",  bench_exec_true_spawn,  0},
     {"shell_noop_spawn", bench_shell_noop_spawn, 0},
     {"pipe_grep",    bench_pipe_grep,      0},
