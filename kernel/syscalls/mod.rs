@@ -32,6 +32,7 @@ mod dup2;
 mod execve;
 mod exit;
 mod exit_group;
+mod kvlr_spawn;
 pub mod fcntl;
 mod fork;
 mod fstat;
@@ -475,6 +476,11 @@ mod syscall_numbers {
     pub const SYS_REMOVEXATTR: usize = 197;
     pub const SYS_LREMOVEXATTR: usize = 198;
     pub const SYS_FREMOVEXATTR: usize = 199;
+
+    /// Kevlar-private: atomic fork+exec (posix_spawn-style).  No Linux ABI
+    /// equivalent; deliberately above the Linux syscall range (~455 today)
+    /// so future Linux additions can't collide.  See blog 224.
+    pub const SYS_KVLR_SPAWN: usize = 500;
 }
 
 // ARM64 (AArch64) syscall numbers from asm-generic/unistd.h.
@@ -720,6 +726,12 @@ mod syscall_numbers {
     pub const SYS_REMOVEXATTR: usize = 14;
     pub const SYS_LREMOVEXATTR: usize = 15;
     pub const SYS_FREMOVEXATTR: usize = 16;
+
+    /// Kevlar-private: atomic fork+exec (posix_spawn-style).  Same number
+    /// as the x86_64 entry — Kevlar-private namespace, deliberately above
+    /// Linux's allocated range so userspace can use the same constant
+    /// regardless of arch.  See blog 224.
+    pub const SYS_KVLR_SPAWN: usize = 500;
 }
 
 use syscall_numbers::*;
@@ -1291,6 +1303,12 @@ impl<'a> SyscallHandler<'a> {
                 &resolve_path(a1)?,
                 UserVAddr::new_nonnull(a2)?,
                 UserVAddr::new_nonnull(a3)?,
+            ),
+            SYS_KVLR_SPAWN => self.sys_kvlr_spawn(
+                &resolve_path(a1)?,
+                UserVAddr::new_nonnull(a2)?,
+                UserVAddr::new_nonnull(a3)?,
+                a4 as u32,
             ),
             SYS_FORK => self.sys_fork(),
             SYS_CLONE => self.sys_clone(a1, a2, a3, a4, a5),
@@ -1887,6 +1905,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FORK => "fork",
         SYS_VFORK => "vfork",
         SYS_EXECVE => "execve",
+        SYS_KVLR_SPAWN => "kvlr_spawn",
         SYS_EXIT => "exit",
         SYS_WAIT4 => "wait4",
         SYS_KILL => "kill",

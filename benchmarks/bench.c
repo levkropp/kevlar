@@ -634,6 +634,62 @@ static void bench_shell_noop(void) {
         report("shell_noop", completed, now_ns() - start);
 }
 
+/* Kevlar-private SYS_KVLR_SPAWN(path, argv, envp, flags).  See blog 224.
+ * Returns child PID (no vfork-style block — the user's wait4 handles
+ * synchronization).  Linux returns ENOSYS, so the *_spawn benches BENCH_SKIP
+ * automatically when this binary runs on Linux. */
+#ifndef SYS_kvlr_spawn
+#define SYS_kvlr_spawn 500
+#endif
+
+static void bench_exec_true_spawn(void) {
+    /* Probe once: if kvlr_spawn isn't supported, skip without burning
+     * iterations.  Linux returns -ENOSYS; Kevlar < blog 224 returns -ENOSYS;
+     * the SUID/SGID handling on the probe path is harmless because /bin/true
+     * is mode 0755 with neither bit set. */
+    char *probe_argv[] = { "true", NULL };
+    char *probe_envp[] = { NULL };
+    long probe = syscall(SYS_kvlr_spawn, "/bin/true", probe_argv, probe_envp, 0);
+    if (probe < 0) { printf("BENCH_SKIP exec_true_spawn (kvlr_spawn unsupported)\n"); return; }
+    waitpid((pid_t)probe, NULL, 0);
+
+    int iters = ITERS(200, 100);
+    int completed = 0;
+    char *argv[] = { "true", NULL };
+    char *envp[] = { NULL };
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        long pid = syscall(SYS_kvlr_spawn, "/bin/true", argv, envp, 0);
+        if (pid < 0) break;
+        waitpid((pid_t)pid, NULL, 0);
+        completed++;
+    }
+    if (completed > 0)
+        report("exec_true_spawn", completed, now_ns() - start);
+}
+
+static void bench_shell_noop_spawn(void) {
+    char *probe_argv[] = { "sh", "-c", "true", NULL };
+    char *probe_envp[] = { NULL };
+    long probe = syscall(SYS_kvlr_spawn, "/bin/sh", probe_argv, probe_envp, 0);
+    if (probe < 0) { printf("BENCH_SKIP shell_noop_spawn (kvlr_spawn unsupported)\n"); return; }
+    waitpid((pid_t)probe, NULL, 0);
+
+    int iters = ITERS(100, 50);
+    int completed = 0;
+    char *argv[] = { "sh", "-c", "true", NULL };
+    char *envp[] = { NULL };
+    long long start = now_ns();
+    for (int i = 0; i < iters; i++) {
+        long pid = syscall(SYS_kvlr_spawn, "/bin/sh", argv, envp, 0);
+        if (pid < 0) break;
+        waitpid((pid_t)pid, NULL, 0);
+        completed++;
+    }
+    if (completed > 0)
+        report("shell_noop_spawn", completed, now_ns() - start);
+}
+
 static void bench_pipe_grep(void) {
     /* Simulate: echo <data> | grep <pattern> — measures pipe+fork+exec */
     int iters = ITERS(100, 50);
@@ -964,6 +1020,8 @@ static bench_entry benchmarks[] = {
     /* Workload benchmarks (7) */
     {"exec_true",    bench_exec_true,      0},
     {"shell_noop",   bench_shell_noop,     0},
+    {"exec_true_spawn",  bench_exec_true_spawn,  0},
+    {"shell_noop_spawn", bench_shell_noop_spawn, 0},
     {"pipe_grep",    bench_pipe_grep,      0},
     {"file_tree",    bench_file_tree,      0},
     {"sed_pipeline", bench_sed_pipeline,   0},

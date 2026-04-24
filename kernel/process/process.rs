@@ -2146,6 +2146,188 @@ impl Process {
         Ok(child)
     }
 
+    /// Atomic fork+exec.  Constructs a new process directly with the
+    /// target binary's address space — no intermediate child VM is built
+    /// and immediately discarded by execve.  Equivalent to vfork() +
+    /// execve() but as one kernel call.  Parent blocks on
+    /// `VFORK_WAIT_QUEUE` until the child has either reached user-mode
+    /// entry of the new binary or the kernel has failed to set it up.
+    ///
+    /// Caller (sys_kvlr_spawn) is responsible for the vfork-style block.
+    /// This function returns the child Arc with the new VM already loaded.
+    /// On error, no process is created and the parent is unaffected.
+    pub fn spawn(
+        parent: &Arc<Process>,
+        executable: Arc<PathComponent>,
+        argv: &[&[u8]],
+        envp: &[&[u8]],
+    ) -> Result<Arc<Process>> {
+        // cgroup limit check (same as fork).
+        crate::cgroups::pids_controller::check_fork_allowed(&parent.cgroup())?;
+
+        let parent_weak = Arc::downgrade(parent);
+        let mut process_table = PROCESSES.lock();
+        let pid = alloc_pid(&mut process_table)?;
+
+        // Build the new process's address space directly from the executable.
+        // This is the "skip the ephemeral fork-VM" win: setup_userspace
+        // returns a fresh, fully-loaded VM with the binary's segments
+        // mapped, stack initialized with argv/envp/auxv, and entry point
+        // ready.  No CoW marking, no refcount bumps, no PT duplication.
+        let root_fs_arc = parent.root_fs();
+        let resolved_exe = {
+            let p = executable.resolve_absolute_path();
+            let mut s = ArrayString::<256>::new();
+            let _ = s.try_push_str(p.as_str());
+            s
+        };
+        let entry = setup_userspace(executable, argv, envp, &root_fs_arc)?;
+
+        // Inherit the parent's open file table, then immediately close
+        // CLOEXEC entries (as execve does on the in-place process).
+        let mut opened_files = parent.opened_files().lock().clone();
+        opened_files.close_cloexec_files();
+
+        // Fresh signal handlers (POSIX exec resets all to SIG_DFL).
+        let signals = SignalDelivery::new();
+
+        // Per-process state inherited from parent.
+        let process_group = parent.process_group();
+        let parent_umask = parent.umask.load();
+        let child_utsname = *parent.cached_utsname.lock_no_irq();
+        let cloned_rootfs = parent.root_fs().lock().clone();
+        let cloned_groups = parent.groups();
+
+        #[cfg(target_arch = "x86_64")]
+        let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
+            pid.as_i32(),
+            pid.as_i32(),
+            parent.uid.load(Ordering::Relaxed),
+            parent.nice.load(Ordering::Relaxed),
+            &child_utsname,
+        )
+        .map(|p| p.value() as u64)
+        .unwrap_or(0);
+
+        // Build the ArchTask with PtRegs frame pointing at the new binary's
+        // entry point — same shape as `new_user_thread` used by PID 1.
+        let arch = arch::Process::new_user_thread(entry.ip, entry.user_sp);
+
+        // vfork-style parent block: child carries vfork_parent so its
+        // _exit / execve wakes VFORK_WAIT_QUEUE on the spawning parent.
+        // The child is "already exec'd" the moment it starts running, so
+        // ghost_fork_done starts false; we never enter the fork-CoW path.
+        let child = Arc::new(Process {
+            is_idle: false,
+            process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
+            pid,
+            tgid: pid,
+            session_id: AtomicI32::new(parent.session_id()),
+            state: AtomicProcessState::new(ProcessState::Runnable),
+            parent: parent_weak,
+            cmdline: AtomicRefCell::new(Cmdline::from_argv(argv)),
+            environ: SpinLock::new(envp_to_vec(envp)),
+            children: SpinLock::new(Vec::new()),
+            #[cfg(target_arch = "x86_64")]
+            vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new({
+                let mut vm = entry.vm;
+                let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
+                if child_vdso != 0 {
+                    vm.page_table_mut().map_user_page_with_prot(
+                        vdso_uaddr,
+                        kevlar_platform::address::PAddr::new(child_vdso as usize),
+                        5,
+                    );
+                }
+                vm
+            })))),
+            #[cfg(not(target_arch = "x86_64"))]
+            vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(entry.vm)))),
+            opened_files: Arc::new(SpinLock::new(opened_files)),
+            root_fs: AtomicRefCell::new(Arc::new(SpinLock::new(cloned_rootfs))),
+            arch,
+            signals: Arc::new(SpinLock::new(signals)),
+            signal_pending: AtomicU32::new(0),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
+            sigset: AtomicU64::new(0),
+            umask: AtomicCell::new(parent_umask),
+            uid: AtomicU32::new(parent.uid.load(Ordering::Relaxed)),
+            euid: AtomicU32::new(parent.euid.load(Ordering::Relaxed)),
+            suid: AtomicU32::new(parent.suid.load(Ordering::Relaxed)),
+            gid: AtomicU32::new(parent.gid.load(Ordering::Relaxed)),
+            egid: AtomicU32::new(parent.egid.load(Ordering::Relaxed)),
+            sgid: AtomicU32::new(parent.sgid.load(Ordering::Relaxed)),
+            nice: AtomicI32::new(parent.nice.load(Ordering::Relaxed)),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(None),
+            clear_child_tid: AtomicUsize::new(0),
+            // No vfork blocking: kvlr_spawn returns the child PID
+            // immediately and the parent runs concurrently.  The child has
+            // its own brand-new VM from the moment of construction (no CoW
+            // sharing with the parent), so there's no memory-safety reason
+            // for the parent to wait.  The caller's wait4 handles
+            // synchronization at the user's choice.
+            vfork_parent: None,
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
+            groups: SpinLock::new(cloned_groups),
+            cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(pid.as_i32()),
+            syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(resolved_exe),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: AtomicRlimits::new(parent.rlimits()),
+            cached_utsname: SpinLock::new(child_utsname),
+            #[cfg(target_arch = "x86_64")]
+            vdso_data_paddr: AtomicU64::new(child_vdso),
+        });
+
+        // Inherit cgroup + namespaces (same plumbing as fork).
+        let parent_cg = parent.cgroup();
+        *child.cgroup.borrow_mut() = Some(parent_cg.clone());
+        parent_cg.member_pids.lock().push(pid);
+
+        let parent_ns = parent.namespaces();
+        if !parent_ns.pid_ns.is_root() {
+            let ns_pid = parent_ns.pid_ns.alloc_ns_pid(pid);
+            child.ns_pid.store(ns_pid.as_i32(), Ordering::Relaxed);
+        }
+        *child.namespaces.borrow_mut() = Some(parent_ns);
+
+        process_group.lock().add(Arc::downgrade(&child));
+        parent.children().push(child.clone());
+        process_table.insert(pid, child.clone());
+        drop(process_table);
+
+        SCHEDULER.lock().enqueue(pid);
+
+        debug::emit(
+            DebugFilter::PROCESS,
+            &DebugEvent::ProcessFork {
+                parent_pid: parent.pid().as_i32(),
+                child_pid: pid.as_i32(),
+            },
+        );
+
+        Ok(child)
+    }
+
     /// Creates a child process that shares the parent's address space.
     /// The parent is suspended until the child calls _exit() or exec().
     /// No page table copy, no TLB flush — much faster than fork().
