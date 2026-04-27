@@ -650,6 +650,25 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k4.ko load");
     }
 
+    // K5 — load /lib/modules/k5.ko (ioremap + readl/writel +
+    // dma_alloc_coherent).  The module verifies cross-pointer
+    // visibility internally; success = init_module returns 0.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k5.ko");
+        match kabi::load_module("/lib/modules/k5.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k5 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k5.ko"),
+            },
+            Err(e) => warn!("kabi: k5 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k5.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

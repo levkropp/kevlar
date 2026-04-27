@@ -552,6 +552,30 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k5` — load /lib/modules/k5.ko + verify
+# ioremap + readl/writel + dma_alloc_coherent end-to-end.
+.PHONY: test-module-k5
+test-module-k5: build
+	$(PROGRESS) "TEST" "kABI K5 demo (ioremap + MMIO + DMA)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k5.log; true
+	@echo ""
+	@if grep -q '\[k5\] init begin' /tmp/kevlar-test-module-k5.log \
+	 && grep -q '\[k5\] dma_alloc_coherent ok' /tmp/kevlar-test-module-k5.log \
+	 && grep -q '\[k5\] ioremap ok' /tmp/kevlar-test-module-k5.log \
+	 && grep -q '\[k5\] writel ok' /tmp/kevlar-test-module-k5.log \
+	 && grep -q '\[k5\] readl ok' /tmp/kevlar-test-module-k5.log \
+	 && grep -q '\[k5\] init done' /tmp/kevlar-test-module-k5.log \
+	 && grep -q 'kabi: k5 init_module returned 0' /tmp/kevlar-test-module-k5.log; then \
+	    echo "TEST_PASS: kABI K5 — ioremap + MMIO + DMA"; \
+	else \
+	    echo "TEST_FAIL: missing expected K5 markers"; \
+	    grep -E 'kabi|\[k5\]|panic' /tmp/kevlar-test-module-k5.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k3` — load /lib/modules/k3.ko and verify the
 # device-model spine (platform_device + platform_driver bind/probe).
 .PHONY: test-module-k3

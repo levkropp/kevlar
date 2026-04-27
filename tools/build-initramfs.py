@@ -1269,6 +1269,36 @@ def build_k4_ko_arm64(cc):
     return out
 
 
+def build_k5_ko_arm64(cc):
+    """Build the K5 demo `.ko` exercising ioremap + readl/writel +
+    dma_alloc_coherent."""
+    out = CACHE / "local-bin-arm64" / "k5.ko"
+    src = ROOT / "testing" / "k5-module.c"
+    inc = ROOT / "testing" / "include"
+    if not src.exists():
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        cc, "-c",
+        "-ffreestanding", "-fno-pic", "-fno-stack-protector",
+        "-mcmodel=tiny", "-nostdlib",
+        "-fno-asynchronous-unwind-tables",
+        "-I", str(inc),
+        "-O1",
+        "-o", str(out), str(src),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log("WARN", f"k5.ko: build error: {e}")
+        return None
+    if r.returncode != 0:
+        log("WARN", f"k5.ko: build failed: {(r.stderr or '').strip()[:300]}")
+        return None
+    log("CC", f"k5.ko built ({out.stat().st_size} bytes)")
+    return out
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1343,7 +1373,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1471,6 +1501,16 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(k4_ko, dest)
         log("MOD", f"installed /lib/modules/k4.ko ({k4_ko.stat().st_size} bytes)")
 
+    # ── kABI K5 demo module ──
+    if k5_ko and k5_ko.is_file():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "k5.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(k5_ko, dest)
+        log("MOD", f"installed /lib/modules/k5.ko ({k5_ko.stat().st_size} bytes)")
+
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
@@ -1525,6 +1565,7 @@ def main():
         k2_ko = None
         k3_ko = None
         k4_ko = None
+        k5_ko = None
         if not args.skip_externals:
             cc = fetch_musl_cc_toolchain()
             if cc:
@@ -1533,9 +1574,10 @@ def main():
                 k2_ko = build_k2_ko_arm64(cc)
                 k3_ko = build_k3_ko_arm64(cc)
                 k4_ko = build_k4_ko_arm64(cc)
+                k5_ko = build_k5_ko_arm64(cc)
             else:
                 log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
-        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko)
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive
