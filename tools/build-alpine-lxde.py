@@ -251,18 +251,35 @@ def main():
             "::shutdown:/bin/sync\n"
         )
 
-        # Auto-start script — runs Openbox + panel + pcmanfm desktop.
+        # Auto-start script — runs Openbox (which sources autostart for
+        # tint2 + pcmanfm + xsetroot) on top of Xorg.  Uses absolute paths
+        # because init's PATH is minimal.  Logs progress so failures are
+        # visible in /var/log/lxde-session.log.
         (root / "root" / "start-lxde.sh").write_text(
             "#!/bin/sh\n"
-            "echo 'Starting Xorg + Openbox session (LXDE-style)...'\n"
+            "set -x\n"
+            "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n"
             "export HOME=/root\n"
             "export DISPLAY=:0\n"
+            "echo 'start-lxde: launching Xorg on vt1'\n"
             "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0\n"
-            "/usr/libexec/Xorg :0 -nolisten tcp -noreset "
-            "-config /etc/X11/xorg.conf.d/10-fbdev.conf vt1 &\n"
+            "/usr/libexec/Xorg :0 -nolisten tcp -noreset \\\n"
+            "    -config /etc/X11/xorg.conf.d/10-fbdev.conf vt1 \\\n"
+            "    >/var/log/Xorg.0.log 2>&1 &\n"
+            "XORG_PID=$!\n"
+            "echo \"start-lxde: Xorg pid=$XORG_PID, sleeping 3s for socket\"\n"
             "sleep 3\n"
-            "dbus-launch --exit-with-session openbox-session &\n"
-            "echo 'Openbox session started. Use serial console for shell access.'\n"
+            "if [ ! -S /tmp/.X11-unix/X0 ]; then\n"
+            "    echo 'start-lxde: ERROR /tmp/.X11-unix/X0 missing — Xorg failed'\n"
+            "    cat /var/log/Xorg.0.log | tail -30\n"
+            "    exit 1\n"
+            "fi\n"
+            "echo 'start-lxde: launching openbox (autostart runs tint2 + pcmanfm)'\n"
+            "/usr/bin/openbox >/var/log/openbox.log 2>&1 &\n"
+            "OB_PID=$!\n"
+            "echo \"start-lxde: openbox pid=$OB_PID — desktop should appear in QEMU window\"\n"
+            "wait $OB_PID\n"
+            "echo \"start-lxde: openbox exited (rc=$?)\"\n"
         )
         os.chmod(root / "root" / "start-lxde.sh", 0o755)
 

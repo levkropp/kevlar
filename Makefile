@@ -678,6 +678,15 @@ $(LXDE_IMG):
 	@rm -f $(LXDE_IMG)
 	$(PYTHON3) tools/build-alpine-lxde.py --arch $(LXDE_APKO_ARCH) $(LXDE_IMG)
 
+# Iterate on LXDE bring-up: rebuild image, run test-lxde, extract
+# session log + Xorg log + framebuffer snapshot, summarize.  Use this
+# when bringing up new packages or fixing autostart — much faster
+# round-trip than `run-alpine-lxde` (which requires interaction).
+.PHONY: iterate-lxde
+iterate-lxde:
+	@rm -f $(LXDE_IMG)
+	$(PYTHON3) tools/iterate-lxde.py --arch $(ARCH)
+
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-lxde
 test-lxde: $(LXDE_IMG)
