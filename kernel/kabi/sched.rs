@@ -77,3 +77,28 @@ ksym!(msleep);
 ksym!(schedule);
 ksym!(cond_resched);
 ksym!(schedule_timeout);
+
+/// `dynamic_cond_resched()` is the dynamically-patched cooperative
+/// yield used in Linux's CONFIG_PREEMPT_DYNAMIC builds.  Modules
+/// reference the symbol; the kernel's static-call machinery
+/// rewrites the call site to either yield or no-op based on the
+/// runtime preempt setting.
+///
+/// K11: **must be no-op, not actual yield**.  Linux 7.0 modules use
+/// `x18` as the shadow-call-stack pointer.  If we context-switch
+/// here, our scheduler doesn't save/restore `x18` (it's not a
+/// AAPCS callee-saved register; Kevlar's Rust code never uses it),
+/// so when this function returns into the module its `x18` is
+/// whatever the next task left there — usually 0 — and the
+/// module's epilogue `ldr x30, [x18, #-8]!` faults.
+///
+/// Diagnosis: dummy.ko's `init_module` calls dynamic_cond_resched
+/// at the bottom of its per-device loop.  With numdummies=1 it
+/// fires once.  After yielding, x18 is garbage; epilogue dies on
+/// the SCS pop.
+#[unsafe(no_mangle)]
+pub extern "C" fn dynamic_cond_resched() -> i32 {
+    0
+}
+
+ksym!(dynamic_cond_resched);

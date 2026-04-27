@@ -156,7 +156,7 @@ endif
 # Comma for use in $(if ...) expansions (Make can't embed literal commas).
 comma := ,
 export FEATURES  ?=
-export RUSTFLAGS = -Z emit-stack-sizes
+export RUSTFLAGS = -Z emit-stack-sizes $(if $(filter arm64,$(ARCH)),-Z fixed-x18,)
 CARGOFLAGS += -Z build-std=core,alloc
 CARGOFLAGS += -Z json-target-spec
 CARGOFLAGS += --target $(target_json)
@@ -549,6 +549,27 @@ test-module-k4: build
 	else \
 	    echo "TEST_FAIL: missing expected K4 markers"; \
 	    grep -E 'kabi|\[k4\]|panic' /tmp/kevlar-test-module-k4.log | head -30; \
+	    false; \
+	fi
+
+# `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
+# network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
+# first milestone with subsystem-shaped stub work.
+.PHONY: test-module-k11
+test-module-k11: build
+	$(PROGRESS) "TEST" "kABI K11 demo (Ubuntu dummy.ko + 23 net stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k11.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/dummy.ko' /tmp/kevlar-test-module-k11.log \
+	 && grep -q 'kabi: rtnl_link_register (stub)' /tmp/kevlar-test-module-k11.log \
+	 && grep -q 'kabi: dummy init_module returned 0' /tmp/kevlar-test-module-k11.log; then \
+	    echo "TEST_PASS: kABI K11 — Ubuntu dummy.ko loaded with 23 net subsystem stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K11 markers"; \
+	    grep -E 'kabi|dummy|panic' /tmp/kevlar-test-module-k11.log | head -30; \
 	    false; \
 	fi
 

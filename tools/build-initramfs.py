@@ -1687,6 +1687,19 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(xor_neon_src, dest)
         log("MOD", f"installed /lib/modules/xor-neon.ko ({xor_neon_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K11 target: dummy.ko (network dummy device) ──
+    # 23 undef symbols across rtnl + netdev + ethtool + skb subsystems.
+    dummy_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "net" / "dummy.ko"
+    if dummy_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "dummy.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(dummy_src, dest)
+        log("MOD", f"installed /lib/modules/dummy.ko ({dummy_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

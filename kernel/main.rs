@@ -756,6 +756,24 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi xor-neon.ko load");
     }
 
+    // K11 — load /lib/modules/dummy.ko: Ubuntu's network dummy device.
+    // 23 undef symbols across rtnl/netdev/ethtool/skb subsystems — the
+    // first milestone with subsystem-shaped stub work.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/dummy.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/dummy.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
+                    info!("kabi: dummy init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in dummy.ko"),
+            },
+            Err(e) => warn!("kabi: dummy load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi dummy.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.
