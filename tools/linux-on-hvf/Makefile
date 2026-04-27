@@ -132,7 +132,67 @@ initramfs: $(BENCH_BIN)
 	  find . | cpio -H newc -o 2>/dev/null | gzip > /tmp/linux-initramfs.gz
 	@ls -la /tmp/linux-initramfs.gz
 
+# ─── Per-program LXDE baseline (Phase 3) ────────────────────────────
+#
+# `make lxde-program PROG=<name>` boots Alpine arm64's prebuilt
+# `linux-virt` kernel against the SAME alpine-lxde rootfs Kevlar
+# uses (extracted into a cpio.gz by tools/build-alpine-cpio.py),
+# then runs `/bin/test-lxde-program` as init with
+# `kevlar-prog=<name> kevlar-no-mount=1` on the cmdline.  The
+# program harness behaves identically to the Kevlar path — the
+# only difference is the kernel.  Diff against
+# /tmp/kevlar-iterate-program-<name>-arm64.log to find Kevlar bugs.
+
+LXDE_DISK      ?= ../../build/alpine-lxde.arm64.img
+LXDE_CPIO      ?= ../../build/alpine-lxde.arm64.cpio.gz
+LXDE_LOG       ?= /tmp/linux-iterate-program-$(PROG).log
+
+# Build the cpio on-demand if older than the disk.
+$(LXDE_CPIO): $(LXDE_DISK)
+	@$(PYTHON3) ../../tools/build-alpine-cpio.py \
+	    $(LXDE_DISK) $(LXDE_CPIO)
+PYTHON3 ?= python3
+
+LXDE_QEMU_ARGS = -machine virt,accel=hvf -cpu host -m 2048 -mem-prealloc \
+                 -kernel $(KERNEL) -initrd $(LXDE_CPIO) \
+                 -device virtio-gpu-pci,xres=1024,yres=768 \
+                 -device virtio-keyboard-device,event_idx=off,indirect_desc=off \
+                 -device virtio-mouse-device,event_idx=off,indirect_desc=off \
+                 -append "console=ttyAMA0 panic=1 \
+                          rdinit=/bin/test-lxde-program \
+                          kevlar-prog=$(PROG) \
+                          kevlar-no-mount=1 \
+                          $(if $(PROG_ARGS),kevlar-prog-args=$(PROG_ARGS),)" \
+                 -nographic -no-reboot
+
+# Poll for TEST_END (the harness's terminator) or a kernel panic.
+# 240s budget — Linux kernel + 350MB initramfs decompress + full
+# LXDE bring-up + per-program phase can take a minute under HVF.
+#
+# Note: anchor patterns to the start of line.  Earlier the regex was
+# `panic|kernel panic` which matched `panic=1` on the kernel cmdline
+# echo line and broke the loop immediately.
+LXDE_RUN_SCRIPT = \
+  ($(QEMU) $(LXDE_QEMU_ARGS) > $(LXDE_LOG) 2>&1 & PID=$$!; \
+   for j in $$(seq 1 240); do \
+     grep -qE '^TEST_END|^Kernel panic|^\[.*Kernel panic' $(LXDE_LOG) 2>/dev/null && break; \
+     sleep 1; \
+   done; \
+   kill $$PID 2>/dev/null; sleep 1; kill -9 $$PID 2>/dev/null; \
+   wait 2>/dev/null || true)
+
+.PHONY: lxde-program
+lxde-program: $(LXDE_CPIO)
+	@if [ -z "$(PROG)" ]; then \
+	  echo "Usage: make lxde-program PROG=<name>"; exit 1; fi
+	@echo "  RUN     linux-on-hvf lxde-program PROG=$(PROG)"
+	@$(LXDE_RUN_SCRIPT)
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' $(LXDE_LOG) \
+	    || echo "(no test output — see $(LXDE_LOG))"
+
 .PHONY: clean
 clean:
 	rm -f /tmp/linux-hvf-*.log
+	rm -f /tmp/linux-iterate-program-*.log
 	rm -f Documentation/optimization/linux-on-hvf-baseline.txt

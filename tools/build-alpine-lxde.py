@@ -480,21 +480,19 @@ def main():
                 except Exception:
                     pass
 
-        # Drop the busybox suite test driver into the image so we can
-        # boot Alpine with `alpine_init=/bin/busybox-suite` and exercise
-        # Alpine's *production* BusyBox (full applet set, dynamic-linked
-        # against Alpine's musl) instead of the slimmer cross-built
-        # version that ships in our initramfs.  See `make
-        # ARCH=arm64 test-busybox-alpine`.
-        bb_suite_src_candidates = [
-            ROOT / "build" / "native-cache" / "local-bin-arm64" / "busybox-suite",
-        ]
-        for cand in bb_suite_src_candidates:
+        # Drop the cross-built test binaries into the image so they
+        # can run as init under either Kevlar or Linux:
+        #   busybox-suite      — `make ARCH=arm64 test-busybox-alpine`
+        #   test-lxde-program  — `make ARCH=arm64 linux-iterate-program PROG=<name>`
+        # When booted via cpio-as-rootfs (Linux baseline), these
+        # binaries become the initramfs init via `rdinit=/bin/<name>`.
+        guest_bin_dir = ROOT / "build" / "native-cache" / "local-bin-arm64"
+        for binary_name in ("busybox-suite", "test-lxde-program"):
+            cand = guest_bin_dir / binary_name
             if cand.exists():
-                shutil.copy2(cand, root / "bin" / "busybox-suite")
-                os.chmod(root / "bin" / "busybox-suite", 0o755)
-                print(f"  COPY  busybox-suite → /bin/busybox-suite", file=sys.stderr)
-                break
+                shutil.copy2(cand, root / "bin" / binary_name)
+                os.chmod(root / "bin" / binary_name, 0o755)
+                print(f"  COPY  {binary_name} → /bin/{binary_name}", file=sys.stderr)
 
         mke2fs = ensure_tool("mke2fs", "e2fsprogs")
         size_mb = 1024

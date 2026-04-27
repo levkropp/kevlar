@@ -749,6 +749,19 @@ iterate-program: $(LXDE_IMG)
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP)' /tmp/kevlar-iterate-program-$(PROG)-$(ARCH).log || echo "(no test output)"
 	@grep 'TEST_END' /tmp/kevlar-iterate-program-$(PROG)-$(ARCH).log || echo "(no summary)"
 
+# Linux baseline parity for the per-program harness.  Boots
+# Alpine's prebuilt linux-virt arm64 kernel against the same
+# alpine-lxde rootfs (extracted to a cpio.gz), runs the SAME
+# test-lxde-program binary as the Kevlar path.  The only thing
+# that differs is the kernel.  Diff the result against
+# `iterate-program PROG=<name>` to find Kevlar bugs.
+.PHONY: linux-iterate-program
+linux-iterate-program:
+	@if [ -z "$(PROG)" ]; then echo "Usage: make linux-iterate-program PROG=<name>"; exit 1; fi
+	$(PROGRESS) "TEST" "Linux LXDE program: $(PROG) ($(ARCH))"
+	$(MAKE) -C tools/linux-on-hvf lxde-program PROG="$(PROG)" \
+	    $(if $(PROG_ARGS),PROG_ARGS="$(PROG_ARGS)",)
+
 # Run Alpine LXDE interactively (with QEMU window).
 # `-vga std` is required for ramfb to be configured — without it, the
 # QEMU window stays blank because /dev/fb0 isn't backed by anything.

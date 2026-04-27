@@ -126,14 +126,57 @@ static pid_t start_bg(const char *cmd) {
     return pid;
 }
 
+// Parse a key=value flag from /proc/cmdline.  Returns 1 if the
+// key is present (with any value).  The value isn't returned —
+// callers that need it use parse_cmdline().
+static int cmdline_flag(const char *key) {
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[1024];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    return strstr(buf, key) != NULL;
+}
+
 static void setup_rootfs(void) {
+    // Mount /proc early so we can read /proc/cmdline.  Procfs is
+    // automatic on either kernel since it's pseudo-fs.
+    mkdir("/proc", 0755);
+    mount("proc", "/proc", "proc", 0, NULL);
+
+    // Two boot modes:
+    //
+    //   Kevlar (initramfs → disk pivot): we are PID 1 in the
+    //     cpio initramfs; /dev/vda holds the alpine-lxde ext2;
+    //     mount it at /mnt and chroot into /mnt for everything.
+    //
+    //   Linux baseline (cpio-as-rootfs): the alpine rootfs IS
+    //     the initramfs, so / already has /usr/libexec/Xorg etc.
+    //     Bind-mount / over /mnt so all the existing
+    //     `chroot(ROOT)` calls become no-ops at the Linux end
+    //     while still working on Kevlar.  Selected via
+    //     `kevlar-no-mount=1` on the kernel cmdline.
+    int no_mount = cmdline_flag("kevlar-no-mount=1");
     mkdir(ROOT, 0755);
     sleep(2);
-    if (mount("/dev/vda", ROOT, "ext2", 0, NULL) != 0) {
-        char buf[64]; snprintf(buf, sizeof(buf), "errno=%d", errno);
-        fail("mount_rootfs", buf);
-        printf("TEST_END 0/1\n");
-        _exit(1);
+    if (no_mount) {
+        if (mount("/", ROOT, NULL, MS_BIND, NULL) != 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "bind errno=%d", errno);
+            fail("mount_rootfs", buf);
+            printf("TEST_END 0/1\n");
+            _exit(1);
+        }
+    } else {
+        if (mount("/dev/vda", ROOT, "ext2", 0, NULL) != 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "errno=%d", errno);
+            fail("mount_rootfs", buf);
+            printf("TEST_END 0/1\n");
+            _exit(1);
+        }
     }
     pass("mount_rootfs");
 
@@ -212,7 +255,40 @@ static int fb_fingerprint(uint32_t *fingerprint, size_t *nonblack) {
     return 0;
 }
 
+// Pre-init: mount the bare-minimum pseudo-fs so /proc/cmdline,
+// /dev/console etc. work for the subsequent harness logic.  Mirrors
+// `init_setup()` in testing/busybox_suite.c — without this, when we
+// run as init under Linux's `rdinit=` path, fd 0/1/2 may point at a
+// /dev/console that doesn't exist in the cpio yet, making every
+// printf silent.
+static void preinit(void) {
+    mkdir("/proc", 0755);
+    mount("proc", "/proc", "proc", 0, NULL);
+    mkdir("/sys", 0755);
+    mount("sysfs", "/sys", "sysfs", 0, NULL);
+    mkdir("/dev", 0755);
+    mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+    // Re-open stdout/stderr via /dev/console — the kernel may have
+    // attached fd 0/1/2 to a now-stale device, and the freshly-
+    // mounted devtmpfs has the right /dev/console.
+    int cfd = open("/dev/console", O_RDWR);
+    if (cfd >= 0) {
+        dup2(cfd, 0);
+        dup2(cfd, 1);
+        dup2(cfd, 2);
+        if (cfd > 2) close(cfd);
+    }
+}
+
 int main(void) {
+    /* Raw write(2) before any libc setup so we can see if init runs
+     * at all on Linux's rdinit path.  Silent printf-via-stdio means
+     * fd 1 is broken; raw write to fd 2 (which the kernel always
+     * connects to /dev/console) should reach the serial port even
+     * when stdio is misconfigured. */
+    (void)write(2, "DBG: main entered\n", 18);
+    if (getpid() == 1) preinit();
+    (void)write(2, "DBG: preinit done\n", 18);
     printf("T: LXDE Per-Program Test Harness\n");
     fflush(stdout);
     setup_rootfs();
