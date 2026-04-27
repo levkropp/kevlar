@@ -23,6 +23,12 @@ SECTIONS {
         *(.rodata);
         *(.rodata.*);
 
+        /* kABI exported-symbol table.  See arm64.ld for details. */
+        . = ALIGN(8);
+        __ksymtab_start = .;
+        KEEP(*(.ksymtab));
+        __ksymtab_end = .;
+
         . = ALIGN(4096);
         __cpu_local = .;
         KEEP(*(.cpu_local_head));

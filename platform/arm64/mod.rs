@@ -119,6 +119,31 @@ pub fn local_memory_barrier() {
     unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
 }
 
+/// Synchronize the I-cache after writing new instructions into a
+/// kernel-VA range.  Used by the kABI module loader after copying
+/// + relocating a `.ko`'s `.text` section.
+///
+/// Sequence: `dsb ish` (writes globally observable) → `ic ialluis`
+/// (invalidate I-cache inner-shareable) → `dsb ish; isb`.
+///
+/// `_va` and `_len` are accepted for symmetry with the x86_64 stub
+/// (which is a no-op since x86's I-cache is coherent with stores) —
+/// arm64 invalidates the entire I-cache because `ic ialluis` is
+/// simpler and the loader runs once per module.  Range-based
+/// `ic ivau` is a future optimization.
+pub fn sync_icache_range(_va: crate::address::VAddr, _len: usize) {
+    #[allow(unsafe_code)]
+    unsafe {
+        core::arch::asm!(
+            "dsb ish",
+            "ic ialluis",
+            "dsb ish",
+            "isb",
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
 /// Read RTC epoch seconds from the QEMU virt PL031 RTC.
 ///
 /// PL031 lives at paddr 0x09010000 (QEMU virt board).  Its data register

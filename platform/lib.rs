@@ -72,7 +72,7 @@ mod arm64;
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
-        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
+        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, sync_icache_range, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
         enable_irq, halt, idle,
         enable_interrupts, in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, set_need_resched, set_resched_fn,
@@ -146,7 +146,7 @@ pub mod arch {
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
-        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, sync_icache_range, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
         last_user_regs, last_user_state,
         num_online_cpus, preempt_disable, preempt_enable,
         read_clock_counter, read_clock_frequency, read_rtc_epoch_secs,

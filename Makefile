@@ -487,6 +487,26 @@ build/alpine-xorg.img:
 	$(PYTHON3) tools/build-alpine-xorg.py build/alpine-xorg.img
 
 # Test X11/Xorg on Kevlar with fbdev framebuffer
+# `make test-module` — load /lib/modules/hello.ko at boot and verify
+# its init function ran via kABI.  Boots the kernel, greps the serial
+# log for the printk() output emitted from inside the module.
+.PHONY: test-module
+test-module: build
+	$(PROGRESS) "TEST" "kABI .ko module load (K1)"
+	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module.log; true
+	@echo ""
+	@if grep -q '\[mod\] hello from module!' /tmp/kevlar-test-module.log \
+	 && grep -q 'kabi: my_init returned 0' /tmp/kevlar-test-module.log; then \
+	    echo "TEST_PASS: kABI K1 — hello.ko loaded and ran"; \
+	else \
+	    echo "TEST_FAIL: expected '[mod] hello from module!' + 'kabi: my_init returned 0'"; \
+	    grep -E 'kabi|\[mod\]|panic' /tmp/kevlar-test-module.log | head -20; \
+	    false; \
+	fi
+
 .PHONY: test-xorg
 test-xorg: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "X11/Xorg fbdev integration"

@@ -1140,6 +1140,42 @@ def compile_all_local_arm64(cc):
     return built
 
 
+def build_hello_ko_arm64(cc):
+    """Build the K1 demo `.ko` (an ET_REL ELF) for the kABI module
+    loader.  Different flags than the test-binary jobs above:
+    `-c` (relocatable, not linked); `-fno-pic` (avoid GOT/PLT,
+    keeping relocations to CALL26/ADRP/ADD_LO12_NC/ABS64);
+    `-mcmodel=tiny` (keep `bl printk` reachable as CALL26 ±128 MB);
+    `-fno-asynchronous-unwind-tables` (strip .eh_frame so we don't
+    have to handle unwind relocations yet).
+
+    Returns the path to the built `.ko`, or None on failure.
+    """
+    out = CACHE / "local-bin-arm64" / "hello.ko"
+    src = ROOT / "testing" / "hello-module.c"
+    if not src.exists():
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        cc, "-c",
+        "-ffreestanding", "-fno-pic", "-fno-stack-protector",
+        "-mcmodel=tiny", "-nostdlib",
+        "-fno-asynchronous-unwind-tables",
+        "-O1",
+        "-o", str(out), str(src),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log("WARN", f"hello.ko: build error: {e}")
+        return None
+    if r.returncode != 0:
+        log("WARN", f"hello.ko: build failed: {(r.stderr or '').strip()[:200]}")
+        return None
+    log("CC", f"hello.ko built ({out.stat().st_size} bytes)")
+    return out
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1214,7 +1250,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1302,6 +1338,16 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None):
                 shutil.copy2(f, dest)
                 os.chmod(dest, 0o755)
 
+    # ── kABI K1 demo module ──
+    if hello_ko and hello_ko.is_file():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "hello.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(hello_ko, dest)
+        log("MOD", f"installed /lib/modules/hello.ko ({hello_ko.stat().st_size} bytes)")
+
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
@@ -1352,13 +1398,15 @@ def main():
         log("ARCH", "arm64 — downloading pre-built Alpine aarch64 binaries")
         arm64_bins = build_arm64_packages()
         local_arm64_bins = []
+        hello_ko = None
         if not args.skip_externals:
             cc = fetch_musl_cc_toolchain()
             if cc:
                 local_arm64_bins = compile_all_local_arm64(cc)
+                hello_ko = build_hello_ko_arm64(cc)
             else:
                 log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
-        assemble_rootfs_arm64(arm64_bins, local_arm64_bins)
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive

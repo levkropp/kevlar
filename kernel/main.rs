@@ -32,6 +32,7 @@ mod debug;
 mod deferred_job;
 mod fs;
 mod interrupt;
+mod kabi;
 mod lang_items;
 mod mm;
 mod net;
@@ -336,6 +337,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     profiler.lap_time("virtio_net init");
     virtio_input::init();
     profiler.lap_time("virtio_input init");
+
+    // K1 demo — load /lib/modules/hello.ko via the kabi loader and
+    // call its `my_init` function.  Validates the full module-load
+    // pipeline: ELF parse → section layout → memory copy →
+    // relocation → kernel-symbol resolution → entry call.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/hello.ko");
+        match kabi::load_module("/lib/modules/hello.ko", "my_init") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: my_init returned {}", rc);
+                }
+                None => warn!("kabi: my_init not found in module"),
+            },
+            Err(e) => warn!("kabi: load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi hello.ko load");
+    }
 
     // Register Bochs VGA framebuffer prober (before PCI scan).
     bochs_fb::init();

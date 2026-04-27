@@ -230,6 +230,14 @@ pub fn local_memory_barrier() {
     unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
 }
 
+/// I-cache sync stub for x86_64 — no-op because x86's I-cache is
+/// coherent with stores in the same coherence domain.  Defined for
+/// symmetry with the arm64 implementation used by the kABI module
+/// loader.
+pub fn sync_icache_range(_va: crate::address::VAddr, _len: usize) {
+    // intentionally empty
+}
+
 pub mod x64_specific {
     pub use super::cpu_local::cpu_local_head;
     pub use super::gdt::{USER_CS32, USER_CS64, USER_DS, USER_RPL};

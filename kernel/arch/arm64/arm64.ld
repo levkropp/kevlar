@@ -26,6 +26,15 @@ SECTIONS {
         *(.rodata);
         *(.rodata.*);
 
+        /* kABI exported-symbol table — collected from `ksym!` macro
+         * invocations across the kernel.  Boundary symbols are read
+         * by `kernel/kabi/exports.rs::all()` to reconstruct the slice
+         * at runtime. */
+        . = ALIGN(8);
+        __ksymtab_start = .;
+        KEEP(*(.ksymtab));
+        __ksymtab_end = .;
+
         . = ALIGN(4096);
         __cpu_local = .;
         KEEP(*(.cpu_local_head));
