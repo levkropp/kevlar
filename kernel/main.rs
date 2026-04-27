@@ -351,9 +351,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/hello.ko");
         match kabi::load_module("/lib/modules/hello.ko", "my_init") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: my_init returned {}", rc);
                 }
                 None => warn!("kabi: my_init not found in module"),
@@ -594,9 +593,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         kabi::init();
         info!("kabi: loading /lib/modules/k2.ko");
         match kabi::load_module("/lib/modules/k2.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k2 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k2.ko"),
@@ -612,9 +610,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k3.ko");
         match kabi::load_module("/lib/modules/k3.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k3 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k3.ko"),
@@ -631,9 +628,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k4.ko");
         match kabi::load_module("/lib/modules/k4.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k4 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k4.ko"),
@@ -658,9 +654,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k5.ko");
         match kabi::load_module("/lib/modules/k5.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k5 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k5.ko"),
@@ -675,9 +670,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k6.ko");
         match kabi::load_module("/lib/modules/k6.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k6 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k6.ko"),
@@ -693,9 +687,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k7.ko");
         match kabi::load_module("/lib/modules/k7.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k7 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k7.ko"),
@@ -713,9 +706,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/k8.ko");
         match kabi::load_module("/lib/modules/k8.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: k8 init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in k8.ko"),
@@ -733,9 +725,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     {
         info!("kabi: loading /lib/modules/bman-test.ko (Ubuntu 26.04)");
         match kabi::load_module("/lib/modules/bman-test.ko", "init_module") {
-            Ok(m) => match m.init_fn {
-                Some(f) => {
-                    let rc = f();
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
                     info!("kabi: bman-test init_module returned {}", rc);
                 }
                 None => warn!("kabi: init_module not found in bman-test.ko"),
@@ -743,6 +734,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
             Err(e) => warn!("kabi: bman-test load_module failed: {:?}", e),
         }
         profiler.lap_time("kabi bman-test.ko load");
+    }
+
+    // K10 — load /lib/modules/xor-neon.ko: arm64 NEON-accelerated XOR
+    // template (used by RAID5/6 parity).  First Ubuntu binary that
+    // depends on a Linux export we add (`cpu_have_feature`).
+    // Establishes the LinuxKPI-style iterate-on-missing-symbols
+    // pattern for the rest of the kABI ascent.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/xor-neon.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/xor-neon.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
+                    info!("kabi: xor-neon init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in xor-neon.ko"),
+            },
+            Err(e) => warn!("kabi: xor-neon load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi xor-neon.ko load");
     }
 
     // Create the init process.

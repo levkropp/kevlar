@@ -552,6 +552,27 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k10` — load /lib/modules/xor-neon.ko: a real
+# Ubuntu 26.04 .ko that needs a new Linux export (cpu_have_feature).
+# First milestone where we add a missing Linux symbol to make a
+# real Canonical-built binary load.
+.PHONY: test-module-k10
+test-module-k10: build
+	$(PROGRESS) "TEST" "kABI K10 demo (Ubuntu .ko + new export)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k10.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/xor-neon.ko' /tmp/kevlar-test-module-k10.log \
+	 && grep -q 'kabi: xor-neon init_module returned 0' /tmp/kevlar-test-module-k10.log; then \
+	    echo "TEST_PASS: kABI K10 — Ubuntu .ko with new Linux export loads"; \
+	else \
+	    echo "TEST_FAIL: missing expected K10 markers"; \
+	    grep -E 'kabi|xor-neon|panic' /tmp/kevlar-test-module-k10.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k9` — load /lib/modules/bman-test.ko: a real
 # prebuilt Linux 7.0 .ko binary from Ubuntu 26.04's
 # linux-modules-7.0.0-14-generic.deb package.  First Canonical-built

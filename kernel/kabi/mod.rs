@@ -17,6 +17,7 @@ pub mod arch;
 pub mod bus;
 pub mod cdev;
 pub mod completion;
+pub mod cpufeature;
 pub mod device;
 pub mod dma;
 pub mod elf;

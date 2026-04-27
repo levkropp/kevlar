@@ -1673,6 +1673,20 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(bman_test_src, dest)
         log("MOD", f"installed /lib/modules/bman-test.ko ({bman_test_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K10 target: a real Ubuntu prebuilt .ko (xor-neon) ──
+    # xor-neon.ko: arm64 NEON XOR template, 1 undef (cpu_have_feature).
+    # First Ubuntu binary that needs us to add a Linux export.
+    xor_neon_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "arch" / "arm64" / "lib" / "xor-neon.ko"
+    if xor_neon_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "xor-neon.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(xor_neon_src, dest)
+        log("MOD", f"installed /lib/modules/xor-neon.ko ({xor_neon_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

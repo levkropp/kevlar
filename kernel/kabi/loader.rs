@@ -29,6 +29,54 @@ pub struct LoadedModule {
     pub init_fn: Option<extern "C" fn() -> i32>,
 }
 
+impl LoadedModule {
+    /// Invoke the module's init function with proper Linux ABI setup.
+    ///
+    /// On arm64, Linux 7.0 modules built with `CONFIG_SHADOW_CALL_STACK=y`
+    /// (Ubuntu's default) use `x18` as the shadow-call-stack pointer.
+    /// Function entry executes `str x30, [x18], #8` which writes the
+    /// LR to the SCS area; function exit reverses.  Our Rust kernel
+    /// doesn't use SCS, so x18 is uninitialized when we call into the
+    /// module — and the SCS write traps.  Allocate a small SCS area
+    /// here, point x18 at it, then call.  After the call x18 is back
+    /// where we put it (init function's epilogue pops its own write).
+    pub fn call_init(&self) -> Option<i32> {
+        let f = self.init_fn?;
+        Some(call_module_init_with_scs(f))
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
+    // 1 KB SCS area — Linux's per-task default.  Module init's call
+    // depth is bounded; this is plenty.
+    let mut scs: Vec<u8> = alloc::vec![0u8; 1024];
+    let scs_ptr = scs.as_mut_ptr();
+    let result: i32;
+    unsafe {
+        core::arch::asm!(
+            "mov x9, x18",
+            "mov x18, {scs}",
+            "blr {fp}",
+            "mov x18, x9",
+            scs = in(reg) scs_ptr,
+            fp = in(reg) f,
+            lateout("x0") result,
+            out("x9") _,
+            clobber_abi("C"),
+        );
+    }
+    // Keep SCS allocation alive across the asm block.
+    drop(scs);
+    result
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
+    f()
+}
+
 /// Load a `.ko` from the initramfs at `path`, resolve its undefined
 /// symbols against the kernel exports, apply relocations, and return
 /// a `LoadedModule` whose `init_fn` is the address of the symbol named
