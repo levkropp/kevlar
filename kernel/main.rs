@@ -342,6 +342,10 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     // call its `my_init` function.  Validates the full module-load
     // pipeline: ELF parse → section layout → memory copy →
     // relocation → kernel-symbol resolution → entry call.
+    //
+    // K1's module is purely synchronous (no scheduler interaction),
+    // so it's safe to run before process::init().  The K2 demo
+    // (which does sleep + wake) loads later, after the scheduler.
     #[cfg(target_arch = "aarch64")]
     {
         info!("kabi: loading /lib/modules/hello.ko");
@@ -579,6 +583,27 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     #[cfg(target_arch = "x86_64")]
     kevlar_platform::usercopy_trace::enable();
     profiler.lap_time("process init");
+
+    // K2 — kABI runtime: spawns the workqueue worker kthread, then
+    // loads /lib/modules/k2.ko which exercises kmalloc + wait_queue
+    // + completion + work_struct end-to-end.  Must run after
+    // process::init() so kthread spawn + sleep/wake work.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kabi::init();
+        info!("kabi: loading /lib/modules/k2.ko");
+        match kabi::load_module("/lib/modules/k2.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k2 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k2.ko"),
+            },
+            Err(e) => warn!("kabi: k2 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k2.ko load");
+    }
 
     // Create the init process.
     if let Some(path) = init_slot_path {

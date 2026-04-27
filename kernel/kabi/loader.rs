@@ -45,6 +45,18 @@ pub fn load_module(path: &str, init_sym: &str) -> Result<LoadedModule> {
         obj.symtab.len()
     );
 
+    // ── .modinfo parse ────────────────────────────────────────────
+    if let Some(mi_bytes) = find_section_bytes(&obj, ".modinfo") {
+        let info = crate::kabi::modinfo::parse(mi_bytes);
+        log::info!(
+            "kabi: {} license={:?} author={:?} desc={:?}",
+            path, info.license, info.author, info.description
+        );
+        if info.depends.as_deref().unwrap_or("").len() > 0 {
+            log::info!("kabi: {} depends={:?}", path, info.depends);
+        }
+    }
+
     // ── Layout pass ───────────────────────────────────────────────
     //
     // Walk SHF_ALLOC sections in-order, computing per-section offsets
@@ -284,6 +296,21 @@ fn read_initramfs_file(path: &str) -> Result<Vec<u8>> {
 #[inline]
 fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
+}
+
+/// Find a section by name and return its raw bytes from the file.
+/// Used by the loader to extract `.modinfo`.
+fn find_section_bytes<'a>(obj: &RelObj<'a>, name: &str) -> Option<&'a [u8]> {
+    for sh in obj.sections.iter() {
+        if obj.section_name(sh) == name {
+            let start = sh.sh_offset as usize;
+            let end = start + sh.sh_size as usize;
+            if end <= obj.buf.len() {
+                return Some(&obj.buf[start..end]);
+            }
+        }
+    }
+    None
 }
 
 /// Materialize a 16-byte aarch64 PLT stub that performs an absolute

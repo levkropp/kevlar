@@ -150,12 +150,13 @@ unsafe fn push_stack(mut sp: *mut u64, value: u64) -> *mut u64 {
 }
 
 impl ArchTask {
-    #[allow(unused)]
-    pub fn new_kthread(ip: VAddr, stack_top: VAddr) -> ArchTask {
+    pub fn new_kthread(ip: VAddr) -> ArchTask {
         let syscall_stack = crate::stack_cache::alloc_kernel_stack(AUX_STACK_PAGES)
             .expect("failed to allocate syscall stack");
         let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE)
             .expect("failed to allocate kernel stack");
+
+        let stack_top = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
 
         let sp = unsafe {
             let mut sp: *mut u64 = stack_top.as_mut_ptr();

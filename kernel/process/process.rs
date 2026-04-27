@@ -549,6 +549,88 @@ impl Process {
         Ok(proc)
     }
 
+    /// Spawn a kernel-only thread that runs `entry()` once scheduled.
+    /// Used by the kABI workqueue (K2) and any future in-kernel
+    /// background-work consumers.  The new task is added to the
+    /// process table + scheduler run queue with a fresh PID; it has
+    /// no virtual address space (kernel-only) and is *not* an idle
+    /// thread (it runs in preference to the idle thread).
+    pub fn new_kthread_with_entry(
+        name: &'static str,
+        entry: extern "C" fn(),
+    ) -> Result<Arc<Process>> {
+        use kevlar_platform::address::VAddr;
+        let pid = {
+            let mut tbl = PROCESSES.lock();
+            alloc_pid(&mut tbl)?
+        };
+        let process_group = ProcessGroup::new(PgId::new(0));
+        let arch_task = arch::Process::new_kthread(VAddr::new(entry as usize));
+        let proc = Arc::new(Process {
+            is_idle: false,
+            process_group: AtomicRefCell::new(Arc::downgrade(&process_group)),
+            arch: arch_task,
+            state: AtomicProcessState::new(ProcessState::Runnable),
+            parent: Weak::new(),
+            cmdline: AtomicRefCell::new(Cmdline::new()),
+            environ: SpinLock::new(alloc::vec::Vec::new()),
+            children: SpinLock::new(Vec::new()),
+            vm: AtomicRefCell::new(None),
+            pid,
+            tgid: pid,
+            session_id: AtomicI32::new(0),
+            root_fs: AtomicRefCell::new(INITIAL_ROOT_FS.clone()),
+            opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
+            signals: Arc::new(SpinLock::new(SignalDelivery::new())),
+            signal_pending: AtomicU64::new(0),
+            signaled_frame_stack: SpinLock::new(None),
+            signal_ctx_base_stack: SpinLock::new(None),
+            sigset: AtomicU64::new(0),
+            umask: AtomicCell::new(0o022),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
+            nice: AtomicI32::new(0),
+            is_child_subreaper: AtomicBool::new(false),
+            comm: SpinLock::new(Some(name.as_bytes().to_vec())),
+            clear_child_tid: AtomicUsize::new(0),
+            vfork_parent: None,
+            start_ticks: crate::timer::monotonic_ticks() as u64,
+            utime: AtomicU64::new(0),
+            stime: AtomicU64::new(0),
+            groups: SpinLock::new(Vec::new()),
+            cgroup: AtomicRefCell::new(None),
+            namespaces: AtomicRefCell::new(None),
+            ns_pid: AtomicI32::new(0),
+            syscall_trace: SyscallTrace::new(),
+            exe_path: SpinLock::new(ArrayString::new()),
+            ghost_fork_done: AtomicBool::new(false),
+            sigsuspend_saved_mask: AtomicU64::new(0),
+            sigsuspend_has_mask: AtomicBool::new(false),
+            alt_stack_sp: AtomicUsize::new(0),
+            alt_stack_size: AtomicUsize::new(0),
+            alt_stack_flags: AtomicU32::new(0),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            epoll_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_fd: AtomicI32::new(-1),
+            #[cfg(not(feature = "profile-fortress"))]
+            file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
+            rlimits: AtomicRlimits::new(default_rlimits()),
+            vdso_data_paddr: AtomicU64::new(0),
+        });
+
+        process_group.lock().add(Arc::downgrade(&proc));
+        PROCESSES.lock().insert(pid, proc.clone());
+        SCHEDULER.lock().enqueue(pid);
+        Ok(proc)
+    }
+
     /// Creates the initial process (PID=1).
     pub fn new_init_process(
         root_fs: Arc<SpinLock<RootFs>>,

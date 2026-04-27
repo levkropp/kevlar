@@ -220,11 +220,12 @@ unsafe fn push_stack(mut rsp: *mut u64, value: u64) -> *mut u64 {
 }
 
 impl ArchTask {
-    #[allow(unused)]
-    pub fn new_kthread(ip: VAddr, sp: VAddr) -> ArchTask {
+    pub fn new_kthread(ip: VAddr) -> ArchTask {
         let interrupt_stack = crate::stack_cache::alloc_kernel_stack(2).expect("kthread IST stack");
         let syscall_stack = crate::stack_cache::alloc_kernel_stack(2).expect("kthread syscall stack");
         let kernel_stack = crate::stack_cache::alloc_kernel_stack(KERNEL_STACK_SIZE / PAGE_SIZE).expect("kthread kernel stack");
+
+        let sp = kernel_stack.as_vaddr().add(KERNEL_STACK_SIZE);
 
         let rsp = unsafe {
             let mut rsp: *mut u64 = sp.as_mut_ptr();

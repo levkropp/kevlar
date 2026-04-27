@@ -507,6 +507,27 @@ test-module: build
 	    false; \
 	fi
 
+# `make test-module-k2` — load /lib/modules/k2.ko and verify it
+# exercises kmalloc + wait_queue + completion + work_struct end-to-end.
+.PHONY: test-module-k2
+test-module-k2: build
+	$(PROGRESS) "TEST" "kABI K2 demo (alloc + wait + work + completion)"
+	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k2.log; true
+	@echo ""
+	@if grep -q '\[k2\] init begin' /tmp/kevlar-test-module-k2.log \
+	 && grep -q '\[k2\] work handler running' /tmp/kevlar-test-module-k2.log \
+	 && grep -q '\[k2\] init done' /tmp/kevlar-test-module-k2.log \
+	 && grep -q 'kabi: k2 init_module returned 0' /tmp/kevlar-test-module-k2.log; then \
+	    echo "TEST_PASS: kABI K2 — k2.ko ran end-to-end"; \
+	else \
+	    echo "TEST_FAIL: missing expected K2 markers"; \
+	    grep -E 'kabi|\[k2\]|panic' /tmp/kevlar-test-module-k2.log | head -30; \
+	    false; \
+	fi
+
 .PHONY: test-xorg
 test-xorg: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "X11/Xorg fbdev integration"

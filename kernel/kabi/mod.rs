@@ -12,12 +12,25 @@
 //!
 //! Pinned target: Linux 7.0 (Ubuntu 26.04 LTS "Resolute Raccoon").
 
+pub mod alloc;
 pub mod arch;
+pub mod completion;
 pub mod elf;
 pub mod exports;
 pub mod loader;
+pub mod modinfo;
 pub mod printk;
 pub mod reloc;
+pub mod sched;
 pub mod symbols;
+pub mod wait;
+pub mod work;
 
 pub use loader::{load_module, LoadedModule};
+
+/// Boot-time initialization for the kABI runtime: spawns the
+/// workqueue worker kthread.  Call after the scheduler is up.
+pub fn init() {
+    work::init();
+    log::info!("kabi: runtime initialized (workqueue spawned)");
+}
