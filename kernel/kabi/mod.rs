@@ -29,6 +29,7 @@ pub mod loader;
 pub mod modinfo;
 pub mod platform;
 pub mod printk;
+pub mod printk_fmt;
 pub mod reloc;
 pub mod sched;
 pub mod symbols;

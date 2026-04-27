@@ -552,6 +552,58 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k6` — load /lib/modules/k6.ko + verify the
+# variadic printk + format-string parser end-to-end.
+.PHONY: test-module-k6
+test-module-k6: build
+	$(PROGRESS) "TEST" "kABI K6 demo (variadic printk + format strings)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k6.log; true
+	@echo ""
+	@if grep -q '\[k6\] decimal: 42' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] negative: -7' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] hex: cafebabe' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] HEX: DEADBEEF' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] string: world' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] pointer: 0xffff000040000000' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] padded: 00042' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] mixed: answer = 42 (0x2a)' /tmp/kevlar-test-module-k6.log \
+	 && grep -q '\[k6\] percent: 100%' /tmp/kevlar-test-module-k6.log \
+	 && grep -q 'kabi: k6 init_module returned 0' /tmp/kevlar-test-module-k6.log; then \
+	    echo "TEST_PASS: kABI K6 — variadic printk + format-string parser"; \
+	else \
+	    echo "TEST_FAIL: missing expected K6 markers"; \
+	    grep -E 'kabi|\[k6\]|panic' /tmp/kevlar-test-module-k6.log | head -30; \
+	    false; \
+	fi
+
+# `make test-userspace-kabi` — boot with INIT_SCRIPT=test-kabi-userspace
+# and verify the userspace fd path against /dev/k4-demo.  Rebuilds the
+# kernel with the INIT_SCRIPT compile-time env (arm64 cmdline parsing
+# from QEMU's -append isn't wired up without DTB; INIT_SCRIPT is the
+# supported path).
+.PHONY: test-userspace-kabi
+test-userspace-kabi:
+	$(MAKE) build INIT_SCRIPT=/usr/bin/test-kabi-userspace
+	$(PROGRESS) "TEST" "kABI userspace path (sys_openat /dev/k4-demo)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-userspace-kabi.log; true
+	@echo ""
+	@if grep -q 'USERSPACE: starting' /tmp/kevlar-test-userspace-kabi.log \
+	 && grep -q 'USERSPACE: open ok' /tmp/kevlar-test-userspace-kabi.log \
+	 && grep -q 'USERSPACE: read=hello from k4' /tmp/kevlar-test-userspace-kabi.log \
+	 && grep -q 'USERSPACE: done' /tmp/kevlar-test-userspace-kabi.log; then \
+	    echo "TEST_PASS: kABI userspace fd path through /dev/k4-demo"; \
+	else \
+	    echo "TEST_FAIL: missing expected userspace markers"; \
+	    grep -E 'kabi|USERSPACE|panic' /tmp/kevlar-test-userspace-kabi.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k5` — load /lib/modules/k5.ko + verify
 # ioremap + readl/writel + dma_alloc_coherent end-to-end.
 .PHONY: test-module-k5

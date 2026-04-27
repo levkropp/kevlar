@@ -6,6 +6,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![feature(custom_test_frameworks)]
 #![feature(alloc_error_handler)]
+#![feature(c_variadic)]
 #![test_runner(crate::test_runner::run_tests)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(trait_alias)]
@@ -667,6 +668,23 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
             Err(e) => warn!("kabi: k5 load_module failed: {:?}", e),
         }
         profiler.lap_time("kabi k5.ko load");
+    }
+
+    // K6 — load /lib/modules/k6.ko (variadic printk format strings).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k6.ko");
+        match kabi::load_module("/lib/modules/k6.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k6 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k6.ko"),
+            },
+            Err(e) => warn!("kabi: k6 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k6.ko load");
     }
 
     // Create the init process.

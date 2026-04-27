@@ -1,36 +1,33 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0 OR BSD-2-Clause
-//! `printk` — the one kernel symbol K1 exports to loaded `.ko` modules.
+#![allow(unsafe_code)]
+//! Linux-shaped variadic `printk`.  K6: real format-string parsing
+//! supporting the subset every standard kernel module uses
+//! (%d/%i/%u/%x/%X/%p/%s/%c/%% with width + zero-pad +
+//! length-modifier flags).
 //!
-//! Real Linux's `printk` is variadic (`int printk(const char *fmt,
-//! ...)`).  Variadic ABI isn't stable in Rust, so K1's stub takes
-//! only `(*const c_char)` — it prints the format string verbatim,
-//! ignoring `%`-tokens.  Sufficient for the hello-world demo.
-//!
-//! K2 will swap this for a Linux-shaped variadic via a small inline
-//! printf-class formatter.
+//! Implementation lives in `printk_fmt.rs`; this module is the
+//! ksym!-exported entry point.
 
+use core::ffi::c_char;
+
+use crate::kabi::printk_fmt::{format_into, Sink};
 use crate::ksym;
 
-/// Walk `fmt` to NUL (capped at 4KB), decode as UTF-8, and emit via
-/// the kernel's existing `info!()` infra.  Tagged `[mod]` so it's
-/// distinguishable from native kernel logs.
-#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn printk(fmt: *const core::ffi::c_char) {
+pub unsafe extern "C" fn printk(fmt: *const c_char, mut args: ...) -> i32 {
     if fmt.is_null() {
-        return;
+        return 0;
     }
-    #[allow(unsafe_code)]
-    unsafe {
-        let mut n = 0usize;
-        while n < 4096 && *fmt.add(n) != 0 {
-            n += 1;
-        }
-        let bytes = core::slice::from_raw_parts(fmt as *const u8, n);
-        if let Ok(s) = core::str::from_utf8(bytes) {
-            log::info!("[mod] {}", s.trim_end_matches('\n'));
-        }
+    let mut buf = [0u8; 1024];
+    let n = {
+        let mut sink = Sink::new(&mut buf);
+        unsafe { format_into(&mut sink, fmt, &mut args) };
+        sink.pos()
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log::info!("[mod] {}", s.trim_end_matches('\n'));
     }
+    n as i32
 }
 
 ksym!(printk);

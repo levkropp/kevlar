@@ -20,8 +20,8 @@ typedef unsigned int uint32_t;
 typedef unsigned long long uint64_t;
 typedef long long int64_t;
 
-/* printk — K1 export. Format-string-only; %-tokens are ignored. */
-extern void printk(const char *fmt);
+/* printk — Linux-shape variadic, supports %d/%i/%u/%x/%X/%p/%s/%c. */
+extern int printk(const char *fmt, ...);
 
 /* ── Allocators ──────────────────────────────────────────────── */
 extern void *kmalloc(size_t size, uint32_t gfp);

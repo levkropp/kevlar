@@ -1107,6 +1107,9 @@ def compile_all_local_arm64(cc):
         ("testing/test_i3.c",          "test-i3",           []),
         ("testing/test_openbox.c",     "test-openbox",      []),
         ("testing/test_xfce.c",        "test-xfce",         []),
+        # kABI userspace harness: opens /dev/k4-demo, validates K4 path
+        # through real sys_openat/read syscalls.
+        ("testing/test_kabi_userspace.c","test-kabi-userspace",[]),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
@@ -1299,6 +1302,35 @@ def build_k5_ko_arm64(cc):
     return out
 
 
+def build_k6_ko_arm64(cc):
+    """Build the K6 demo `.ko` exercising variadic printk format strings."""
+    out = CACHE / "local-bin-arm64" / "k6.ko"
+    src = ROOT / "testing" / "k6-module.c"
+    inc = ROOT / "testing" / "include"
+    if not src.exists():
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        cc, "-c",
+        "-ffreestanding", "-fno-pic", "-fno-stack-protector",
+        "-mcmodel=tiny", "-nostdlib",
+        "-fno-asynchronous-unwind-tables",
+        "-I", str(inc),
+        "-O1",
+        "-o", str(out), str(src),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log("WARN", f"k6.ko: build error: {e}")
+        return None
+    if r.returncode != 0:
+        log("WARN", f"k6.ko: build failed: {(r.stderr or '').strip()[:300]}")
+        return None
+    log("CC", f"k6.ko built ({out.stat().st_size} bytes)")
+    return out
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1373,7 +1405,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None, k6_ko=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1511,6 +1543,29 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(k5_ko, dest)
         log("MOD", f"installed /lib/modules/k5.ko ({k5_ko.stat().st_size} bytes)")
 
+    # ── kABI K6 demo module ──
+    if k6_ko and k6_ko.is_file():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "k6.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(k6_ko, dest)
+        log("MOD", f"installed /lib/modules/k6.ko ({k6_ko.stat().st_size} bytes)")
+
+    # ── kABI userspace test binary ──
+    if local_arm64_bins:
+        kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"
+        if kabi_userspace_src.is_file():
+            usr_bin = ROOTFS / "usr" / "bin"
+            usr_bin.mkdir(parents=True, exist_ok=True)
+            dest = usr_bin / "test-kabi-userspace"
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(kabi_userspace_src, dest)
+            os.chmod(str(dest), 0o755)
+            log("BIN", f"installed /usr/bin/test-kabi-userspace ({kabi_userspace_src.stat().st_size} bytes)")
+
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
     (ROOTFS / "etc" / "machine-id").write_text(os.urandom(16).hex() + "\n")
@@ -1566,6 +1621,7 @@ def main():
         k3_ko = None
         k4_ko = None
         k5_ko = None
+        k6_ko = None
         if not args.skip_externals:
             cc = fetch_musl_cc_toolchain()
             if cc:
@@ -1575,9 +1631,10 @@ def main():
                 k3_ko = build_k3_ko_arm64(cc)
                 k4_ko = build_k4_ko_arm64(cc)
                 k5_ko = build_k5_ko_arm64(cc)
+                k6_ko = build_k6_ko_arm64(cc)
             else:
                 log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
-        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko)
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko, k6_ko)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive
