@@ -1540,7 +1540,13 @@ static void test_dev_fd(void) {
 
 static void test_ifconfig_cmd(void) {
     char out[4096];
-    int rc = run_cmd("ifconfig 2>/dev/null || ip addr 2>/dev/null || echo no_net_cmd", out, sizeof(out));
+    /* `ifconfig -a` lists all interfaces (including down ones); plain
+     * `ifconfig` only lists up ones, which is empty stdout on a kernel
+     * that hasn't brought up loopback yet — making this an env probe
+     * instead of an applet probe.  The fallback chain falls through to
+     * `echo no_net_cmd` if neither tool is available. */
+    int rc = run_cmd("ifconfig -a 2>/dev/null || ip -a addr 2>/dev/null || echo no_net_cmd",
+                     out, sizeof(out));
     if (rc == 0 && strlen(out) > 0)
         pass("ifconfig_cmd");
     else
@@ -1548,18 +1554,39 @@ static void test_ifconfig_cmd(void) {
 }
 
 static void test_nc_loopback(void) {
-    /* Use nc (netcat) to test local TCP: start listener, send data, verify */
+    /* nc-based loopback test is fundamentally fragile — both Linux and
+     * Kevlar hang on `nc -l`-survives-shell-exit problems if the test
+     * is structured naively, and busybox nc lacks the `-q` / process-
+     * group control to make it self-terminating across shell restarts.
+     *
+     * Instead, just verify TCP loopback round-trips by binding a
+     * listener via busybox's `nc -l` with a short `-w` timeout, then
+     * connecting from a client and checking the byte handoff completes
+     * within run_cmd's 5-second budget.
+     *
+     * `nc -w SEC` on busybox affects both connect timeout and total
+     * idle time, so the listener exits within SEC seconds even if the
+     * client never connects. */
     char out[256];
+    /* `wait` would block forever on a busybox `nc -l` that doesn't honor
+     * total-session timeout (-w on busybox affects only connect, not
+     * idle), so kill the listener PID hard *before* waiting.  `wait`
+     * after kill is a no-op cleanup. */
     int rc = run_cmd(
-        "echo 'nc_test_data' | nc -l -p 9999 &"
+        "echo 'nc_test_data' | nc -l -p 9999 > /tmp/bb_nc_srv 2>&1 &"
+        "SRV_PID=$!;"
         "sleep 1;"
-        "echo 'query' | nc 127.0.0.1 9999 2>/dev/null;"
-        "wait 2>/dev/null",
+        "echo 'query' | nc -w 2 127.0.0.1 9999 > /tmp/bb_nc_cli 2>&1;"
+        "kill -9 $SRV_PID 2>/dev/null;"
+        "wait 2>/dev/null;"
+        "cat /tmp/bb_nc_cli 2>/dev/null",
         out, sizeof(out));
     if (rc == 0 && strstr(out, "nc_test_data"))
         pass("nc_loopback");
     else
         skip("nc_loopback");
+    unlink("/tmp/bb_nc_srv");
+    unlink("/tmp/bb_nc_cli");
 }
 
 static void test_hostname_set(void) {
@@ -2097,9 +2124,7 @@ int main(int argc, char **argv) {
         else
             fail("shell_pipe_eof");
     }
-    /* while_read: BusyBox ash runs the while loop in a subshell that
-     * survives our timeout kill. Skip until process-group kill works. */
-    skip("while_read");
+    test_while_read();
     test_case_stmt();
     test_trap_signal();
 
@@ -2149,8 +2174,7 @@ int main(int argc, char **argv) {
     /* Category 9: Real-World Workload Patterns */
     test_log_pipeline();
     test_config_parse();
-    /* test_file_batch_create — skip: 50 subprocesses exhaust fork on Kevlar */
-    skip("file_batch_create");
+    test_file_batch_create();
     test_multi_redirect();
     test_process_substitution_workaround();
     test_background_jobs();
@@ -2168,12 +2192,17 @@ int main(int argc, char **argv) {
     test_dev_null();
     test_dev_zero();
     test_dev_urandom();
-    /* test_dev_fd — skip: pipe + /dev/fd/0 stdin causes fork hang */
-    skip("dev_fd");
+    test_dev_fd();
 
     /* Category 12: Networking */
     test_ifconfig_cmd();
-    /* test_nc_loopback — skip: sleep+background in shell exhausts fork */
+    /* test_nc_loopback — busybox `nc -l` hangs the outer shell on both
+     * Kevlar AND Linux because it lacks a self-terminating mode and our
+     * `kill` of the subshell pid leaves an orphaned `nc` whose `wait`
+     * blocks the harness.  This is a test-infra problem, not a kernel
+     * bug.  TCP loopback is exercised end-to-end by the contract tests
+     * (`make test-contracts-vm` → tcp_*) which use direct socket calls
+     * instead of shelling out to nc. */
     skip("nc_loopback");
     test_hostname_set();
 
@@ -2186,12 +2215,10 @@ int main(int argc, char **argv) {
     /* Category 14: Stress & Edge Cases */
     test_deep_directory();
     test_large_file();
-    /* test_many_pipes — skip: 10 cat subprocesses causes fork hang */
-    skip("many_pipes");
+    test_many_pipes();
     test_empty_file();
     test_special_chars_filename();
-    /* test_rapid_fork — skip: 20 subshells causes fork hang */
-    skip("rapid_fork");
+    test_rapid_fork();
 
     printf("TEST_END %d/%d\n", passed, total);
     fflush(stdout);

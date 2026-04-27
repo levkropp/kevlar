@@ -6,23 +6,30 @@ Creates a 1GB ext2 image with:
 - Xorg, xf86-video-fbdev, XFCE4, D-Bus, fonts, icons
 - Pre-configured inittab, xinitrc, and xorg.conf for fbdev
 
-Usage: python3 tools/build-alpine-xfce.py build/alpine-xfce.img
+Built via `apko` so the script runs cross-arch on macOS host —
+matches the openbox / lxde build pattern.
+
+Usage:
+    python3 tools/build-alpine-xfce.py [--arch aarch64|x86_64] \\
+        build/alpine-xfce.aarch64.img
 """
+import argparse
 import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE = ROOT / "build" / "native-cache" / "src"
 
-ALPINE_ROOTFS_URL = (
-    "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/"
-    "alpine-minirootfs-3.21.3-x86_64.tar.gz"
+ALPINE_REPOS = [
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/community",
+]
+ALPINE_KEY = (
+    "https://alpinelinux.org/keys/"
+    "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
 )
 
 # Packages for XFCE desktop on fbdev
@@ -57,81 +64,84 @@ XFCE_PACKAGES = [
 ]
 
 
-def download(url, dest):
-    dest = Path(dest)
-    if dest.exists():
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  DL  {Path(url).name}", file=sys.stderr)
-    urllib.request.urlretrieve(url, dest)
-    return dest
+def apko_yaml(arch: str) -> str:
+    return (
+        "contents:\n"
+        "  repositories:\n"
+        + "".join(f"    - {r}\n" for r in ALPINE_REPOS) +
+        f"  keyring:\n    - {ALPINE_KEY}\n"
+        "  packages:\n"
+        + "".join(f"    - {p}\n" for p in XFCE_PACKAGES) +
+        "\n"
+        "archs:\n"
+        f"  - {arch}\n"
+        "\n"
+        "cmd: /sbin/init\n"
+    )
+
+
+def ensure_tool(name: str, brew_hint: str | None = None) -> str:
+    path = shutil.which(name)
+    if path:
+        return path
+    for p in ("/opt/homebrew/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/sbin"):
+        cand = Path(p) / name
+        if cand.exists():
+            return str(cand)
+    hint = f" (install with `brew install {brew_hint}`)" if brew_hint else ""
+    print(f"  ERROR  `{name}` not found in PATH{hint}", file=sys.stderr)
+    sys.exit(1)
+
+
+def build_rootfs_with_apko(arch: str, out_dir: Path) -> None:
+    apko = ensure_tool("apko", "apko")
+    with tempfile.TemporaryDirectory() as ytmp:
+        yaml_path = Path(ytmp) / "apko.yaml"
+        yaml_path.write_text(apko_yaml(arch))
+        tgz_path = Path(ytmp) / "rootfs.tar.gz"
+        print(f"  APKO  resolving + installing {len(XFCE_PACKAGES)} packages "
+              f"({arch})...", file=sys.stderr)
+        r = subprocess.run(
+            [apko, "build-minirootfs",
+             "--ignore-signatures",
+             str(yaml_path), str(tgz_path)],
+            text=True, capture_output=True,
+        )
+        if not tgz_path.exists() or tgz_path.stat().st_size < 1024:
+            print(r.stdout, file=sys.stderr)
+            print(r.stderr, file=sys.stderr)
+            print("  ERROR  apko did not produce a rootfs", file=sys.stderr)
+            sys.exit(1)
+        print(f"  EXTRACT  rootfs ({tgz_path.stat().st_size // (1024*1024)}MB)",
+              file=sys.stderr)
+        subprocess.run(
+            ["tar", "-xzf", str(tgz_path), "-C", str(out_dir)],
+            capture_output=True,
+        )
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <output.img>", file=sys.stderr)
-        sys.exit(1)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--arch", default="aarch64",
+                    choices=["aarch64", "x86_64"])
+    ap.add_argument("output", help="Path to the output .img file")
+    args = ap.parse_args()
 
-    output = sys.argv[1]
+    output = args.output
 
     if os.path.exists(output):
         print(f"  SKIP  {output} already exists (delete to rebuild)", file=sys.stderr)
         return
 
-    tarball = download(ALPINE_ROOTFS_URL,
-                       CACHE / "alpine-minirootfs-3.21.3-x86_64.tar.gz")
-
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir) / "alpine-root"
         root.mkdir()
 
-        # Extract rootfs
-        print("  EXTRACT  Alpine minirootfs", file=sys.stderr)
-        with tarfile.open(tarball, "r:gz") as tar:
-            try:
-                tar.extractall(path=root, filter="fully_trusted")
-            except TypeError:
-                tar.extractall(path=root)
-
-        # Configure apk repositories
-        repos = root / "etc" / "apk" / "repositories"
-        repos.parent.mkdir(parents=True, exist_ok=True)
-        repos.write_text(
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/community\n"
-        )
-
-        (root / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
-        (root / "var" / "cache" / "apk").mkdir(parents=True, exist_ok=True)
-        (root / "tmp").mkdir(exist_ok=True)
-
-        # Find apk binary
-        apk_cmd = shutil.which("apk")
-        if not apk_cmd:
-            for candidate in [
-                ROOT / "build" / "native-cache" / "alpine-pkgs" / "apk-tools-static" / "sbin" / "apk.static",
-                ROOT / "build" / "native-cache" / "ext-bin" / "apk.static",
-            ]:
-                if candidate.exists():
-                    apk_cmd = str(candidate)
-                    break
-
-        if not apk_cmd:
-            print("  ERROR  No apk binary found.", file=sys.stderr)
-            sys.exit(1)
-
-        # Install XFCE packages. Post-install triggers fail (chroot not
-        # available) — this is expected; the packages are still installed.
-        print(f"  APK  Installing XFCE packages...", file=sys.stderr)
-        result = subprocess.run(
-            [apk_cmd, "--root", str(root), "--initdb",
-             "--repositories-file", str(repos),
-             "--allow-untrusted", "--no-cache",
-             "add"] + XFCE_PACKAGES,
-            text=True,
-        )
-        if result.returncode not in (0, 5):
-            print(f"  ERROR  apk exited with {result.returncode}", file=sys.stderr)
+        build_rootfs_with_apko(args.arch, root)
+        if not (root / "usr" / "bin" / "xfce4-session").exists() \
+            and not (root / "usr" / "bin" / "startxfce4").exists():
+            print("  ERROR  apko did not install XFCE; rootfs at " + str(root),
+                  file=sys.stderr)
             sys.exit(1)
 
         # --- Xorg config ---
@@ -147,7 +157,6 @@ def main():
             'Section "Device"\n'
             '    Identifier "fbdev"\n'
             '    Driver "fbdev"\n'
-            '    BusID "PCI:0:2:0"\n'
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'
@@ -207,12 +216,19 @@ def main():
         (root / "run" / "dbus").mkdir(parents=True, exist_ok=True)
         (root / "var" / "run" / "dbus").mkdir(parents=True, exist_ok=True)
 
-        # Append messagebus user/group to passwd/group/shadow if not present
+        # Append messagebus user/group to passwd/group/shadow if not present.
+        # apko's minirootfs is missing some of these files entirely — create
+        # them with a sensible default if so.
         passwd = root / "etc" / "passwd"
+        if not passwd.exists():
+            passwd.parent.mkdir(parents=True, exist_ok=True)
+            passwd.write_text("root:x:0:0:root:/root:/bin/sh\n")
         if "messagebus" not in passwd.read_text():
             with open(passwd, "a") as f:
                 f.write("messagebus:x:100:101:D-Bus:/var/run/dbus:/sbin/nologin\n")
         group = root / "etc" / "group"
+        if not group.exists():
+            group.write_text("root:x:0:\n")
         if "messagebus" not in group.read_text():
             with open(group, "a") as f:
                 f.write("messagebus:x:101:\n")
@@ -338,6 +354,7 @@ def main():
                     pass
 
         # Create 1GB ext2 disk image
+        mke2fs = ensure_tool("mke2fs", "e2fsprogs")
         size_mb = 1024
         print(f"  MKDISK  {size_mb}MB ext2", file=sys.stderr)
         subprocess.run(
@@ -345,7 +362,7 @@ def main():
              "bs=1M", f"count={size_mb}"],
             check=True, capture_output=True)
         subprocess.run(
-            ["mke2fs", "-t", "ext2", "-d", str(root), output],
+            [mke2fs, "-t", "ext2", "-d", str(root), "-F", output],
             check=True, capture_output=True)
 
     print(f"  DONE  {output}", file=sys.stderr)

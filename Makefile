@@ -1220,6 +1220,33 @@ test-busybox:
 		echo "ALL BUSYBOX TESTS PASSED"; \
 	fi
 
+# Run the busybox suite against Alpine's *production* BusyBox (full
+# applet set with all symlinks, dynamically linked against Alpine's
+# musl).  Boots via the alpine-lxde disk image — boot-alpine pivots
+# into the Alpine root, then execs /bin/busybox-suite (selected via
+# the `alpine_init=` cmdline arg).  This is the apples-to-apples
+# comparison against the same suite running under Linux on the same
+# Alpine userspace.
+.PHONY: test-busybox-alpine
+test-busybox-alpine: $(LXDE_IMG)
+	$(PROGRESS) "TEST" "BusyBox suite on Alpine production busybox"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
+		--kvm --arch $(ARCH) --batch --disk $(LXDE_IMG) \
+		--append-cmdline "alpine_init=/bin/busybox-suite" \
+		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
+		| tee /tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log; true
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
+		/tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log || echo "(no TEST output found)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log; then \
+		echo "BUSYBOX-ALPINE TESTS: some failures"; \
+		grep -c '^TEST_PASS' /tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log || true; \
+		grep -c '^TEST_FAIL' /tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log || true; \
+		exit 1; \
+	elif grep -q '^TEST_END' /tmp/kevlar-test-busybox-alpine-$(ARCH)-$(PROFILE).log; then \
+		echo "ALL BUSYBOX-ALPINE TESTS PASSED"; \
+	fi
+
 .PHONY: test-busybox-smp
 test-busybox-smp:
 	$(PROGRESS) "TEST" "BusyBox applet suite (4 CPUs)"

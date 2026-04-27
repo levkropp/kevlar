@@ -246,17 +246,34 @@ def main():
         )
         os.chmod(home / ".xinitrc", 0o755)
 
+        # Single combined sysinit script — busybox init runs ::sysinit
+        # entries sequentially in argv-exec mode (no shell), so chained
+        # commands won't work as a single line.  Putting everything in a
+        # script that we exec gives us a shell + sequencing.
+        (root / "etc" / "kevlar-sysinit.sh").write_text(
+            "#!/bin/sh\n"
+            "set -x\n"
+            "mkdir -p /run/dbus /tmp/.X11-unix /var/log\n"
+            "rm -f /run/dbus/dbus.pid\n"
+            "hostname kevlar\n"
+            "dbus-uuidgen --ensure >/dev/null 2>&1 || true\n"
+            "dbus-daemon --system --fork >/dev/null 2>&1 || true\n"
+            "echo 'kevlar-sysinit done' > /var/log/sysinit.log\n"
+            "sync\n"
+            # Launch LXDE in background.  Periodic syncs make the\n
+            # logs survive a QEMU kill timeout (no orderly shutdown).
+            "(/root/start-lxde.sh > /var/log/lxde-session.log 2>&1; sync) &\n"
+            "echo 'start-lxde.sh launched in background' >> /var/log/sysinit.log\n"
+            "sync\n"
+            # Background sync loop so log content reaches the disk
+            # image even if the VM gets killed mid-boot.
+            "(while true; do sleep 2; sync; done) &\n"
+        )
+        os.chmod(root / "etc" / "kevlar-sysinit.sh", 0o755)
         (root / "etc" / "inittab").write_text(
             "# Kevlar LXDE inittab\n"
-            "::sysinit:/bin/mkdir -p /run/dbus /tmp/.X11-unix\n"
-            "::sysinit:/bin/rm -f /run/dbus/dbus.pid\n"
-            "::sysinit:/bin/hostname kevlar\n"
-            "::sysinit:/usr/bin/dbus-uuidgen --ensure 2>/dev/null\n"
-            "::sysinit:/usr/bin/dbus-daemon --system 2>/dev/null\n"
-            # Auto-start LXDE session on boot (for `make run-alpine-lxde`).
-            # Output goes to /var/log/lxde-session.log so it doesn't
-            # interleave with the serial console.
-            "::once:/bin/sh /root/start-lxde.sh > /var/log/lxde-session.log 2>&1\n"
+            # Single sysinit launches everything via shell script.
+            "::sysinit:/bin/sh /etc/kevlar-sysinit.sh\n"
             "ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100\n"
             "::shutdown:/bin/sync\n"
         )
@@ -277,19 +294,33 @@ def main():
             "    -config /etc/X11/xorg.conf.d/10-fbdev.conf vt1 \\\n"
             "    >/var/log/Xorg.0.log 2>&1 &\n"
             "XORG_PID=$!\n"
-            "echo \"start-lxde: Xorg pid=$XORG_PID, sleeping 3s for socket\"\n"
-            "sleep 3\n"
+            "echo \"start-lxde: Xorg pid=$XORG_PID, polling for X0 socket\"\n"
+            # Poll for the X11 socket file.  AF_UNIX bind() in Kevlar
+            # creates a real S_IFSOCK node on the filesystem (matches
+            # Linux), so `[ -S ... ]` is the right readiness signal.
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do\n"
+            "    if [ -S /tmp/.X11-unix/X0 ]; then\n"
+            "        echo \"start-lxde: X0 socket ready after ${i}s\"\n"
+            "        break\n"
+            "    fi\n"
+            "    sleep 1\n"
+            "    sync\n"
+            "done\n"
             "if [ ! -S /tmp/.X11-unix/X0 ]; then\n"
-            "    echo 'start-lxde: ERROR /tmp/.X11-unix/X0 missing — Xorg failed'\n"
-            "    cat /var/log/Xorg.0.log | tail -30\n"
+            "    echo 'start-lxde: ERROR /tmp/.X11-unix/X0 missing after 20s — Xorg failed'\n"
+            "    ls -la /tmp/.X11-unix/ 2>&1 || true\n"
+            "    cat /var/log/Xorg.0.log | tail -40\n"
+            "    sync\n"
             "    exit 1\n"
             "fi\n"
             "echo 'start-lxde: launching openbox (autostart runs tint2 + pcmanfm)'\n"
             "/usr/bin/openbox >/var/log/openbox.log 2>&1 &\n"
             "OB_PID=$!\n"
             "echo \"start-lxde: openbox pid=$OB_PID — desktop should appear in QEMU window\"\n"
+            "sync\n"
             "wait $OB_PID\n"
             "echo \"start-lxde: openbox exited (rc=$?)\"\n"
+            "sync\n"
         )
         os.chmod(root / "root" / "start-lxde.sh", 0o755)
 
@@ -409,6 +440,22 @@ def main():
                     print("  CACHE  mime.cache: generated", file=sys.stderr)
                 except Exception:
                     pass
+
+        # Drop the busybox suite test driver into the image so we can
+        # boot Alpine with `alpine_init=/bin/busybox-suite` and exercise
+        # Alpine's *production* BusyBox (full applet set, dynamic-linked
+        # against Alpine's musl) instead of the slimmer cross-built
+        # version that ships in our initramfs.  See `make
+        # ARCH=arm64 test-busybox-alpine`.
+        bb_suite_src_candidates = [
+            ROOT / "build" / "native-cache" / "local-bin-arm64" / "busybox-suite",
+        ]
+        for cand in bb_suite_src_candidates:
+            if cand.exists():
+                shutil.copy2(cand, root / "bin" / "busybox-suite")
+                os.chmod(root / "bin" / "busybox-suite", 0o755)
+                print(f"  COPY  busybox-suite → /bin/busybox-suite", file=sys.stderr)
+                break
 
         mke2fs = ensure_tool("mke2fs", "e2fsprogs")
         size_mb = 1024

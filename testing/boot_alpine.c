@@ -97,20 +97,56 @@ int main(void) {
         chdir("/");
     }
 
-    msg("kevlar: exec /sbin/init\n");
+    // Honor `alpine_init=PATH` on the kernel cmdline so callers can
+    // run an alternative PID 1 inside the Alpine root (e.g. our
+    // `/bin/busybox-suite` test driver against Alpine's production
+    // BusyBox).  Default falls through to /sbin/init.
+    char init_path[256] = "/sbin/init";
+    {
+        int cfd = open("/proc/cmdline", O_RDONLY);
+        if (cfd >= 0) {
+            char buf[1024];
+            ssize_t n = read(cfd, buf, sizeof(buf) - 1);
+            close(cfd);
+            if (n > 0) {
+                buf[n] = '\0';
+                const char *p = strstr(buf, "alpine_init=");
+                if (p) {
+                    p += strlen("alpine_init=");
+                    size_t i = 0;
+                    while (*p && *p != ' ' && *p != '\t' && *p != '\n' &&
+                           i + 1 < sizeof(init_path)) {
+                        init_path[i++] = *p++;
+                    }
+                    init_path[i] = '\0';
+                }
+            }
+        }
+    }
 
-    // Execute Alpine's init (BusyBox init reads /etc/inittab)
-    char *init_argv[] = { "/sbin/init", NULL };
+    {
+        char buf[300];
+        int n = snprintf(buf, sizeof(buf), "kevlar: exec %s\n", init_path);
+        write(1, buf, n);
+    }
+
+    char *init_argv[] = { init_path, NULL };
     char *init_envp[] = {
         "HOME=/root",
         "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
         "TERM=vt100",
         NULL,
     };
-    execve("/sbin/init", init_argv, init_envp);
+    execve(init_path, init_argv, init_envp);
 
     // If execve fails, drop to shell
-    msg("kevlar: execve /sbin/init failed, dropping to shell\n");
+    {
+        char buf[300];
+        int n = snprintf(buf, sizeof(buf),
+                         "kevlar: execve %s failed (errno=%d), dropping to shell\n",
+                         init_path, errno);
+        write(1, buf, n);
+    }
     char *sh_argv[] = { "/bin/sh", NULL };
     char *sh_envp[] = {
         "HOME=/root",

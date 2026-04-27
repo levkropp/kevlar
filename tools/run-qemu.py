@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import platform
+import threading
+import time
 
 COMMON_ARGS = [
     "-serial",
@@ -56,6 +58,27 @@ ARCHS = {
             "virtio-net-device,netdev=net0",
             "-netdev",
             "user,id=net0,hostfwd=tcp:127.0.0.1:20022-:22,hostfwd=tcp:127.0.0.1:20080-:80",
+            # Expose a `ramfb` display device.  Setup is done by
+            # `exts/ramfb` from the guest, which writes fb metadata
+            # into the QEMU fw_cfg `etc/ramfb` file.  When `-display`
+            # is anything other than `none`, QEMU scans out the guest
+            # framebuffer.  In `--batch` mode we still pass `-display
+            # vnc=:0 -vga none` if the user opts in via --display-vnc.
+            "-device",
+            "ramfb",
+            # virtio-{keyboard,tablet}-device: virtio-mmio input
+            # devices that `exts/virtio_input` discovers via the DTB
+            # walker and exposes at /dev/input/event0 (keyboard) and
+            # /dev/input/event1 (tablet — absolute coords map cleanly
+            # from the VNC client without a "first move to register"
+            # step that virtio-mouse would need).  Disable event_idx
+            # and indirect_desc so the wire protocol stays in plain
+            # mode; Kevlar's `Virtio` driver doesn't negotiate either
+            # feature.
+            "-device",
+            "virtio-keyboard-device,event_idx=off,indirect_desc=off",
+            "-device",
+            "virtio-mouse-device,event_idx=off,indirect_desc=off",
             "-d",
             "guest_errors,unimp",
         ]
@@ -160,6 +183,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=["x64", "arm64"])
     parser.add_argument("--gui", action="store_true")
+    parser.add_argument("--display-vnc", metavar="PORT", type=int, default=None,
+                        help="When set, replace -nographic with `-display vnc=:PORT` "
+                             "so QEMU's display backend stays alive in batch mode. "
+                             "Required for the ramfb scan-out path on arm64 to be "
+                             "visible during a `--batch` run.  Connect with a VNC "
+                             "client at 127.0.0.1:(5900+PORT).")
     parser.add_argument("--gdb", action="store_true")
     parser.add_argument("--kvm", action="store_true")
     parser.add_argument("--ktrace", metavar="FILE", nargs="?", const="ktrace.bin",
@@ -178,6 +207,11 @@ def main():
                              "latency histogram). Useful for livelocks that the "
                              "kernel's internal LAPIC-HB watchdog can't detect.")
     parser.add_argument("--qemu")
+    parser.add_argument("--timeout", metavar="SECONDS", type=float, default=None,
+                        help="Hard kill QEMU after SECONDS. Portable replacement "
+                             "for `timeout(1)` (which is missing on macOS by "
+                             "default). Sends SIGTERM, then SIGKILL after a "
+                             "5s grace period.")
     parser.add_argument("kernel_elf", help="The kernel ELF executable.")
     parser.add_argument("qemu_args", nargs="*")
     args = parser.parse_args()
@@ -272,7 +306,15 @@ def main():
         argv = new_argv
         argv += ["-serial", "stdio", "-monitor", "none"]
     cmdline = []
-    if not args.gui:
+    if args.display_vnc is not None:
+        # VNC backend keeps the QEMU display device alive even in
+        # batch mode (no SDL/cocoa needed).  Combined with `-device
+        # ramfb` (in the arm64 default args) this lets ramfb scan
+        # out the guest's /dev/fb0 backing memory to a remote VNC
+        # client.  `-vga none` suppresses any default VGA the
+        # machine model would otherwise pull in.
+        argv += ["-display", f"vnc=:{args.display_vnc}", "-vga", "none"]
+    elif not args.gui:
         argv += ["-nographic"]
     if args.gdb:
         argv += ["-gdb", "tcp::7789", "-S"]
@@ -284,30 +326,49 @@ def main():
         # Fall back to kvm label if the host isn't macOS so CI/Linux flows stay
         # unchanged.
         if platform.system() == "Darwin":
-            argv += ["-accel", "hvf"]
-            # HVF requires -cpu host (it cannot emulate a different ARM CPU
-            # model).  Replace the default -cpu cortex-a72 if present.
-            if args.arch == "arm64":
-                new_argv = []
-                skip = False
-                for a in argv:
-                    if a == "-cpu":
-                        skip = True
-                        continue
-                    if skip:
-                        skip = False
-                        continue
-                    new_argv.append(a)
-                argv = new_argv + ["-cpu", "host"]
+            host_is_arm64 = platform.machine() in ("arm64", "aarch64")
+            host_arch_for_qemu = "arm64" if host_is_arm64 else "x64"
+            if args.arch != host_arch_for_qemu:
+                # Cross-arch on macOS — HVF only accelerates same-arch guests.
+                # Fall back to TCG (software emulation).  Slower but works.
+                print(f"run-qemu.py: --kvm with cross-arch macOS host "
+                      f"(host={host_arch_for_qemu}, guest={args.arch}); "
+                      f"falling back to TCG", file=sys.stderr)
+                argv += ["-accel", "tcg"]
+            else:
+                argv += ["-accel", "hvf"]
+                # HVF requires -cpu host (it cannot emulate a different ARM CPU
+                # model).  Replace the default -cpu cortex-a72 if present.
+                if args.arch == "arm64":
+                    new_argv = []
+                    skip = False
+                    for a in argv:
+                        if a == "-cpu":
+                            skip = True
+                            continue
+                        if skip:
+                            skip = False
+                            continue
+                        new_argv.append(a)
+                    argv = new_argv + ["-cpu", "host"]
         else:
             argv += ["-accel", "kvm"]
     if args.disk:
         disk_path = args.disk.replace('\\', '/') if platform.system() == "Windows" else args.disk
+        # cache=writeback (default) keeps host writes in the page cache
+        # until the host OS schedules them out, OR until QEMU exits and
+        # closes the file.  Under SIGKILL (the wrapper's fallback after
+        # SIGTERM timeout) writes that haven't been issued yet are lost,
+        # producing 0-byte files when extracted via debugfs.
+        # cache=writethrough (synchronous fsync per write) is safer for
+        # off-host extraction and the perf cost is irrelevant for our
+        # test harness.
         if args.arch == "arm64":
-            argv += ["-drive", f"file={disk_path},format=raw,if=none,id=drive0",
+            argv += ["-drive",
+                     f"file={disk_path},format=raw,if=none,id=drive0,cache=writethrough",
                      "-device", "virtio-blk-device,drive=drive0"]
         else:
-            argv += ["-drive", f"file={disk_path},format=raw,if=virtio"]
+            argv += ["-drive", f"file={disk_path},format=raw,if=virtio,cache=writethrough"]
     if args.ktrace:
         ktrace_path = args.ktrace
         if args.arch == "arm64":
@@ -364,8 +425,6 @@ def main():
     stall_t = None
     if need_intercept:
         import base64
-        import threading
-        import time
 
         popen_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
         if not is_windows:
@@ -481,6 +540,23 @@ def main():
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
 
+    deadline_t = None
+    if args.timeout is not None:
+        def _deadline_kill():
+            time.sleep(args.timeout)
+            if p.poll() is None:
+                print(f"\nrun-qemu.py: --timeout {args.timeout}s reached, "
+                      f"terminating QEMU", file=sys.stderr)
+                _forward_signal(signal.SIGTERM, None)
+                # Grace period before SIGKILL.
+                time.sleep(5)
+                if p.poll() is None:
+                    print("run-qemu.py: SIGTERM ignored, sending SIGKILL",
+                          file=sys.stderr)
+                    _forward_signal(signal.SIGKILL, None)
+        deadline_t = threading.Thread(target=_deadline_kill, daemon=True)
+        deadline_t.start()
+
     try:
         p.wait()
         if t is not None:
@@ -499,7 +575,11 @@ def main():
             except OSError:
                 pass
 
-    if p.returncode != 33:
+    # Recognized clean-exit codes:
+    #   33  — x86_64 isa-debug-exit Success ((0x10 << 1) | 1)
+    #   0   — arm64 PSCI SYSTEM_OFF (carries no exit code) and QEMU's own
+    #         clean shutdown after a graceful guest halt.
+    if p.returncode not in (0, 33):
         sys.exit(
             f"\nrun-qemu.py: qemu exited with failure status (status={p.returncode})"
         )

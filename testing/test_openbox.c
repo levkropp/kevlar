@@ -401,6 +401,14 @@ int main(void) {
         if (rc != 0) {
             sh_run("cat /tmp/wm-check.err 2>&1 "
                    "| sed 's/^/  xprop stderr: /' | head -4", 1000);
+            // Dump Xorg's process maps so we can decode the user PC
+            // logged by PID1_STALL.  The PC sits inside one of these
+            // mappings (Xorg binary, libc, libxfont, libxcursor, ...);
+            // file_off + (pc - vma_base) tells us where in the file.
+            sh_run("echo '=== /proc/4/maps (Xorg) ==='; "
+                   "dd if=/proc/4/maps bs=65536 count=1 2>/dev/null "
+                   "| sed 's/^/  XORG_MAP: /'",
+                   3000);
         }
         if (rc == 0) pass("openbox_owns_wm_selection");
         else { char b[32]; snprintf(b, sizeof(b), "rc=%d", rc);
