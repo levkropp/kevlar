@@ -71,6 +71,11 @@ LXDE_PACKAGES = [
     "hicolor-icon-theme",
     # Utilities
     "xterm",
+    # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
+    # safest cases for the per-program harness in
+    # `testing/test_lxde_program.c`.
+    "xeyes",
+    "xcalc",
 ]
 
 

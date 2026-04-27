@@ -723,6 +723,32 @@ test-lxde-input: $(LXDE_IMG)
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP)' /tmp/kevlar-test-lxde-input-$(ARCH)-$(PROFILE).log || echo "(no test output)"
 	@grep 'TEST_END' /tmp/kevlar-test-lxde-input-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
+# Generic per-program harness: brings up the LXDE session, then
+# spawns the program named by PROG=<name> and emits four sub-tests
+# (process_running, window_mapped, pixels_changed, clean_exit).
+# Args to the program go via PROG_ARGS=<...>.  Example:
+#
+#   make ARCH=arm64 iterate-program PROG=xeyes
+#   make ARCH=arm64 iterate-program PROG=dillo PROG_ARGS=file:///etc/issue
+#
+# The `iterate-` target name mirrors `iterate-lxde` but targets a
+# specific program, with its own log path so concurrent runs
+# don't clobber each other.
+.PHONY: iterate-program
+iterate-program: $(LXDE_IMG)
+	@if [ -z "$(PROG)" ]; then echo "Usage: make iterate-program PROG=<name>"; exit 1; fi
+	$(PROGRESS) "TEST" "LXDE program: $(PROG) ($(ARCH))"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-lxde-program"
+	$(PYTHON3) tools/run-qemu.py --timeout 240 \
+		--kvm --batch --arch $(ARCH) --disk $(LXDE_IMG) \
+		--append-cmdline "kevlar-prog=$(PROG)" \
+		$(if $(PROG_ARGS),--append-cmdline "kevlar-prog-args=$(PROG_ARGS)",) \
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-iterate-program-$(PROG)-$(ARCH).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP)' /tmp/kevlar-iterate-program-$(PROG)-$(ARCH).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-iterate-program-$(PROG)-$(ARCH).log || echo "(no summary)"
+
 # Run Alpine LXDE interactively (with QEMU window).
 # `-vga std` is required for ramfb to be configured — without it, the
 # QEMU window stays blank because /dev/fb0 isn't backed by anything.

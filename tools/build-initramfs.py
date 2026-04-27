@@ -1103,6 +1103,7 @@ def compile_all_local_arm64(cc):
         # Graphical-desktop tests (first arm64 Alpine+Xorg attempts).
         ("testing/test_twm.c",         "test-twm",          []),
         ("testing/test_lxde.c",        "test-lxde",         []),
+        ("testing/test_lxde_program.c","test-lxde-program", []),
         ("testing/test_i3.c",          "test-i3",           []),
         ("testing/test_openbox.c",     "test-openbox",      []),
         ("testing/test_xfce.c",        "test-xfce",         []),
