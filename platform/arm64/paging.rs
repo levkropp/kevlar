@@ -26,6 +26,7 @@ const DESC_PAGE: u64 = 1 << 1;  // Page descriptor (level 3)
 // Lower attributes.
 const ATTR_IDX_DEVICE: u64 = 0 << 2; // MAIR index 0 = Device-nGnRnE (MMIO)
 const ATTR_IDX_NORMAL: u64 = 1 << 2; // MAIR index 1 = Normal WB
+const ATTR_IDX_NORMAL_NC: u64 = 2 << 2; // MAIR index 2 = Normal Non-Cacheable (fb mmap)
 // AP[2:1] (bits [7:6]):
 //   00 = EL1 RW, EL0 no access
 //   01 = EL1 RW, EL0 RW
@@ -1563,13 +1564,21 @@ impl PageTable {
         restore_writable_from_list(self.pgd, addrs);
     }
 
-    /// Map a device memory page (MMIO). Uses MAIR attr0 = Device-nGnRnE so
-    /// writes bypass the cache and go directly to hardware — required for
-    /// framebuffers and similar BAR-backed regions.
+    /// Map a device memory page exposed to userspace (e.g. /dev/fb0).
+    ///
+    /// Uses MAIR attr2 = Normal Non-Cacheable.  This matches what Linux
+    /// fbdev does (`pgprot_writecombine` on arm64).  We deliberately
+    /// avoid Device-nGnRnE here because the architecture's behavior of
+    /// LDP/STP on Device memory is implementation-defined, and musl's
+    /// memcpy (used by Xorg's libshadow framebuffer update path) emits
+    /// LDP/STP for the bulk transfer — see task #44 / blog 244.
+    ///
+    /// Normal-NC still bypasses the cache (no clean/invalidate worries
+    /// for QEMU's external view of ramfb), but it permits the full
+    /// arm64 instruction set including aligned multi-register transfers.
     #[inline(always)]
     pub fn map_device_page(&mut self, vaddr: UserVAddr, paddr: PAddr, prot_flags: i32) {
-        // Start from device attributes (not ATTR_IDX_NORMAL).
-        let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_DEVICE | ATTR_SH_ISH
+        let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL_NC | ATTR_SH_ISH
             | ATTR_AF | ATTR_NG | ATTR_AP_USER | ATTR_PXN;
         // Writable bit is cleared by setting AP[2] (read-only); clear
         // it when PROT_WRITE is requested.

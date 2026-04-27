@@ -131,8 +131,14 @@ _start:
     // Configure and enable the MMU.
     // ---------------------------------------------------------------
 
-    // MAIR_EL1: attr0 = Device-nGnRnE (0x00), attr1 = Normal WB (0xFF)
+    // MAIR_EL1: attr0 = Device-nGnRnE (0x00), attr1 = Normal WB (0xFF),
+    //           attr2 = Normal Non-Cacheable (0x44).
+    // Normal-NC is what Linux uses for /dev/fb0 mmap (pgprot_writecombine on
+    // arm64) — supports LDP/STP (memcpy uses these), unlike Device-nGnRnE
+    // where multi-register transfers are implementation-defined.  Required
+    // for libshadow's framebuffer update loop (task #44).
     mov     x0, #0xFF00
+    movk    x0, #0x44, lsl #16
     msr     mair_el1, x0
 
     // TCR_EL1:
@@ -217,8 +223,10 @@ secondary_entry:
     adrp    x0, __boot_stack
     add     sp, x0, :lo12:__boot_stack
 
-    // MAIR_EL1 (same as BSP).
+    // MAIR_EL1 (same as BSP — attr0=Device-nGnRnE, attr1=Normal-WB,
+    // attr2=Normal-NC for /dev/fb0 mmap; see BSP block for rationale).
     mov     x0, #0xFF00
+    movk    x0, #0x44, lsl #16
     msr     mair_el1, x0
 
     // TCR_EL1 (same as BSP — see BSP block for field breakdown).
