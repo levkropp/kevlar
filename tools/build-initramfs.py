@@ -152,6 +152,8 @@ def compile_all_local():
         ("testing/test_xfce_idle.c",     "test-xfce-idle",   []),
         ("testing/test_xfce_panel_probe.c", "test-xfce-panel-probe", []),
         ("testing/test_lxde.c",          "test-lxde",        []),
+        ("testing/test_i3.c",            "test-i3",          []),
+        ("testing/test_openbox.c",       "test-openbox",     []),
         ("testing/test_unix_stream_corruption.c", "test-unix-stream", ["-pthread"]),
         ("testing/test_tlb_stress.c",    "test-tlb-stress",  ["-pthread"]),
         ("testing/test_x11_visible.c",   "test-x11-visible", []),
@@ -1095,6 +1097,15 @@ def compile_all_local_arm64(cc):
         ("testing/fork_exec_stress.c", "fork-exec-stress",  []),
         ("testing/dd_diag.c",          "dd-diag",           []),
         ("testing/test_net.c",         "test-net",          []),
+        # Boot shim for `make run-alpine-{openbox,lxde,xfce}`: pivots
+        # initramfs → on-disk Alpine root and execs /sbin/init.
+        ("testing/boot_alpine.c",      "boot-alpine",       []),
+        # Graphical-desktop tests (first arm64 Alpine+Xorg attempts).
+        ("testing/test_twm.c",         "test-twm",          []),
+        ("testing/test_lxde.c",        "test-lxde",         []),
+        ("testing/test_i3.c",          "test-i3",           []),
+        ("testing/test_openbox.c",     "test-openbox",      []),
+        ("testing/test_xfce.c",        "test-xfce",         []),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
