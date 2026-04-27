@@ -635,29 +635,35 @@ run-alpine-gui: build/alpine-xorg.img
 		$(kernel_qemu_arg) -- -mem-prealloc
 
 # Build Alpine XFCE disk image (1GB with XFCE4, D-Bus, fonts, icons)
-build/alpine-xfce.img:
-	$(PROGRESS) "MKDISK" "Alpine XFCE (1GB)"
-	$(PYTHON3) tools/build-alpine-xfce.py build/alpine-xfce.img
+XFCE_APKO_ARCH_x64   := x86_64
+XFCE_APKO_ARCH_arm64 := aarch64
+XFCE_APKO_ARCH       := $(XFCE_APKO_ARCH_$(ARCH))
+XFCE_IMG := build/alpine-xfce.$(ARCH).img
+
+$(XFCE_IMG):
+	$(PROGRESS) "MKDISK" "Alpine XFCE ($(ARCH), 1GB)"
+	@rm -f $(XFCE_IMG)
+	$(PYTHON3) tools/build-alpine-xfce.py --arch $(XFCE_APKO_ARCH) $(XFCE_IMG)
 
 # Test XFCE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-xfce
-test-xfce: build/alpine-xfce.img
-	$(PROGRESS) "TEST" "XFCE desktop startup"
+test-xfce: $(XFCE_IMG)
+	$(PROGRESS) "TEST" "XFCE desktop startup ($(ARCH))"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xfce"
 	$(PYTHON3) tools/run-qemu.py --timeout 300 \
-		--kvm --batch --arch $(ARCH) --disk build/alpine-xfce.img \
-		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
-		| tee /tmp/kevlar-test-xfce-$(PROFILE).log; true
+		--kvm --batch --arch $(ARCH) --disk $(XFCE_IMG) \
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-xfce-$(ARCH)-$(PROFILE).log; true
 	@echo ""
-	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-xfce-$(PROFILE).log || echo "(no test output)"
-	@grep 'TEST_END' /tmp/kevlar-test-xfce-$(PROFILE).log || echo "(no summary)"
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-xfce-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-xfce-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
 # Run Alpine XFCE interactively (with QEMU window)
 .PHONY: run-alpine-xfce
-run-alpine-xfce: build/alpine-xfce.img
+run-alpine-xfce: $(XFCE_IMG)
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
 	$(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --kvm --gui --disk build/alpine-xfce.img \
+		--arch $(ARCH) --kvm --gui --disk $(XFCE_IMG) \
 		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
 
 # Build Alpine LXDE disk image (1GB with LXDE, openbox, D-Bus, fonts, icons)
@@ -685,13 +691,16 @@ test-lxde: $(LXDE_IMG)
 	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no test output)"
 	@grep 'TEST_END' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
-# Run Alpine LXDE interactively (with QEMU window)
+# Run Alpine LXDE interactively (with QEMU window).
+# `-vga std` is required for ramfb to be configured — without it, the
+# QEMU window stays blank because /dev/fb0 isn't backed by anything.
+# `-smp 2` matches the test runner so timing/scheduler behavior matches.
 .PHONY: run-alpine-lxde
 run-alpine-lxde: $(LXDE_IMG)
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
 	$(PYTHON3) tools/run-qemu.py \
 		--arch $(ARCH) --kvm --gui --disk $(LXDE_IMG) \
-		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std -mem-prealloc
 
 # Build Alpine i3 disk image — uses apko for cross-platform resolution
 # (works on macOS natively; no Linux VM needed).  Default arch aarch64,

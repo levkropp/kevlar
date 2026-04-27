@@ -243,6 +243,10 @@ def main():
             "::sysinit:/bin/hostname kevlar\n"
             "::sysinit:/usr/bin/dbus-uuidgen --ensure 2>/dev/null\n"
             "::sysinit:/usr/bin/dbus-daemon --system 2>/dev/null\n"
+            # Auto-start LXDE session on boot (for `make run-alpine-lxde`).
+            # Output goes to /var/log/lxde-session.log so it doesn't
+            # interleave with the serial console.
+            "::once:/bin/sh /root/start-lxde.sh > /var/log/lxde-session.log 2>&1\n"
             "ttyS0::respawn:/sbin/getty -n -l /bin/sh -L 115200 ttyS0 vt100\n"
             "::shutdown:/bin/sync\n"
         )
