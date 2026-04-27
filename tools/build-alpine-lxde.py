@@ -160,8 +160,15 @@ def main():
         # directly.
         xorg_conf_dir = root / "etc" / "X11" / "xorg.conf.d"
         xorg_conf_dir.mkdir(parents=True, exist_ok=True)
+        # Kevlar has no udev, so Xorg can't auto-discover input devices
+        # via the standard hotplug path.  We bind /dev/input/event0 and
+        # /dev/input/event1 explicitly to xf86-input-evdev — one of
+        # them is the virtio-keyboard, the other is the virtio-mouse,
+        # depending on QEMU's MMIO assignment order on this VM.  The
+        # evdev driver auto-detects keyboard-vs-pointer from the
+        # device's EVIOCGBIT(EV_KEY) bitmap.
         (xorg_conf_dir / "10-fbdev.conf").write_text(
-            '# Kevlar: disable udev auto-detect, use explicit fbdev config\n'
+            '# Kevlar: disable udev auto-detect, use explicit fbdev + evdev config\n'
             'Section "ServerFlags"\n'
             '    Option "AutoAddDevices" "false"\n'
             '    Option "AutoAddGPU" "false"\n'
@@ -173,6 +180,21 @@ def main():
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'
+            # NOTE: QEMU's virt MMIO assigns lower addresses to later
+            # -device args, so /dev/input/event1 is the
+            # virtio-keyboard-device (registered first via DTB walk).
+            # Bind only the keyboard for now — the mouse path needs
+            # virtio-input config-space evbit reading to disambiguate
+            # from the keyboard's "all keys" EVIOCGBIT response.
+            'Section "InputDevice"\n'
+            '    Identifier "kbd"\n'
+            '    Driver "evdev"\n'
+            '    Option "Device" "/dev/input/event1"\n'
+            '    Option "XkbRules" "evdev"\n'
+            '    Option "XkbModel" "pc105"\n'
+            '    Option "XkbLayout" "us"\n'
+            'EndSection\n'
+            '\n'
             'Section "Screen"\n'
             '    Identifier "default"\n'
             '    Device "fbdev"\n'
@@ -181,6 +203,12 @@ def main():
             '        Depth 24\n'
             '        Modes "1024x768"\n'
             '    EndSubSection\n'
+            'EndSection\n'
+            '\n'
+            'Section "ServerLayout"\n'
+            '    Identifier "kevlar-lxde"\n'
+            '    Screen "default"\n'
+            '    InputDevice "kbd" "CoreKeyboard"\n'
             'EndSection\n'
         )
 

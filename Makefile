@@ -700,6 +700,29 @@ test-lxde: $(LXDE_IMG)
 	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no test output)"
 	@grep 'TEST_END' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
+# test-lxde plus Phase-1 input verification.  Spawns xterm running
+# `cat > /var/log/typed.txt` inside the desktop, prints an INJECT_NOW
+# sentinel on serial, and the run-qemu --inject-on-line / --inject-keys
+# flags drive a QMP `input-send-event` sequence that types
+# "kevlar-keys\n" into the focused xterm.  The guest then re-reads the
+# disk file and asserts the bytes arrived through virtio-keyboard ->
+# evdev -> Xorg -> xterm -> cat -> ext2.  Without the driver, the
+# typed_text_arrived sub-test reports SKIP (the default for test-lxde).
+.PHONY: test-lxde-input
+test-lxde-input: $(LXDE_IMG)
+	$(PROGRESS) "TEST" "LXDE input verification ($(ARCH))"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-lxde"
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
+		--kvm --batch --arch $(ARCH) --disk $(LXDE_IMG) \
+		--display-vnc 8 \
+		--inject-on-line "INJECT_NOW: kevlar-lxde-input-ready" \
+		--inject-keys "kevlar-keys\n" \
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 2>&1 \
+		| tee /tmp/kevlar-test-lxde-input-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP)' /tmp/kevlar-test-lxde-input-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-lxde-input-$(ARCH)-$(PROFILE).log || echo "(no summary)"
+
 # Run Alpine LXDE interactively (with QEMU window).
 # `-vga std` is required for ramfb to be configured — without it, the
 # QEMU window stays blank because /dev/fb0 isn't backed by anything.

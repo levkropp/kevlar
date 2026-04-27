@@ -12,6 +12,10 @@ pub mod virtio_pci_modern;
 pub trait VirtioTransport: Send + Sync {
     fn is_modern(&self) -> bool;
     fn read_device_config8(&self, offset: u16) -> u8;
+    /// Write one byte into the device-specific config space.  Only the
+    /// MMIO transport exposes this — PCI is read-only on most config
+    /// fields.  Default is a no-op so PCI-only callers still build.
+    fn write_device_config8(&self, _offset: u16, _value: u8) {}
     fn read_isr_status(&self) -> IsrStatus;
     fn read_device_status(&self) -> u8;
     fn write_device_status(&self, value: u8);

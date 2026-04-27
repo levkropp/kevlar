@@ -34,6 +34,17 @@ impl VirtioTransport for VirtioMmio {
         unsafe { self.mmio_base.add((0x100 + offset) as usize).mmio_read8() }
     }
 
+    fn write_device_config8(&self, offset: u16, value: u8) {
+        // virtio-input uses config-space writes for the (select,
+        // subsel) tuple to select which capability bitmap to expose
+        // via subsequent reads.  Spec §5.8.5.
+        unsafe {
+            self.mmio_base
+                .add((0x100 + offset) as usize)
+                .mmio_write8(value);
+        }
+    }
+
     fn read_isr_status(&self) -> IsrStatus {
         // Per virtio-mmio v1.1 §4.2.2.1, InterruptStatus (0x60) is
         // read-only and InterruptACK (0x64) is write-only.  The device

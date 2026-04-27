@@ -114,6 +114,79 @@ def _qmp_inject_nmi(sock_path):
         s.close()
 
 
+# ASCII → QEMU qcode mapping for `input-send-event`.  Covers the
+# characters the LXDE input test injects (printable + newline +
+# space).  Anything unmapped is silently dropped.
+#
+# QEMU's qcodes are documented in QAPI input.json; the names match
+# what `qemu -display sdl` would map host keys to.
+_QCODE_BY_CHAR = {
+    "\n": "ret", "\t": "tab", " ": "spc",
+    "0": "0", "1": "1", "2": "2", "3": "3", "4": "4",
+    "5": "5", "6": "6", "7": "7", "8": "8", "9": "9",
+    "-": "minus", "=": "equal", "/": "slash", ".": "dot",
+    ",": "comma", ";": "semicolon", "'": "apostrophe",
+}
+for _c in "abcdefghijklmnopqrstuvwxyz":
+    _QCODE_BY_CHAR[_c] = _c
+
+# Subset of characters that need shift to produce.  When typing one
+# of these, we wrap the keypress with shift down/up.
+_SHIFTED_CHAR = {}
+for _c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+    _SHIFTED_CHAR[_c] = _c.lower()
+for _pair in ("!1", "@2", "#3", "$4", "%5", "^6", "&7", "*8", "(9", ")0",
+              "_-", "+=", "{[", "}]", ":;", "\"'", "<,", ">.", "?/", "~`"):
+    _SHIFTED_CHAR[_pair[0]] = _QCODE_BY_CHAR.get(_pair[1], _pair[1])
+
+
+def _qmp_send_keys(sock_path, text):
+    """Send `text` as a series of QMP `input-send-event` key presses.
+
+    Caller is responsible for any host-side delay before / after.
+    Returns the count of characters successfully injected.
+    """
+    import json
+    if not text:
+        return 0
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5.0)
+    sent = 0
+    try:
+        s.connect(sock_path)
+        f = s.makefile("rwb")
+        _ = f.readline()
+        f.write(b'{"execute":"qmp_capabilities"}\n'); f.flush()
+        _ = f.readline()
+
+        def _send_event(payload):
+            f.write((json.dumps({"execute": "input-send-event",
+                                 "arguments": {"events": payload}})
+                     + "\n").encode())
+            f.flush()
+            _ = f.readline()
+
+        for ch in text:
+            shifted = ch in _SHIFTED_CHAR
+            qcode = _SHIFTED_CHAR.get(ch) or _QCODE_BY_CHAR.get(ch)
+            if qcode is None:
+                continue
+            keyev = lambda down, qc: {
+                "type": "key",
+                "data": {"down": down, "key": {"type": "qcode", "data": qc}},
+            }
+            if shifted:
+                _send_event([keyev(True,  "shift")])
+            _send_event([keyev(True,  qcode)])
+            _send_event([keyev(False, qcode)])
+            if shifted:
+                _send_event([keyev(False, "shift")])
+            sent += 1
+    finally:
+        s.close()
+    return sent
+
+
 def kill_stale_qemu_on_ports(ports):
     """Kill any QEMU processes holding our forwarded ports."""
     is_windows = platform.system() == "Windows"
@@ -206,6 +279,19 @@ def main():
                              "per-CPU state (RIP, registers, backtrace, syscall "
                              "latency histogram). Useful for livelocks that the "
                              "kernel's internal LAPIC-HB watchdog can't detect.")
+    parser.add_argument("--inject-on-line", metavar="PATTERN", default=None,
+                        help="When the guest emits a serial line containing "
+                             "PATTERN, inject the keystrokes from "
+                             "--inject-keys via QMP `input-send-event`.  "
+                             "The guest is expected to print PATTERN as a "
+                             "ready signal (e.g. 'INJECT_NOW') after the "
+                             "consumer process is up.")
+    parser.add_argument("--inject-keys", metavar="STRING", default=None,
+                        help="String to type via QMP when --inject-on-line "
+                             "fires.  Supports printable ASCII, newline "
+                             "(\\n), tab, space.  Sent as virtio-keyboard "
+                             "key events with shift held for capitals/"
+                             "shifted symbols.")
     parser.add_argument("--qemu")
     parser.add_argument("--timeout", metavar="SECONDS", type=float, default=None,
                         help="Hard kill QEMU after SECONDS. Portable replacement "
@@ -396,7 +482,7 @@ def main():
         # Add a second serial port that writes to a file.
         argv += ["-serial", f"file:{args.log_serial}"]
     qmp_sock_path: "str | None" = None
-    if args.nmi_on_stall is not None:
+    if args.nmi_on_stall is not None or args.inject_on_line is not None:
         qmp_sock_path = f"/tmp/kevlar-qmp-{os.getpid()}.sock"
         # Clean up any stale socket (e.g. from a prior crashed run).
         try:
@@ -420,7 +506,8 @@ def main():
     # When --save-dump or --nmi-on-stall is given, intercept stdout both
     # to detect the crash-dump sentinels AND to maintain a last-output
     # timestamp for the stall monitor.
-    need_intercept = bool(args.save_dump or args.nmi_on_stall is not None)
+    need_intercept = bool(args.save_dump or args.nmi_on_stall is not None
+                          or args.inject_on_line is not None)
     t = None
     stall_t = None
     if need_intercept:
@@ -439,9 +526,18 @@ def main():
         last_out_monotonic = [time.monotonic()]
         intercept_running = [True]
 
+        # If --inject-on-line is set, the intercept thread also scans
+        # each line for the trigger pattern and sends the keystrokes
+        # via QMP (one-shot — the pattern is stripped from the
+        # watch-list after first match).
+        injection_pattern = (args.inject_on_line.encode("utf-8")
+                             if args.inject_on_line else None)
+        injection_done = [False]
+
         def _intercept_stdout():
             nonlocal capturing, saved
             line_buf = b""
+            need_lines = bool(args.save_dump) or injection_pattern is not None
             while True:
                 chunk = p.stdout.read1(4096) if hasattr(p.stdout, 'read1') else p.stdout.read(1)
                 if not chunk:
@@ -452,29 +548,51 @@ def main():
                 # Bump the stall-monitor timestamp on any output.
                 with last_out_lock:
                     last_out_monotonic[0] = time.monotonic()
-                # Accumulate for crash dump detection.
-                if args.save_dump:
+                # Accumulate for crash dump detection / line scanning.
+                if need_lines:
                     line_buf += chunk
                     while b"\n" in line_buf:
                         raw_line, line_buf = line_buf.split(b"\n", 1)
                         line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
-                        if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
-                            capturing = True
-                            dump_lines.clear()
-                        elif line == "===KEVLAR_CRASH_DUMP_END===":
-                            capturing = False
+                        if args.save_dump:
+                            if line == "===KEVLAR_CRASH_DUMP_BEGIN===":
+                                capturing = True
+                                dump_lines.clear()
+                            elif line == "===KEVLAR_CRASH_DUMP_END===":
+                                capturing = False
+                                try:
+                                    data = base64.b64decode("".join(dump_lines))
+                                    with open(args.save_dump, "wb") as f:
+                                        f.write(data)
+                                    print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
+                                          f"({len(data)} bytes)", file=sys.stderr)
+                                    saved = True
+                                except Exception as e:
+                                    print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
+                                          file=sys.stderr)
+                            elif capturing:
+                                dump_lines.append(line)
+                        if (injection_pattern is not None
+                                and not injection_done[0]
+                                and args.inject_on_line in line):
+                            injection_done[0] = True
                             try:
-                                data = base64.b64decode("".join(dump_lines))
-                                with open(args.save_dump, "wb") as f:
-                                    f.write(data)
-                                print(f"\nrun-qemu.py: crash dump saved to {args.save_dump} "
-                                      f"({len(data)} bytes)", file=sys.stderr)
-                                saved = True
-                            except Exception as e:
-                                print(f"\nrun-qemu.py: failed to decode crash dump: {e}",
+                                # Brief delay so the consumer has a poll
+                                # loop active before keys arrive.
+                                time.sleep(0.5)
+                                # Decode \n / \t escapes so callers can
+                                # pass them via shell quoting.
+                                keys = (args.inject_keys or "")
+                                keys = (keys.replace("\\n", "\n")
+                                            .replace("\\t", "\t")
+                                            .replace("\\\\", "\\"))
+                                n = _qmp_send_keys(qmp_sock_path, keys)
+                                print(f"\nrun-qemu.py: injected {n} keystrokes "
+                                      f"after seeing '{args.inject_on_line}'",
                                       file=sys.stderr)
-                        elif capturing:
-                            dump_lines.append(line)
+                            except Exception as e:
+                                print(f"\nrun-qemu.py: QMP key inject failed: {e}",
+                                      file=sys.stderr)
             intercept_running[0] = False
 
         t = threading.Thread(target=_intercept_stdout, daemon=True)

@@ -389,6 +389,10 @@ impl Virtio {
         self.transport.read_device_config8(offset)
     }
 
+    pub fn write_device_config8(&self, offset: u16, value: u8) {
+        self.transport.write_device_config8(offset, value);
+    }
+
     pub fn read_isr_status(&self) -> IsrStatus {
         self.transport.read_isr_status()
     }

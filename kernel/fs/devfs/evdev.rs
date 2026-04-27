@@ -205,15 +205,24 @@ impl FileLike for EvdevFile {
             return Ok(0);
         }
 
-        // EVIOCGREP (nr=0x03) — keyboard auto-repeat: u32 delay (ms),
-        // u32 period (ms).  Match Linux defaults.
+        // EVIOCGREP (nr=0x03, read) — keyboard auto-repeat: u32 delay
+        // (ms), u32 period (ms).  Match Linux defaults.
         if nr == 0x03 && is_read {
             let rep: [u32; 2] = [250, 33];
             let uaddr = kevlar_platform::address::UserVAddr::new_nonnull(arg)?;
             uaddr.write::<[u32; 2]>(&rep)?;
             return Ok(0);
         }
-        // EVIOCSREP (nr=0x04) — set auto-repeat.  Accept silently.
+        // EVIOCSREP (nr=0x03, write) — set auto-repeat.  Accept
+        // silently.  xf86-input-evdev calls this in EvdevKbdCtrl()
+        // every time XKB updates the repeat rate; if it returns
+        // !0, evdev logs "Failed to set keyboard controls" and
+        // unloads the device, breaking input entirely.
+        if nr == 0x03 && !is_read {
+            return Ok(0);
+        }
+        // EVIOCSKEYCODE (nr=0x04, write) — set scancode mapping.
+        // Accept silently.
         if nr == 0x04 {
             return Ok(0);
         }
@@ -278,51 +287,44 @@ impl FileLike for EvdevFile {
         }
 
         // EVIOCGBIT(ev_type, len) — supported event-code bitmap.
-        // Encoded as nr = 0x20 + ev_type.
+        // Encoded as nr = 0x20 + ev_type.  Read the bitmap directly
+        // from `InputDevice::ev_bits`, which the driver populated at
+        // probe time from virtio-input config space.  Honest answers
+        // here let xf86-input-evdev distinguish keyboard from mouse;
+        // earlier "set every key bit" stubs caused Xorg to configure
+        // every device as both keyboard AND tablet.
         if (0x20..=0x3f).contains(&nr) && is_read {
-            let ev_type = nr - 0x20;
-            let mut bits = alloc::vec![0u8; size];
-            // Helper: set bit n in the byte array.
-            let set_bit = |bits: &mut alloc::vec::Vec<u8>, n: usize| {
-                let byte = n / 8;
-                let bit = n % 8;
-                if byte < bits.len() {
-                    bits[byte] |= 1 << bit;
-                }
+            let ev_type = (nr - 0x20) as usize;
+            let dev = match self.dev() {
+                Some(d) => d,
+                None => return Err(Errno::ENODEV.into()),
             };
-            match ev_type {
-                0 => {
-                    // EVIOCGBIT(0): which event TYPES are supported.
-                    // EV_SYN=0, EV_KEY=1, EV_REL=2, EV_ABS=3, EV_MSC=4, EV_REP=20.
-                    set_bit(&mut bits, 0);
-                    set_bit(&mut bits, 1);
-                    set_bit(&mut bits, 2);
-                    set_bit(&mut bits, 3);
-                    set_bit(&mut bits, 4);
-                    set_bit(&mut bits, 20);
+            let mut bits = alloc::vec![0u8; size];
+            if ev_type == 0 {
+                // EVIOCGBIT(0) reports the set of event TYPES this
+                // device supports.  Build a bitmap by checking which
+                // per-type bitmaps are non-empty in ev_bits.
+                let set_bit = |bits: &mut alloc::vec::Vec<u8>, n: usize| {
+                    let byte = n / 8;
+                    let bit = n % 8;
+                    if byte < bits.len() {
+                        bits[byte] |= 1 << bit;
+                    }
+                };
+                // EV_SYN is implicit on every input device.
+                set_bit(&mut bits, 0);
+                for ty in 1..32 {
+                    if !dev.ev_bits[ty].lock().is_empty() {
+                        set_bit(&mut bits, ty);
+                    }
                 }
-                1 => {
-                    // EV_KEY: which keys/buttons are supported.  Set
-                    // every bit in the user's buffer — we don't know
-                    // the device's actual key set without reading
-                    // virtio config space, and Xorg evdev tolerates
-                    // over-reporting (keys the kernel doesn't deliver
-                    // simply never fire).
-                    for b in bits.iter_mut() { *b = 0xff; }
-                }
-                2 => {
-                    // EV_REL: REL_X=0, REL_Y=1, REL_HWHEEL=6, REL_WHEEL=8.
-                    set_bit(&mut bits, 0);
-                    set_bit(&mut bits, 1);
-                    set_bit(&mut bits, 6);
-                    set_bit(&mut bits, 8);
-                }
-                3 => {
-                    // EV_ABS: ABS_X=0, ABS_Y=1 (for tablet).
-                    set_bit(&mut bits, 0);
-                    set_bit(&mut bits, 1);
-                }
-                _ => {} // other types: empty bitmap
+            } else if ev_type < 32 {
+                // Copy the device-reported bitmap up to the user's
+                // requested size.  Pad with zeros if the user asked
+                // for more than the device exposes.
+                let stored = dev.ev_bits[ev_type].lock();
+                let n = core::cmp::min(stored.len(), size);
+                bits[..n].copy_from_slice(&stored[..n]);
             }
             let uaddr = kevlar_platform::address::UserVAddr::new_nonnull(arg)?;
             uaddr.write_bytes(&bits)?;

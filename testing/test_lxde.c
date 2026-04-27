@@ -38,6 +38,13 @@ static void fail(const char *name, const char *detail) {
     g_fail++; g_total++;
 }
 
+static void skip(const char *name, const char *detail) {
+    if (detail) printf("TEST_SKIP %s (%s)\n", name, detail);
+    else printf("TEST_SKIP %s\n", name);
+    fflush(stdout);
+    /* skip doesn't count toward total */
+}
+
 static int sh_run(const char *cmd, int timeout_ms) {
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -353,6 +360,154 @@ int main(void) {
                 }
             }
             fflush(stdout);
+        }
+    }
+
+    // Phase-1 input device verification: confirm /dev/input/event0
+    // (the virtio-keyboard-device) is a real evdev character node
+    // backed by exts/virtio_input — not a stub or missing file.
+    // The harder "typed text actually reaches Xorg" check needs a
+    // host-side QMP driver to inject keystrokes; that's covered by
+    // test-lxde-input via tools/lxde-input-driver.py.
+    {
+        struct stat st;
+        if (stat(ROOT "/dev/input/event0", &st) == 0 && S_ISCHR(st.st_mode)) {
+            pass("evdev_event0_present");
+        } else {
+            char b[64];
+            snprintf(b, sizeof(b), "stat=%d mode=%o errno=%d",
+                     stat(ROOT "/dev/input/event0", &st), st.st_mode, errno);
+            fail("evdev_event0_present", b);
+        }
+
+        // Real evdev nodes return EAGAIN on non-blocking read when
+        // the queue is empty; a stub would return 0 (EOF) or fail
+        // to open.  Either of those is a kernel-side bug.
+        int fd = open(ROOT "/dev/input/event0", O_RDONLY | O_NONBLOCK);
+        if (fd < 0) {
+            char b[64];
+            snprintf(b, sizeof(b), "open errno=%d", errno);
+            fail("evdev_event0_readable", b);
+        } else {
+            char buf[64];
+            ssize_t n = read(fd, buf, sizeof(buf));
+            int e = errno;
+            close(fd);
+            if (n < 0 && e == EAGAIN) {
+                pass("evdev_event0_readable");
+            } else if (n > 0) {
+                // Got real events queued — also fine, evdev is alive.
+                pass("evdev_event0_readable");
+            } else {
+                char b[64];
+                snprintf(b, sizeof(b), "read=%zd errno=%d", n, e);
+                fail("evdev_event0_readable", b);
+            }
+        }
+    }
+
+    // Phase-1d: typed-text-arrives. Spawn xterm running `cat` with
+    // stdout redirected to a disk-backed file, signal the host driver
+    // (`run-qemu.py --inject-on-line INJECT_NOW --inject-keys ...`)
+    // by emitting the sentinel line, and verify the keystrokes that
+    // QMP injects into virtio-keyboard reach the terminal via Xorg.
+    //
+    // We split this into two checks so failures are diagnosable:
+    //   evdev_keys_arrived — bytes show up on /dev/input/event0 at
+    //     all (proves virtio-keyboard → evdev devnode works).
+    //   typed_text_arrived — those bytes route through Xorg → xterm
+    //     → cat → ext2.  Failing this when evdev_keys_arrived passes
+    //     means the gap is in Xorg/xkb/xf86-input-evdev focus
+    //     handling, not the kernel.
+    //
+    // Without a driver injecting, both report SKIP.
+    {
+        // Make sure /var/log exists and start fresh.
+        sh_run("mkdir -p /var/log; rm -f /var/log/typed.txt /var/log/evdev.bin", 1000);
+
+        // Open both event0 and event1 (one is keyboard, one is mouse —
+        // QEMU's virt MMIO assigns lower addresses to later -device
+        // args, so the keyboard often lands at event1 not event0 on
+        // arm64).  Drain anything pending.
+        int evfd0 = open(ROOT "/dev/input/event0", O_RDONLY | O_NONBLOCK);
+        int evfd1 = open(ROOT "/dev/input/event1", O_RDONLY | O_NONBLOCK);
+        char drain[4096];
+        if (evfd0 >= 0) while (read(evfd0, drain, sizeof(drain)) > 0) {}
+        if (evfd1 >= 0) while (read(evfd1, drain, sizeof(drain)) > 0) {}
+
+        // xterm runs `cat > /var/log/typed.txt` via sh -c.  cat stays
+        // alive waiting for stdin EOF, keeping the window mapped for
+        // the injection window.
+        char xcmd[1024];
+        snprintf(xcmd, sizeof(xcmd),
+                 "%s exec /usr/bin/xterm -bg '#404080' -fg '#ffffff' "
+                 "-e sh -c 'cat > /var/log/typed.txt' "
+                 ">>/tmp/lxde-session.log 2>&1",
+                 env_prefix);
+        start_bg(xcmd);
+        sleep(3);  // let xterm map + receive focus
+
+        // Sentinel — host driver matches this and injects keys.
+        printf("INJECT_NOW: kevlar-lxde-input-ready\n");
+        fflush(stdout);
+        sleep(6);  // let host inject + Xorg route + cat write
+
+        // Sync so the file is visible on disk via debugfs too.
+        sh_run("sync", 1000);
+
+        // Drain both event0 and event1 to count bytes that arrived.
+        // Either device receiving non-zero bytes proves virtio-keyboard
+        // delivered events through to the evdev devnode.
+        ssize_t ev0_bytes = 0, ev1_bytes = 0;
+        if (evfd0 >= 0) {
+            for (;;) {
+                ssize_t r = read(evfd0, drain, sizeof(drain));
+                if (r <= 0) break;
+                ev0_bytes += r;
+            }
+            close(evfd0);
+        }
+        if (evfd1 >= 0) {
+            for (;;) {
+                ssize_t r = read(evfd1, drain, sizeof(drain));
+                if (r <= 0) break;
+                ev1_bytes += r;
+            }
+            close(evfd1);
+        }
+        ssize_t evbytes = ev0_bytes + ev1_bytes;
+        printf("  evdev event0=%zd bytes, event1=%zd bytes (total %zd)\n",
+               ev0_bytes, ev1_bytes, evbytes);
+        fflush(stdout);
+
+        if (evbytes >= 24) {
+            pass("evdev_keys_arrived");
+        } else if (evbytes == 0) {
+            skip("evdev_keys_arrived", "no input driver attached or no events");
+        } else {
+            char b[64];
+            snprintf(b, sizeof(b), "only %zd bytes (need >=24)", evbytes);
+            fail("evdev_keys_arrived", b);
+        }
+
+        char typed[256] = {0};
+        int rfd = open(ROOT "/var/log/typed.txt", O_RDONLY);
+        ssize_t n = 0;
+        if (rfd >= 0) {
+            n = read(rfd, typed, sizeof(typed) - 1);
+            close(rfd);
+            if (n > 0) typed[n] = '\0';
+        }
+        printf("  typed.txt: [%s] (%zd bytes)\n", typed, n);
+        fflush(stdout);
+
+        if (strstr(typed, "kevlar")) {
+            pass("typed_text_arrived");
+        } else if (n <= 0 || typed[0] == '\0') {
+            // No driver active — expected for plain `make test-lxde`.
+            skip("typed_text_arrived", "no input driver attached");
+        } else {
+            fail("typed_text_arrived", typed);
         }
     }
 

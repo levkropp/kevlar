@@ -63,6 +63,49 @@ pub const EV_KEY: u16 = 0x01;
 pub const EV_REL: u16 = 0x02;
 pub const EV_ABS: u16 = 0x03;
 
+// virtio-input config-space layout (spec §5.8.5).
+// `select` and `subsel` are at offsets 0 and 1 in device config; the
+// device populates `size` (offset 2) and the data union (offset 8) in
+// response.  We use this to query each device's true capability
+// bitmaps so /dev/input/eventN's EVIOCGBIT response is honest.
+const VIRTIO_INPUT_CFG_ID_NAME: u8 = 0x01;
+const VIRTIO_INPUT_CFG_EV_BITS: u8 = 0x11;
+const VIRTIO_INPUT_CFG_OFF_SELECT: u16 = 0;
+const VIRTIO_INPUT_CFG_OFF_SUBSEL: u16 = 1;
+const VIRTIO_INPUT_CFG_OFF_SIZE: u16 = 2;
+const VIRTIO_INPUT_CFG_OFF_DATA: u16 = 8;
+const VIRTIO_INPUT_BITMAP_MAX: usize = 128;
+
+/// Read the bitmap for a given (select, subsel) pair from the device's
+/// config space.  Returns the raw bytes (up to 128) the device reports.
+fn read_config_bitmap(virtio: &Virtio, select: u8, subsel: u8) -> alloc::vec::Vec<u8> {
+    virtio.write_device_config8(VIRTIO_INPUT_CFG_OFF_SELECT, select);
+    virtio.write_device_config8(VIRTIO_INPUT_CFG_OFF_SUBSEL, subsel);
+    let size = virtio.read_device_config8(VIRTIO_INPUT_CFG_OFF_SIZE) as usize;
+    let n = core::cmp::min(size, VIRTIO_INPUT_BITMAP_MAX);
+    let mut out = alloc::vec::Vec::with_capacity(n);
+    for i in 0..n {
+        out.push(virtio.read_device_config8(VIRTIO_INPUT_CFG_OFF_DATA + i as u16));
+    }
+    out
+}
+
+/// Read the device's name (NUL-terminated) from config.  Used for
+/// EVIOCGNAME and for picking a sane in-kernel label.
+fn read_config_name(virtio: &Virtio) -> alloc::string::String {
+    virtio.write_device_config8(VIRTIO_INPUT_CFG_OFF_SELECT, VIRTIO_INPUT_CFG_ID_NAME);
+    virtio.write_device_config8(VIRTIO_INPUT_CFG_OFF_SUBSEL, 0);
+    let size = virtio.read_device_config8(VIRTIO_INPUT_CFG_OFF_SIZE) as usize;
+    let n = core::cmp::min(size, VIRTIO_INPUT_BITMAP_MAX);
+    let mut bytes = alloc::vec::Vec::with_capacity(n);
+    for i in 0..n {
+        let b = virtio.read_device_config8(VIRTIO_INPUT_CFG_OFF_DATA + i as u16);
+        if b == 0 { break; }
+        bytes.push(b);
+    }
+    alloc::string::String::from_utf8(bytes).unwrap_or_else(|_| alloc::string::String::from("virtio-input"))
+}
+
 /// Maximum number of input events buffered between the device IRQ and
 /// userspace `read()`.  Mouse + keyboard at typical rates produce <100
 /// events/sec; 256 gives ~2.5s of buffering before drops.
@@ -80,6 +123,12 @@ pub struct InputDevice {
     /// device's config space at probe time, primarily for diagnostics
     /// and for `EVIOCGNAME` ioctl from userspace evdev clients.
     pub name: SpinLock<alloc::string::String>,
+    /// Per-event-type capability bitmaps from the device's virtio
+    /// config space.  Indexed by event type (0..=31): EV_SYN, EV_KEY,
+    /// EV_REL, EV_ABS, etc.  An empty Vec means the device doesn't
+    /// support that event type.  Used to satisfy EVIOCGBIT honestly,
+    /// so Xorg's xf86-input-evdev disambiguates keyboard from mouse.
+    pub ev_bits: [SpinLock<alloc::vec::Vec<u8>>; 32],
     /// Pending events ready for userspace `read`.
     queue: SpinLock<VecDeque<VirtioInputEvent>>,
     /// Used by `/dev/input/eventN`'s `poll()`.  Bumped (with Release)
@@ -94,8 +143,28 @@ pub struct InputDevice {
 
 impl InputDevice {
     pub fn new(name: alloc::string::String) -> Arc<Self> {
+        // Const-init each per-event-type bitmap as an empty Vec.  The
+        // probe path fills the relevant slots from virtio config space.
         Arc::new(InputDevice {
             name: SpinLock::new(name),
+            ev_bits: [
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+                SpinLock::new(alloc::vec::Vec::new()), SpinLock::new(alloc::vec::Vec::new()),
+            ],
             queue: SpinLock::new(VecDeque::with_capacity(MAX_QUEUED_EVENTS)),
             poll_gen: core::sync::atomic::AtomicU64::new(1),
             et_watcher_count: core::sync::atomic::AtomicU32::new(0),
@@ -213,7 +282,19 @@ impl VirtioInputDriver {
         }
         virtio.virtq_mut(VIRTIO_INPUT_EVENTQ).notify();
 
-        let device = InputDevice::new(name);
+        // Replace the placeholder with the real device name from
+        // config space ("QEMU Virtio Keyboard", "QEMU Virtio Mouse",
+        // etc.) and read each event-type's capability bitmap so
+        // EVIOCGBIT can report honestly.
+        let real_name = read_config_name(&virtio);
+        let display_name = if real_name.is_empty() { name } else { real_name };
+        let device = InputDevice::new(display_name);
+        for ev_type in 0u8..32 {
+            let bits = read_config_bitmap(&virtio, VIRTIO_INPUT_CFG_EV_BITS, ev_type);
+            if !bits.is_empty() {
+                *device.ev_bits[ev_type as usize].lock() = bits;
+            }
+        }
         INPUT_DEVICES.lock().push(device.clone());
 
         Ok(VirtioInputDriver {
@@ -230,11 +311,13 @@ impl VirtioInputDriver {
         // device will keep re-asserting it.
         let _ = virtio.read_isr_status();
 
+        let mut events_drained = 0u32;
         loop {
             let chain = match virtio.virtq_mut(VIRTIO_INPUT_EVENTQ).pop_used() {
                 Some(c) => c,
                 None => break,
             };
+            events_drained += 1;
             // One descriptor per chain in our setup; each is 8 bytes.
             for desc in &chain.descs {
                 if let VirtqDescBuffer::WritableFromDevice { addr, len } = desc {
@@ -260,6 +343,16 @@ impl VirtioInputDriver {
             }
         }
         virtio.virtq_mut(VIRTIO_INPUT_EVENTQ).notify();
+
+        // One-shot trace at first event so we can confirm IRQ path is
+        // live without spamming the log on every keystroke.
+        static TRACED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        if events_drained > 0 && !TRACED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            let name = self.device.name.lock().clone();
+            info!("virtio-input: first IRQ drained {} events from {}",
+                  events_drained, name);
+        }
 
         // Quiet the unused-field warnings.  Both fields are used at
         // probe time for buffer placement; keep them to make a future
