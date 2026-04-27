@@ -14,11 +14,16 @@
 
 pub mod alloc;
 pub mod arch;
+pub mod bus;
 pub mod completion;
+pub mod device;
 pub mod elf;
 pub mod exports;
+pub mod kobject;
+pub mod kref;
 pub mod loader;
 pub mod modinfo;
+pub mod platform;
 pub mod printk;
 pub mod reloc;
 pub mod sched;
@@ -29,8 +34,10 @@ pub mod work;
 pub use loader::{load_module, LoadedModule};
 
 /// Boot-time initialization for the kABI runtime: spawns the
-/// workqueue worker kthread.  Call after the scheduler is up.
+/// workqueue worker kthread + initializes the platform bus.  Call
+/// after the scheduler is up.
 pub fn init() {
     work::init();
-    log::info!("kabi: runtime initialized (workqueue spawned)");
+    platform::init();
+    log::info!("kabi: runtime initialized (workqueue + platform bus)");
 }

@@ -605,6 +605,24 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k2.ko load");
     }
 
+    // K3 — load /lib/modules/k3.ko, exercising the device-model
+    // spine (platform_device + platform_driver + bind/probe).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k3.ko");
+        match kabi::load_module("/lib/modules/k3.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k3 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k3.ko"),
+            },
+            Err(e) => warn!("kabi: k3 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k3.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

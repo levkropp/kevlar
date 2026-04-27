@@ -72,3 +72,23 @@ macro_rules! ksym {
         };
     };
 }
+
+/// Export a kernel-side `static` (data, not code) under its source
+/// name.  Modules `extern` it with a matching declaration and the
+/// loader resolves the symbol to the static's address.  Used for
+/// kABI globals like `platform_bus_type`.
+#[macro_export]
+macro_rules! ksym_static {
+    ($item:ident) => {
+        const _: () = {
+            #[allow(unsafe_code)]
+            #[unsafe(link_section = ".ksymtab")]
+            #[used]
+            static __KSYM_ENTRY: $crate::kabi::exports::KSym =
+                $crate::kabi::exports::KSym {
+                    name: stringify!($item),
+                    addr: &raw const $item as *const (),
+                };
+        };
+    };
+}

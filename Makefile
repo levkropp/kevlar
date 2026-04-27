@@ -528,6 +528,29 @@ test-module-k2: build
 	    false; \
 	fi
 
+# `make test-module-k3` — load /lib/modules/k3.ko and verify the
+# device-model spine (platform_device + platform_driver bind/probe).
+.PHONY: test-module-k3
+test-module-k3: build
+	$(PROGRESS) "TEST" "kABI K3 demo (device model + platform bind/probe)"
+	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k3.log; true
+	@echo ""
+	@if grep -q '\[k3\] init begin' /tmp/kevlar-test-module-k3.log \
+	 && grep -q '\[k3\] platform_device_register ok' /tmp/kevlar-test-module-k3.log \
+	 && grep -q '\[k3\] platform_driver_register ok' /tmp/kevlar-test-module-k3.log \
+	 && grep -q '\[k3\] probe called' /tmp/kevlar-test-module-k3.log \
+	 && grep -q '\[k3\] init done' /tmp/kevlar-test-module-k3.log \
+	 && grep -q 'kabi: k3 init_module returned 0' /tmp/kevlar-test-module-k3.log; then \
+	    echo "TEST_PASS: kABI K3 — device model + platform bind/probe"; \
+	else \
+	    echo "TEST_FAIL: missing expected K3 markers"; \
+	    grep -E 'kabi|\[k3\]|panic' /tmp/kevlar-test-module-k3.log | head -30; \
+	    false; \
+	fi
+
 .PHONY: test-xorg
 test-xorg: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "X11/Xorg fbdev integration"
