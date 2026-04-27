@@ -37,7 +37,7 @@ use kevlar_vfs::{
     result::{Errno, Error, Result},
     stat::{
         BlockCount, BlockSize, DevId, FileMode, FileSize, GId, NLink, Stat, Time, UId, S_IFDIR,
-        S_IFLNK, S_IFREG,
+        S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK,
     },
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
@@ -61,12 +61,14 @@ const GROUP_DESC_SIZE_32: usize = 32;
 const EXT2_S_IFREG: u16 = 0x8000;
 const EXT2_S_IFDIR: u16 = 0x4000;
 const EXT2_S_IFLNK: u16 = 0xA000;
+const EXT2_S_IFSOCK: u16 = 0xC000;
 
 // ext2 directory file types.
 #[allow(dead_code)]
 const EXT2_FT_UNKNOWN: u8 = 0;
 const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
+const EXT2_FT_SOCK: u8 = 6;
 const EXT2_FT_SYMLINK: u8 = 7;
 
 // Root inode is always 2 in ext2/ext4.
@@ -458,6 +460,7 @@ impl Ext2Inode {
         let type_bits = match self.mode & 0xF000 {
             x if x == EXT2_S_IFDIR => S_IFDIR,
             x if x == EXT2_S_IFLNK => S_IFLNK,
+            x if x == EXT2_S_IFSOCK => S_IFSOCK,
             _ => S_IFREG,
         };
         type_bits | (self.mode as u32 & 0o7777)
@@ -878,6 +881,19 @@ impl Ext2Inner {
 
         // Mark filesystem as cleanly synced.
         self.write_superblock_state(EXT2_VALID_FS)?;
+
+        // `flush_metadata` writes its GDT/bitmap blocks via
+        // `write_block`, which only stages them into `dirty_cache`.
+        // The first `flush_dirty()` at the top of this function ran
+        // BEFORE the metadata writes existed, so those blocks would
+        // otherwise sit in cache forever.  We can't call
+        // `flush_dirty()` from inside `flush_metadata` (lock-order
+        // assumption — see the deadlock note in flush_metadata) but
+        // a second flush at this level, after every prior step has
+        // released its locks, is safe and lets off-host extraction
+        // (debugfs / e2fsprogs) actually see the file the guest just
+        // wrote.
+        self.flush_dirty()?;
 
         Ok(())
     }
@@ -1941,6 +1957,12 @@ impl Ext2Inner {
             self.write_block(blk, &full_block)?;
         }
 
+        // NOTE: GDT writes above land in `dirty_cache`.  Calling
+        // `self.flush_dirty()` here would deadlock — flush_metadata
+        // is called from flush_all which has structural assumptions
+        // about lock ordering.  The next ext2 operation will pick
+        // them up; for the off-host extraction case we rely on the
+        // sync_all() in the halt path.
         Ok(())
     }
 
@@ -2431,10 +2453,19 @@ impl Directory for Ext2Dir {
         // Allocate inode.
         let ino = self.fs.alloc_inode(false)?;
 
-        // Initialize the inode as a regular file.
+        // Honor S_IFSOCK in the type bits — AF_UNIX bind() to a filesystem
+        // path needs the on-disk inode to record the socket type so that
+        // subsequent stat() / readdir() report it correctly (matches Linux
+        // semantics).  All other types fall back to a regular file.
+        let (ext2_type_bits, ft_type) = match mode.as_u32() & S_IFMT {
+            S_IFSOCK => (EXT2_S_IFSOCK, EXT2_FT_SOCK),
+            _ => (EXT2_S_IFREG, EXT2_FT_REG_FILE),
+        };
+
+        // Initialize the inode (regular file or socket).
         let use_extents = self.fs.superblock.has_extents();
         let new_inode = Ext2Inode {
-            mode: EXT2_S_IFREG | (mode.as_u32() as u16 & 0o7777),
+            mode: ext2_type_bits | (mode.as_u32() as u16 & 0o7777),
             uid: uid.as_u32() as u16,
             size: 0,
             atime: now_secs(),
@@ -2453,7 +2484,7 @@ impl Directory for Ext2Dir {
         {
             let mut dir_inode = self.inode.lock_no_irq();
             self.fs
-                .add_dir_entry(self.inode_num, &mut dir_inode, ino, name, EXT2_FT_REG_FILE)?;
+                .add_dir_entry(self.inode_num, &mut dir_inode, ino, name, ft_type)?;
         }
 
         // Update dentry cache with the new entry.
@@ -2589,6 +2620,7 @@ impl Directory for Ext2Dir {
             let ft = match e.file_type {
                 EXT2_FT_DIR => FileType::Directory,
                 EXT2_FT_SYMLINK => FileType::Link,
+                EXT2_FT_SOCK => FileType::Socket,
                 _ => FileType::Regular,
             };
             DirEntry {

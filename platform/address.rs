@@ -101,6 +101,132 @@ impl VAddr {
         ptr::write_volatile(self.as_mut_ptr(), value);
     }
 
+    // --- HVF-safe MMIO accessors ---------------------------------------
+    //
+    // macOS HVF's EL2 data-abort handler asserts ESR_EL2.ISV (see QEMU
+    // target/arm/hvf/hvf.c).  The compiler may lower `ptr::read_volatile`
+    // to instructions (post-/pre-indexed loads, stp/ldp, vector moves)
+    // that clear ISV on Apple Silicon's stage-2 trap, crashing the
+    // hypervisor when the VA is a device-memory MMIO page.  These
+    // accessors pin the instruction form to plain `ldr/str w/x, [x]` via
+    // inline asm so HVF always sees a valid syndrome.  See
+    // `platform/arm64/gic.rs::mmio_read` for the original pattern.
+    //
+    // On non-arm64 targets they fall through to volatile access — HVF
+    // isn't in the picture and the generic path is fine.
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_read32(self) -> u32 {
+        let v: u32;
+        core::arch::asm!(
+            "ldr {v:w}, [{a}]",
+            v = out(reg) v, a = in(reg) self.0,
+            options(nostack, preserves_flags, readonly),
+        );
+        v
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_read32(self) -> u32 {
+        ptr::read_volatile(self.as_ptr::<u32>())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_write32(self, value: u32) {
+        core::arch::asm!(
+            "str {v:w}, [{a}]",
+            v = in(reg) value, a = in(reg) self.0,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_write32(self, value: u32) {
+        ptr::write_volatile(self.as_mut_ptr::<u32>(), value);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_read8(self) -> u8 {
+        let v: u32;
+        core::arch::asm!(
+            "ldrb {v:w}, [{a}]",
+            v = out(reg) v, a = in(reg) self.0,
+            options(nostack, preserves_flags, readonly),
+        );
+        v as u8
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_read8(self) -> u8 {
+        ptr::read_volatile(self.as_ptr::<u8>())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_write8(self, value: u8) {
+        core::arch::asm!(
+            "strb {v:w}, [{a}]",
+            v = in(reg) value as u32, a = in(reg) self.0,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_write8(self, value: u8) {
+        ptr::write_volatile(self.as_mut_ptr::<u8>(), value);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_read16(self) -> u16 {
+        let v: u32;
+        core::arch::asm!(
+            "ldrh {v:w}, [{a}]",
+            v = out(reg) v, a = in(reg) self.0,
+            options(nostack, preserves_flags, readonly),
+        );
+        v as u16
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_read16(self) -> u16 {
+        ptr::read_volatile(self.as_ptr::<u16>())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_write16(self, value: u16) {
+        core::arch::asm!(
+            "strh {v:w}, [{a}]",
+            v = in(reg) value as u32, a = in(reg) self.0,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_write16(self, value: u16) {
+        ptr::write_volatile(self.as_mut_ptr::<u16>(), value);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_read64(self) -> u64 {
+        let v: u64;
+        core::arch::asm!(
+            "ldr {v}, [{a}]",
+            v = out(reg) v, a = in(reg) self.0,
+            options(nostack, preserves_flags, readonly),
+        );
+        v
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_read64(self) -> u64 {
+        ptr::read_volatile(self.as_ptr::<u64>())
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn mmio_write64(self, value: u64) {
+        core::arch::asm!(
+            "str {v}, [{a}]",
+            v = in(reg) value, a = in(reg) self.0,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    pub unsafe fn mmio_write64(self, value: u64) {
+        ptr::write_volatile(self.as_mut_ptr::<u64>(), value);
+    }
+
     pub fn write_bytes(self, buf: &[u8]) {
         debug_assert!(self.value().checked_add(buf.len()).is_some());
         unsafe {

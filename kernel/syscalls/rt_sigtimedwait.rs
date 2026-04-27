@@ -43,7 +43,7 @@ impl<'a> SyscallHandler<'a> {
             b[..4].copy_from_slice(&raw);
             b
         };
-        let mask = u64::from_le_bytes(set_bytes) as u32;
+        let mask = u64::from_le_bytes(set_bytes);
 
         // Parse timeout.
         let deadline_ns: Option<u64> = if let Some(tp) = timeout_ptr {
@@ -121,7 +121,7 @@ impl<'a> SyscallHandler<'a> {
 }
 
 /// Try to dequeue a signal matching `mask` from the current process.
-fn try_dequeue_signal(mask: u32) -> Option<Signal> {
+fn try_dequeue_signal(mask: u64) -> Option<Signal> {
     let current = current_process();
     let mut signals = current.signals().lock();
     signals.pop_pending_masked(mask)

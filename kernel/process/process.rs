@@ -285,8 +285,12 @@ impl AtomicProcessState {
     }
 }
 
-/// Build a pre-computed `struct utsname` (390 bytes) from a UTS namespace.
-/// Used to cache the result so sys_uname becomes a single memcpy.
+/// Build a `struct utsname` (390 bytes) from a UTS namespace.  Called
+/// directly by `utsname_copy()` on every `uname()` syscall — there is
+/// no per-process cache, because a per-process cache would diverge from
+/// the (shared) UTS namespace as soon as one process called
+/// `sethostname()`.  Linux's behavior is "uname always reflects the
+/// current namespace state", which we match by rebuilding here.
 fn build_cached_utsname(uts: &crate::namespace::UtsNamespace) -> [u8; 390] {
     let mut buf = [0u8; 390];
     #[inline(always)]
@@ -328,7 +332,7 @@ pub struct Process {
     signals: Arc<SpinLock<SignalDelivery>>,
     /// Lock-free mirror of `signals.pending`.  Avoids taking the spinlock on
     /// every syscall exit when no signals are pending (the common case).
-    signal_pending: AtomicU32,
+    signal_pending: AtomicU64,
     /// Stack of saved register contexts for nested signal delivery.
     /// Each signal handler pushes its interrupted context; rt_sigreturn pops it.
     ///
@@ -413,12 +417,8 @@ pub struct Process {
     /// Per-process resource limits (16 resources × [cur, max]).
     /// Lock-free: reads via AtomicU64, writes via atomic stores.
     rlimits: AtomicRlimits,
-    /// Pre-built `struct utsname` (390 bytes) for fast sys_uname response.
-    /// Built at init/fork from UTS namespace data. TODO: rebuild on sethostname/setdomainname.
-    cached_utsname: SpinLock<[u8; 390]>,
     /// Physical address of this process's personal vDSO data page.
     /// 0 = not yet allocated (before vdso::init() runs).
-    #[cfg(target_arch = "x86_64")]
     vdso_data_paddr: AtomicU64,
 }
 
@@ -502,7 +502,7 @@ impl Process {
             root_fs: AtomicRefCell::new(INITIAL_ROOT_FS.clone()),
             opened_files: Arc::new(SpinLock::new(OpenedFileTable::new())),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(0),
@@ -542,8 +542,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(default_rlimits()),
-            cached_utsname: SpinLock::new([0u8; 390]),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(0),
         });
 
@@ -595,13 +593,11 @@ impl Process {
             s
         };
         let init_utsname = build_cached_utsname(&*crate::namespace::ROOT_UTS);
-        #[cfg(target_arch = "x86_64")]
         let init_vdso_paddr = kevlar_platform::arch::vdso::alloc_process_page(
             1, 1, 0, 0, &init_utsname,
         ).map(|p| p.value() as u64).unwrap_or(0);
         let mut entry = setup_userspace(executable_path, argv, &[], &root_fs)?;
         // Remap vDSO with per-process page for PID 1.
-        #[cfg(target_arch = "x86_64")]
         if init_vdso_paddr != 0 {
             let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
             entry.vm.page_table_mut().map_user_page_with_prot(
@@ -626,7 +622,7 @@ impl Process {
             opened_files: Arc::new(SpinLock::new(opened_files)),
             root_fs: AtomicRefCell::new(root_fs),
             signals: Arc::new(SpinLock::new(SignalDelivery::new())),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(0),
@@ -666,8 +662,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(default_rlimits()),
-            cached_utsname: SpinLock::new(init_utsname),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(init_vdso_paddr),
         });
 
@@ -898,21 +892,16 @@ impl Process {
     pub fn nice(&self) -> i32 { self.nice.load(Ordering::Relaxed) }
     pub fn set_nice(&self, n: i32) { self.nice.store(n, Ordering::Relaxed); }
 
-    /// Returns a copy of the pre-built utsname buffer (390 bytes).
+    /// Build a `struct utsname` (390 bytes) from this process's UTS
+    /// namespace.  Always reads live state — no per-process cache —
+    /// so `sethostname()` from one process is visible to another that
+    /// shares the same UTS namespace (matches Linux semantics).
     pub fn utsname_copy(&self) -> [u8; 390] {
-        *self.cached_utsname.lock_no_irq()
-    }
-
-    /// Rebuild the cached utsname from the current UTS namespace.
-    /// Called after sethostname/setdomainname to ensure uname(2) returns
-    /// the updated values.
-    pub fn rebuild_cached_utsname(&self) {
         let ns = self.namespaces();
-        *self.cached_utsname.lock_no_irq() = build_cached_utsname(&ns.uts);
+        build_cached_utsname(&ns.uts)
     }
 
     /// Returns the physical address of this process's vDSO data page (0 if none).
-    #[cfg(target_arch = "x86_64")]
     pub fn vdso_data_paddr(&self) -> u64 {
         self.vdso_data_paddr.load(Ordering::Relaxed)
     }
@@ -1022,13 +1011,13 @@ impl Process {
     }
 
     /// Lock-free read of the pending signal bitmask.
-    pub fn signal_pending_bits(&self) -> u32 {
+    pub fn signal_pending_bits(&self) -> u64 {
         self.signal_pending.load(Ordering::Relaxed)
     }
 
     /// Update the pending signal atomic mirror (call after modifying
     /// SignalDelivery.pending while holding the signals lock).
-    pub fn sync_signal_pending(&self, bits: u32) {
+    pub fn sync_signal_pending(&self, bits: u64) {
         self.signal_pending.store(bits, Ordering::Relaxed);
     }
 
@@ -1319,6 +1308,15 @@ impl Process {
                 }
             }
 
+            // Sync filesystems before halt — mirrors the reboot syscall
+            // path at `kernel/syscalls/reboot.rs:30-31`.  Without this,
+            // ext2 GDT and dirty data blocks queued during the run never
+            // make it to the disk image, so off-host extraction (e.g.
+            // `debugfs -R 'dump /root/fb-snapshot.bgra ...'`) returns
+            // a 0-byte file even though the in-guest write succeeded.
+            info!("Syncing filesystems before halt...");
+            let _ = kevlar_ext2::sync_all();
+
             kevlar_platform::arch::halt();
         }
 
@@ -1560,7 +1558,7 @@ impl Process {
         sigs.signal(signal);
         drop(sigs);
 
-        self.signal_pending.fetch_or(1 << (signal - 1), Ordering::Release);
+        self.signal_pending.fetch_or(1u64 << (signal - 1), Ordering::Release);
 
         #[cfg(feature = "ktrace-mm")]
         {
@@ -1594,9 +1592,9 @@ impl Process {
     /// deliverable regardless of the signal mask.
     pub fn has_pending_signals(&self) -> bool {
         let pending = self.signal_pending.load(Ordering::Relaxed);
-        let mut blocked = self.sigset_load().bits() as u32;
+        let mut blocked = self.sigset_load().bits();
         // SIGKILL (9) and SIGSTOP (19) can NEVER be blocked (POSIX).
-        blocked &= !((1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1)));
+        blocked &= !((1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)));
         (pending & !blocked) != 0
     }
 
@@ -1879,7 +1877,6 @@ impl Process {
             setup_userspace(executable_path, argv, envp, &root_fs)?
         };
         // Remap vDSO with this process's per-process page.
-        #[cfg(target_arch = "x86_64")]
         {
             let vdso_paddr_val = current.vdso_data_paddr.load(Ordering::Relaxed);
             if vdso_paddr_val != 0 {
@@ -2039,8 +2036,7 @@ impl Process {
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
         let parent_umask = parent.umask.load();
-        let child_utsname = *parent.cached_utsname.lock_no_irq();
-        #[cfg(target_arch = "x86_64")]
+        let child_utsname = build_cached_utsname(&parent.namespaces().uts);
         let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
             pid.as_i32(), pid.as_i32(),
             parent.uid.load(Ordering::Relaxed),
@@ -2081,7 +2077,7 @@ impl Process {
             root_fs: AtomicRefCell::new(Arc::new(SpinLock::new(cloned_rootfs))),
             arch,
             signals: Arc::new(SpinLock::new(cloned_signals)),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
@@ -2121,8 +2117,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(parent.rlimits()),
-            cached_utsname: SpinLock::new(child_utsname),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
         });
         drop(_fork_struct_span);
@@ -2292,11 +2286,10 @@ impl Process {
         // Per-process state inherited from parent.
         let process_group = parent.process_group();
         let parent_umask = parent.umask.load();
-        let child_utsname = *parent.cached_utsname.lock_no_irq();
+        let child_utsname = build_cached_utsname(&parent.namespaces().uts);
         let cloned_rootfs = parent.root_fs().lock().clone();
         let cloned_groups = parent.groups();
 
-        #[cfg(target_arch = "x86_64")]
         let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
             pid.as_i32(),
             pid.as_i32(),
@@ -2326,7 +2319,6 @@ impl Process {
             cmdline: AtomicRefCell::new(Cmdline::from_argv(argv)),
             environ: SpinLock::new(envp_to_vec(envp)),
             children: SpinLock::new(Vec::new()),
-            #[cfg(target_arch = "x86_64")]
             vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new({
                 let mut vm = entry.vm;
                 let vdso_uaddr = UserVAddr::new(kevlar_platform::arch::vdso::VDSO_VADDR).unwrap();
@@ -2339,13 +2331,11 @@ impl Process {
                 }
                 vm
             })))),
-            #[cfg(not(target_arch = "x86_64"))]
-            vm: AtomicRefCell::new(Some(Arc::new(SpinLock::new(entry.vm)))),
             opened_files: Arc::new(SpinLock::new(opened_files)),
             root_fs: AtomicRefCell::new(Arc::new(SpinLock::new(cloned_rootfs))),
             arch,
             signals: Arc::new(SpinLock::new(signals)),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(initial_sigset),
@@ -2391,8 +2381,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(parent.rlimits()),
-            cached_utsname: SpinLock::new(child_utsname),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
         });
 
@@ -2462,8 +2450,7 @@ impl Process {
         let opened_files = parent.opened_files().lock().clone();
         let process_group = parent.process_group();
         let sig_set = parent.sigset_load();
-        let child_utsname = *parent.cached_utsname.lock_no_irq();
-        #[cfg(target_arch = "x86_64")]
+        let child_utsname = build_cached_utsname(&parent.namespaces().uts);
         let child_vdso = kevlar_platform::arch::vdso::alloc_process_page(
             pid.as_i32(), pid.as_i32(),
             parent.uid.load(Ordering::Relaxed),
@@ -2491,7 +2478,7 @@ impl Process {
             }),
             arch,
             signals: Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone())),
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(sig_set.bits()),
@@ -2531,8 +2518,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(parent.rlimits()),
-            cached_utsname: SpinLock::new(child_utsname),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new(child_vdso),
         });
 
@@ -2616,7 +2601,7 @@ impl Process {
             } else {
                 Arc::new(SpinLock::new(parent.signals.lock_no_irq().fork_clone()))
             },
-            signal_pending: AtomicU32::new(0),
+            signal_pending: AtomicU64::new(0),
             signaled_frame_stack: SpinLock::new(None),
             signal_ctx_base_stack: SpinLock::new(None),
             sigset: AtomicU64::new(parent.sigset_load().bits()),
@@ -2656,8 +2641,6 @@ impl Process {
             #[cfg(not(feature = "profile-fortress"))]
             file_hot_ptr: AtomicPtr::new(core::ptr::null_mut()),
             rlimits: AtomicRlimits::new(parent.rlimits()),
-            cached_utsname: SpinLock::new(*parent.cached_utsname.lock_no_irq()),
-            #[cfg(target_arch = "x86_64")]
             vdso_data_paddr: AtomicU64::new({
                 // Threads share the parent's vDSO page. Set tid=0 so
                 // __vdso_gettid falls back to syscall in multi-threaded processes.
@@ -3774,8 +3757,8 @@ fn do_elf_binfmt(
         executable_path.resolve_absolute_path().as_str().as_bytes().to_vec(),
     ));
 
-    // vDSO: map a shared page with __vdso_clock_gettime for fast userspace clocks.
-    #[cfg(target_arch = "x86_64")]
+    // vDSO: map a shared page with __vdso_clock_gettime (x86_64) /
+    // __kernel_clock_gettime (arm64) for fast userspace clocks.
     if let Some(_vdso_paddr) = kevlar_platform::arch::vdso::page_paddr() {
         let vdso_vaddr = kevlar_platform::arch::vdso::VDSO_VADDR;
         auxv.push(Auxv::SysinfoEhdr(UserVAddr::new(vdso_vaddr).unwrap()));

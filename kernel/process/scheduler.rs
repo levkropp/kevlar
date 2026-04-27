@@ -66,9 +66,45 @@ impl Scheduler {
 
 impl SchedulerPolicy for Scheduler {
     fn enqueue(&self, pid: PId) {
-        let cpu = cpu_id() as usize % MAX_CPUS;
-        self.run_queues[cpu].lock().push_back(pid);
+        // Load-balance to the LEAST-LOADED queue, not the caller's CPU.
+        //
+        // The previous version unconditionally used the caller's CPU,
+        // which caused severe pile-ups when one CPU was busy ferrying
+        // events for many user threads (e.g. Xorg's main loop on CPU
+        // 0 while CPU 1 was idle).  Every wake_all from inside that
+        // CPU's syscalls dropped the woken processes into the same
+        // saturated queue; work-stealing only pops from the BACK of
+        // a remote queue, so wake-ups stuck behind CPU-bound threads
+        // waited a full preemption quantum (or longer if the busy
+        // CPU never returned to its idle loop).  Symptom: PID 1
+        // stalls 10s+ during test-i3 connection storms while CPU 1
+        // sits idle.
+        //
+        // `enqueue_front` already does this (see comment there for
+        // history); now `enqueue` does it too.
+        let n = (num_online_cpus() as usize).min(MAX_CPUS);
+        let mut best_cpu: usize = 0;
+        let mut best_len = usize::MAX;
+        for c in 0..n {
+            let len = self.run_queues[c].lock().len();
+            if len < best_len {
+                best_len = len;
+                best_cpu = c;
+            }
+        }
+        self.run_queues[best_cpu].lock().push_back(pid);
         RUNQUEUE_LEN.fetch_add(1, Ordering::Relaxed);
+        // Wake the target CPU if it isn't us — without this, an idle
+        // CPU in WFI waits up to one timer period before noticing the
+        // new entry.  On arm64 this is the difference between
+        // "scheduler picks up wake immediately" and "wake stalls if
+        // the target's timer is behaving oddly".  On x64 the IPI is a
+        // no-op (timer is reliable enough that the latency hit of
+        // "wait one tick" is in the noise).
+        let me = cpu_id() as usize;
+        if best_cpu != me {
+            kevlar_platform::arch::send_reschedule_ipi(best_cpu as u32);
+        }
     }
 
     fn enqueue_front(&self, pid: PId) {
@@ -98,6 +134,10 @@ impl SchedulerPolicy for Scheduler {
         }
         self.run_queues[best_cpu].lock().push_front(pid);
         RUNQUEUE_LEN.fetch_add(1, Ordering::Relaxed);
+        let me = cpu_id() as usize;
+        if best_cpu != me {
+            kevlar_platform::arch::send_reschedule_ipi(best_cpu as u32);
+        }
     }
 
     fn pick_next(&self) -> Option<PId> {

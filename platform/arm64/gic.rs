@@ -40,6 +40,19 @@ const GICD_ICPENDR: usize = 0x280;
 const GICD_IPRIORITYR: usize = 0x400;
 const GICD_ITARGETSR: usize = 0x800;
 const GICD_ICFGR: usize = 0xC00;
+const GICD_SGIR: usize = 0xF00;
+
+/// SGI we use for cross-CPU "wake up and reschedule".  The receive
+/// handler is empty — the WFI exit on the target CPU is the point.
+/// Any value 0..=15 works; pick 1 because 0 is sometimes special.
+pub const SGI_RESCHEDULE: u8 = 1;
+
+/// SGI we use for membarrier(2) — the target CPU executes a `dsb sy`
+/// in the IRQ handler so that any user-space stores it issued before
+/// the membarrier syscall on the originating CPU are observable to it
+/// after the syscall returns.  The matching local barrier on the
+/// originating CPU is issued in the syscall handler itself.
+pub const SGI_MEMBARRIER: u8 = 2;
 
 // CPU interface registers.
 const GICC_CTLR: usize = 0x000;
@@ -65,6 +78,19 @@ pub unsafe fn init() {
         mmio_write(gicd + GICD_ICFGR + (i / 16) * 4, 0);
     }
 
+    // SGIs (0..15) and PPIs (16..31) live in IPRIORITYR0..IPRIORITYR7
+    // (the first 32 bytes — one byte per IRQ).  Banked per-CPU.  Set
+    // them all to the same priority as SPIs so the CPU interface
+    // doesn't reject deliveries based on PMR.
+    for i in (0..32).step_by(4) {
+        mmio_write(gicd + GICD_IPRIORITYR + i, 0xa0a0a0a0);
+    }
+    // Enable our reschedule SGI so the BSP receives it from APs.
+    // ISENABLER0 covers SGIs+PPIs; banked per-CPU.  enable_irq writes
+    // to the CALLING CPU's view, so this enables it for the BSP.
+    enable_irq(SGI_RESCHEDULE);
+    enable_irq(SGI_MEMBARRIER);
+
     // Enable distributor.
     mmio_write(gicd + GICD_CTLR, 1);
 
@@ -75,11 +101,47 @@ pub unsafe fn init() {
 
 /// Per-AP GIC CPU interface initialization.
 /// The distributor is already configured by the BSP; each AP only needs
-/// to enable its own CPU interface.
+/// to enable its own CPU interface AND its banked PPI/SGI lines.
 pub unsafe fn init_ap() {
     let gicc = gicc_base();
     mmio_write(gicc + GICC_PMR, 0xFF);
     mmio_write(gicc + GICC_CTLR, 1);
+    // Enable the reschedule SGI on this AP — ISENABLER0 is banked.
+    enable_irq(SGI_RESCHEDULE);
+    enable_irq(SGI_MEMBARRIER);
+}
+
+/// Send the reschedule SGI to one specific target CPU.
+///
+/// `cpu_id` is the CPU's logical id (0..=7).  GICv2 SGI delivery uses
+/// a CPUTargetList bitmap, so the conversion is a 1-bit shift.  The
+/// receiving CPU takes the SGI as a regular IRQ in its 0..15 range
+/// — `arm64_handle_irq` discards it (the value of an empty handler is
+/// the wake-from-WFI side effect, not the work it does).
+pub fn send_reschedule_ipi(cpu_id: u32) {
+    debug_assert!(cpu_id < 8);
+    let gicd = gicd_base();
+    // GICD_SGIR layout (GICv2 §4.3.15):
+    //   bits [25:24] TargetListFilter — 0b00 = use CPUTargetList bitmap
+    //   bits [23:16] CPUTargetList   — 1-bit per target CPU (0..=7)
+    //   bits [15] NSATT (0 = group 0, irrelevant for non-secure)
+    //   bits [3:0]  SGIINTID         — 0..=15
+    let cpu_bit = 1u32 << cpu_id;
+    let val = (cpu_bit << 16) | (SGI_RESCHEDULE as u32);
+    unsafe { mmio_write(gicd + GICD_SGIR, val); }
+}
+
+/// Broadcast a membarrier SGI to every other CPU.  Receivers execute
+/// `dsb sy` in the IRQ path so any prior user-space stores on the
+/// originating CPU become visible to them by the time the syscall
+/// returns to user space.  Implements MEMBARRIER_CMD_GLOBAL semantics.
+///
+/// TargetListFilter=0b01 means "all CPUs except the requesting CPU"
+/// (GICv2 §4.3.15) — exactly the membarrier broadcast set.
+pub fn broadcast_membarrier_ipi() {
+    let gicd = gicd_base();
+    let val = (0b01u32 << 24) | (SGI_MEMBARRIER as u32);
+    unsafe { mmio_write(gicd + GICD_SGIR, val); }
 }
 
 /// Enable a specific IRQ (SPI number, e.g. 33 for UART).

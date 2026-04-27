@@ -109,6 +109,14 @@ impl VirtQueue {
         let avail = virtqueue_paddr.add(avail_ring_off);
         let used = virtqueue_paddr.add(used_ring_off);
 
+        // Per virtio-mmio v1.1 §4.2.3.2 the driver MUST write QueueNum
+        // (the actual size to use, ≤ QueueNumMax) before writing
+        // QueueReady.  Some QEMU versions default QueueNum to
+        // num_default which may be smaller than QueueNumMax — without
+        // this write the device would either reject the queue or use
+        // a tiny ring (e.g. 64) while the driver populates 1024
+        // entries, masking many submissions.  Pin it explicitly.
+        transport.set_queue_size(num_descs);
         transport.set_queue_desc_paddr(descs);
         transport.set_queue_driver_paddr(avail);
         transport.set_queue_device_paddr(used);

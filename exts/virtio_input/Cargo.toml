@@ -1,0 +1,14 @@
+[package]
+name = "virtio_input"
+version = "0.1.0"
+authors = ["The Kevlar Authors"]
+edition = "2024"
+license = "MIT OR Apache-2.0 OR BSD-2-Clause"
+
+[lib]
+name = "virtio_input"
+path = "lib.rs"
+
+[dependencies]
+kevlar_api = { path = "../../libs/kevlar_api" }
+virtio = { path = "../../libs/virtio" }

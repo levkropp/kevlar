@@ -49,6 +49,11 @@ unsafe extern "C" fn bsp_early_init(dtb_paddr: u64) -> ! {
     serial::init();
     timer::init();
 
+    // Build the vDSO template page (single page mapped read-execute
+    // into every user process at VDSO_VADDR).  Provides
+    // __kernel_clock_gettime so musl's vDSO probe finds it.
+    super::vdso::init();
+
     // Wake Application Processors.
     smp::init(&boot_info.cpu_mpdirs);
 

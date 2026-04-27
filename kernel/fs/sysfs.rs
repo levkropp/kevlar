@@ -239,6 +239,26 @@ impl SysFs {
             add_dev_files(&pci_fb0, 29, 0, "fb0");
         }
 
+        // Input devices: /sys/class/input/eventN — major 13, minor
+        // 64+N.  libinput-style discovery walks this directory to
+        // find evdev devices.  Listing the entries even without a
+        // udev daemon is enough for static-config Xorg evdev to
+        // work, since we point it at /dev/input/eventN explicitly.
+        {
+            let input_class = self.class_dir.add_dir("input");
+            for (i, dev) in virtio_input::registered_devices().iter().enumerate() {
+                let name = alloc::format!("event{}", i);
+                let dir = input_class.add_dir(&name);
+                add_dev_files(&dir, 13, (64 + i) as u32, &name);
+                let dev_name = dev.name.lock().clone();
+                dir.add_file(
+                    "name",
+                    Arc::new(SysfsFile(alloc::format!("{}\n", dev_name)))
+                        as Arc<dyn FileLike>,
+                );
+            }
+        }
+
         // Block device: virtio-blk (major 253, minor 0).
         if kevlar_api::driver::block::block_device().is_some() {
             let vda_dir = self.block_dir.add_dir("vda");

@@ -118,7 +118,7 @@ impl kevlar_platform::Handler for Handler {
         crate::timer::handle_timer_irq()
     }
 
-    fn current_process_signal_pending(&self) -> u32 {
+    fn current_process_signal_pending(&self) -> u64 {
         crate::process::current_process().signal_pending_bits()
     }
 
@@ -272,6 +272,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         syscalls::set_strace_pid(pid);
     }
 
+    // Per-fd epoll activity trace: when `epoll-trace-fd=N` is on the
+    // cmdline, every iteration of `collect_ready` that touches fd=N
+    // (and fd=N+1) logs the registered events, current poll status,
+    // and computed ready bits.  Used to debug listener starvation.
+    if let Some(fd) = bootinfo.epoll_trace_fd {
+        info!("epoll: enabling trace for fd={}", fd);
+        fs::epoll::EPOLL_TRACE_FD.store(
+            fd, core::sync::atomic::Ordering::Relaxed);
+    }
+
     // Expose the real cmdline via /proc/cmdline so userspace tools can
     // read flags like `strace-exec=...`.
     fs::procfs::system::set_cmdline(bootinfo.raw_cmdline.as_str());
@@ -324,9 +334,45 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     info!("kext: Loading virtio_net...");
     virtio_net::init();
     profiler.lap_time("virtio_net init");
+    virtio_input::init();
+    profiler.lap_time("virtio_input init");
 
     // Register Bochs VGA framebuffer prober (before PCI scan).
     bochs_fb::init();
+
+    // ARM64 QEMU virt has no legacy PCI, so the bochs_fb PCI prober never
+    // fires.  Without a framebuffer `/dev/fb0`'s ioctls return ENODEV and
+    // Xorg's fbdev driver reports "No devices detected" and dies.
+    //
+    // Provision a RAM-backed framebuffer so `/dev/fb0` has a real backing.
+    // The region isn't scanned out by QEMU (no display pipe on virt without
+    // ramfb/virtio-gpu), so nothing appears in the QEMU window — but Xorg,
+    // i3, xterm and i3status all run against it and the test harness can
+    // dump the rendered pixels back for analysis.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use kevlar_api::mm::{alloc_pages, AllocPageFlags};
+        const FB_W: u32 = 1024;
+        const FB_H: u32 = 768;
+        const FB_BPP: u32 = 32;
+        // 1024*768*4 = 3 MiB = 768 4 KiB pages.
+        let num_pages = ((FB_W * FB_H * (FB_BPP / 8)) as usize).div_ceil(4096);
+        match alloc_pages(num_pages, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK) {
+            Ok(paddr) => {
+                bochs_fb::init_ram_backed(paddr, FB_W, FB_H, FB_BPP);
+                // If QEMU exposes fw_cfg AND was started with `-device
+                // ramfb`, hand the fb paddr+geometry to ramfb so the
+                // QEMU display backend (SDL/cocoa/VNC) scans it out
+                // and the user actually sees the rendered i3 desktop.
+                if let Some(fw_cfg_base) = bootinfo.fw_cfg_base {
+                    ramfb::init(fw_cfg_base, paddr, FB_W, FB_H);
+                }
+            }
+            Err(_) => {
+                warn!("bochs-fb: failed to allocate RAM-backed framebuffer ({} pages)", num_pages);
+            }
+        }
+    }
 
     // Initialize device drivers (PCI bus scan invokes registered probers).
     kevlar_api::kernel_ops::init_drivers(

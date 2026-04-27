@@ -8,15 +8,13 @@ use kevlar_platform::address::UserVAddr;
 
 impl<'a> SyscallHandler<'a> {
     /// sethostname(2) — set hostname in the calling process's UTS namespace.
+    /// `uname()` reads the namespace live, so the change is visible to every
+    /// process that shares this UTS namespace (matches Linux semantics).
     pub fn sys_sethostname(&mut self, name: UserVAddr, len: usize) -> Result<isize> {
         let mut buf = [0u8; 64];
         let copy_len = core::cmp::min(len, 64);
         name.read_bytes(&mut buf[..copy_len])?;
-        let proc = current_process();
-        let ns = proc.namespaces();
-        ns.uts.set_hostname(&buf[..copy_len])?;
-        // Invalidate the cached utsname so uname(2) sees the new hostname.
-        proc.rebuild_cached_utsname();
+        current_process().namespaces().uts.set_hostname(&buf[..copy_len])?;
         Ok(0)
     }
 
@@ -25,10 +23,7 @@ impl<'a> SyscallHandler<'a> {
         let mut buf = [0u8; 64];
         let copy_len = core::cmp::min(len, 64);
         name.read_bytes(&mut buf[..copy_len])?;
-        let proc = current_process();
-        let ns = proc.namespaces();
-        ns.uts.set_domainname(&buf[..copy_len])?;
-        proc.rebuild_cached_utsname();
+        current_process().namespaces().uts.set_domainname(&buf[..copy_len])?;
         Ok(0)
     }
 }

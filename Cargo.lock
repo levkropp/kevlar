@@ -262,10 +262,12 @@ dependencies = [
  "kevlar_utils",
  "kevlar_vfs",
  "log",
+ "ramfb",
  "smoltcp",
  "spin 0.10.0",
  "unwinding",
  "virtio_blk",
+ "virtio_input",
  "virtio_net",
  "x86",
 ]
@@ -407,6 +409,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
+name = "ramfb"
+version = "0.1.0"
+dependencies = [
+ "kevlar_api",
+]
+
+[[package]]
 name = "raw-cpuid"
 version = "10.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -540,6 +549,14 @@ version = "0.1.0"
 dependencies = [
  "kevlar_api",
  "kevlar_utils",
+ "virtio",
+]
+
+[[package]]
+name = "virtio_input"
+version = "0.1.0"
+dependencies = [
+ "kevlar_api",
  "virtio",
 ]
 

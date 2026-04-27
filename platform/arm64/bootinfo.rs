@@ -2,7 +2,7 @@
 //! Minimal device tree blob (DTB) parser for QEMU virt machine.
 //! Extracts memory regions and command line from the DTB.
 use crate::address::PAddr;
-use crate::bootinfo::{BootInfo, RamArea};
+use crate::bootinfo::{BootInfo, RamArea, VirtioMmioDevice};
 use arrayvec::{ArrayString, ArrayVec};
 use core::cmp::max;
 
@@ -62,12 +62,25 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
 
     let mut ram_areas = ArrayVec::new();
     let mut cpu_mpdirs: ArrayVec<u64, 8> = ArrayVec::new();
+    let mut virtio_mmio_devices: ArrayVec<VirtioMmioDevice, 32> = ArrayVec::new();
     let mut cmdline_str: Option<&str> = None;
     let mut in_memory = false;
     let mut in_chosen = false;
     let mut depth: i32 = 0;
     let mut cpus_depth: i32 = -1;
     let mut in_cpu_node = false;
+    // virtio_mmio@<addr> nodes are top-level children of /.  Within one
+    // we collect the MMIO base address from `reg` and the SPI IRQ
+    // number from `interrupts` (QEMU virt uses <type=0 SPI, spi_num,
+    // flags=1 level>).  Kevlar's GIC `enable_irq` takes the GIC INTID,
+    // which is SPI + 32 for SPIs.
+    let mut in_virtio_mmio = false;
+    let mut vmmio_base: Option<usize> = None;
+    let mut vmmio_irq: Option<u8> = None;
+    // QEMU `-machine virt` exposes a single fw-cfg@<addr> node — used
+    // by `exts/ramfb` for QEMU's ramfb scan-out device.
+    let mut in_fw_cfg = false;
+    let mut fw_cfg_base: Option<PAddr> = None;
 
     let mut offset = 0usize;
     while offset + 4 <= struct_size {
@@ -92,6 +105,12 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
                     cpus_depth = depth;
                 } else if cpus_depth >= 0 && depth == cpus_depth + 1 && name.starts_with("cpu@") {
                     in_cpu_node = true;
+                } else if depth == 2 && name.starts_with("virtio_mmio@") {
+                    in_virtio_mmio = true;
+                    vmmio_base = None;
+                    vmmio_irq = None;
+                } else if depth == 2 && name.starts_with("fw-cfg@") {
+                    in_fw_cfg = true;
                 }
             }
             2 => {
@@ -100,6 +119,22 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
                     in_cpu_node = false;
                 } else if cpus_depth >= 0 && depth == cpus_depth {
                     cpus_depth = -1;
+                } else if in_virtio_mmio {
+                    // Commit the virtio-mmio slot only if it had both reg
+                    // and interrupts — otherwise it's an empty placeholder.
+                    if let (Some(base), Some(irq)) = (vmmio_base, vmmio_irq) {
+                        if !virtio_mmio_devices.is_full() {
+                            let _ = virtio_mmio_devices.try_push(VirtioMmioDevice {
+                                mmio_base: PAddr::new(base),
+                                irq,
+                            });
+                        }
+                    }
+                    in_virtio_mmio = false;
+                    vmmio_base = None;
+                    vmmio_irq = None;
+                } else if in_fw_cfg {
+                    in_fw_cfg = false;
                 } else {
                     in_memory = false;
                     in_chosen = false;
@@ -150,6 +185,32 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
                     let _ = cpu_mpdirs.try_push(mpidr);
                 }
 
+                // virtio_mmio@ADDR: reg = <addr_hi addr_lo size_hi size_lo>
+                // (#address-cells=2, #size-cells=2 at root), interrupts =
+                // <type spi_num flags> where type=0 means SPI.
+                if in_virtio_mmio && prop_name == "reg" && prop_len >= 16 {
+                    let base_hi = *(prop_data as *const u32);
+                    let base_lo = *(prop_data.add(4) as *const u32);
+                    vmmio_base = Some(be64_from_cells(base_hi, base_lo) as usize);
+                }
+                if in_virtio_mmio && prop_name == "interrupts" && prop_len >= 12 {
+                    let irq_type = be32(*(prop_data as *const u32));
+                    let spi_num = be32(*(prop_data.add(4) as *const u32));
+                    // SPI (type=0) → GIC INTID = SPI + 32.  Ignore PPI etc.
+                    if irq_type == 0 {
+                        let intid = (spi_num + 32) as u8;
+                        vmmio_irq = Some(intid);
+                    }
+                }
+
+                // fw-cfg@ADDR: reg = <addr_hi addr_lo size_hi size_lo>
+                // Only the base matters for ramfb's port-mode access.
+                if in_fw_cfg && prop_name == "reg" && prop_len >= 16 {
+                    let base_hi = *(prop_data as *const u32);
+                    let base_lo = *(prop_data.add(4) as *const u32);
+                    fw_cfg_base = Some(PAddr::new(be64_from_cells(base_hi, base_lo) as usize));
+                }
+
                 offset += (prop_len + 3) & !3; // align to 4
             }
             9 => {
@@ -167,12 +228,35 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         return default_boot_info();
     }
 
-    let cmdline = parse_cmdline(cmdline_str.unwrap_or(""));
+    let cmdline_raw = cmdline_str.unwrap_or("");
+    let cmdline = parse_cmdline(cmdline_raw);
+    // Capture the raw cmdline so /proc/cmdline shows what userspace
+    // was actually given (including custom flags like kbox-phase=N
+    // that we don't structurally parse).
+    let mut raw_cmdline = ArrayString::<512>::new();
+    let _ = raw_cmdline.try_push_str(cmdline_raw);
+    // Merge DTB-discovered virtio-mmio devices with any passed via cmdline
+    // (`virtio_mmio.device=SIZE@ADDR:IRQ`).  DTB entries come first, as the
+    // hypervisor-authoritative source; cmdline entries act as overrides.
+    let mut merged_vmmio = virtio_mmio_devices;
+    for dev in cmdline.virtio_mmio_devices.iter() {
+        if !merged_vmmio.is_full() {
+            let _ = merged_vmmio.try_push(VirtioMmioDevice {
+                mmio_base: dev.mmio_base,
+                irq: dev.irq,
+            });
+        }
+    }
+    println!("virtio-mmio: discovered {} device(s) from DTB", merged_vmmio.len());
+    if let Some(p) = fw_cfg_base {
+        println!("fw-cfg: discovered MMIO base {:#x} from DTB", p.value());
+    }
     BootInfo {
         ram_areas,
         pci_enabled: cmdline.pci_enabled,
         pci_allowlist: cmdline.pci_allowlist,
-        virtio_mmio_devices: cmdline.virtio_mmio_devices,
+        virtio_mmio_devices: merged_vmmio,
+        fw_cfg_base,
         log_filter: cmdline.log_filter,
         use_second_serialport: false,
         dhcp_enabled: cmdline.dhcp_enabled,
@@ -181,8 +265,9 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         cpu_mpdirs,
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
-        strace_pid: None,
-        raw_cmdline: ArrayString::new(),
+        strace_pid: cmdline.strace_pid,
+        epoll_trace_fd: cmdline.epoll_trace_fd,
+        raw_cmdline,
     }
 }
 
@@ -210,6 +295,7 @@ pub fn default_boot_info() -> BootInfo {
         pci_enabled: false,
         pci_allowlist: ArrayVec::new(),
         virtio_mmio_devices,
+        fw_cfg_base: None,
         log_filter: ArrayString::new(),
         use_second_serialport: false,
         dhcp_enabled: true,
@@ -219,6 +305,7 @@ pub fn default_boot_info() -> BootInfo {
         init_path: None,
         debug_filter: ArrayString::new(),
         strace_pid: None,
+        epoll_trace_fd: None,
         raw_cmdline: ArrayString::new(),
     }
 }
@@ -276,6 +363,8 @@ struct ParsedCmdline {
     gateway_ip4: Option<ArrayString<15>>,
     init_path: Option<ArrayString<128>>,
     debug_filter: ArrayString<64>,
+    strace_pid: Option<i32>,
+    epoll_trace_fd: Option<i32>,
 }
 
 fn parse_cmdline(s: &str) -> ParsedCmdline {
@@ -291,6 +380,8 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
         gateway_ip4: None,
         init_path: None,
         debug_filter: ArrayString::new(),
+        strace_pid: None,
+        epoll_trace_fd: None,
     };
 
     for config in s.split(' ') {
@@ -326,6 +417,18 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
             }
             (Some("debug"), Some(value)) => {
                 let _ = result.debug_filter.try_push_str(value);
+            }
+            (Some("strace-pid"), Some(value)) => {
+                if let Ok(pid) = value.parse() {
+                    info!("bootinfo: strace-pid = {}", pid);
+                    result.strace_pid = Some(pid);
+                }
+            }
+            (Some("epoll-trace-fd"), Some(value)) => {
+                if let Ok(fd) = value.parse() {
+                    info!("bootinfo: epoll-trace-fd = {}", fd);
+                    result.epoll_trace_fd = Some(fd);
+                }
             }
             _ => {}
         }

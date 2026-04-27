@@ -30,15 +30,14 @@ const SIGINFO_SIZE: usize = 128;
 pub struct SignalFd {
     /// Bitmask of signals this fd watches (matches the sigset_t passed to
     /// signalfd4).  Only signals in this mask will be dequeued on read.
-    mask: u32,
+    /// u64 to cover the full Linux signal range (1..=64) including RT
+    /// signals — see signal.rs SIGMAX comment.
+    mask: u64,
 }
 
 impl SignalFd {
     pub fn new(mask: u64) -> Arc<SignalFd> {
-        // We only support standard signals 1-31 (pending is u32).
-        Arc::new(SignalFd {
-            mask: mask as u32,
-        })
+        Arc::new(SignalFd { mask })
     }
 }
 

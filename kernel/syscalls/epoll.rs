@@ -17,24 +17,61 @@ use crate::{
 use alloc::vec::Vec;
 use kevlar_platform::address::UserVAddr;
 
-/// Size of `struct epoll_event` (u32 events + u64 data, packed = 12 bytes).
+/// Size and layout of `struct epoll_event`.
+///
+/// Linux `<sys/epoll.h>`:
+///
+/// ```c
+/// struct epoll_event {
+///     uint32_t events;
+///     epoll_data_t data;  // union, 8 bytes
+/// } __EPOLL_PACKED;
+/// ```
+///
+/// `__EPOLL_PACKED` is `__attribute__((packed))` **only on x86_64** —
+/// for ABI compatibility with 32-bit x86.  On every other arch
+/// (aarch64, riscv, etc.) it is a no-op, so the struct has natural
+/// alignment with a 4-byte hole after `events`:
+///
+/// | arch    | layout                           | size |
+/// |---------|----------------------------------|------|
+/// | x86_64  | `events(4) | data(8)`            | 12   |
+/// | aarch64 | `events(4) | _pad(4) | data(8)`  | 16   |
+///
+/// Get this wrong and userspace reads `data.ptr` from either the
+/// wrong offset (truncated to a partial pointer) or the wrong stride
+/// (reads into the next event's header).  Xorg crashes immediately
+/// because it stores real pointers in `data.ptr` for its event loop.
+#[cfg(target_arch = "x86_64")]
 const EPOLL_EVENT_SIZE: usize = 12;
+#[cfg(target_arch = "x86_64")]
+const EPOLL_DATA_OFFSET: usize = 4;
+
+#[cfg(not(target_arch = "x86_64"))]
+const EPOLL_EVENT_SIZE: usize = 16;
+#[cfg(not(target_arch = "x86_64"))]
+const EPOLL_DATA_OFFSET: usize = 8;
 
 impl EpollEvent {
-    /// Deserialize from a 12-byte little-endian buffer.
+    /// Deserialize from userspace `struct epoll_event` bytes.
     fn from_bytes(b: &[u8; EPOLL_EVENT_SIZE]) -> EpollEvent {
         let events = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
-        let data = u64::from_ne_bytes([b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]]);
+        let d = EPOLL_DATA_OFFSET;
+        let data = u64::from_ne_bytes([
+            b[d], b[d + 1], b[d + 2], b[d + 3],
+            b[d + 4], b[d + 5], b[d + 6], b[d + 7],
+        ]);
         EpollEvent { events, data }
     }
 
-    /// Serialize to a 12-byte little-endian buffer.
+    /// Serialize to userspace `struct epoll_event` bytes.  Pad bytes
+    /// (arm64) are zeroed to avoid leaking kernel stack data.
     fn to_bytes(&self) -> [u8; EPOLL_EVENT_SIZE] {
         let mut buf = [0u8; EPOLL_EVENT_SIZE];
         let ev = self.events.to_ne_bytes();
         let da = self.data.to_ne_bytes();
         buf[0..4].copy_from_slice(&ev);
-        buf[4..12].copy_from_slice(&da);
+        buf[EPOLL_DATA_OFFSET..EPOLL_DATA_OFFSET + 8].copy_from_slice(&da);
         buf
     }
 }

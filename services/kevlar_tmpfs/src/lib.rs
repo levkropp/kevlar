@@ -25,7 +25,7 @@ use kevlar_vfs::{
         Symlink as SymlinkTrait,
     },
     result::{Errno, Error, Result},
-    stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFLNK, S_IFREG},
+    stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK},
     user_buffer::{UserBufReader, UserBufWriter, UserBuffer, UserBufferMut},
 };
 
@@ -213,10 +213,18 @@ impl Directory for Dir {
                     name: name.clone(),
                 }
             }
-            TmpFsINode::File(file) => DirEntry {
-                inode_no: file.stat()?.inode_no,
-                file_type: FileType::Regular,
-                name: name.clone(),
+            TmpFsINode::File(file) => {
+                let st = file.stat()?;
+                let ft = if (st.mode.as_u32() & S_IFMT) == S_IFSOCK {
+                    FileType::Socket
+                } else {
+                    FileType::Regular
+                };
+                DirEntry {
+                    inode_no: st.inode_no,
+                    file_type: ft,
+                    name: name.clone(),
+                }
             },
             TmpFsINode::Symlink(sym) => DirEntry {
                 inode_no: sym.stat.inode_no,
@@ -305,7 +313,15 @@ impl Directory for Dir {
 
         let inode = Arc::new(File::new(alloc_inode_no()));
         // Apply the requested permission bits (umask already applied by caller).
-        *inode.mode.lock_no_irq() = FileMode::new(S_IFREG | (mode.as_u32() & 0o7777));
+        // Honor S_IFSOCK in the type bits — AF_UNIX bind() to a filesystem
+        // path creates a socket node here so that subsequent stat() reports
+        // S_IFSOCK and shell tests like `[ -S /path ]` succeed (matches
+        // Linux semantics).  All other types fall back to S_IFREG.
+        let resolved_type = match mode.as_u32() & S_IFMT {
+            S_IFSOCK => S_IFSOCK,
+            _ => S_IFREG,
+        };
+        *inode.mode.lock_no_irq() = FileMode::new(resolved_type | (mode.as_u32() & 0o7777));
         *inode.uid.lock_no_irq() = uid;
         *inode.gid.lock_no_irq() = gid;
         dir_lock.insert(name.into(), TmpFsINode::File(inode.clone()));

@@ -17,6 +17,15 @@ const PREEMPT_PER_TICKS: usize = 3;
 pub const DIAG_SKIP_SWITCH: bool = false;
 
 static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
+/// Per-CPU tick counter — bumped from `handle_timer_irq` regardless
+/// of whether the global heartbeat fires.  Used to detect a dead
+/// timer on a specific CPU (the AP virtual timer not re-arming).
+static PER_CPU_TICKS: [AtomicUsize; 8] = [
+    AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+];
 /// Ticks from the epoch (00:00:00 on 1 January 1970, UTC).
 static WALLCLOCK_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Wall-clock epoch in nanoseconds (set once from CMOS RTC at boot).
@@ -249,6 +258,15 @@ pub fn handle_timer_irq() -> bool {
     WALLCLOCK_TICKS.fetch_add(1, Ordering::Relaxed);
     let ticks = MONOTONIC_TICKS.fetch_add(1, Ordering::Relaxed);
 
+    // Per-CPU tick counter — exposes whether each CPU's timer is alive.
+    // If one CPU's count is stuck at the boot value, its timer has died
+    // (e.g. arm64 virtual timer on AP not rearming) and that CPU can't
+    // pick up runnable work even if its queue is non-empty.
+    let cpu_idx = kevlar_platform::arch::cpu_id() as usize;
+    if cpu_idx < PER_CPU_TICKS.len() {
+        PER_CPU_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
+    }
+
     // Task #25 diagnostic: unconditional tick heartbeat + PID 1
     // starvation detector.  The heartbeat proves the timer ISR is
     // still running during a hang.
@@ -256,19 +274,63 @@ pub fn handle_timer_irq() -> bool {
         let last = PID1_LAST_TICK.load(Ordering::Relaxed);
         let gap = ticks.saturating_sub(last);
         let cpu = kevlar_platform::arch::cpu_id();
-        warn!("TICK_HB: cpu={} tick={} pid1_last={} pid1_gap={}",
-              cpu, ticks, last, gap);
+        let pcs: alloc::vec::Vec<usize> = PER_CPU_TICKS.iter()
+            .map(|a| a.load(Ordering::Relaxed)).collect();
+        warn!("TICK_HB: cpu={} tick={} pid1_last={} pid1_gap={} per_cpu={:?}",
+              cpu, ticks, last, gap, pcs);
     }
-    if ticks % 100 == 50 {  // once per second, offset from preempt
+    if ticks % 50 == 25 {  // twice per second, offset from preempt
         let last = PID1_LAST_TICK.load(Ordering::Relaxed);
+        // Dump on every sample once gap > 100 ticks (1s).  Repeated
+        // samples let us tell whether the userspace PC is stuck (a
+        // loop) or moving (forward progress).
+        if last != 0 && ticks > last + 100 {
+            let gap_ms = (ticks - last) * 1000 / TICK_HZ;
+            #[cfg(target_arch = "aarch64")]
+            let fp_traps = kevlar_platform::arch::arm64_specific::FP_TRAP_COUNT_VALUE();
+            #[cfg(not(target_arch = "aarch64"))]
+            let fp_traps: usize = 0;
+            let pf_count = crate::mm::page_fault::PAGE_FAULT_COUNT
+                .load(Ordering::Relaxed);
+            for cpu in 0..(kevlar_platform::arch::num_online_cpus() as usize) {
+                if let Some((pc, sp, _pstate, stale)) = kevlar_platform::arch::last_user_state(cpu) {
+                    // stale=0 → CPU is currently running EL0 (or just
+                    // trapped from it in this IRQ).  Higher = N IRQs
+                    // have fired in EL1/idle since we last sampled.
+                    let regs = kevlar_platform::arch::last_user_regs(cpu);
+                    let (lr, x0, x1, x2) = regs.unwrap_or((0, 0, 0, 0));
+                    warn!(
+                        "PID1_STALL: tick={} gap={}ms cpu={} stale_irqs={} user_pc=0x{:x} sp=0x{:x} lr=0x{:x} x0=0x{:x} x1=0x{:x} x2=0x{:x} fp_traps={} pf={}",
+                        ticks, gap_ms, cpu, stale, pc, sp, lr, x0, x1, x2, fp_traps, pf_count,
+                    );
+                    // Read the 16 bytes at LR-8..LR+8 from user memory.
+                    // The instruction at LR-4 is the call site that
+                    // dispatched into where we're now sampled (if we're
+                    // currently inside a function that x30 returns from).
+                    if stale == 0 && lr >= 8 {
+                        let mut buf = [0u8; 16];
+                        let uva = kevlar_platform::address::UserVAddr::new_nonnull(
+                            (lr - 8) as usize,
+                        );
+                        if let Ok(uva) = uva {
+                            if uva.read_bytes(&mut buf).is_ok() {
+                                let i_pre = u32::from_le_bytes([buf[0],buf[1],buf[2],buf[3]]);
+                                let i_call = u32::from_le_bytes([buf[4],buf[5],buf[6],buf[7]]);
+                                let i_at = u32::from_le_bytes([buf[8],buf[9],buf[10],buf[11]]);
+                                let i_next = u32::from_le_bytes([buf[12],buf[13],buf[14],buf[15]]);
+                                warn!(
+                                    "PID1_STALL: cpu={} insns near lr-8: {:08x} {:08x} {:08x} {:08x}",
+                                    cpu, i_pre, i_call, i_at, i_next,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if last != 0 && ticks > last + PID1_STALL_THRESHOLD_TICKS
             && !PID1_STALL_DUMPED.swap(true, Ordering::Relaxed)
         {
-            let gap_ms = (ticks - last) * 1000 / TICK_HZ;
-            warn!(
-                "PID1_STALL: tick={} last_run={} gap={}ms",
-                ticks, last, gap_ms,
-            );
             let queues = crate::process::dump_scheduler_state(4);
             warn!("PID1_STALL queues={:?}", queues);
         }

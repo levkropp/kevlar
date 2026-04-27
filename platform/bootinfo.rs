@@ -21,6 +21,12 @@ pub struct AllowedPciDevice {
 pub struct BootInfo {
     pub ram_areas: ArrayVec<RamArea, 8>,
     pub virtio_mmio_devices: ArrayVec<VirtioMmioDevice, 32>,
+    /// QEMU `fw_cfg` MMIO base, discovered from the DTB on arm64 virt
+    /// (typically `0x9020000`).  Populated only on platforms that
+    /// expose fw_cfg; `None` on x64 and on arm64 boots without DTB.
+    /// Used by `exts/ramfb` to set up scan-out of `/dev/fb0`'s backing
+    /// memory through QEMU's `-device ramfb`.
+    pub fw_cfg_base: Option<PAddr>,
     pub log_filter: ArrayString<64>,
     pub pci_enabled: bool,
     pub pci_allowlist: ArrayVec<AllowedPciDevice, 4>,
@@ -41,6 +47,12 @@ pub struct BootInfo {
     /// line to serial — consumed by `tools/strace-diff.py` to compare
     /// Kevlar's syscall behaviour against Linux on an identical rootfs.
     pub strace_pid: Option<i32>,
+    /// Trace `collect_ready` activity for this fd (and fd+1) — used to
+    /// debug AF_UNIX listener starvation.  When set, every iteration
+    /// over the fd in either the blocking or non-blocking epoll path
+    /// logs the registered events, current poll status, and computed
+    /// ready bits.
+    pub epoll_trace_fd: Option<i32>,
     /// Full raw kernel cmdline (as seen at boot). Exposed via /proc/cmdline
     /// so userspace tools can inspect flags like `strace-exec=...`.
     pub raw_cmdline: ArrayString<512>,

@@ -370,6 +370,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         pci_enabled: cmdline.pci_enabled,
         pci_allowlist: cmdline.pci_allowlist,
         virtio_mmio_devices: cmdline.virtio_mmio_devices,
+        fw_cfg_base: None,
         log_filter: cmdline.log_filter,
         use_second_serialport: cmdline.use_second_serialport,
         dhcp_enabled: cmdline.dhcp_enabled,
@@ -379,6 +380,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }
 }
@@ -420,6 +422,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         pci_enabled: cmdline.pci_enabled,
         pci_allowlist: cmdline.pci_allowlist,
         virtio_mmio_devices: cmdline.virtio_mmio_devices,
+        fw_cfg_base: None,
         log_filter: cmdline.log_filter,
         use_second_serialport: cmdline.use_second_serialport,
         dhcp_enabled: cmdline.dhcp_enabled,
@@ -429,6 +432,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }
 }
@@ -464,6 +468,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         pci_enabled: cmdline.pci_enabled,
         pci_allowlist: cmdline.pci_allowlist,
         virtio_mmio_devices: cmdline.virtio_mmio_devices,
+        fw_cfg_base: None,
         log_filter: cmdline.log_filter,
         use_second_serialport: cmdline.use_second_serialport,
         dhcp_enabled: cmdline.dhcp_enabled,
@@ -473,6 +478,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }
 }

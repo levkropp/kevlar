@@ -360,9 +360,9 @@ impl DeviceProber for VirtioNetProber {
 
     fn probe_virtio_mmio(&self, mmio_device: &VirtioMmioDevice) {
         let mmio = mmio_device.mmio_base.as_vaddr();
-        let magic = unsafe { *mmio.as_ptr::<u32>() };
-        let virtio_version = unsafe { *mmio.add(4).as_ptr::<u32>() };
-        let device_id = unsafe { *mmio.add(8).as_ptr::<u32>() };
+        let magic = unsafe { mmio.mmio_read32() };
+        let virtio_version = unsafe { mmio.add(4).mmio_read32() };
+        let device_id = unsafe { mmio.add(8).mmio_read32() };
 
         info!(
             "virtio-net: probing MMIO at {:?}: magic={:#x}, version={}, device_id={}",

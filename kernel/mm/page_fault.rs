@@ -112,6 +112,12 @@ fn deliver_sigsegv_fatal() {
     if let Some(r) = regs {
         warn!("  RIP={:#x} RSP={:#x} RBP={:#x} RAX={:#x}", r.rip, r.rsp, r.rbp, r.rax);
         warn!("  RDI={:#x} RSI={:#x} RDX={:#x} RCX={:#x}", r.rdi, r.rsi, r.rdx, r.rcx);
+        // r8/r9: on arm64 these slots hold x7/x8 (the syscall number
+        // is in x8).  When the fault is in musl's __syscall_ret error
+        // path, x2 (RCX) holds the errno value and x8 (R9) tells us
+        // which syscall returned the error — see blog 247 / clone(2)
+        // CLONE_SETTLS inheritance fix.
+        warn!("  R8 ={:#x} R9 ={:#x}", r.r8, r.r9);
         // Flag any GPR that looks like a kernel direct-map pointer.
         let gprs = [("RIP", r.rip), ("RSP", r.rsp), ("RBP", r.rbp), ("RAX", r.rax),
                     ("RDI", r.rdi), ("RSI", r.rsi), ("RDX", r.rdx), ("RCX", r.rcx)];

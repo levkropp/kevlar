@@ -55,6 +55,7 @@ mod link;
 mod linkat;
 mod listen;
 mod lstat;
+mod membarrier;
 mod mkdir;
 mod mmap;
 mod shm;
@@ -409,6 +410,8 @@ mod syscall_numbers {
     pub const SYS_PREADV: usize = 295;
     pub const SYS_PWRITEV: usize = 296;
     pub const SYS_STATX: usize = 332;
+    // x86_64 membarrier number (arm64 uses 283, see other module).
+    pub const SYS_MEMBARRIER: usize = 324;
     // M5 Phase 2: inotify
     pub const SYS_INOTIFY_ADD_WATCH: usize = 254;
     pub const SYS_INOTIFY_RM_WATCH: usize = 255;
@@ -666,6 +669,8 @@ mod syscall_numbers {
     pub const SYS_UTIMENSAT: usize = 88;
     pub const SYS_FADVISE64: usize = 223;
     pub const SYS_STATX: usize = 291;
+    // arm64 membarrier number (x86_64 uses 324, see other module).
+    pub const SYS_MEMBARRIER: usize = 283;
     // M5 Phase 2: inotify
     pub const SYS_INOTIFY_INIT1: usize = 26;
     pub const SYS_INOTIFY_ADD_WATCH: usize = 27;
@@ -1705,6 +1710,7 @@ impl<'a> SyscallHandler<'a> {
                 a3,
                 a4,
             ),
+            SYS_MEMBARRIER => self.sys_membarrier(a1 as c_int, a2 as u32, a3 as c_int),
             // M5 Phase 2: inotify
             SYS_INOTIFY_INIT1 => self.sys_inotify_init1(a1 as c_int),
             SYS_INOTIFY_ADD_WATCH => self.sys_inotify_add_watch(
@@ -1820,7 +1826,12 @@ impl<'a> SyscallHandler<'a> {
             // New mount API stubs — systemd v259 probes these and falls back to mount(2).
             SYS_OPEN_TREE | SYS_MOVE_MOUNT | SYS_FSOPEN | SYS_FSCONFIG |
             SYS_FSMOUNT | SYS_FSPICK => Err(Error::new(Errno::ENOSYS)),
-            // XFCE/GTK stubs — return harmless defaults so desktop components start.
+            // XFCE/GTK stubs — return harmless defaults so desktop
+            // components start.  All literals below are x86_64 syscall
+            // numbers; cfg-gate them so arm64 doesn't accidentally
+            // match a different syscall that happens to share the
+            // number (e.g. arm64 syscall 251 is NOT ioprio_set).
+            #[cfg(target_arch = "x86_64")]
             172 /* iopl */ => {
                 // Return success WITHOUT changing IOPL in RFLAGS.
                 //
@@ -1835,24 +1846,55 @@ impl<'a> SyscallHandler<'a> {
                 // PIT timer and caused timer starvation on SMP).
                 Ok(0)
             }
+            #[cfg(target_arch = "x86_64")]
             173 /* ioperm */ => Ok(0), // Accept silently — iopl(3) grants all ports
-            142 /* sched_getparam */ => {
+            #[cfg(target_arch = "x86_64")]
+            142 /* sched_getparam (x86_64) */ => {
                 // Return default sched_param { sched_priority: 0 }
                 if a2 != 0 { UserVAddr::new_nonnull(a2)?.write::<i32>(&0)?; }
                 Ok(0)
             }
-            149 /* mlock */ | 150 /* munlock */ | 151 /* mlockall */ | 152 /* munlockall */ => Ok(0),
-            251 /* ioprio_set */ => Ok(0),
-            252 /* ioprio_get */ => Ok(0),
-            27  /* mincore */ => Err(Error::new(Errno::ENOSYS)),
-            239 /* get_mempolicy */ => Err(Error::new(Errno::ENOSYS)), // glib probes, has fallback
-            299 /* recvmmsg */ => Err(Error::new(Errno::ENOSYS)),
-            307 /* sendmmsg */ => Err(Error::new(Errno::ENOSYS)),
-            324 /* membarrier */ => Ok(0), // glib uses for RCU, safe to stub as success
+            #[cfg(target_arch = "aarch64")]
+            121 /* sched_getparam (arm64) */ => {
+                if a2 != 0 { UserVAddr::new_nonnull(a2)?.write::<i32>(&0)?; }
+                Ok(0)
+            }
+            #[cfg(target_arch = "x86_64")]
+            149 /* mlock (x86_64) */ | 150 /* munlock */ | 151 /* mlockall */ | 152 /* munlockall */ => Ok(0),
+            #[cfg(target_arch = "aarch64")]
+            228 /* mlock (arm64) */ | 229 /* munlock */ | 230 /* mlockall */ | 231 /* munlockall */ => Ok(0),
+            #[cfg(target_arch = "x86_64")]
+            251 /* ioprio_set (x86_64) */ => Ok(0),
+            #[cfg(target_arch = "x86_64")]
+            252 /* ioprio_get (x86_64) */ => Ok(0),
+            #[cfg(target_arch = "aarch64")]
+            30  /* ioprio_set (arm64) */ => Ok(0),
+            #[cfg(target_arch = "aarch64")]
+            31  /* ioprio_get (arm64) */ => Ok(0),
+            #[cfg(target_arch = "x86_64")]
+            27  /* mincore (x86_64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "aarch64")]
+            232 /* mincore (arm64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "x86_64")]
+            239 /* get_mempolicy (x86_64) */ => Err(Error::new(Errno::ENOSYS)), // glib probes, has fallback
+            #[cfg(target_arch = "aarch64")]
+            236 /* get_mempolicy (arm64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "x86_64")]
+            299 /* recvmmsg (x86_64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "x86_64")]
+            307 /* sendmmsg (x86_64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "aarch64")]
+            243 /* recvmmsg (arm64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "aarch64")]
+            269 /* sendmmsg (arm64) */ => Err(Error::new(Errno::ENOSYS)),
+            #[cfg(target_arch = "aarch64")]
+            277 /* sync_file_range2 (arm64) */ => Ok(0), // hint syscall, safe to stub
+            #[cfg(target_arch = "aarch64")]
+            284 /* mlock2 (arm64) */ => Ok(0), // mlock variant — silently accept
             _ => {
                 let pid = current_process().pid().as_i32();
-                // Always print unimplemented syscalls for processes > 5 (Xorg etc.)
-                if pid > 5 {
+                // Print unimplemented syscalls for non-init processes.
+                if pid > 1 {
                     println!("UNIMP: pid={} syscall {} (n={})", pid, syscall_name_by_number(n), n);
                 }
                 debug::emit(DebugFilter::SYSCALL, &DebugEvent::UnimplementedSyscall {
@@ -2039,6 +2081,7 @@ pub fn syscall_name_by_number(n: usize) -> &'static str {
         SYS_FADVISE64 => "fadvise64",
         SYS_PREADV => "preadv",
         SYS_PWRITEV => "pwritev",
+        SYS_MEMBARRIER => "membarrier",
         SYS_INOTIFY_INIT1 => "inotify_init1",
         SYS_INOTIFY_ADD_WATCH => "inotify_add_watch",
         SYS_INOTIFY_RM_WATCH => "inotify_rm_watch",

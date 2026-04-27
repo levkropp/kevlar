@@ -333,6 +333,8 @@ pub trait FileLike: Debug + Send + Sync + Downcastable {
 }
 
 /// Represents `d_type` in `linux_dirent`. See `getdents64(2)` manual.
+/// Discriminants match Linux's DT_* values so the syscall layer can cast
+/// directly without a translation table.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
 #[non_exhaustive]
@@ -340,6 +342,7 @@ pub enum FileType {
     Directory = 4,
     Regular = 8,
     Link = 10,
+    Socket = 12,
 }
 
 /// A directory entry (ones returned from `readdir(3)`).

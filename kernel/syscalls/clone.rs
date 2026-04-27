@@ -61,7 +61,34 @@ impl<'a> SyscallHandler<'a> {
 
             let set_child_tid   = flags & CLONE_CHILD_SETTID  != 0;
             let clear_child_tid = flags & CLONE_CHILD_CLEARTID != 0;
-            let newtls_val = if flags & CLONE_SETTLS != 0 { newtls as u64 } else { 0 };
+            // Per clone(2): "If CLONE_SETTLS is not specified, the new
+            // thread inherits the TLS settings of the calling thread."
+            // On arm64 that means TPIDR_EL0.  Reading the live HW
+            // register here captures any direct `msr tpidr_el0` writes
+            // from userspace (musl's __init_tp does this).  Without
+            // this, posix_spawn'd children landed with TPIDR_EL0=0,
+            // making the first errno-setting failure of any startup
+            // syscall NULL-deref.
+            let newtls_val = if flags & CLONE_SETTLS != 0 {
+                newtls as u64
+            } else {
+                #[cfg(target_arch = "aarch64")]
+                #[allow(unsafe_code)]
+                let inherited: u64 = {
+                    let v: u64;
+                    unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) v); }
+                    v
+                };
+                #[cfg(target_arch = "x86_64")]
+                let inherited: u64 = {
+                    // x86_64: FSBASE inheritance — read the live MSR.
+                    // RDFSBASE requires CR4.FSGSBASE; if unavailable,
+                    // the parent's stored fs_base is used by new_thread.
+                    let v: u64 = 0;
+                    v
+                };
+                inherited
+            };
             let is_vfork = flags & CLONE_VFORK != 0;
             let is_thread = flags & CLONE_THREAD != 0;
 

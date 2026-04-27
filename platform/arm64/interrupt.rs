@@ -74,6 +74,35 @@ extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
                 reason |= PageFaultReason::PRESENT;
             }
 
+            // Stash registers for crash diagnostics.  The generic crash
+            // reporter uses x86-style names (rax/rbx/...); we map arm64
+            // x0..x7 into those slots since that's what the dump printer
+            // shows first.  x0..x7 cover the ARM AAPCS argument and
+            // return registers, which is what crash analysis cares about.
+            let f = unsafe { &*frame };
+            let values: [u64; 19] = [
+                f.regs[0],  // RAX slot <- x0
+                f.regs[1],  // RBX slot <- x1
+                f.regs[2],  // RCX slot <- x2
+                f.regs[3],  // RDX slot <- x3
+                f.regs[4],  // RSI slot <- x4
+                f.regs[5],  // RDI slot <- x5
+                f.regs[6],  // RBP slot <- x6
+                f.sp,       // RSP slot <- SP_EL0 (user stack)
+                f.regs[7],  // R8 slot  <- x7
+                f.regs[8],  // R9 slot  <- x8 (syscall num)
+                f.regs[9],  // R10
+                f.regs[10], // R11
+                f.regs[11], // R12
+                f.regs[12], // R13
+                f.regs[13], // R14
+                f.regs[14], // R15
+                f.pc,       // RIP
+                f.pstate,   // RFLAGS slot <- SPSR
+                far,        // FAULT_ADDR
+            ];
+            crate::crash_regs::stash(crate::arch::cpu_id() as usize, &values);
+
             let unaligned_vaddr = UserVAddr::new(far as usize);
             let pc = unsafe { (*frame).pc as usize };
             handler().handle_page_fault(unaligned_vaddr, pc, reason);
@@ -111,9 +140,120 @@ extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
     }
 }
 
+/// Per-CPU EL0 PC sampler.
+///
+/// On every IRQ entry we bump `irq_count`.  On every IRQ that
+/// interrupted EL0 (userspace), we also copy the saved PC/SP/PSTATE
+/// into the sample slots and snapshot `irq_count` into
+/// `last_el0_irq_count`.  Staleness of the EL0 sample is then
+/// `irq_count - last_el0_irq_count` — high values mean the CPU has
+/// been running EL1 (kernel/idle) for many IRQs since we last saw
+/// it in userspace, so the PC sample is old.
+///
+/// This replaces the earlier `LAST_IRQ_FRAME[]` pointer scheme which
+/// did not invalidate when the CPU went idle and would keep
+/// reporting the same stale PC for seconds.
+pub struct PerCpuIrqState {
+    pub irq_count: core::sync::atomic::AtomicU64,
+    pub last_el0_irq_count: core::sync::atomic::AtomicU64,
+    pub el0_pc: core::sync::atomic::AtomicU64,
+    pub el0_sp: core::sync::atomic::AtomicU64,
+    pub el0_pstate: core::sync::atomic::AtomicU64,
+    /// x30 = link register at IRQ time, i.e. the return address of
+    /// the most recent BL.  When we sample inside memcpy/memset
+    /// this points at the *caller* — invaluable for identifying
+    /// which Xorg subsystem is looping.
+    pub el0_lr: core::sync::atomic::AtomicU64,
+    /// x0/x1/x2 at IRQ time.  For memcpy these are dst, src, len.
+    pub el0_x0: core::sync::atomic::AtomicU64,
+    pub el0_x1: core::sync::atomic::AtomicU64,
+    pub el0_x2: core::sync::atomic::AtomicU64,
+}
+
+impl PerCpuIrqState {
+    const fn new() -> Self {
+        Self {
+            irq_count: core::sync::atomic::AtomicU64::new(0),
+            last_el0_irq_count: core::sync::atomic::AtomicU64::new(0),
+            el0_pc: core::sync::atomic::AtomicU64::new(0),
+            el0_sp: core::sync::atomic::AtomicU64::new(0),
+            el0_pstate: core::sync::atomic::AtomicU64::new(0),
+            el0_lr: core::sync::atomic::AtomicU64::new(0),
+            el0_x0: core::sync::atomic::AtomicU64::new(0),
+            el0_x1: core::sync::atomic::AtomicU64::new(0),
+            el0_x2: core::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
+pub static PER_CPU_IRQ_STATE: [PerCpuIrqState; 8] = [
+    PerCpuIrqState::new(), PerCpuIrqState::new(),
+    PerCpuIrqState::new(), PerCpuIrqState::new(),
+    PerCpuIrqState::new(), PerCpuIrqState::new(),
+    PerCpuIrqState::new(), PerCpuIrqState::new(),
+];
+
+/// Read the most recent EL0 PC sample for the given CPU.
+/// Returns (pc, sp, pstate, staleness_in_irqs) or None if no EL0
+/// sample has ever been recorded.  `staleness_in_irqs == 0` means
+/// the CPU is currently running EL0 code (or just trapped from it
+/// in this very IRQ); higher values mean N IRQs have fired without
+/// an EL0 source since the last sample.
+pub fn last_user_state(cpu: usize) -> Option<(u64, u64, u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    if cpu >= PER_CPU_IRQ_STATE.len() { return None; }
+    let s = &PER_CPU_IRQ_STATE[cpu];
+    let last_el0 = s.last_el0_irq_count.load(Relaxed);
+    if last_el0 == 0 { return None; }
+    let now = s.irq_count.load(Relaxed);
+    let pc = s.el0_pc.load(Relaxed);
+    let sp = s.el0_sp.load(Relaxed);
+    let pstate = s.el0_pstate.load(Relaxed);
+    Some((pc, sp, pstate, now.saturating_sub(last_el0)))
+}
+
+/// Read the most recent EL0 register snapshot for the given CPU.
+/// Returns (lr, x0, x1, x2) or None — companion to `last_user_state`.
+pub fn last_user_regs(cpu: usize) -> Option<(u64, u64, u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    if cpu >= PER_CPU_IRQ_STATE.len() { return None; }
+    let s = &PER_CPU_IRQ_STATE[cpu];
+    if s.last_el0_irq_count.load(Relaxed) == 0 { return None; }
+    Some((
+        s.el0_lr.load(Relaxed),
+        s.el0_x0.load(Relaxed),
+        s.el0_x1.load(Relaxed),
+        s.el0_x2.load(Relaxed),
+    ))
+}
+
 /// Called from trap.S for IRQ exceptions.
 #[unsafe(no_mangle)]
-extern "C" fn arm64_handle_irq(_irq_type: u64, _frame: *mut PtRegs) {
+extern "C" fn arm64_handle_irq(_irq_type: u64, frame: *mut PtRegs) {
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let cpu = super::cpu_id() as usize;
+        if cpu < PER_CPU_IRQ_STATE.len() {
+            let s = &PER_CPU_IRQ_STATE[cpu];
+            let n = s.irq_count.fetch_add(1, Relaxed) + 1;
+            // Only update the EL0 sample if we interrupted EL0.
+            // PSTATE.M[3:0] == 0b0000 (=0) means SPSR captured EL0t
+            // (user-mode) at IRQ time.  Anything else (EL1h=5, etc.)
+            // means we interrupted kernel code — preserve the prior
+            // EL0 sample so the consumer can reason about staleness.
+            let f = unsafe { &*frame };
+            if (f.pstate & 0xf) == 0 {
+                s.el0_pc.store(f.pc, Relaxed);
+                s.el0_sp.store(f.sp, Relaxed);
+                s.el0_pstate.store(f.pstate, Relaxed);
+                s.el0_lr.store(f.regs[30], Relaxed);
+                s.el0_x0.store(f.regs[0], Relaxed);
+                s.el0_x1.store(f.regs[1], Relaxed);
+                s.el0_x2.store(f.regs[2], Relaxed);
+                s.last_el0_irq_count.store(n, Relaxed);
+            }
+        }
+    }
     let irq = gic::ack_interrupt();
     let irq_id = irq & 0x3FF; // Mask off CPU ID bits.
 
@@ -124,16 +264,55 @@ extern "C" fn arm64_handle_irq(_irq_type: u64, _frame: *mut PtRegs) {
 
     match irq_id as u8 {
         TIMER_IRQ => {
+            // CRITICAL: rearm the timer AND EOI the GIC BEFORE running
+            // the timer handler, because the handler may call
+            // `process::switch()` which transfers the CPU to a different
+            // process.  If we EOI'd after the handler instead, and the
+            // process whose IRQ stack we're parked on later gets killed
+            // before being rescheduled, the original IRQ stack is leaked
+            // along with the un-EOI'd GIC state — the timer IRQ stays
+            // marked Active on this CPU and no further timer IRQs ever
+            // deliver.  Symptom: per-CPU tick counter (`PER_CPU_TICKS`)
+            // freezes mid-run and that CPU stops scheduling forever.
+            // See blog 231 for the multi-day investigation.
             timer::rearm();
+            gic::end_interrupt(irq);
             handler().handle_timer_irq();
+            return;
+        }
+        gic::SGI_RESCHEDULE => {
+            // Cross-CPU reschedule wake.  No work to do — the WFI exit
+            // on entry to the IRQ vector already brought us out of
+            // idle, and the normal preemption tick (or the next return
+            // from this IRQ) will pick up whatever was just enqueued
+            // on our run-queue by the sender.
+        }
+        gic::SGI_MEMBARRIER => {
+            // membarrier(MEMBARRIER_CMD_GLOBAL) IPI — issue a full
+            // system memory barrier so prior user-space stores on the
+            // originating CPU become visible to user-space code that
+            // runs on this CPU after the IRQ returns.  `dsb sy` is
+            // the heaviest barrier arm64 has — it orders all loads
+            // and stores from all observers before any after.
+            unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
         }
         UART_IRQ => {
             uart_irq_handler();
         }
         other => {
-            // Mask the IRQ to prevent flooding from unhandled level-triggered
-            // interrupts (e.g., virtio devices asserting before driver is ready).
-            gic::disable_irq(other);
+            // Run the driver's handler.  It is responsible for
+            // quiescing the device (e.g. virtio-mmio drivers must
+            // read InterruptStatus and write InterruptACK so the
+            // device de-asserts its level-triggered line) before we
+            // EOI the GIC, otherwise the same IRQ would re-fire
+            // immediately.  We do NOT mask the IRQ at the GIC: doing
+            // so silently kills the line for the rest of the run, so
+            // the *first* virtio-input interrupt would be the only
+            // one ever delivered, and steady-state event flow stops.
+            // (Pre-handler masking was a band-aid against unattached
+            // devices flooding IRQs at boot — but the only IRQs that
+            // get here at all already have an `attach_irq` handler
+            // registered, so there's nothing to flood.)
             handler().handle_irq(other);
         }
     }

@@ -72,7 +72,7 @@ mod arm64;
 pub mod arch {
     #[cfg(target_arch = "x86_64")]
     pub use super::x64::{
-        broadcast_halt_ipi, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
+        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, cpu_id, cpuid_family_model_stepping, emergency_serial_hex,
         enable_irq, halt, idle,
         enable_interrupts, in_preempt, interrupts_enabled,
         num_online_cpus, preempt_disable, preempt_enable, set_need_resched, set_resched_fn,
@@ -146,16 +146,25 @@ pub mod arch {
 
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
-        broadcast_halt_ipi, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        last_user_regs, last_user_state,
         num_online_cpus, preempt_disable, preempt_enable,
         read_clock_counter, read_clock_frequency, read_rtc_epoch_secs,
         semihosting_halt, nanoseconds_since_boot,
         set_need_resched, set_resched_fn,
         register_cpu_apic_id, watchdog_enable, watchdog_check, if_trace_enable,
-        start_ap_preemption_timer, arm64_specific, Backtrace,
+        start_ap_preemption_timer, arm64_specific, vdso, Backtrace,
         PageFaultReason, PageTable, PtRegs, SavedInterruptStatus, SemihostingExitStatus,
         KERNEL_BASE_ADDR, KERNEL_STRAIGHT_MAP_PADDR_END, PAGE_SIZE, HUGE_PAGE_SIZE, TICK_HZ,
     };
+
+    /// x86_64 stub — only arm64 has the IRQ-frame stash today.  Returns
+    /// None on x86_64 so the stuck-process detector compiles for both
+    /// architectures.
+    #[cfg(target_arch = "x86_64")]
+    pub fn last_user_state(_cpu: usize) -> Option<(u64, u64, u64, u64)> { None }
+    #[cfg(target_arch = "x86_64")]
+    pub fn last_user_regs(_cpu: usize) -> Option<(u64, u64, u64, u64)> { None }
 }
 
 use address::UserVAddr;
@@ -200,7 +209,7 @@ pub trait Handler: Sync {
     /// Fast check: returns the signal_pending bitmask for the current process.
     /// Used to skip PtRegs construction on interrupt return when no signals
     /// are pending (the common case for page faults).
-    fn current_process_signal_pending(&self) -> u32 { 0 }
+    fn current_process_signal_pending(&self) -> u64 { 0 }
 
     /// Called when an interrupt is about to return to user space.
     /// The kernel may modify the frame to deliver a pending signal.

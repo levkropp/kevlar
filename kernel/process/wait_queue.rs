@@ -70,8 +70,27 @@ impl WaitQueue {
                 return Err(Errno::EINTR.into());
             }
 
-            // Enqueue and sleep. Hold queue lock across state change + push
-            // to prevent lost-wakeup race with preemption timer.
+            // Enqueue *before* re-checking the condition.  Previously this
+            // function checked the condition via the fast path in
+            // `sleep_signalable_until`, then (if not ready) entered the
+            // loop and enqueued — creating a classic lost-wakeup window:
+            // a concurrent `wake_all()` between the fast-path check and
+            // the enqueue would observe `waiter_count == 0`, do nothing,
+            // and leave this sleeper waiting for a second wake that may
+            // never arrive.
+            //
+            // Symptom: AF_UNIX client ppoll() returns EAGAIN, then
+            // enqueues; peer writes in that gap, calls wake_all with no
+            // waiters; client then sleeps forever.  Observed on arm64
+            // HVF as xsetroot/xterm/Xorg hangs in blog 229 debugging.
+            //
+            // Correct ordering:
+            //   1. Enqueue self with state=BlockedSignalable.
+            //   2. Re-check condition.  If ready, self-remove and return
+            //      — any write that landed after step 1 now sees us on
+            //      the queue and will wake us, but we don't need the
+            //      wake anymore.  Either way we observe the change.
+            //   3. Only if condition is still not met, switch().
             {
                 let _s = crate::debug::tracer::span_guard(
                     crate::debug::tracer::span::SLEEP_ENQUEUE);
@@ -79,6 +98,26 @@ impl WaitQueue {
                 current_process().set_state(ProcessState::BlockedSignalable);
                 q.push_back(current_process().clone());
                 self.waiter_count.fetch_add(1, Ordering::Relaxed);
+            }
+
+            // Re-check the condition now that we're enqueued.  This
+            // plugs the lost-wakeup race: any wake_all from here on is
+            // guaranteed to find us in the queue.
+            htrace::enter(htrace::id::SLEEP_CALLBACK, 2);
+            let recheck = condition();
+            htrace::exit(htrace::id::SLEEP_CALLBACK, 2);
+            match recheck {
+                Ok(Some(result)) => {
+                    self.try_remove_current();
+                    current_process().set_state(ProcessState::Runnable);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    self.try_remove_current();
+                    current_process().set_state(ProcessState::Runnable);
+                    return Err(e);
+                }
+                Ok(None) => {} // still not ready — fall through to switch()
             }
 
             #[cfg(feature = "ktrace-sched")]
@@ -174,6 +213,8 @@ impl WaitQueue {
         // valid arm64 kernel Arc to be treated as corrupt — silently dropping
         // every wait-queue wakeup.  Use the platform's KERNEL_BASE_ADDR.
         let mut warned = false;
+        let trace = crate::fs::epoll::EPOLL_TRACE_FD.load(Ordering::Relaxed) != 0;
+        let mut woken_pids: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
         for process in waiters.into_iter() {
             let raw = Arc::as_ptr(&process) as usize;
             if raw < kevlar_platform::arch::KERNEL_BASE_ADDR {
@@ -187,7 +228,14 @@ impl WaitQueue {
                 core::mem::forget(process);
                 continue;
             }
+            if trace {
+                woken_pids.push(process.pid().as_i32());
+            }
             process.resume();
+        }
+        if trace && woken_count > 0 {
+            log::info!("WAITQ wake_all queue={:p} woken={} pids={:?}",
+                self, woken_count, woken_pids);
         }
         htrace::exit(htrace::id::WAKE_ALL, 0);
 

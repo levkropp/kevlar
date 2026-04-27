@@ -45,6 +45,15 @@ pub struct EpollEvent {
     pub data: u64,
 }
 
+// ── Diagnostic: trace activity on a specific fd ─────────────────────
+//
+// When set to a non-zero fd number, every iteration of `collect_ready`
+// or `collect_ready_inner` that visits that fd OR fd+1 logs the
+// registered events, current poll status, and computed ready bits.
+// Used to chase the AF_UNIX listener-starvation bug.  Default 0 = silent.
+pub static EPOLL_TRACE_FD: core::sync::atomic::AtomicI32
+    = core::sync::atomic::AtomicI32::new(0);
+
 // ── Interest entry ──────────────────────────────────────────────────
 
 struct Interest {
@@ -101,6 +110,16 @@ impl EpollInstance {
         }
         let poll_gen_ptr = file.poll_gen_atomic()
             .map_or(core::ptr::null(), |a| a as *const AtomicU64);
+        let trace_fd = EPOLL_TRACE_FD.load(Ordering::Relaxed);
+        if trace_fd != 0 && (fd.as_int() == trace_fd || fd.as_int() == trace_fd + 1) {
+            let ev = event.events;
+            let dat = event.data;
+            log::info!(
+                "epoll_ctl ADD pid={} fd={} events={:#x} data={:#x}",
+                crate::process::current_process().pid().as_i32(),
+                fd.as_int(), ev, dat,
+            );
+        }
         interests.insert(fd.as_int(), Interest {
             file,
             events: AtomicU32::new(event.events),
@@ -122,6 +141,17 @@ impl EpollInstance {
         let new_et = event.events & EPOLLET != 0;
         if old_et != new_et {
             entry.file.notify_epoll_et(new_et);
+        }
+        let trace_fd = EPOLL_TRACE_FD.load(Ordering::Relaxed);
+        if trace_fd != 0 && (fd.as_int() == trace_fd || fd.as_int() == trace_fd + 1) {
+            let old_events = entry.events.load(Ordering::Relaxed);
+            let ev = event.events;
+            let dat = event.data;
+            log::info!(
+                "epoll_ctl MOD pid={} fd={} old_events={:#x} new_events={:#x} data={:#x}",
+                crate::process::current_process().pid().as_i32(),
+                fd.as_int(), old_events, ev, dat,
+            );
         }
         entry.events.store(event.events, Ordering::Relaxed);
         entry.data = event.data;
@@ -172,7 +202,8 @@ impl EpollInstance {
     pub fn collect_ready(&self, out: &mut Vec<EpollEvent>, max: usize) -> usize {
         let interests = self.interests.lock_no_irq();
         let mut count = 0;
-        for interest in interests.values() {
+        let trace_fd = EPOLL_TRACE_FD.load(Ordering::Relaxed);
+        for (fd, interest) in interests.iter() {
             if count >= max { break; }
             let ev = match Self::check_interest(interest) {
                 Some(ev) => ev,
@@ -185,6 +216,22 @@ impl EpollInstance {
                 count += 1;
                 if ev & EPOLLONESHOT != 0 {
                     interest.events.store(0, Ordering::Relaxed);
+                }
+            }
+            // Diagnostic: when EPOLL_TRACE_FD is set to a non-zero
+            // value, log every iteration touching that fd — what
+            // events were registered, what status came back, what
+            // ready bits we computed.  Used to debug AF_UNIX listener
+            // starvation under Xorg.  Zero (default) = silent.
+            if trace_fd != 0 && (*fd == trace_fd || *fd == trace_fd + 1) {
+                static LIM: AtomicU32 = AtomicU32::new(0);
+                let n = LIM.fetch_add(1, Ordering::Relaxed);
+                if n < 64 || n.is_multiple_of(64) {
+                    let pid = crate::process::current_process().pid().as_i32();
+                    log::info!(
+                        "epoll[blk] pid={} fd={} ev={:#x} status={:?} ready={:#x}",
+                        pid, fd, ev, status, ready,
+                    );
                 }
             }
         }
@@ -251,7 +298,8 @@ impl EpollInstance {
         max: usize,
     ) -> crate::result::Result<usize> {
         let mut count = 0;
-        for interest in interests.values() {
+        let trace_fd = EPOLL_TRACE_FD.load(Ordering::Relaxed);
+        for (fd, interest) in interests.iter() {
             if count >= max { break; }
             let ev = match Self::check_interest(interest) {
                 Some(ev) => ev,
@@ -259,12 +307,34 @@ impl EpollInstance {
             };
             let status = Self::poll_cached(interest);
             let ready = poll_status_to_epoll(status) & (ev | EPOLLERR | EPOLLHUP);
+            if trace_fd != 0 && (*fd == trace_fd || *fd == trace_fd + 1) {
+                static LIM: AtomicU32 = AtomicU32::new(0);
+                let n = LIM.fetch_add(1, Ordering::Relaxed);
+                if n < 64 || n.is_multiple_of(128) {
+                    let pid = crate::process::current_process().pid().as_i32();
+                    log::info!(
+                        "epoll[nb] pid={} fd={} ev={:#x} status={:?} ready={:#x}",
+                        pid, fd, ev, status, ready,
+                    );
+                }
+            }
             if ready != 0 {
+                // Layout of `struct epoll_event` is arch-dependent
+                // (packed=12B on x86_64, natural=16B on arm64/others).
+                // See kernel/syscalls/epoll.rs for the rationale.
+                #[cfg(target_arch = "x86_64")]
+                const EVENT_SIZE: usize = 12;
+                #[cfg(target_arch = "x86_64")]
+                const DATA_OFF: usize = 4;
+                #[cfg(not(target_arch = "x86_64"))]
+                const EVENT_SIZE: usize = 16;
+                #[cfg(not(target_arch = "x86_64"))]
+                const DATA_OFF: usize = 8;
                 let event = EpollEvent { events: ready, data: interest.data };
-                let dest = events_ptr.add(count * 12);
-                let mut buf = [0u8; 12];
+                let dest = events_ptr.add(count * EVENT_SIZE);
+                let mut buf = [0u8; EVENT_SIZE];
                 buf[0..4].copy_from_slice(&event.events.to_ne_bytes());
-                buf[4..12].copy_from_slice(&event.data.to_ne_bytes());
+                buf[DATA_OFF..DATA_OFF + 8].copy_from_slice(&event.data.to_ne_bytes());
                 dest.write_bytes(&buf)?;
                 count += 1;
                 if ev & EPOLLONESHOT != 0 {

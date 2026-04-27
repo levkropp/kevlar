@@ -66,7 +66,14 @@ pub const SIGPWR: Signal = 30;
 #[allow(unused)]
 pub const SIGSYS: Signal = 31;
 
-const SIGMAX: c_int = 32;
+// SIGMAX = 64 to cover the full Linux signal range (1..=64), including
+// the real-time signals SIGRTMIN..SIGRTMAX (32..=64).  musl's startup
+// path on arm64 calls rt_sigaction on at least one RT signal during
+// __init_libc; with SIGMAX=32 this returned EINVAL and musl crashed in
+// __syscall_ret because TPIDR_EL0 wasn't set yet (chicken-and-egg).
+// Keeping the array size to 64 means `pending` and DEFAULT_ACTIONS need
+// to be sized accordingly.
+const SIGMAX: c_int = 64;
 
 pub const SIG_DFL: usize = 0;
 pub const SIG_IGN: usize = 1;
@@ -121,10 +128,48 @@ pub const DEFAULT_ACTIONS: [SigAction; SIGMAX as usize] = [
     /* SIGIO     */ SigAction::Terminate,
     /* SIGPWR    */ SigAction::Terminate,
     /* SIGSYS    */ SigAction::Terminate,
+    // Real-time signals 32..=63 (SIGRTMIN..SIGRTMAX on Linux).  POSIX
+    // default disposition is "Terminate" for all of them; programs that
+    // care install their own handlers via sigaction.  We track these
+    // mainly so musl's startup rt_sigaction calls succeed.
+    /* RT 32     */ SigAction::Terminate,
+    /* RT 33     */ SigAction::Terminate,
+    /* RT 34     */ SigAction::Terminate,
+    /* RT 35     */ SigAction::Terminate,
+    /* RT 36     */ SigAction::Terminate,
+    /* RT 37     */ SigAction::Terminate,
+    /* RT 38     */ SigAction::Terminate,
+    /* RT 39     */ SigAction::Terminate,
+    /* RT 40     */ SigAction::Terminate,
+    /* RT 41     */ SigAction::Terminate,
+    /* RT 42     */ SigAction::Terminate,
+    /* RT 43     */ SigAction::Terminate,
+    /* RT 44     */ SigAction::Terminate,
+    /* RT 45     */ SigAction::Terminate,
+    /* RT 46     */ SigAction::Terminate,
+    /* RT 47     */ SigAction::Terminate,
+    /* RT 48     */ SigAction::Terminate,
+    /* RT 49     */ SigAction::Terminate,
+    /* RT 50     */ SigAction::Terminate,
+    /* RT 51     */ SigAction::Terminate,
+    /* RT 52     */ SigAction::Terminate,
+    /* RT 53     */ SigAction::Terminate,
+    /* RT 54     */ SigAction::Terminate,
+    /* RT 55     */ SigAction::Terminate,
+    /* RT 56     */ SigAction::Terminate,
+    /* RT 57     */ SigAction::Terminate,
+    /* RT 58     */ SigAction::Terminate,
+    /* RT 59     */ SigAction::Terminate,
+    /* RT 60     */ SigAction::Terminate,
+    /* RT 61     */ SigAction::Terminate,
+    /* RT 62     */ SigAction::Terminate,
+    /* RT 63     */ SigAction::Terminate,
 ];
 
 pub struct SignalDelivery {
-    pending: u32,
+    /// Bitmask of pending signals.  Bit `n-1` set means signal `n` is
+    /// pending.  u64 to cover 1..=64 (Linux NSIG range).
+    pending: u64,
     actions: [SigAction; SIGMAX as usize],
     /// True when the user explicitly called `sigaction(SIGCHLD, SIG_IGN)` or
     /// set `SA_NOCLDWAIT`.  This enables auto-reaping of child zombies.
@@ -184,7 +229,7 @@ impl SignalDelivery {
         }
 
         let bit = self.pending.trailing_zeros();
-        self.pending &= !(1 << bit);
+        self.pending &= !(1u64 << bit);
         let signal = (bit + 1) as Signal;
         if signal as usize >= self.actions.len() {
             return self.pop_pending(); // skip unsupported RT signals
@@ -196,15 +241,15 @@ impl SignalDelivery {
     /// Blocked signals remain in the pending set for later delivery
     /// (or for signalfd to consume).
     pub fn pop_pending_unblocked(&mut self, blocked: SigSet) -> Option<(Signal, SigAction)> {
-        let mut blocked_bits = blocked.bits() as u32;
+        let mut blocked_bits = blocked.bits();
         // SIGKILL (9) and SIGSTOP (19) can NEVER be blocked (POSIX).
-        blocked_bits &= !((1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1)));
+        blocked_bits &= !((1u64 << (SIGKILL - 1)) | (1u64 << (SIGSTOP - 1)));
         let deliverable = self.pending & !blocked_bits;
         if deliverable == 0 {
             return None;
         }
         let bit = deliverable.trailing_zeros();
-        self.pending &= !(1 << bit);
+        self.pending &= !(1u64 << bit);
         let signal = (bit + 1) as Signal;
         if signal as usize >= self.actions.len() {
             return self.pop_pending_unblocked(blocked); // skip unsupported RT signals
@@ -214,24 +259,24 @@ impl SignalDelivery {
 
     /// Pop a pending signal that matches the given bitmask.
     /// Used by signalfd to consume blocked-but-pending signals.
-    pub fn pop_pending_masked(&mut self, mask: u32) -> Option<Signal> {
+    pub fn pop_pending_masked(&mut self, mask: u64) -> Option<Signal> {
         let matching = self.pending & mask;
         if matching == 0 {
             return None;
         }
         let bit = matching.trailing_zeros();
-        self.pending &= !(1 << bit);
+        self.pending &= !(1u64 << bit);
         Some((bit + 1) as Signal)
     }
 
     /// Return the raw pending bitmask (for syncing the atomic mirror).
-    pub fn pending_bits(&self) -> u32 {
+    pub fn pending_bits(&self) -> u64 {
         self.pending
     }
 
     pub fn signal(&mut self, signal: Signal) {
         // Store using 0-based bit positions to match userspace sigset_t convention.
-        self.pending |= 1 << (signal - 1);
+        self.pending |= 1u64 << (signal - 1);
     }
 
     /// Clone signal dispositions for fork. Child inherits actions and

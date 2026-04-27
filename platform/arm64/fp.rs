@@ -81,8 +81,17 @@ pub fn cpacr_trap_el0_fp() {
 ///   - Previous owner's `fp_state` has been saved from v-regs (if there
 ///     was a previous owner distinct from current).
 ///   - CPACR.FPEN = 0b11 (EL0 FP allowed for the `eret`).
+/// Count of EC=0x07 FP traps handled.  Used as a sanity check that
+/// the lazy-save scheme is actually engaging — if zero, Xorg's
+/// NEON/SIMD instructions are running without ever loading the
+/// task's saved FpState (the cause of memcpy infinite loops in
+/// task #42).
+pub static FP_TRAP_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[allow(unsafe_code)]
 pub fn handle_fp_trap() {
+    FP_TRAP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Disable preemption: we're about to mutate per-CPU and per-task FP
     // state non-atomically.  A timer-driven reschedule in the middle
     // would leave v-regs and `fp_owner` out of sync.

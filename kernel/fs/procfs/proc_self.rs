@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 use kevlar_vfs::{
     inode::{DirEntry, Directory, FileLike, FileType, INode, INodeNo, OpenOptions, Symlink},
     result::{Errno, Error, Result},
-    stat::{FileMode, GId, Stat, UId, S_IFLNK, S_IFDIR, S_IFREG},
+    stat::{FileMode, GId, Stat, UId, S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK},
     user_buffer::{UserBufWriter, UserBufferMut},
 };
 
@@ -322,7 +322,7 @@ impl FileLike for ProcPidStatus {
             let _ = write!(s, "Threads:\t{}\n", p.count_threads());
 
             // Signal masks.
-            let sig_pending = p.signal_pending_bits() as u64;
+            let sig_pending = p.signal_pending_bits();
             let sig_blocked = p.sigset_load().bits();
             let _ = write!(s, "SigPnd:\t{:016x}\n", sig_pending);
             let _ = write!(s, "SigBlk:\t{:016x}\n", sig_blocked);
@@ -530,13 +530,39 @@ impl Directory for ProcPidFdDir {
     fn lookup(&self, name: &str) -> Result<INode> {
         let fd_num: usize = name.parse().map_err(|_| Error::new(Errno::ENOENT))?;
         let proc = Process::find_by_pid(self.pid).ok_or_else(|| Error::new(Errno::ENOENT))?;
-        // Return a symlink so the VFS follows it during path resolution.
-        // We resolve the target path here (holding the fd table lock briefly)
-        // and return a Symlink INode that the VFS follows without re-locking.
+        // Linux's `/proc/<pid>/fd/N` is a symlink whose target is one of:
+        //   - a real path like `/dev/fb0` for files mapped through a
+        //     filesystem (we already do this for backed FDs);
+        //   - `socket:[INODE]` / `pipe:[INODE]` / `anon_inode:[<kind>]`
+        //     for anonymous fds (sockets, pipes, eventfds, epoll, ...).
+        // The latter convention is what `lsof`, `ss`, and almost every
+        // debugger tool key off, so we mirror it here — without it,
+        // every non-file fd reads as `/` and the listing is useless.
         let target = {
             let opened_files = proc.opened_files().lock();
             let file = opened_files.get(crate::fs::opened_file::Fd::new(fd_num as i32))?;
-            file.path().resolve_absolute_path().as_str().to_string()
+            let path_str = file.path().resolve_absolute_path().as_str().to_string();
+            if path_str == "/" {
+                // Anonymous file — derive a Linux-style descriptor
+                // from the inode's stat() mode + inode number.
+                if let Ok(file_obj) = file.as_file() {
+                    if let Ok(st) = file_obj.stat() {
+                        let mode_kind = st.mode.bits() & S_IFMT;
+                        let inode = st.inode_no.as_u64();
+                        match mode_kind {
+                            S_IFSOCK => alloc::format!("socket:[{}]", inode),
+                            S_IFIFO => alloc::format!("pipe:[{}]", inode),
+                            _ => alloc::format!("anon_inode:[{}]", inode),
+                        }
+                    } else {
+                        path_str
+                    }
+                } else {
+                    path_str
+                }
+            } else {
+                path_str
+            }
         };
         Ok(INode::Symlink(
             Arc::new(ProcFdLink(target)) as Arc<dyn Symlink>

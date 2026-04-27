@@ -15,6 +15,7 @@ mod bootinfo;
 #[cfg(feature = "ktrace")]
 pub mod debugcon;
 pub mod fp;
+pub mod vdso;
 mod gic;
 mod idle;
 mod interrupt;
@@ -29,7 +30,7 @@ mod timer;
 
 pub use backtrace::Backtrace;
 pub use idle::{halt, idle};
-pub use interrupt::SavedInterruptStatus;
+pub use interrupt::{last_user_regs, last_user_state, SavedInterruptStatus};
 pub use gic::enable_irq;
 pub use paging::{PageFaultReason, PageTable};
 pub use profile::{read_clock_counter, read_clock_frequency};
@@ -43,6 +44,15 @@ pub mod arm64_specific {
         ArchTask, switch_task, write_tls_base,
         KERNEL_STACK_SIZE, USER_VALLOC_END, USER_VALLOC_BASE, USER_STACK_TOP,
     };
+
+    /// Read the current value of the FP-trap counter (number of times
+    /// EC=0x07 has fired since boot).  Used by the PID1_STALL detector
+    /// to correlate Xorg's user-PC with whether the lazy-FP scheme has
+    /// engaged at all.
+    #[allow(non_snake_case)]
+    pub fn FP_TRAP_COUNT_VALUE() -> usize {
+        super::fp::FP_TRAP_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Per-CPU ID (0 = BSP, 1..N = APs in startup order).
@@ -67,10 +77,46 @@ pub fn start_ap_preemption_timer() {
 }
 
 /// Broadcast a halt IPI to all other CPUs on panic.
-/// TODO: implement via GIC SGI (Software Generated Interrupt).
+///
+/// Sends the reschedule SGI to every other online CPU.  The
+/// receiving handler is empty, so the immediate effect is just to
+/// wake the target CPU from WFI; the panic signal itself is the
+/// PANICKED static, which the woken CPU then observes on its next
+/// scheduler tick or interval_work pass.
 pub fn broadcast_halt_ipi() {
-    // ARM64/GIC implementation pending. Other CPUs will eventually see
-    // PANICKED=true and halt on their next interrupt.
+    let me = cpu_id();
+    let n = num_online_cpus();
+    for cpu in 0..n {
+        if cpu != me {
+            gic::send_reschedule_ipi(cpu);
+        }
+    }
+}
+
+/// Send a reschedule wake to a specific CPU.  Used by the scheduler
+/// after enqueueing work to a remote CPU's run-queue, so an idle
+/// CPU stuck in WFI doesn't have to wait for its own timer to fire
+/// before noticing the new work.
+pub fn send_reschedule_ipi(target_cpu: u32) {
+    gic::send_reschedule_ipi(target_cpu);
+}
+
+/// Broadcast a memory-barrier IPI to all CPUs except the current one
+/// for membarrier(2) MEMBARRIER_CMD_GLOBAL semantics.  Each receiver
+/// executes `dsb sy` in the SGI handler so any prior user-space stores
+/// on the originating CPU become visible to user-space code that runs
+/// on the receivers after the IPI returns.  The matching local barrier
+/// on the originating CPU is issued in the syscall handler itself.
+pub fn broadcast_membarrier_ipi() {
+    gic::broadcast_membarrier_ipi();
+}
+
+/// Issue a full local memory barrier on this CPU.  `dsb sy` on arm64
+/// orders all loads and stores before vs after for all observers,
+/// providing the matching half of `broadcast_membarrier_ipi` for
+/// membarrier(2) semantics on the originating CPU.
+pub fn local_memory_barrier() {
+    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
 }
 
 /// Read RTC epoch seconds from the QEMU virt PL031 RTC.

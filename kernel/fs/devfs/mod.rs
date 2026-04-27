@@ -14,6 +14,7 @@ use kevlar_utils::once::Once;
 
 use super::tmpfs::TmpFs;
 
+pub mod evdev;
 pub mod fb;
 pub mod mice;
 mod null;
@@ -63,10 +64,22 @@ impl DevFs {
         root_dir.add_file("tty6", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("tty7", SERIAL_TTY.clone() as Arc<dyn FileLike>);
         root_dir.add_file("fb0", Arc::new(fb::FramebufferFile::new()) as Arc<dyn FileLike>);
-        // /dev/input/ directory for input devices
+        // /dev/input/ directory for input devices.
+        //
+        // event0..event3 are evdev nodes that resolve lazily to the
+        // i-th `virtio_input::registered_devices()` entry — so QEMU's
+        // virtio-keyboard-device, virtio-mouse-device, virtio-tablet-
+        // device land at predictable paths regardless of probe order.
+        // /dev/input/mice stays as the legacy PS/2 multiplexer for x64.
         let input_dir = root_dir.add_dir("input");
         input_dir.add_file("mice", Arc::new(mice::MiceFile::new()) as Arc<dyn FileLike>);
-        input_dir.add_file("event0", Arc::new(mice::MiceFile::new()) as Arc<dyn FileLike>);
+        for i in 0..4 {
+            let name = alloc::format!("event{}", i);
+            input_dir.add_file(
+                &name,
+                Arc::new(evdev::EvdevFile::new(i)) as Arc<dyn FileLike>,
+            );
+        }
         // /dev/shm directory for POSIX shared memory.
         root_dir.add_dir("shm");
 

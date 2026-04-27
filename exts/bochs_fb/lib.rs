@@ -217,3 +217,34 @@ pub fn init() {
     info!("kext: Loading bochs_fb...");
     register_driver_prober(Box::new(BochsFbProber));
 }
+
+/// RAM-backed framebuffer setup for platforms without PCI (currently
+/// ARM64 QEMU virt).  Caller allocates a contiguous physical region
+/// (e.g. via `alloc_pages`) and passes its base paddr + dimensions.
+/// This is a scan-nothing framebuffer — QEMU never reads it, so it is
+/// invisible to the host display, but it gives `/dev/fb0` a real backing
+/// so Xorg's fbdev driver has a device to drive.  Userspace renders
+/// into it normally; the test harness can extract the memory and render
+/// it off-host.
+///
+/// Returns false if the framebuffer was already initialized (e.g. by
+/// a prior PCI probe).
+pub fn init_ram_backed(paddr: PAddr, width: u32, height: u32, bpp: u32) -> bool {
+    if FB_INITIALIZED.load(Ordering::Acquire) {
+        return false;
+    }
+    let stride = width * (bpp / 8);
+    let fb_size = (stride * height) as usize;
+    FB_PADDR.store(paddr.value(), Ordering::Relaxed);
+    FB_SIZE.store(fb_size, Ordering::Relaxed);
+    FB_WIDTH.store(width, Ordering::Relaxed);
+    FB_HEIGHT.store(height, Ordering::Relaxed);
+    FB_STRIDE.store(stride, Ordering::Relaxed);
+    FB_BPP.store(bpp, Ordering::Relaxed);
+    FB_INITIALIZED.store(true, Ordering::Release);
+    info!(
+        "bochs-fb: RAM-backed framebuffer initialized at paddr={:#x}, {}x{}x{}, {} bytes",
+        paddr.value(), width, height, bpp, fb_size
+    );
+    true
+}
