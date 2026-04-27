@@ -205,10 +205,16 @@ def main():
             '    EndSubSection\n'
             'EndSection\n'
             '\n'
+            # NOTE: deliberately no `InputDevice "kbd" "CoreKeyboard"`
+            # in this ServerLayout — listing it both here AND in a
+            # standalone `Section "InputDevice"` causes Xorg to try
+            # to PreInit the device twice, the second attempt fails
+            # with "device file is duplicate", and Xorg unloads the
+            # whole device.  The standalone section is enough; with
+            # `AutoAddDevices=false` Xorg picks it up automatically.
             'Section "ServerLayout"\n'
             '    Identifier "kevlar-lxde"\n'
             '    Screen "default"\n'
-            '    InputDevice "kbd" "CoreKeyboard"\n'
             'EndSection\n'
         )
 

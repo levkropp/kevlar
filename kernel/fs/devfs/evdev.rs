@@ -140,14 +140,23 @@ impl FileLike for EvdevFile {
     fn write(
         &self,
         _offset: usize,
-        _buf: UserBuffer<'_>,
+        buf: UserBuffer<'_>,
         _options: &OpenOptions,
     ) -> Result<usize> {
-        // Userspace can write to evdev to send LED/synth events.  We
-        // don't currently forward those to the device's statusq, so
-        // accept silently — returning an error here breaks evdev's
-        // grab/auto-repeat feature probing.
-        Ok(0)
+        // Userspace can write to evdev to send LED / synth events.
+        // xf86-input-evdev writes a `struct input_event[N]` block via
+        // EvdevKbdCtrl every time XKB updates the LED state, and
+        // CHECKS that `write() == sizeof(buffer)` — if we return 0,
+        // it logs "Failed to set keyboard controls" and unloads the
+        // keyboard, breaking input entirely.
+        //
+        // We don't currently forward LEDs to the device's statusq
+        // (so the LED state in QEMU doesn't track XKB), but we DO
+        // need to report success on the full write so userspace
+        // sees a normal handshake.  This is a "drop the bytes
+        // silently but pretend they went" pattern, same as
+        // /dev/null.
+        Ok(buf.len())
     }
 
     fn poll(&self) -> Result<PollStatus> {
