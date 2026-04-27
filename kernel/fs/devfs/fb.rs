@@ -171,7 +171,17 @@ impl FileLike for FramebufferFile {
             // CMAP ioctls: no-op for TrueColor (32bpp) framebuffers.
             // Xorg fbdev calls these repeatedly; returning success silences the error spam.
             FBIOGETCMAP | FBIOPUTCMAP => Ok(0),
-            FBIOPAN_DISPLAY => Ok(0),
+            FBIOPAN_DISPLAY => {
+                // We only have a single buffer (no double-buffered front/back),
+                // so panning is conceptually a no-op.  But the ioctl is also
+                // userspace's "I just finished writing, please commit"
+                // signal — issue a memory barrier so any pending
+                // mmap-region stores are visible to ramfb's external
+                // scan before we return.  Matches Linux's pan-display
+                // contract enough for libshadow.
+                kevlar_platform::arch::local_memory_barrier();
+                Ok(0)
+            }
             _ => Err(Errno::ENOTTY.into()),
         }
     }
