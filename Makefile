@@ -406,7 +406,7 @@ test-ext4: build/alpine.img
 	$(PROGRESS) "TEST" "ext4 comprehensive (write/mmap/sendfile + dynamic linking)"
 	@cp build/alpine.img build/alpine-test.img
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine-apk"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-test.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-ext4-$(PROFILE).log; true
@@ -427,7 +427,7 @@ test-alpine-apk: build/alpine.img
 	$(PROGRESS) "TEST" "Alpine full boot + apk update + apk add curl"
 	@cp build/alpine.img build/alpine-test.img
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-alpine-apk"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-test.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-alpine-apk-$(PROFILE).log; true
@@ -444,7 +444,7 @@ test-alpine-apk: build/alpine.img
 test-alpine: alpine-disk
 	$(PROGRESS) "TEST" "Alpine apk integration (mount + update)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test_apk_update.sh"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-alpine-$(PROFILE).log; true
@@ -462,7 +462,7 @@ test-alpine: alpine-disk
 test-smoke-alpine: alpine-disk
 	$(PROGRESS) "TEST" "Alpine smoke test (8 phases, ~60 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/smoke-alpine"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-smoke-alpine-$(PROFILE).log; true
@@ -491,7 +491,7 @@ build/alpine-xorg.img:
 test-xorg: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "X11/Xorg fbdev integration"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xorg"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-xorg-$(PROFILE).log; true
@@ -505,7 +505,7 @@ test-xorg: build/alpine-xorg.img
 test-twm: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "twm desktop session"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-twm"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
 		$(kernel_qemu_arg) -- -mem-prealloc -vga std 2>&1 \
 		| tee /tmp/kevlar-test-twm-$(PROFILE).log; true
@@ -519,7 +519,7 @@ test-twm: build/alpine-xorg.img
 test-twm-smp: build/alpine-xorg.img
 	$(PROGRESS) "TEST" "twm desktop session (SMP)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-twm"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
 		$(kernel_qemu_arg) -- -smp 2 -mem-prealloc -vga std 2>&1 \
 		| tee /tmp/kevlar-test-twm-smp-$(PROFILE).log; true
@@ -561,7 +561,7 @@ kxserver-image: kxserver-bin
 test-kxserver: kxserver-image
 	$(PROGRESS) "TEST" "kxserver"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-kxserver"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xorg.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-kxserver-$(PROFILE).log; true
@@ -569,6 +569,51 @@ test-kxserver: kxserver-image
 	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-kxserver-$(PROFILE).log || echo "(no test output)"
 	@echo ""
 	@grep 'TEST_END' /tmp/kevlar-test-kxserver-$(PROFILE).log || echo "(no summary)"
+
+# ── kbox: minimal Rust openbox replacement ────────────────────────────
+# A static-musl binary that becomes the active WM (sets
+# _NET_SUPPORTING_WM_CHECK + claims WM_S0) and stays alive.  Drops in
+# at /usr/bin/openbox of the alpine-openbox image so the openbox test
+# scans /proc/N/comm and finds "openbox".  See
+# Documentation/blog/233-... and tools/kbox/.
+
+KBOX_TRIPLE_x64   := x86_64-unknown-linux-musl
+KBOX_TRIPLE_arm64 := aarch64-unknown-linux-musl
+KBOX_TRIPLE       := $(KBOX_TRIPLE_$(ARCH))
+KBOX_BIN          := tools/kbox/target/$(KBOX_TRIPLE)/release/kbox
+
+.PHONY: kbox-bin
+kbox-bin:
+	$(PROGRESS) "CARGO" "kbox ($(KBOX_TRIPLE))"
+	@# kbox is a userspace musl binary; same RUSTFLAGS-unset trick as
+	@# kxserver so the kernel's -Z flags don't leak into this build.
+	cd tools/kbox && env -u RUSTFLAGS cargo build --release --target $(KBOX_TRIPLE)
+	@ls -lh $(KBOX_BIN) 2>/dev/null || (echo "kbox build produced no binary" && false)
+
+# kxproxy: Unix-socket X11 proxy.  Mirrors kbox's build shape.
+KXPROXY_BIN := tools/kxproxy/target/$(KBOX_TRIPLE)/release/kxproxy
+
+.PHONY: kxproxy-bin
+kxproxy-bin:
+	$(PROGRESS) "CARGO" "kxproxy ($(KBOX_TRIPLE))"
+	cd tools/kxproxy && env -u RUSTFLAGS cargo build --release --target $(KBOX_TRIPLE)
+	@ls -lh $(KXPROXY_BIN) 2>/dev/null || (echo "kxproxy build produced no binary" && false)
+
+# kxreplay: replays the captured kxproxy log against real Xorg.
+KXREPLAY_BIN := tools/kxreplay/target/$(KBOX_TRIPLE)/release/kxreplay
+
+.PHONY: kxreplay-bin
+kxreplay-bin:
+	$(PROGRESS) "CARGO" "kxreplay ($(KBOX_TRIPLE))"
+	cd tools/kxreplay && env -u RUSTFLAGS cargo build --release --target $(KBOX_TRIPLE)
+	@ls -lh $(KXREPLAY_BIN) 2>/dev/null || (echo "kxreplay build produced no binary" && false)
+
+# Force a rebuild of the openbox Alpine image so the freshly-built kbox
+# is copied over /usr/bin/openbox.
+.PHONY: kbox-image
+kbox-image: kbox-bin
+	@rm -f build/alpine-openbox.$(ARCH).img
+	$(MAKE) build/alpine-openbox.$(ARCH).img
 
 # ═══════════════════════════════════════════════════════════════════
 # Kevlar Alpine+twm Desktop — our first graphical "distro"
@@ -599,7 +644,7 @@ build/alpine-xfce.img:
 test-xfce: build/alpine-xfce.img
 	$(PROGRESS) "TEST" "XFCE desktop startup"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-xfce"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-xfce.img \
 		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
 		| tee /tmp/kevlar-test-xfce-$(PROFILE).log; true
@@ -616,37 +661,115 @@ run-alpine-xfce: build/alpine-xfce.img
 		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
 
 # Build Alpine LXDE disk image (1GB with LXDE, openbox, D-Bus, fonts, icons)
-build/alpine-lxde.img:
-	$(PROGRESS) "MKDISK" "Alpine LXDE (1GB)"
-	$(PYTHON3) tools/build-alpine-lxde.py build/alpine-lxde.img
+# Per-arch apko name: aarch64 / x86_64.
+LXDE_APKO_ARCH_x64   := x86_64
+LXDE_APKO_ARCH_arm64 := aarch64
+LXDE_APKO_ARCH       := $(LXDE_APKO_ARCH_$(ARCH))
+LXDE_IMG := build/alpine-lxde.$(ARCH).img
+
+$(LXDE_IMG):
+	$(PROGRESS) "MKDISK" "Alpine LXDE ($(ARCH), 1GB)"
+	@rm -f $(LXDE_IMG)
+	$(PYTHON3) tools/build-alpine-lxde.py --arch $(LXDE_APKO_ARCH) $(LXDE_IMG)
 
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-lxde
-test-lxde: build/alpine-lxde.img
-	$(PROGRESS) "TEST" "LXDE desktop startup"
+test-lxde: $(LXDE_IMG)
+	$(PROGRESS) "TEST" "LXDE desktop startup ($(ARCH))"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-lxde"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
-		--kvm --batch --arch $(ARCH) --disk build/alpine-lxde.img \
-		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
-		| tee /tmp/kevlar-test-lxde-$(PROFILE).log; true
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
+		--kvm --batch --arch $(ARCH) --disk $(LXDE_IMG) \
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log; true
 	@echo ""
-	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-lxde-$(PROFILE).log || echo "(no test output)"
-	@grep 'TEST_END' /tmp/kevlar-test-lxde-$(PROFILE).log || echo "(no summary)"
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-lxde-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
 # Run Alpine LXDE interactively (with QEMU window)
 .PHONY: run-alpine-lxde
-run-alpine-lxde: build/alpine-lxde.img
+run-alpine-lxde: $(LXDE_IMG)
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
 	$(PYTHON3) tools/run-qemu.py \
-		--arch $(ARCH) --kvm --gui --disk build/alpine-lxde.img \
+		--arch $(ARCH) --kvm --gui --disk $(LXDE_IMG) \
 		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
+
+# Build Alpine i3 disk image — uses apko for cross-platform resolution
+# (works on macOS natively; no Linux VM needed).  Default arch aarch64,
+# but the image is built per-ARCH so x64 and arm64 coexist.
+I3_APKO_ARCH_x64   := x86_64
+I3_APKO_ARCH_arm64 := aarch64
+I3_APKO_ARCH       := $(I3_APKO_ARCH_$(ARCH))
+I3_IMG             := build/alpine-i3.$(ARCH).img
+
+$(I3_IMG):
+	$(PROGRESS) "MKDISK" "Alpine i3 ($(I3_APKO_ARCH))"
+	$(PYTHON3) tools/build-alpine-i3.py --arch $(I3_APKO_ARCH) $(I3_IMG)
+
+# Test i3 desktop startup (batch mode, 2 CPUs, VGA for framebuffer)
+.PHONY: test-i3
+test-i3: $(I3_IMG)
+	$(PROGRESS) "TEST" "i3 desktop startup ($(ARCH))"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-i3"
+	$(PYTHON3) tools/run-qemu.py --timeout 240 \
+		--kvm --batch --arch $(ARCH) --disk $(I3_IMG) \
+		$(kernel_qemu_arg) -- -smp 2 -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-i3-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-i3-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-i3-$(ARCH)-$(PROFILE).log || echo "(no summary)"
+
+# Test i3 desktop on SMP (wider — 4 CPUs shake out more races)
+.PHONY: test-i3-smp
+test-i3-smp: $(I3_IMG)
+	$(PROGRESS) "TEST" "i3 desktop startup (SMP, $(ARCH))"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-i3"
+	$(PYTHON3) tools/run-qemu.py --timeout 240 \
+		--kvm --batch --arch $(ARCH) --disk $(I3_IMG) \
+		$(kernel_qemu_arg) -- -smp 4 -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-i3-smp-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-i3-smp-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-i3-smp-$(ARCH)-$(PROFILE).log || echo "(no summary)"
+
+# Run Alpine i3 interactively (with QEMU window)
+.PHONY: run-alpine-i3
+run-alpine-i3: $(I3_IMG)
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(PYTHON3) tools/run-qemu.py \
+		--arch $(ARCH) --kvm --gui --disk $(I3_IMG) \
+		$(kernel_qemu_arg) -- -mem-prealloc -m 1024
+
+# Build Alpine openbox disk — minimal stacking-WM stack, no IPC, no
+# built-in bar.  Comparison baseline against test-i3.
+OPENBOX_IMG := build/alpine-openbox.$(ARCH).img
+
+$(OPENBOX_IMG): kbox-bin $(KBOX_BIN) kxproxy-bin $(KXPROXY_BIN) kxreplay-bin $(KXREPLAY_BIN)
+	$(PROGRESS) "MKDISK" "Alpine openbox ($(I3_APKO_ARCH))"
+	@# Always rebuild — build-alpine-openbox.py SKIPs if the image
+	@# already exists, so we have to remove it ourselves to pick up
+	@# a freshly-built kbox.
+	@rm -f $(OPENBOX_IMG)
+	$(PYTHON3) tools/build-alpine-openbox.py --arch $(I3_APKO_ARCH) $(OPENBOX_IMG)
+
+.PHONY: test-openbox
+test-openbox: $(OPENBOX_IMG)
+	$(PROGRESS) "TEST" "openbox desktop startup ($(ARCH))"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-openbox"
+	$(PYTHON3) tools/run-qemu.py --timeout 240 \
+		--kvm --batch --arch $(ARCH) --disk $(OPENBOX_IMG) \
+		$(if $(CMDLINE),--append-cmdline "$(CMDLINE)",) \
+		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std 2>&1 \
+		| tee /tmp/kevlar-test-openbox-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL)' /tmp/kevlar-test-openbox-$(ARCH)-$(PROFILE).log || echo "(no test output)"
+	@grep 'TEST_END' /tmp/kevlar-test-openbox-$(ARCH)-$(PROFILE).log || echo "(no summary)"
 
 # M10 Phase A: apk add integration test
 .PHONY: test-m10-apk
 test-m10-apk: alpine-disk
 	$(PROGRESS) "TEST" "M10 apk add integration (mount + update + install)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/test_m10_apk.sh"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-disk.img \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-m10-apk-$(PROFILE).log; true
@@ -677,7 +800,7 @@ run-alpine-ssh: build alpine-disk
 test-ssh:
 	$(PROGRESS) "TEST" "SSH: dropbear start + dbclient connect"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-ssh-dropbear"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --batch --arch $(ARCH) \
 		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
 		| tee /tmp/kevlar-test-ssh-$(PROFILE).log; true
@@ -695,7 +818,7 @@ test-nginx: build/alpine.img
 	$(PROGRESS) "TEST" "nginx: install via apk + start + listen"
 	@cp build/alpine.img build/alpine-nginx-test.img
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-nginx"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-nginx-test.img \
 		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
 		| tee /tmp/kevlar-test-nginx-$(PROFILE).log; true
@@ -714,7 +837,7 @@ test-build-tools: build/alpine.img
 	$(PROGRESS) "TEST" "Build tools: git + sqlite + perl + gcc/make"
 	@cp build/alpine.img build/alpine-build-test.img
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-build-tools"
-	timeout 600 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 600 \
 		--kvm --batch --arch $(ARCH) --disk build/alpine-build-test.img \
 		$(kernel_qemu_arg) -- -mem-prealloc -nic user 2>&1 \
 		| tee /tmp/kevlar-test-build-tools-$(PROFILE).log; true
@@ -794,7 +917,7 @@ lint-and-fix:
 test-integration: disk
 	$(PROGRESS) "TEST" "syscall correctness tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-$(PROFILE).log || echo "(no TEST output found)"
@@ -811,7 +934,7 @@ test: test-unit test-integration
 test-ext2: disk
 	$(PROGRESS) "TEST" "ext2 filesystem tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-ext2-$(PROFILE).log; true
 	@grep -E '^(PASS|FAIL|TEST_)' /tmp/kevlar-test-ext2-$(PROFILE).log || echo "(no TEST output found)"
@@ -825,7 +948,7 @@ test-ext2: disk
 test-storage: build/disk.img
 	$(PROGRESS) "TEST" "M5 storage integration tests"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-storage"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) --disk build/disk.img $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-storage-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
@@ -840,7 +963,7 @@ test-storage: build/disk.img
 test-threads:
 	$(PROGRESS) "TEST" "M6 threading (1 CPU)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-threads-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -855,7 +978,7 @@ test-threads:
 test-threads-smp:
 	$(PROGRESS) "TEST" "M6 threading (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-threads-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -870,7 +993,7 @@ test-threads-smp:
 test-smp:
 	$(PROGRESS) "TEST" "M6 SMP boot (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE)
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-smp-$(PROFILE).log; true
 	@grep -E 'CPU \(LAPIC|smp:|online' /tmp/kevlar-test-smp-$(PROFILE).log || echo "(no SMP output found)"
@@ -880,7 +1003,7 @@ test-smp:
 test-regression-smp:
 	$(PROGRESS) "TEST" "M6 Phase 5 regression: mini_systemd on 4 CPUs"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-regression-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -905,7 +1028,7 @@ test-m6:
 test-glibc-hello:
 	$(PROGRESS) "TEST" "M7 glibc hello world"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/hello-glibc"
-	timeout 60 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 60 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-glibc-hello.log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|hello from glibc)' \
@@ -920,7 +1043,7 @@ test-glibc-hello:
 test-glibc-threads:
 	$(PROGRESS) "TEST" "M7 glibc pthreads (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-threads-glibc"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-glibc-threads.log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -945,7 +1068,7 @@ test-m7:
 test-cgroups-ns:
 	$(PROGRESS) "TEST" "M8 cgroups + namespaces (14 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-cgroups-ns"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-cgroups-ns-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -960,7 +1083,7 @@ test-cgroups-ns:
 test-systemd-boot:
 	$(PROGRESS) "TEST" "M9 systemd boot (real systemd PID 1)"
 	$(MAKE) build PROFILE=$(PROFILE)
-	timeout 60 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 60 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) \
 		-- -mem-prealloc -append "pci=off init=/usr/lib/systemd/systemd" 2>&1 \
 		| tee /tmp/kevlar-test-systemd-boot.log; true
@@ -971,7 +1094,7 @@ test-systemd-boot:
 test-systemd-v3:
 	$(PROGRESS) "TEST" "M9 systemd init-sequence (25 tests)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd-v3"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-systemd-v3-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -986,7 +1109,7 @@ test-systemd-v3:
 test-systemd-v3-smp:
 	$(PROGRESS) "TEST" "M9 systemd init-sequence SMP (25 tests, 4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/mini-systemd-v3"
-	timeout 180 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 180 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-systemd-v3-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END)' \
@@ -1064,7 +1187,7 @@ test-systemd:
 test-busybox:
 	$(PROGRESS) "TEST" "BusyBox applet suite (102 tests)"
 	$(MAKE) build PROFILE=$(PROFILE)
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) --append-cmdline "init=/bin/busybox-suite" \
 		$(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-busybox-$(PROFILE).log; true
@@ -1083,7 +1206,7 @@ test-busybox:
 test-busybox-smp:
 	$(PROGRESS) "TEST" "BusyBox applet suite (4 CPUs)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc -smp 4 2>&1 \
 		| tee /tmp/kevlar-test-busybox-smp-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_SKIP|TEST_END)' \
@@ -1099,7 +1222,7 @@ test-busybox-smp:
 test-huge-page:
 	$(PROGRESS) "TEST" "huge page stress test (KVM)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/fork-exec-stress 300"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-huge-page-$(PROFILE).log; true
 	@grep -E '^(TEST_PASS|TEST_FAIL|DBG.*huge_page_verify)' \
@@ -1115,7 +1238,7 @@ test-huge-page:
 bench-workloads:
 	$(PROGRESS) "BENCH" "workload benchmarks (KVM)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full exec_true,shell_noop,pipe_grep,file_tree,sed_pipeline,sort_uniq,tar_extract"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-workloads-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-workloads-$(PROFILE).log || echo "(no BENCH output found)"
@@ -1125,7 +1248,7 @@ bench-workloads:
 test-busybox-dd:
 	$(PROGRESS) "TEST" "dd diagnostic (KVM)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/dd-diag"
-	timeout 30 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 30 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-test-dd-diag.log; true
 	@grep -E '^\s+(OK|FAIL|HANG)|^Phase|^===' /tmp/kevlar-test-dd-diag.log || echo "(no output)"
@@ -1135,7 +1258,7 @@ test-busybox-dd:
 bench-busybox:
 	$(PROGRESS) "BENCH" "BusyBox workload benchmarks (KVM)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/busybox-suite --bench-only --full"
-	timeout 30 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 30 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-busybox-kvm-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-busybox-kvm-$(PROFILE).log > /tmp/kevlar-bench-busybox-$(PROFILE).txt 2>/dev/null; \
@@ -1221,7 +1344,7 @@ test-contracts-trace: $(kernel_qemu_arg)
 bench:
 	$(PROGRESS) "BENCH" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench"
-	timeout 120 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 120 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-$(PROFILE).log > /tmp/kevlar-bench-$(PROFILE).txt 2>/dev/null; \
@@ -1234,7 +1357,7 @@ bench:
 bench-kvm:
 	$(PROGRESS) "BENCH-KVM" "profile-$(PROFILE)"
 	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/bench --full"
-	timeout 300 $(PYTHON3) tools/run-qemu.py \
+	$(PYTHON3) tools/run-qemu.py --timeout 300 \
 		--kvm --arch $(ARCH) $(kernel_qemu_arg) -- -mem-prealloc 2>&1 \
 		| tee /tmp/kevlar-bench-kvm-$(PROFILE).log; true
 	@grep '^BENCH ' /tmp/kevlar-bench-kvm-$(PROFILE).log > /tmp/kevlar-bench-$(PROFILE).txt 2>/dev/null; \

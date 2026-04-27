@@ -8,23 +8,30 @@ the same architecture — independent WM + panel + file-manager-as-desktop
 starts them via a small openbox autostart script so the boot flow
 matches what LXDE would do.
 
-Usage: python3 tools/build-alpine-lxde.py build/alpine-lxde.img
+Built via `apko` so the script runs cross-arch on macOS host —
+matches the openbox build (tools/build-alpine-openbox.py).
+
+Usage:
+    python3 tools/build-alpine-lxde.py [--arch aarch64|x86_64] \\
+        build/alpine-lxde.aarch64.img
 """
+import argparse
 import os
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE = ROOT / "build" / "native-cache" / "src"
 
-ALPINE_ROOTFS_URL = (
-    "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/"
-    "alpine-minirootfs-3.21.3-x86_64.tar.gz"
+ALPINE_REPOS = [
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/main",
+    "https://dl-cdn.alpinelinux.org/alpine/v3.21/community",
+]
+ALPINE_KEY = (
+    "https://alpinelinux.org/keys/"
+    "alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
 )
 
 # Packages for the LXDE-style lightweight desktop on fbdev.  Openbox
@@ -33,15 +40,19 @@ ALPINE_ROOTFS_URL = (
 # combination is what upstream Alpine users deploy when they want "LXDE
 # but without GNOME/Qt baggage."
 LXDE_PACKAGES = [
-    # X11 server + fbdev driver (same as XFCE)
+    "alpine-baselayout",
+    "busybox",
+    "musl-utils",
+    # X11 server + fbdev driver
     "xorg-server",
     "xf86-video-fbdev",
-    "xf86-input-libinput",
-    "libinput",
+    "xf86-input-evdev",
     "xinit",
     "xauth",
     "xset",
+    "xsetroot",
     "xdpyinfo",
+    "xprop",
     # LXDE-style stack
     "openbox",          # window manager
     "tint2",            # panel
@@ -60,91 +71,93 @@ LXDE_PACKAGES = [
     "hicolor-icon-theme",
     # Utilities
     "xterm",
-    "xsetroot",
-    "xprop",
 ]
 
 
-def download(url, dest):
-    dest = Path(dest)
-    if dest.exists():
-        return dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    print(f"  DL  {Path(url).name}", file=sys.stderr)
-    urllib.request.urlretrieve(url, dest)
-    return dest
+def apko_yaml(arch: str) -> str:
+    return (
+        "contents:\n"
+        "  repositories:\n"
+        + "".join(f"    - {r}\n" for r in ALPINE_REPOS) +
+        f"  keyring:\n    - {ALPINE_KEY}\n"
+        "  packages:\n"
+        + "".join(f"    - {p}\n" for p in LXDE_PACKAGES) +
+        "\n"
+        "archs:\n"
+        f"  - {arch}\n"
+        "\n"
+        "cmd: /sbin/init\n"
+    )
+
+
+def ensure_tool(name: str, brew_hint: str | None = None) -> str:
+    path = shutil.which(name)
+    if path:
+        return path
+    for p in ("/opt/homebrew/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/sbin"):
+        cand = Path(p) / name
+        if cand.exists():
+            return str(cand)
+    hint = f" (install with `brew install {brew_hint}`)" if brew_hint else ""
+    print(f"  ERROR  `{name}` not found in PATH{hint}", file=sys.stderr)
+    sys.exit(1)
+
+
+def build_rootfs_with_apko(arch: str, out_dir: Path) -> None:
+    apko = ensure_tool("apko", "apko")
+    with tempfile.TemporaryDirectory() as ytmp:
+        yaml_path = Path(ytmp) / "apko.yaml"
+        yaml_path.write_text(apko_yaml(arch))
+        tgz_path = Path(ytmp) / "rootfs.tar.gz"
+        print(f"  APKO  resolving + installing {len(LXDE_PACKAGES)} packages "
+              f"({arch})...", file=sys.stderr)
+        r = subprocess.run(
+            [apko, "build-minirootfs",
+             "--ignore-signatures",
+             str(yaml_path), str(tgz_path)],
+            text=True, capture_output=True,
+        )
+        if not tgz_path.exists() or tgz_path.stat().st_size < 1024:
+            print(r.stdout, file=sys.stderr)
+            print(r.stderr, file=sys.stderr)
+            print("  ERROR  apko did not produce a rootfs", file=sys.stderr)
+            sys.exit(1)
+        print(f"  EXTRACT  rootfs ({tgz_path.stat().st_size // (1024*1024)}MB)",
+              file=sys.stderr)
+        subprocess.run(
+            ["tar", "-xzf", str(tgz_path), "-C", str(out_dir)],
+            capture_output=True,
+        )
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <output.img>", file=sys.stderr)
-        sys.exit(1)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--arch", default="aarch64",
+                    choices=["aarch64", "x86_64"])
+    ap.add_argument("output", help="Path to the output .img file")
+    args = ap.parse_args()
 
-    output = sys.argv[1]
+    output = args.output
 
     if os.path.exists(output):
         print(f"  SKIP  {output} already exists (delete to rebuild)", file=sys.stderr)
         return
 
-    tarball = download(ALPINE_ROOTFS_URL,
-                       CACHE / "alpine-minirootfs-3.21.3-x86_64.tar.gz")
-
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir) / "alpine-root"
         root.mkdir()
 
-        print("  EXTRACT  Alpine minirootfs", file=sys.stderr)
-        with tarfile.open(tarball, "r:gz") as tar:
-            try:
-                tar.extractall(path=root, filter="fully_trusted")
-            except TypeError:
-                tar.extractall(path=root)
-
-        repos = root / "etc" / "apk" / "repositories"
-        repos.parent.mkdir(parents=True, exist_ok=True)
-        repos.write_text(
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/main\n"
-            "http://dl-cdn.alpinelinux.org/alpine/v3.21/community\n"
-        )
-
-        (root / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")
-        (root / "var" / "cache" / "apk").mkdir(parents=True, exist_ok=True)
-        (root / "tmp").mkdir(exist_ok=True)
-
-        apk_cmd = shutil.which("apk")
-        if not apk_cmd:
-            for candidate in [
-                ROOT / "build" / "native-cache" / "alpine-pkgs" / "apk-tools-static" / "sbin" / "apk.static",
-                ROOT / "build" / "native-cache" / "ext-bin" / "apk.static",
-            ]:
-                if candidate.exists():
-                    apk_cmd = str(candidate)
-                    break
-
-        if not apk_cmd:
-            print("  ERROR  No apk binary found.", file=sys.stderr)
-            sys.exit(1)
-
-        print(f"  APK  Installing LXDE packages...", file=sys.stderr)
-        result = subprocess.run(
-            [apk_cmd, "--root", str(root), "--initdb",
-             "--repositories-file", str(repos),
-             "--allow-untrusted", "--no-cache",
-             "add"] + LXDE_PACKAGES,
-            text=True,
-        )
-        # apk returns non-zero for trigger failures, which are always
-        # reported here because the build host lacks chroot privilege
-        # (common on unprivileged build environments).  The packages
-        # themselves are installed regardless.  Only bail out if NO
-        # packages got installed — detected by checking for the
-        # Openbox binary, which comes from the one must-have package.
+        build_rootfs_with_apko(args.arch, root)
         if not (root / "usr" / "bin" / "openbox").exists():
-            print(f"  ERROR  apk install failed (openbox binary missing, "
-                  f"exit code {result.returncode})", file=sys.stderr)
+            print(f"  ERROR  apko did not install openbox; rootfs at {root}",
+                  file=sys.stderr)
             sys.exit(1)
 
-        # Xorg fbdev config (shared with XFCE — same shape)
+        # Xorg fbdev config — uses Kevlar's /dev/fb0 (ramfb).
+        # ShadowFB defaults to "on"; the arm64 fb mmap fix in blog 245
+        # (Normal-NC vs Device-nGnRnE) makes that path work.  No BusID
+        # because we don't have PCI on virt; fbdev driver finds /dev/fb0
+        # directly.
         xorg_conf_dir = root / "etc" / "X11" / "xorg.conf.d"
         xorg_conf_dir.mkdir(parents=True, exist_ok=True)
         (xorg_conf_dir / "10-fbdev.conf").write_text(
@@ -157,7 +170,6 @@ def main():
             'Section "Device"\n'
             '    Identifier "fbdev"\n'
             '    Driver "fbdev"\n'
-            '    BusID "PCI:0:2:0"\n'
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'
@@ -367,6 +379,7 @@ def main():
                 except Exception:
                     pass
 
+        mke2fs = ensure_tool("mke2fs", "e2fsprogs")
         size_mb = 1024
         print(f"  MKDISK  {size_mb}MB ext2", file=sys.stderr)
         subprocess.run(
@@ -374,7 +387,7 @@ def main():
              "bs=1M", f"count={size_mb}"],
             check=True, capture_output=True)
         subprocess.run(
-            ["mke2fs", "-t", "ext2", "-d", str(root), output],
+            [mke2fs, "-t", "ext2", "-d", str(root), "-F", output],
             check=True, capture_output=True)
 
     print(f"  DONE  {output}", file=sys.stderr)

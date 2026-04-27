@@ -290,6 +290,18 @@ int main(void) {
                     int colors_bits = __builtin_popcount(distinct_mask & 0x00ffffff);
                     if (nonblack * 10 >= nsamples && colors_bits >= 4) {
                         pass("lxde_pixels_visible");
+                        // Save the framebuffer for off-VM screenshot.
+                        // Mirror of test_openbox.c — debugfs picks this up.
+                        // ROOT is the real ext2 mount; /root is initramfs.
+                        int out = open(ROOT "/root/fb-snapshot.bgra",
+                                       O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        if (out >= 0) {
+                            (void)write(out, fb, smem_len);
+                            close(out);
+                            printf("  fb0 snapshot saved (%u bytes)\n",
+                                   smem_len);
+                            fflush(stdout);
+                        }
                     } else {
                         char b[64];
                         snprintf(b, sizeof(b),
