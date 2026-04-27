@@ -43,6 +43,15 @@ LXDE_PACKAGES = [
     "alpine-baselayout",
     "busybox",
     "musl-utils",
+    # The Linux baseline harness (`make linux-iterate-program`) boots
+    # Alpine's `linux-virt` arm64 kernel; that kernel's modules
+    # (drm/bochs, virtio-gpu, simpledrm, etc.) live in
+    # /lib/modules/<version>/kernel/drivers/gpu/drm/ and are needed
+    # for Linux to expose /dev/fb0.  Without this package, Linux
+    # boots the stand-alone vmlinuz-virt with no DRM modules
+    # available and Xorg's fbdev driver finds nothing.  Kevlar
+    # ignores these (it has its own ramfb driver in exts/ramfb).
+    "linux-virt",
     # X11 server + fbdev driver
     "xorg-server",
     "xf86-video-fbdev",
@@ -220,6 +229,39 @@ def main():
             'Section "ServerLayout"\n'
             '    Identifier "kevlar-lxde"\n'
             '    Screen "default"\n'
+            'EndSection\n'
+        )
+
+        # Linux baseline path uses a different config: virtio-gpu's
+        # DRM driver creates /dev/fb0 *and* /dev/dri/card0, but
+        # xf86-video-fbdev's "old probe method" fails to bind to
+        # virtio-gpu's fb0.  modesetting (built-in to xorg-server,
+        # no separate package needed) talks to /dev/dri/card0
+        # directly and works with any DRM driver.  Selected at boot
+        # by `test-lxde-program` when kevlar-no-mount=1 is on the
+        # cmdline (Linux baseline) — see setup_rootfs() in
+        # testing/test_lxde_program.c.
+        xorg_linux_dir = root / "etc" / "X11" / "linux-baseline"
+        xorg_linux_dir.mkdir(parents=True, exist_ok=True)
+        # Linux baseline: minimal config — no Driver pin, no Screen
+        # section.  Xorg's platform-probe path picks modesetting
+        # automatically when it finds /dev/dri/card0 (it sees the
+        # virtio-gpu PCI device and the matching DRM node).  We
+        # only need the InputDevice config since AutoAddDevices is
+        # off.  test_lxde_program copies this into xorg.conf.d on
+        # boot when kevlar-no-mount=1.
+        (xorg_linux_dir / "10-input.conf").write_text(
+            'Section "ServerFlags"\n'
+            '    Option "AutoAddDevices" "false"\n'
+            'EndSection\n'
+            '\n'
+            'Section "InputDevice"\n'
+            '    Identifier "kbd"\n'
+            '    Driver "evdev"\n'
+            '    Option "Device" "/dev/input/event0"\n'
+            '    Option "XkbRules" "evdev"\n'
+            '    Option "XkbModel" "pc105"\n'
+            '    Option "XkbLayout" "us"\n'
             'EndSection\n'
         )
 
