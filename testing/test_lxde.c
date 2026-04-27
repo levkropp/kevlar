@@ -244,20 +244,27 @@ int main(void) {
         if (has_pcmanfm) pass("pcmanfm_running");
         else fail("pcmanfm_running", "desktop renderer not found");
 
-        // pcmanfm --desktop owns the root-window wallpaper layer, so if
-        // its wallpaper is solid-black (default without config) or if it
-        // failed to read the config, xsetroot's paint gets overdrawn.
-        // Kill pcmanfm --desktop so the root-window xsetroot paint
-        // survives long enough for the pixel check to see it.  This is
-        // only a test-harness workaround — a real LXDE session would
-        // display pcmanfm's wallpaper.
-        sh_run("pkill -9 -f 'pcmanfm --desktop' 2>/dev/null", 2000);
-        sleep(1);
-        sh_run("DISPLAY=:0 xsetroot -solid '#336699' 2>/dev/null", 3000);
-        sleep(1);
+        // pcmanfm --desktop should be painting its configured wallpaper
+        // (#336699 from ~/.config/pcmanfm/default/pcmanfm.conf).  Give
+        // it a moment to draw — the retry loop below will catch the
+        // race where pcmanfm clears the desktop region just before our
+        // sample.
+        //
+        // We deliberately do NOT kill pcmanfm here anymore; the old
+        // workaround (kill pcmanfm + xsetroot) was racy because xsetroot
+        // sometimes lost to the WM/sprite layer.  If pcmanfm is
+        // genuinely failing to paint, the retry loop will exhaust and
+        // fail the test cleanly with the actual non-black-pixel count.
+        sleep(2);
 
         // Framebuffer pixel check: are pixels actually drawn?  Read fb0
         // directly and count non-black pixels + distinct color bits.
+        //
+        // Retry up to 8 times, 1s apart.  pcmanfm clears the desktop
+        // region before painting the wallpaper; if our sample lands in
+        // the brief window between clear and paint, we see nonblack=2
+        // (just the cursor) even though the desktop ends up correctly
+        // painted moments later.  Retrying eliminates that race.
         {
             int fd = open("/dev/fb0", O_RDONLY);
             if (fd < 0) {
@@ -277,17 +284,29 @@ int main(void) {
                     size_t nsamples = smem_len / 1024;
                     size_t nonblack = 0;
                     uint32_t distinct_mask = 0;
-                    for (size_t i = 0; i < nsamples; i++) {
-                        uint32_t v = px[i * 256];
-                        if ((v & 0x00ffffff) != 0) {
-                            nonblack++;
-                            distinct_mask |= v;
+                    int colors_bits = 0;
+                    int attempt;
+                    for (attempt = 0; attempt < 8; attempt++) {
+                        nonblack = 0;
+                        distinct_mask = 0;
+                        for (size_t i = 0; i < nsamples; i++) {
+                            uint32_t v = px[i * 256];
+                            if ((v & 0x00ffffff) != 0) {
+                                nonblack++;
+                                distinct_mask |= v;
+                            }
                         }
+                        colors_bits = __builtin_popcount(distinct_mask & 0x00ffffff);
+                        printf("  fb0 attempt=%d smem_len=%u samples=%zu nonblack=%zu "
+                               "distinct_mask=%08x colors_bits=%d\n",
+                               attempt, smem_len, nsamples, nonblack,
+                               distinct_mask, colors_bits);
+                        fflush(stdout);
+                        if (nonblack * 10 >= nsamples && colors_bits >= 4) {
+                            break; // success
+                        }
+                        sleep(1);
                     }
-                    printf("  fb0 smem_len=%u samples=%zu nonblack=%zu "
-                           "distinct_mask=%08x\n",
-                           smem_len, nsamples, nonblack, distinct_mask);
-                    int colors_bits = __builtin_popcount(distinct_mask & 0x00ffffff);
                     if (nonblack * 10 >= nsamples && colors_bits >= 4) {
                         pass("lxde_pixels_visible");
                         // Save the framebuffer for off-VM screenshot.
@@ -298,15 +317,15 @@ int main(void) {
                         if (out >= 0) {
                             (void)write(out, fb, smem_len);
                             close(out);
-                            printf("  fb0 snapshot saved (%u bytes)\n",
-                                   smem_len);
+                            printf("  fb0 snapshot saved (%u bytes after %d attempts)\n",
+                                   smem_len, attempt + 1);
                             fflush(stdout);
                         }
                     } else {
-                        char b[64];
+                        char b[80];
                         snprintf(b, sizeof(b),
-                            "nonblack=%zu/%zu colors_bits=%d",
-                            nonblack, nsamples, colors_bits);
+                            "nonblack=%zu/%zu colors_bits=%d after %d attempts",
+                            nonblack, nsamples, colors_bits, attempt);
                         fail("lxde_pixels_visible", b);
                     }
                     munmap(fb, smem_len);

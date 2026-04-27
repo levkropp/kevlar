@@ -203,9 +203,15 @@ def main():
         # background rather than black (default when no wallpaper set).
         # Also disable the "Templates missing" dialog and keep icons
         # visible so the test's pixel-visibility check picks up color.
-        pcmanfm_dir = home / ".config" / "pcmanfm" / "LXDE"
-        pcmanfm_dir.mkdir(parents=True, exist_ok=True)
-        (pcmanfm_dir / "pcmanfm.conf").write_text(
+        #
+        # IMPORTANT: pcmanfm with `--desktop` (no --profile) uses the
+        # "default" profile, NOT "LXDE".  Earlier versions of this
+        # script wrote the config under .../pcmanfm/LXDE/ which pcmanfm
+        # then ignored, falling back to a black wallpaper — the test
+        # then had to kill pcmanfm and use xsetroot as a workaround,
+        # which was racy.  Write under "default" so pcmanfm reads it
+        # without --profile.
+        pcmanfm_conf = (
             "[config]\n"
             "bm_open_method=0\n"
             "\n"
@@ -229,6 +235,10 @@ def main():
             "show_trash=0\n"
             "show_mounts=0\n"
         )
+        for profile in ("default", "LXDE"):
+            d = home / ".config" / "pcmanfm" / profile
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "pcmanfm.conf").write_text(pcmanfm_conf)
         # .xinitrc starts Openbox directly — no lxsession needed.
         (home / ".xinitrc").write_text(
             "#!/bin/sh\n"
