@@ -705,6 +705,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k7.ko load");
     }
 
+    // K8 — load /lib/modules/k8.ko: a Linux-source-shape hello-world
+    // compiled against Ubuntu 26.04's prebuilt Linux 7.0 headers.
+    // First module in the kABI arc that uses *Linux's actual UAPI*
+    // headers (not Kevlar compat shims).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k8.ko");
+        match kabi::load_module("/lib/modules/k8.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k8 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k8.ko"),
+            },
+            Err(e) => warn!("kabi: k8 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k8.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

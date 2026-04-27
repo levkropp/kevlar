@@ -552,6 +552,26 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k8` — load /lib/modules/k8.ko, a Linux-source
+# module compiled against Ubuntu 26.04's prebuilt Linux 7.0 headers
+# (build/linux-src/).  First module that uses Linux's actual UAPI.
+.PHONY: test-module-k8
+test-module-k8: build
+	$(PROGRESS) "TEST" "kABI K8 demo (Linux 7.0 headers from Ubuntu 26.04)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k8.log; true
+	@echo ""
+	@if grep -q 'k8: hello from real Linux 6.12 headers v8\|k8: hello from real Linux 7.0 headers' /tmp/kevlar-test-module-k8.log \
+	 && grep -q 'kabi: k8 init_module returned 0' /tmp/kevlar-test-module-k8.log; then \
+	    echo "TEST_PASS: kABI K8 — Linux 7.0 headers from Ubuntu 26.04"; \
+	else \
+	    echo "TEST_FAIL: missing expected K8 markers"; \
+	    grep -E 'kabi|k8:|panic' /tmp/kevlar-test-module-k8.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k7` — load /lib/modules/k7.ko, a Linux-source-
 # shape hello-world module compiled against testing/linux/ compat
 # headers (matches every Linux 6.12 hello-world tutorial).

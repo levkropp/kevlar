@@ -1366,6 +1366,55 @@ def build_k7_ko_arm64(cc):
     return out
 
 
+def build_k8_ko_arm64(cc):
+    """Build the K8 demo `.ko` against Ubuntu 26.04's prebuilt Linux
+    7.0 headers (`build/linux-src/`).  This is the inflection point
+    where Linux source compiles against *Linux's* headers — not our
+    K7 compat tree — and the resulting `.ko` loads through K1.
+    """
+    out = CACHE / "local-bin-arm64" / "k8.ko"
+    src = ROOT / "testing" / "k8-module.c"
+    linux = ROOT / "build" / "linux-src"
+    if not (linux / "include" / "generated" / "autoconf.h").exists():
+        log("WARN", "k8.ko: linux-src not prepared (no autoconf.h)")
+        return None
+    if not src.exists():
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        cc, "-c",
+        "-std=gnu11", "-fplan9-extensions",
+        "-ffreestanding", "-fno-pic", "-fno-stack-protector",
+        "-mcmodel=tiny", "-nostdlib",
+        "-fno-asynchronous-unwind-tables",
+        "-I", str(linux / "arch" / "arm64" / "include"),
+        "-I", str(linux / "arch" / "arm64" / "include" / "generated"),
+        "-I", str(linux / "include"),
+        "-I", str(linux / "arch" / "arm64" / "include" / "uapi"),
+        "-I", str(linux / "arch" / "arm64" / "include" / "generated" / "uapi"),
+        "-I", str(linux / "include" / "uapi"),
+        "-I", str(linux / "include" / "generated" / "uapi"),
+        "-D__KERNEL__", "-DMODULE",
+        '-DKBUILD_BASENAME="k8_module"',
+        '-DKBUILD_MODNAME="k8"',
+        '-DKBUILD_MODFILE="k8"',
+        "-include", str(linux / "include" / "linux" / "kconfig.h"),
+        "-include", str(linux / "include" / "linux" / "compiler_types.h"),
+        "-O1",
+        "-o", str(out), str(src),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        log("WARN", f"k8.ko: build error: {e}")
+        return None
+    if r.returncode != 0:
+        log("WARN", f"k8.ko: build failed: {(r.stderr or '').strip()[:400]}")
+        return None
+    log("CC", f"k8.ko built ({out.stat().st_size} bytes)")
+    return out
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1440,7 +1489,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None, k6_ko=None, k7_ko=None):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None, k6_ko=None, k7_ko=None, k8_ko=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1598,6 +1647,16 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(k7_ko, dest)
         log("MOD", f"installed /lib/modules/k7.ko ({k7_ko.stat().st_size} bytes)")
 
+    # ── kABI K8 demo module ──
+    if k8_ko and k8_ko.is_file():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "k8.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(k8_ko, dest)
+        log("MOD", f"installed /lib/modules/k8.ko ({k8_ko.stat().st_size} bytes)")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"
@@ -1668,6 +1727,7 @@ def main():
         k5_ko = None
         k6_ko = None
         k7_ko = None
+        k8_ko = None
         if not args.skip_externals:
             cc = fetch_musl_cc_toolchain()
             if cc:
@@ -1679,9 +1739,10 @@ def main():
                 k5_ko = build_k5_ko_arm64(cc)
                 k6_ko = build_k6_ko_arm64(cc)
                 k7_ko = build_k7_ko_arm64(cc)
+                k8_ko = build_k8_ko_arm64(cc)
             else:
                 log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
-        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko, k6_ko, k7_ko)
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko, k6_ko, k7_ko, k8_ko)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive

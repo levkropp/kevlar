@@ -31,3 +31,9 @@ pub unsafe extern "C" fn printk(fmt: *const c_char, mut args: ...) -> i32 {
 }
 
 ksym!(printk);
+
+// Linux 7.0 made printk() a macro that wraps `_printk()` for the
+// printk-index machinery.  Modules compiled against
+// `<linux/printk.h>` reference `_printk` directly; alias to our
+// printk so resolution succeeds.
+crate::ksym_named!("_printk", printk);
