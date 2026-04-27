@@ -687,6 +687,24 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k6.ko load");
     }
 
+    // K7 — load /lib/modules/k7.ko: a Linux-source-shape hello-world
+    // module compiled against testing/linux/ compat headers.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k7.ko");
+        match kabi::load_module("/lib/modules/k7.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k7 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k7.ko"),
+            },
+            Err(e) => warn!("kabi: k7 load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k7.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

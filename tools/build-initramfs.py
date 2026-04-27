@@ -1331,6 +1331,41 @@ def build_k6_ko_arm64(cc):
     return out
 
 
+def build_k7_ko_arm64(cc):
+    """Build the K7 demo `.ko` — Linux-source-shape hello-world.
+    Compiled against `testing/linux/` compat headers (which mirror
+    Linux UAPI paths but re-export Kevlar's K2-K6 shims).  The -I
+    points at `testing/` so `#include <linux/init.h>` resolves to
+    `testing/linux/init.h`. """
+    out = CACHE / "local-bin-arm64" / "k7.ko"
+    src = ROOT / "testing" / "k7-module.c"
+    inc_compat = ROOT / "testing"  # parent of linux/
+    inc_kabi = ROOT / "testing" / "include"
+    if not src.exists():
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        cc, "-c",
+        "-ffreestanding", "-fno-pic", "-fno-stack-protector",
+        "-mcmodel=tiny", "-nostdlib",
+        "-fno-asynchronous-unwind-tables",
+        "-I", str(inc_compat),
+        "-I", str(inc_kabi),
+        "-O1",
+        "-o", str(out), str(src),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log("WARN", f"k7.ko: build error: {e}")
+        return None
+    if r.returncode != 0:
+        log("WARN", f"k7.ko: build failed: {(r.stderr or '').strip()[:300]}")
+        return None
+    log("CC", f"k7.ko built ({out.stat().st_size} bytes)")
+    return out
+
+
 # ─── ARM64 Builders ───────────────────────────────────────────────────────
 
 def fetch_arm64_alpine_pkg(pkg_name):
@@ -1405,7 +1440,7 @@ def build_arm64_packages():
     return results
 
 
-def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None, k6_ko=None):
+def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_ko=None, k3_ko=None, k4_ko=None, k5_ko=None, k6_ko=None, k7_ko=None):
     """Assemble a minimal aarch64 initramfs rootfs with BusyBox + test config."""
     log("ROOTFS", "assembling (arm64)")
 
@@ -1553,6 +1588,16 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(k6_ko, dest)
         log("MOD", f"installed /lib/modules/k6.ko ({k6_ko.stat().st_size} bytes)")
 
+    # ── kABI K7 demo module ──
+    if k7_ko and k7_ko.is_file():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "k7.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(k7_ko, dest)
+        log("MOD", f"installed /lib/modules/k7.ko ({k7_ko.stat().st_size} bytes)")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"
@@ -1622,6 +1667,7 @@ def main():
         k4_ko = None
         k5_ko = None
         k6_ko = None
+        k7_ko = None
         if not args.skip_externals:
             cc = fetch_musl_cc_toolchain()
             if cc:
@@ -1632,9 +1678,10 @@ def main():
                 k4_ko = build_k4_ko_arm64(cc)
                 k5_ko = build_k5_ko_arm64(cc)
                 k6_ko = build_k6_ko_arm64(cc)
+                k7_ko = build_k7_ko_arm64(cc)
             else:
                 log("WARN", "no aarch64 cross-compiler found; skipping test binary compilation")
-        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko, k6_ko)
+        assemble_rootfs_arm64(arm64_bins, local_arm64_bins, hello_ko, k2_ko, k3_ko, k4_ko, k5_ko, k6_ko, k7_ko)
         log("CPIO", args.outfile)
         sys.path.insert(0, str(ROOT / "tools"))
         from docker2initramfs import create_cpio_archive

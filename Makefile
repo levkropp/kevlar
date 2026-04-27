@@ -552,6 +552,27 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k7` — load /lib/modules/k7.ko, a Linux-source-
+# shape hello-world module compiled against testing/linux/ compat
+# headers (matches every Linux 6.12 hello-world tutorial).
+.PHONY: test-module-k7
+test-module-k7: build
+	$(PROGRESS) "TEST" "kABI K7 demo (Linux-source-shape module)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k7.log; true
+	@echo ""
+	@if grep -q 'k7: hello from a Linux-shape module v1.0' /tmp/kevlar-test-module-k7.log \
+	 && grep -q 'k7: KERN_INFO + variadic printk works' /tmp/kevlar-test-module-k7.log \
+	 && grep -q 'kabi: k7 init_module returned 0' /tmp/kevlar-test-module-k7.log; then \
+	    echo "TEST_PASS: kABI K7 — Linux-source-shape module"; \
+	else \
+	    echo "TEST_FAIL: missing expected K7 markers"; \
+	    grep -E 'kabi|k7:|panic' /tmp/kevlar-test-module-k7.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k6` — load /lib/modules/k6.ko + verify the
 # variadic printk + format-string parser end-to-end.
 .PHONY: test-module-k6
