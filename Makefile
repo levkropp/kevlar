@@ -552,6 +552,27 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k12` — load /lib/modules/virtio_input.ko:
+# Ubuntu's virtio keyboard/mouse driver.  30 undefs across input +
+# virtio bus + infra subsystems.
+.PHONY: test-module-k12
+test-module-k12: build
+	$(PROGRESS) "TEST" "kABI K12 demo (Ubuntu virtio_input.ko + 30 stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k12.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/virtio_input.ko' /tmp/kevlar-test-module-k12.log \
+	 && grep -q 'kabi: __register_virtio_driver (stub)' /tmp/kevlar-test-module-k12.log \
+	 && grep -q 'kabi: virtio_input init_module returned 0' /tmp/kevlar-test-module-k12.log; then \
+	    echo "TEST_PASS: kABI K12 — Ubuntu virtio_input.ko loaded with input + virtio core stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K12 markers"; \
+	    grep -E 'kabi|virtio_input|panic' /tmp/kevlar-test-module-k12.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
 # network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
 # first milestone with subsystem-shaped stub work.

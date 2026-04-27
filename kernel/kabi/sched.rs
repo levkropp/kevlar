@@ -101,4 +101,8 @@ pub extern "C" fn dynamic_cond_resched() -> i32 {
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn dynamic_might_resched() {}
+
 ksym!(dynamic_cond_resched);
+ksym!(dynamic_might_resched);

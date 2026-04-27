@@ -144,6 +144,96 @@ ksym!(kcalloc);
 ksym!(krealloc);
 ksym!(kfree);
 
+// ── Linux 7.0 kmalloc renames ─────────────────────────────────
+//
+// The MM subsystem renamed several allocator entry points to
+// `_noprof` variants in 7.0 (memory-profiling support, gated
+// by CONFIG_MEM_ALLOC_PROFILING).  Modules built against 7.0
+// headers reference these names; we alias to our existing
+// kmalloc/kzalloc.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __kmalloc_noprof(size: usize, gfp: u32) -> *mut core::ffi::c_void {
+    kmalloc(size, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __kmalloc_cache_noprof(
+    _cache: *const core::ffi::c_void,
+    gfp: u32,
+    size: usize,
+) -> *mut core::ffi::c_void {
+    kmalloc(size, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kvmalloc_node_noprof(
+    size: usize,
+    gfp: u32,
+    _node: i32,
+) -> *mut core::ffi::c_void {
+    kvmalloc(size, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kmemdup_noprof(
+    src: *const core::ffi::c_void,
+    size: usize,
+    gfp: u32,
+) -> *mut core::ffi::c_void {
+    let dst = kmalloc(size, gfp);
+    if !dst.is_null() && !src.is_null() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src as *const u8,
+                dst as *mut u8,
+                size,
+            );
+        }
+    }
+    dst
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn devm_kmalloc(
+    _dev: *mut core::ffi::c_void,
+    size: usize,
+    gfp: u32,
+) -> *mut core::ffi::c_void {
+    // K12: ignore the device-managed lifetime; just kmalloc.
+    // Real Linux frees on device removal; ours leaks.
+    kmalloc(size, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn devm_kmemdup(
+    _dev: *mut core::ffi::c_void,
+    src: *const core::ffi::c_void,
+    size: usize,
+    gfp: u32,
+) -> *mut core::ffi::c_void {
+    kmemdup_noprof(src, size, gfp)
+}
+
+ksym!(__kmalloc_noprof);
+ksym!(__kmalloc_cache_noprof);
+ksym!(kvmalloc_node_noprof);
+ksym!(kmemdup_noprof);
+ksym!(devm_kmalloc);
+ksym!(devm_kmemdup);
+
+// `kmalloc_caches` is a static array the kmalloc inlining
+// machinery indexes into.  Modules read it to pick the right
+// cache for a given size; our shim ignores the cache pointer.
+// Provide a 1-page zero-filled static so the address resolves.
+#[unsafe(no_mangle)]
+pub static kmalloc_caches: [u8; 4096] = [0; 4096];
+crate::ksym_static!(kmalloc_caches);
+
+#[unsafe(no_mangle)]
+pub static random_kmalloc_seed: u64 = 0;
+crate::ksym_static!(random_kmalloc_seed);
+
 // ── vmalloc ──────────────────────────────────────────────────────
 
 /// Side table mapping (vmalloc-returned VA) → (PAddr, num_pages).

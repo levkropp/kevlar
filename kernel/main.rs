@@ -774,6 +774,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi dummy.ko load");
     }
 
+    // K12 — load /lib/modules/virtio_input.ko: Ubuntu's virtio
+    // keyboard/mouse driver.  30 undef symbols across input core +
+    // virtio bus + infra (kmalloc renames, spinlocks, ubsan, etc.).
+    // Probe doesn't fire (no virtio bus walking yet); init_module
+    // just registers the driver and returns.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/virtio_input.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/virtio_input.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
+                    info!("kabi: virtio_input init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in virtio_input.ko"),
+            },
+            Err(e) => warn!("kabi: virtio_input load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi virtio_input.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

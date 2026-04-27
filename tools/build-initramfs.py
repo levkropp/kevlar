@@ -1700,6 +1700,19 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(dummy_src, dest)
         log("MOD", f"installed /lib/modules/dummy.ko ({dummy_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K12 target: virtio_input.ko (virtio keyboard/mouse) ──
+    # 30 undef symbols across input + virtio bus + infra.
+    vinput_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "virtio" / "virtio_input.ko"
+    if vinput_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "virtio_input.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(vinput_src, dest)
+        log("MOD", f"installed /lib/modules/virtio_input.ko ({vinput_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"
