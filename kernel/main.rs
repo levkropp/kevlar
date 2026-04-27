@@ -725,6 +725,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k8.ko load");
     }
 
+    // K9 — load /lib/modules/bman-test.ko: a real prebuilt Linux 7.0
+    // module from Ubuntu 26.04's `linux-modules-7.0.0-14-generic.deb`.
+    // Smallest viable target (0 undefined symbols, init_module just
+    // returns 0).  First Canonical-built binary to run in Kevlar.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/bman-test.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/bman-test.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: bman-test init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in bman-test.ko"),
+            },
+            Err(e) => warn!("kabi: bman-test load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi bman-test.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

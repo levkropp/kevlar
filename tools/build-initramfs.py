@@ -1657,6 +1657,22 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(k8_ko, dest)
         log("MOD", f"installed /lib/modules/k8.ko ({k8_ko.stat().st_size} bytes)")
 
+    # ── kABI K9 target: a real Ubuntu prebuilt .ko (bman-test) ──
+    # bman-test.ko is the simplest module in linux-modules-7.0.0-14-generic:
+    # 0 undefined symbol references, init_module just returns 0.  Smallest
+    # possible "Canonical's binary loads in Kevlar" demo.
+    bman_test_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "soc" / "fsl" / "qbman" / \
+        "bman-test.ko"
+    if bman_test_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "bman-test.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(bman_test_src, dest)
+        log("MOD", f"installed /lib/modules/bman-test.ko ({bman_test_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

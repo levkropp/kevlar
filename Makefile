@@ -552,6 +552,27 @@ test-module-k4: build
 	    false; \
 	fi
 
+# `make test-module-k9` — load /lib/modules/bman-test.ko: a real
+# prebuilt Linux 7.0 .ko binary from Ubuntu 26.04's
+# linux-modules-7.0.0-14-generic.deb package.  First Canonical-built
+# binary to run in Kevlar.
+.PHONY: test-module-k9
+test-module-k9: build
+	$(PROGRESS) "TEST" "kABI K9 demo (real Ubuntu 26.04 .ko binary)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k9.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/bman-test.ko' /tmp/kevlar-test-module-k9.log \
+	 && grep -q 'kabi: bman-test init_module returned 0' /tmp/kevlar-test-module-k9.log; then \
+	    echo "TEST_PASS: kABI K9 — Ubuntu 26.04 prebuilt .ko binary loads"; \
+	else \
+	    echo "TEST_FAIL: missing expected K9 markers"; \
+	    grep -E 'kabi|bman|panic' /tmp/kevlar-test-module-k9.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k8` — load /lib/modules/k8.ko, a Linux-source
 # module compiled against Ubuntu 26.04's prebuilt Linux 7.0 headers
 # (build/linux-src/).  First module that uses Linux's actual UAPI.
