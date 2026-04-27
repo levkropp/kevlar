@@ -493,7 +493,7 @@ build/alpine-xorg.img:
 .PHONY: test-module
 test-module: build
 	$(PROGRESS) "TEST" "kABI .ko module load (K1)"
-	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
 		--kvm --batch --arch $(ARCH) \
 		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
 		| tee /tmp/kevlar-test-module.log; true
@@ -512,7 +512,7 @@ test-module: build
 .PHONY: test-module-k2
 test-module-k2: build
 	$(PROGRESS) "TEST" "kABI K2 demo (alloc + wait + work + completion)"
-	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
 		--kvm --batch --arch $(ARCH) \
 		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
 		| tee /tmp/kevlar-test-module-k2.log; true
@@ -528,12 +528,36 @@ test-module-k2: build
 	    false; \
 	fi
 
+# `make test-module-k4` — load /lib/modules/k4.ko + verify
+# /dev/k4-demo open/read/release via the kABI char-device bridge.
+.PHONY: test-module-k4
+test-module-k4: build
+	$(PROGRESS) "TEST" "kABI K4 demo (file_operations + /dev/k4-demo)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k4.log; true
+	@echo ""
+	@if grep -q '\[k4\] init begin' /tmp/kevlar-test-module-k4.log \
+	 && grep -q '\[k4\] register_chrdev ok' /tmp/kevlar-test-module-k4.log \
+	 && grep -q '\[k4\] init done' /tmp/kevlar-test-module-k4.log \
+	 && grep -q 'kabi: k4 init_module returned 0' /tmp/kevlar-test-module-k4.log \
+	 && grep -q '\[k4\] open called' /tmp/kevlar-test-module-k4.log \
+	 && grep -q 'kabi: k4 /dev/k4-demo read' /tmp/kevlar-test-module-k4.log \
+	 && grep -q 'hello from k4' /tmp/kevlar-test-module-k4.log; then \
+	    echo "TEST_PASS: kABI K4 — file_operations + char-device dispatch"; \
+	else \
+	    echo "TEST_FAIL: missing expected K4 markers"; \
+	    grep -E 'kabi|\[k4\]|panic' /tmp/kevlar-test-module-k4.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k3` — load /lib/modules/k3.ko and verify the
 # device-model spine (platform_device + platform_driver bind/probe).
 .PHONY: test-module-k3
 test-module-k3: build
 	$(PROGRESS) "TEST" "kABI K3 demo (device model + platform bind/probe)"
-	$(PYTHON3) tools/run-qemu.py --timeout 60 \
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
 		--kvm --batch --arch $(ARCH) \
 		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
 		| tee /tmp/kevlar-test-module-k3.log; true

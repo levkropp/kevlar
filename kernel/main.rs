@@ -623,6 +623,33 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi k3.ko load");
     }
 
+    // K4 — load /lib/modules/k4.ko (file_operations + char-device
+    // bridge).  Then read /dev/k4-demo through the registered
+    // adapter to verify end-to-end open/read/release dispatch.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/k4.ko");
+        match kabi::load_module("/lib/modules/k4.ko", "init_module") {
+            Ok(m) => match m.init_fn {
+                Some(f) => {
+                    let rc = f();
+                    info!("kabi: k4 init_module returned {}", rc);
+                }
+                None => warn!("kabi: init_module not found in k4.ko"),
+            },
+            Err(e) => warn!("kabi: k4 load_module failed: {:?}", e),
+        }
+        let mut buf = [0u8; 32];
+        match kabi::cdev::read_dev_for_test("k4-demo", &mut buf) {
+            Ok(n) => {
+                let s = core::str::from_utf8(&buf[..n]).unwrap_or("?");
+                info!("kabi: k4 /dev/k4-demo read {} bytes: {:?}", n, s);
+            }
+            Err(e) => warn!("kabi: k4 /dev/k4-demo read failed: {:?}", e),
+        }
+        profiler.lap_time("kabi k4.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

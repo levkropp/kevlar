@@ -15,10 +15,12 @@
 pub mod alloc;
 pub mod arch;
 pub mod bus;
+pub mod cdev;
 pub mod completion;
 pub mod device;
 pub mod elf;
 pub mod exports;
+pub mod fops;
 pub mod kobject;
 pub mod kref;
 pub mod loader;
@@ -28,6 +30,7 @@ pub mod printk;
 pub mod reloc;
 pub mod sched;
 pub mod symbols;
+pub mod usercopy;
 pub mod wait;
 pub mod work;
 

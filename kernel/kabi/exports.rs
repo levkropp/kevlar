@@ -92,3 +92,24 @@ macro_rules! ksym_static {
         };
     };
 }
+
+/// Export a function under an explicit name string, decoupled from
+/// its Rust identifier.  Useful when the kABI shim needs to use a
+/// non-conflicting Rust name (e.g. `kabi_copy_to_user`) while
+/// modules still link against the canonical Linux name
+/// (`copy_to_user`).
+#[macro_export]
+macro_rules! ksym_named {
+    ($name:literal, $func:ident) => {
+        const _: () = {
+            #[allow(unsafe_code)]
+            #[unsafe(link_section = ".ksymtab")]
+            #[used]
+            static __KSYM_ENTRY: $crate::kabi::exports::KSym =
+                $crate::kabi::exports::KSym {
+                    name: $name,
+                    addr: $func as *const (),
+                };
+        };
+    };
+}

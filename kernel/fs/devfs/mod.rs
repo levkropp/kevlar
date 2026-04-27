@@ -93,6 +93,16 @@ impl FileSystem for DevFs {
     }
 }
 
+impl DevFs {
+    /// Add a file to /dev/ at runtime.  Used by the kABI char-device
+    /// registration path (`kernel/kabi/cdev.rs`) so loaded modules
+    /// can install /dev/<name> entries after boot.  Idempotent on
+    /// repeat name (the underlying tmpfs add_file overwrites).
+    pub fn add_runtime_file(&self, name: &str, file: Arc<dyn FileLike>) {
+        self.0.root_tmpfs_dir().add_file(name, file);
+    }
+}
+
 pub fn init() {
     DEV_FS.init(|| Arc::new(DevFs::new()));
 }
