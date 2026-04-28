@@ -222,6 +222,32 @@ ksym!(kmemdup_noprof);
 ksym!(devm_kmalloc);
 ksym!(devm_kmemdup);
 
+#[unsafe(no_mangle)]
+pub extern "C" fn __kvmalloc_node_noprof(
+    size: usize,
+    gfp: u32,
+    _node: i32,
+) -> *mut core::ffi::c_void {
+    kvmalloc(size, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kvrealloc_node_align_noprof(
+    p: *mut core::ffi::c_void,
+    size: usize,
+    _align: usize,
+    gfp: u32,
+    _node: i32,
+) -> *mut core::ffi::c_void {
+    // krealloc handles the heap-only path; drm_exec doesn't fire
+    // this at load.  K15+ when a vmalloc-backed pointer is ever
+    // realloc'd, we'll route via kvfree/kvmalloc.
+    krealloc(p, size, gfp)
+}
+
+ksym!(__kvmalloc_node_noprof);
+ksym!(kvrealloc_node_align_noprof);
+
 // `kmalloc_caches` is a static array the kmalloc inlining
 // machinery indexes into.  Modules read it to pick the right
 // cache for a given size; our shim ignores the cache pointer.

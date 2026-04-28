@@ -21,7 +21,9 @@ pub mod completion;
 pub mod cpufeature;
 pub mod device;
 pub mod dma;
+pub mod dma_resv;
 pub mod drm;
+pub mod drm_gem;
 pub mod elf;
 pub mod exports;
 pub mod fops;
@@ -39,6 +41,7 @@ pub mod printk;
 pub mod printk_fmt;
 pub mod random;
 pub mod rbtree;
+pub mod refcount;
 pub mod reloc;
 pub mod scatterlist;
 pub mod sched;
@@ -51,6 +54,7 @@ pub mod usercopy;
 pub mod virtio;
 pub mod wait;
 pub mod work;
+pub mod ww_mutex;
 
 pub use loader::{load_module, LoadedModule};
 

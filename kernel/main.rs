@@ -815,6 +815,25 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi drm_buddy.ko load");
     }
 
+    // K14 — load /lib/modules/drm_exec.ko: Ubuntu's DRM
+    // transactional buffer-reservation helper.  11 undefs (9 net
+    // new) across ww_mutex (4), dma_resv (1), drm_gem (1),
+    // refcount (1), kvmalloc renames (2).  Pure library module —
+    // no init_module — so we log "library module" on the None
+    // arm.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/drm_exec.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/drm_exec.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: drm_exec init_module returned {}", rc),
+                None => info!("kabi: drm_exec is a library module (no init_module)"),
+            },
+            Err(e) => warn!("kabi: drm_exec load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi drm_exec.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

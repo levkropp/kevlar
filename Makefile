@@ -596,6 +596,28 @@ test-module-k13: build
 	    false; \
 	fi
 
+# `make test-module-k14` — load /lib/modules/drm_exec.ko:
+# Ubuntu's DRM transactional buffer-reservation helper.  11
+# undefs across ww_mutex / dma_resv / drm_gem / refcount /
+# kvmalloc renames.  Pure library module — no init_module.
+.PHONY: test-module-k14
+test-module-k14: build
+	$(PROGRESS) "TEST" "kABI K14 demo (Ubuntu drm_exec.ko + ww_mutex/dma_resv/drm_gem stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k14.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/drm_exec.ko' /tmp/kevlar-test-module-k14.log \
+	 && grep -q 'kabi: loaded /lib/modules/drm_exec.ko' /tmp/kevlar-test-module-k14.log \
+	 && grep -q 'kabi: drm_exec is a library module' /tmp/kevlar-test-module-k14.log; then \
+	    echo "TEST_PASS: kABI K14 — Ubuntu drm_exec.ko loaded with ww_mutex/dma_resv/drm_gem stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K14 markers"; \
+	    grep -E 'kabi|drm_exec|panic' /tmp/kevlar-test-module-k14.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
 # network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
 # first milestone with subsystem-shaped stub work.
