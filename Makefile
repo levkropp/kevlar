@@ -1259,6 +1259,28 @@ $(LXDE_IMG):
 iterate-lxde: $(LXDE_IMG)
 	$(PYTHON3) tools/iterate-lxde.py --arch $(ARCH)
 
+# Integration test runner.  Drives a YAML test definition in
+# tests/integration/ through tools/itest.py — boots Kevlar,
+# injects mouse/keyboard via QMP, captures screenshots, asserts
+# pass/fail, persists artifacts to build/itest/<name>/.
+#
+# Usage:
+#   make ARCH=arm64 itest TEST=tests/integration/lxde-smoke.yaml
+#   make ARCH=arm64 itest-all   # runs every yaml in tests/integration/
+.PHONY: itest itest-all
+itest:
+	@if [ -z "$(TEST)" ]; then echo "Usage: make itest TEST=tests/integration/<name>.yaml"; exit 1; fi
+	$(PROGRESS) "ITEST" "$(notdir $(TEST)) ($(ARCH))"
+	$(PYTHON3) tools/itest.py $(TEST)
+
+itest-all:
+	@fail=0; \
+	for t in tests/integration/*.yaml; do \
+	    echo "=== $$t ==="; \
+	    $(PYTHON3) tools/itest.py $$t || fail=1; \
+	done; \
+	exit $$fail
+
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-lxde
 test-lxde: $(LXDE_IMG)

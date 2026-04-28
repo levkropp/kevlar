@@ -27,7 +27,7 @@ const EC_FP_ASIMD: u32 = 0b000111;    // Access to Advanced SIMD / FP while CPAC
 /// Called from trap.S for synchronous exceptions.
 /// `from_user`: 0 = kernel, 1 = user.
 #[unsafe(no_mangle)]
-extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
+extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
     let esr: u64;
     let far: u64;
     unsafe {
@@ -132,8 +132,25 @@ extern "C" fn arm64_handle_exception(_from_user: u64, frame: *mut PtRegs) {
         }
         _ => {
             let pc = unsafe { (*frame).pc };
+            if from_user != 0 {
+                // EL0 took an unclassified synchronous exception.  ec=0
+                // is typically an undefined instruction (or some arm64
+                // extension instruction HVF doesn't model).  Linux
+                // delivers SIGILL/SIGSEGV in this situation; we hand
+                // off to the kernel's `handle_user_fault` (which sends
+                // a fatal signal to the current process) so the
+                // misbehaving process dies cleanly without taking the
+                // whole kernel down.
+                log::warn!(
+                    "EL0 unhandled exception: ec={:#x} esr={:#x} pc={:#x} far={:#x} \
+                     — delivering signal to current process",
+                    ec, esr, pc, far,
+                );
+                handler().handle_user_fault("arm64 EC=0 unknown", pc as usize);
+                return;
+            }
             panic!(
-                "unhandled synchronous exception: ec={:#x}, esr={:#x}, pc={:#x}, far={:#x}",
+                "kernel unhandled synchronous exception: ec={:#x}, esr={:#x}, pc={:#x}, far={:#x}",
                 ec, esr, pc, far
             );
         }

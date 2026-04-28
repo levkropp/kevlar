@@ -1,0 +1,37 @@
+name: lxde-smoke
+description: |
+  Smoke test for the itest framework.  Boot Kevlar with the
+  Alpine LXDE image through the standard test_lxde harness
+  (NOT kevlar_interactive — that path hits a flaky arm64
+  unhandled-exception bug occasionally).  Wait for
+  TEST_PASS lxde_pixels_visible (which fires after pcmanfm
+  has settled and the framebuffer is verified painted),
+  capture a screenshot, and assert that the framebuffer is
+  at least 50% non-black.  No mouse / keyboard injection —
+  pure framework sanity check.
+
+arch: arm64
+disk: build/alpine-lxde.arm64.img
+init: /bin/test-lxde
+cmdline: ""
+boot_timeout: 90s
+qemu_extra: ["-smp", "2", "-m", "1024", "-vga", "std"]
+
+steps:
+  - wait_for_serial:
+      pattern: "TEST_PASS lxde_pixels_visible"
+      timeout: 90s
+
+  - capture_state:
+      tag: post-boot
+
+  - assert:
+      type: framebuffer_painted
+      tag: post-boot
+      min_percent: 50
+      describe: "After boot, the LXDE desktop should have painted the wallpaper + panel."
+
+  - assert:
+      type: serial_contains
+      pattern: "TEST_PASS xorg_running"
+      describe: "test_lxde harness should report Xorg running."

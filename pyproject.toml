@@ -12,6 +12,9 @@ dependencies = [
     # extracted /dev/fb0 BGRA dump into a PNG screenshot (and to
     # compute the non-black-pixel coverage that drives the verdict).
     "pillow>=10.0",
+    # PyYAML is used by `tools/itest.py` to parse integration test
+    # definitions in tests/integration/*.yaml.
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]

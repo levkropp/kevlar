@@ -231,13 +231,18 @@ def main():
             '\n'
             # virtio-tablet sends EV_ABS events on ABS_X/ABS_Y in the
             # range 0..32767 (Kevlar reports this via EVIOCGABS).
-            # xf86-input-evdev recognizes the device as an absolute
-            # pointer and maps the host trackpad position directly to
-            # the guest cursor — no relative-motion grab needed.
+            # Without explicit hints, xf86-input-evdev classifies any
+            # EV_ABS device as a TOUCHPAD, which expects motion-delta
+            # gestures rather than direct positioning — events from
+            # QMP `input-send-event` (and from VNC absolute pointers)
+            # then fail to move the cursor.  Force evdev to treat this
+            # device as an absolute-axis Pointer / Tablet.
             'Section "InputDevice"\n'
             '    Identifier "ptr"\n'
             '    Driver "evdev"\n'
             '    Option "Device" "/dev/input/event0"\n'
+            '    Option "Tablet" "true"\n'
+            '    Option "TouchPad" "false"\n'
             'EndSection\n'
             '\n'
             'Section "Screen"\n'

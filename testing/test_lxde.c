@@ -25,14 +25,21 @@
 
 static int g_pass, g_fail, g_total;
 static int g_interactive;
+// Name extracted from `kevlar_test_setup=NAME` on the cmdline.  Empty
+// if not present.  Currently supports "doubleclick" — used by
+// tests/integration/lxde-doubleclick-folder.yaml to drive the freeze
+// investigation.  Other names can be added without changing the
+// dispatch shape.
+static char g_test_setup[64];
 
 static int sh_run(const char *cmd, int timeout_ms);
 
-// Read /proc/cmdline (mounting initramfs /proc if needed) and return 1
-// if `kevlar_interactive` is on the kernel command line.  Used to skip
-// test-only delays and sub-tests when run-alpine-lxde launches the
-// desktop for interactive use rather than as a regression suite.
-static int read_kevlar_interactive(void) {
+// Read /proc/cmdline (mounting initramfs /proc if needed) and populate
+// g_interactive + g_test_setup.  Returns 1 if any test-mode flag was
+// found on the cmdline.  Used to skip test-only delays and sub-tests
+// when run-alpine-lxde / itest launch the desktop for interactive
+// use rather than as a regression suite.
+static int read_kevlar_cmdline(void) {
     mkdir("/proc", 0755);
     mount("proc", "/proc", "proc", 0, NULL);
     int cfd = open("/proc/cmdline", O_RDONLY);
@@ -42,7 +49,32 @@ static int read_kevlar_interactive(void) {
     close(cfd);
     if (n <= 0) return 0;
     buf[n] = '\0';
-    return strstr(buf, "kevlar_interactive") != NULL;
+    int any = 0;
+    if (strstr(buf, "kevlar_interactive")) {
+        g_interactive = 1;
+        any = 1;
+    }
+    char *p = strstr(buf, "kevlar_test_setup=");
+    if (p) {
+        p += strlen("kevlar_test_setup=");
+        // Copy up to the next space / newline / null.
+        size_t i = 0;
+        while (p[i] && p[i] != ' ' && p[i] != '\n' && p[i] != '\t'
+               && i < sizeof(g_test_setup) - 1) {
+            g_test_setup[i] = p[i];
+            i++;
+        }
+        g_test_setup[i] = '\0';
+        any = 1;
+    }
+    return any;
+}
+
+// Backwards-compat shim — the late-path fallback in main() still calls
+// this name.  Returns 1 if either kevlar_interactive OR a known
+// kevlar_test_setup mode is on the cmdline.
+static int read_kevlar_interactive(void) {
+    return read_kevlar_cmdline();
 }
 
 static void interactive_keepalive(void) {
@@ -60,6 +92,178 @@ static void interactive_keepalive(void) {
     printf("\n=== test-lxde: kevlar_interactive on cmdline; keeping desktop alive ===\n");
     fflush(stdout);
     while (1) sleep(60);
+}
+
+// Find pcmanfm's PID by scanning /proc/*/comm.  Returns 0 if not
+// found.  Called from the doubleclick setup which expects pcmanfm
+// to already be running.
+static int find_proc_pid(const char *target_comm) {
+    for (int pid = 2; pid < 300; pid++) {
+        char path[32], comm[32];
+        snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        int n = read(fd, comm, sizeof(comm) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        comm[n] = '\0';
+        if (n > 0 && comm[n - 1] == '\n') comm[n - 1] = '\0';
+        if (strcmp(comm, target_comm) == 0) return pid;
+    }
+    return 0;
+}
+
+// Read /proc/N/stat and return the state char (R/S/D/T/Z), or '?' if
+// unreadable / unparseable.  Field 3 of /proc/N/stat is the state
+// char, after the comm-in-parens field.
+static char read_proc_state(int pid) {
+    char path[32], buf[256];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return '?';
+    int n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return '?';
+    buf[n] = '\0';
+    // Find the closing ')' of the comm field, then the state char is
+    // two chars later (after the space).
+    char *p = strrchr(buf, ')');
+    if (!p) return '?';
+    if (!p[1] || !p[2]) return '?';
+    return p[2];
+}
+
+// Wait up to `timeout_ms` for >=50% of /dev/fb0 pixels to be non-black,
+// indicating that pcmanfm has finished painting the wallpaper.
+// Returns 1 if the threshold was reached, 0 on timeout.  Mirrors the
+// existing lxde_pixels_visible test logic but as a blocking helper.
+static int wait_for_wallpaper(int timeout_ms) {
+    int fd = open("/dev/fb0", O_RDONLY);
+    if (fd < 0) return 0;
+    unsigned char finfo[68] = {0};
+    unsigned int smem_len = 0;
+    if (ioctl(fd, 0x4602 /* FBIOGET_FSCREENINFO */, finfo) == 0) {
+        smem_len = *(unsigned int *)(finfo + 24);
+    }
+    if (smem_len == 0) smem_len = 1024 * 768 * 4;
+    void *fb = mmap(NULL, smem_len, PROT_READ, MAP_SHARED, fd, 0);
+    int ok = 0;
+    if (fb != MAP_FAILED) {
+        const uint32_t *px = (const uint32_t *)fb;
+        size_t nsamples = smem_len / 1024;
+        for (int i = 0; i < timeout_ms / 500 && !ok; i++) {
+            size_t nonblack = 0;
+            for (size_t j = 0; j < nsamples; j++) {
+                if ((px[j * 256] & 0x00ffffff) != 0) nonblack++;
+            }
+            if (nonblack * 2 >= nsamples) {  // >=50%
+                ok = 1;
+                break;
+            }
+            usleep(500000);
+        }
+        munmap(fb, smem_len);
+    }
+    close(fd);
+    return ok;
+}
+
+// kevlar_test_setup=doubleclick: wait for the wallpaper to actually
+// render (so pre-click screenshots aren't of a half-painted desktop),
+// pre-create a folder on the desktop, emit DESKTOP_READY with
+// pcmanfm's PID, then poll the process state every ~2 seconds and
+// emit PCMANFM_STATE markers to serial.  The itest harness uses this
+// to drive the double-click freeze investigation: it injects a
+// double-click after DESKTOP_READY and watches for state transitions.
+// A frozen pcmanfm shows up as "S" (sleeping) for many consecutive
+// samples after the click — vs. "R" briefly during a successful
+// folder open.
+static void doubleclick_setup_keepalive(void) {
+    // Wait for wallpaper paint (up to 60s).  Without this, harness
+    // pre-click captures land on a half-painted desktop and the
+    // framebuffer_changed assertion fires on the late paint instead
+    // of the actual click effect.  60s is generous — pcmanfm
+    // typically paints within 10s — but allows for slow-pcmanfm
+    // first-render situations.
+    int painted = wait_for_wallpaper(60000);
+    if (!painted) {
+        printf("WARNING: wallpaper not painted after 20s; proceeding anyway\n");
+        fflush(stdout);
+    }
+
+    // Make sure /var/log + /var/log/diag exist on the ext2 disk.
+    sh_run("mkdir -p /var/log /var/log/diag", 2000);
+
+    // Pre-create the folder pcmanfm should display on the desktop.
+    // ~/Desktop is the default desktop dir; pcmanfm rescans on
+    // refresh / inotify.  Sleep briefly to let pcmanfm pick it up.
+    sh_run("mkdir -p /root/Desktop && "
+           "rm -rf /root/Desktop/test-folder && "
+           "mkdir /root/Desktop/test-folder && "
+           "sync", 3000);
+    sleep(2);  // give pcmanfm time to notice the new folder
+
+    // Locate pcmanfm.
+    int pcmanfm_pid = find_proc_pid("pcmanfm");
+
+    // Persist initial diagnostic snapshots.
+    if (pcmanfm_pid > 0) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd),
+                 "cp /proc/%d/maps /var/log/diag/pcmanfm-maps-initial.txt 2>/dev/null; "
+                 "cp /proc/%d/status /var/log/diag/pcmanfm-status-initial.txt 2>/dev/null; "
+                 "cp /proc/%d/stat /var/log/diag/pcmanfm-stat-initial.txt 2>/dev/null; "
+                 "cp /proc/%d/cmdline /var/log/diag/pcmanfm-cmdline.txt 2>/dev/null; "
+                 "true",
+                 pcmanfm_pid, pcmanfm_pid, pcmanfm_pid, pcmanfm_pid);
+        sh_run(cmd, 3000);
+    }
+
+    // Persist Xorg + lxde-session logs (initial snapshot).
+    sh_run("cp -f /tmp/Xorg.0.log /var/log/Xorg.0.log 2>/dev/null; "
+           "cp -f /tmp/lxde-session.log /var/log/lxde-session.log 2>/dev/null; "
+           "sync; true", 3000);
+
+    // Emit ready marker.  Harness blocks on this regex.
+    printf("\nDESKTOP_READY pcmanfm_pid=%d\n", pcmanfm_pid);
+    fflush(stdout);
+
+    // Poll loop: sample pcmanfm's state every 2 seconds and emit a
+    // marker.  Every 5th sample, also re-persist the X / session
+    // logs and pcmanfm's current /proc snapshot so the harness can
+    // extract them post-shutdown for diagnosis.
+    int sample = 0;
+    while (1) {
+        char state = (pcmanfm_pid > 0) ? read_proc_state(pcmanfm_pid) : '?';
+        printf("PCMANFM_STATE sample=%d pid=%d state=%c\n",
+               sample, pcmanfm_pid, state);
+        fflush(stdout);
+        if (state == '?' || state == 'Z') {
+            // Rediscover in case pcmanfm respawned (e.g. parent
+            // pcmanfm exec'd a child).
+            int new_pid = find_proc_pid("pcmanfm");
+            if (new_pid != pcmanfm_pid) {
+                printf("PCMANFM_PID_CHANGED old=%d new=%d\n",
+                       pcmanfm_pid, new_pid);
+                fflush(stdout);
+                pcmanfm_pid = new_pid;
+            }
+        }
+        if (sample % 5 == 0 && pcmanfm_pid > 0) {
+            char cmd[512];
+            snprintf(cmd, sizeof(cmd),
+                     "cp -f /tmp/Xorg.0.log /var/log/Xorg.0.log 2>/dev/null; "
+                     "cp -f /tmp/lxde-session.log /var/log/lxde-session.log 2>/dev/null; "
+                     "cp /proc/%d/stat /var/log/diag/pcmanfm-stat-latest.txt 2>/dev/null; "
+                     "cp /proc/%d/status /var/log/diag/pcmanfm-status-latest.txt 2>/dev/null; "
+                     "cp /proc/%d/maps /var/log/diag/pcmanfm-maps-latest.txt 2>/dev/null; "
+                     "sync; true",
+                     pcmanfm_pid, pcmanfm_pid, pcmanfm_pid);
+            sh_run(cmd, 2000);
+        }
+        sample++;
+        sleep(2);
+    }
 }
 
 static void pass(const char *name) {
@@ -186,9 +390,13 @@ static void setup_rootfs(void) {
 int main(void) {
     printf("T: LXDE Desktop End-to-End Test\n");
     fflush(stdout);
-    g_interactive = read_kevlar_interactive();
+    read_kevlar_cmdline();
     if (g_interactive) {
         printf("T: kevlar_interactive — fast-boot path, sub-tests skipped\n");
+        fflush(stdout);
+    }
+    if (g_test_setup[0]) {
+        printf("T: kevlar_test_setup=%s — itest harness mode\n", g_test_setup);
         fflush(stdout);
     }
     setup_rootfs();
@@ -271,6 +479,17 @@ int main(void) {
     // we drop into the keepalive sleep loop; with only 3s the
     // tint2 panel is up but the desktop background is still
     // unrendered, leaving a black/transparent main area.
+    //
+    // kevlar_test_setup=NAME diverts to a NAME-specific harness
+    // setup at the same point.  Same 8s settle so pcmanfm has time
+    // to render before the harness starts injecting.
+    if (strcmp(g_test_setup, "doubleclick") == 0) {
+        // No fixed sleep; doubleclick_setup_keepalive uses
+        // wait_for_wallpaper to block until pcmanfm has actually
+        // painted the framebuffer.  More reliable than a fixed
+        // settle.
+        doubleclick_setup_keepalive();
+    }
     if (g_interactive) {
         sleep(8);
         interactive_keepalive();

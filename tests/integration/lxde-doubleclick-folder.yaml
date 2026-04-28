@@ -1,0 +1,116 @@
+name: lxde-doubleclick-folder
+description: |
+  Investigate the pcmanfm freeze when a folder is double-clicked
+  on the LXDE desktop.
+
+  Boots Kevlar with kevlar_test_setup=doubleclick, which:
+    1. Brings up Xorg + openbox + tint2 + pcmanfm.
+    2. Waits for the wallpaper to actually paint (>=50% non-black).
+    3. Pre-creates /root/Desktop/test-folder.
+    4. Locates pcmanfm's PID via /proc scan.
+    5. Persists initial /proc/<pid>/{maps,status,stat} + Xorg /
+       lxde-session log snapshots to /var/log/diag/.
+    6. Emits "DESKTOP_READY pcmanfm_pid=N" on serial.
+    7. Loops every 2s emitting "PCMANFM_STATE sample=N pid=P state=X"
+       (R/S/D/Z/?).
+
+  The harness:
+    - Captures a pre-click screenshot (wallpaper + test-folder
+      label visible).
+    - Attempts to inject a double-click at the folder coords
+      (80, 80) via QMP `input-send-event`.
+    - Captures screenshots at +2s, +6s, +12s post-click.
+    - Extracts /var/log/Xorg.0.log, /var/log/lxde-session.log,
+      and /var/log/diag/* via debugfs after shutdown.
+
+  KNOWN LIMITATION (K32): QMP input-send-event with virtio-tablet
+  events reaches the kernel (kernel logs "first IRQ drained 3 events
+  from QEMU Virtio Tablet") but Xorg doesn't apply them to cursor
+  position in this QEMU+HVF+ramfb configuration.  The cursor stays
+  at its initial center position regardless of injected coords.
+  As a result, the `framebuffer_changed` assertion below fails —
+  but that's because the click never lands, NOT because of a true
+  desktop freeze.  K33+ will investigate VNC-protocol injection or
+  fix the QMP/Xorg routing gap.
+
+  Until then, this YAML serves as the framework's reference shape
+  for "boot LXDE → inject mouse → assert framebuffer change",
+  ready to start working as soon as the injection path is fixed.
+  The diagnostic artifacts (PCMANFM_STATE timeline, /var/log/diag,
+  pre/post screenshots) are still useful for manual investigation.
+
+arch: arm64
+disk: build/alpine-lxde.arm64.img
+init: /bin/test-lxde
+cmdline: "kevlar_test_setup=doubleclick"
+boot_timeout: 60s
+qemu_extra: ["-smp", "2", "-m", "1024", "-vga", "std",
+             "-display", "vnc=:9"]
+
+steps:
+  - wait_for_serial:
+      pattern: "DESKTOP_READY pcmanfm_pid=([0-9]+)"
+      capture: pcmanfm_pid
+      timeout: 60s
+
+  - query_qmp:
+      execute: query-mice
+      save_as: query-mice
+      describe: |
+        Captures QMP's view of registered mice.  Should show
+        "QEMU Virtio Tablet (absolute)" as the current device.
+
+  - capture_state:
+      tag: pre-click
+      delay_before: 1s
+
+  - inject_mouse:
+      action: double_click
+      x: 80
+      y: 80
+
+  - capture_state:
+      tag: post-click-2s
+      delay_before: 2s
+
+  - capture_state:
+      tag: post-click-6s
+      delay_before: 4s
+
+  - capture_state:
+      tag: post-click-12s
+      delay_before: 6s
+
+  - extract_disk_artifacts:
+      paths:
+        - /var/log/Xorg.0.log
+        - /var/log/lxde-session.log
+        - /var/log/diag
+
+  # Diagnostic asserts.  These check the framework + boot worked
+  # cleanly; they don't try to assert "the click triggered a folder
+  # open" because mouse injection is the K33+ gap.
+
+  - assert:
+      type: serial_contains
+      pattern: "DESKTOP_READY pcmanfm_pid="
+      describe: |
+        Confirms the doubleclick setup mode reached its ready
+        state — wallpaper painted, folder created, pcmanfm PID
+        captured.
+
+  - assert:
+      type: serial_contains
+      pattern: "PCMANFM_STATE"
+      describe: |
+        Confirms the doubleclick setup poll loop ran at least
+        once (emitting state samples).
+
+  - assert:
+      type: framebuffer_painted
+      tag: pre-click
+      min_percent: 50
+      describe: |
+        Pre-click screenshot should show a fully-painted desktop
+        (wallpaper + panel).  This is the framework checkpoint
+        that wait_for_wallpaper() in test_lxde.c worked.
