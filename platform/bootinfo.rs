@@ -47,6 +47,11 @@ pub struct BootInfo {
     /// line to serial — consumed by `tools/strace-diff.py` to compare
     /// Kevlar's syscall behaviour against Linux on an identical rootfs.
     pub strace_pid: Option<i32>,
+    /// Per-comm structured syscall trace (`strace-comm=NAME`, max 15 chars).
+    /// When set, every syscall made by any process whose `comm` matches NAME
+    /// is logged.  Useful for tracing a target program when its PID isn't
+    /// known at boot time (e.g. tracing pcmanfm spawned by an init script).
+    pub strace_comm: Option<ArrayString<16>>,
     /// Trace `collect_ready` activity for this fd (and fd+1) — used to
     /// debug AF_UNIX listener starvation.  When set, every iteration
     /// over the fd in either the blocking or non-blocking epoll path

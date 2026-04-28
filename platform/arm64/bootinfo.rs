@@ -266,6 +266,7 @@ pub unsafe fn parse(dtb_paddr: PAddr) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        strace_comm: cmdline.strace_comm,
         epoll_trace_fd: cmdline.epoll_trace_fd,
         raw_cmdline,
     }
@@ -305,6 +306,7 @@ pub fn default_boot_info() -> BootInfo {
         init_path: None,
         debug_filter: ArrayString::new(),
         strace_pid: None,
+        strace_comm: None,
         epoll_trace_fd: None,
         raw_cmdline: ArrayString::new(),
     }
@@ -364,6 +366,7 @@ struct ParsedCmdline {
     init_path: Option<ArrayString<128>>,
     debug_filter: ArrayString<64>,
     strace_pid: Option<i32>,
+    strace_comm: Option<ArrayString<16>>,
     epoll_trace_fd: Option<i32>,
 }
 
@@ -381,6 +384,7 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
         init_path: None,
         debug_filter: ArrayString::new(),
         strace_pid: None,
+        strace_comm: None,
         epoll_trace_fd: None,
     };
 
@@ -422,6 +426,13 @@ fn parse_cmdline(s: &str) -> ParsedCmdline {
                 if let Ok(pid) = value.parse() {
                     info!("bootinfo: strace-pid = {}", pid);
                     result.strace_pid = Some(pid);
+                }
+            }
+            (Some("strace-comm"), Some(value)) => {
+                let mut s = ArrayString::new();
+                if s.try_push_str(value).is_ok() {
+                    info!("bootinfo: strace-comm = {}", value);
+                    result.strace_comm = Some(s);
                 }
             }
             (Some("epoll-trace-fd"), Some(value)) => {

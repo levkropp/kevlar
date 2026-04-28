@@ -762,6 +762,13 @@ static CURRENT_SYSCALL_NR: AtomicUsize = AtomicUsize::new(0);
 /// Set to 3 to trace Xorg during graphical desktop debugging.
 static STRACE_PID: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
+/// Process comm name to strace.  Empty = disabled.  Matches via
+/// `current_process().get_comm()`.  Useful when the target process's
+/// PID isn't known at boot (e.g. tracing pcmanfm which gets spawned
+/// by an init script after several other processes).
+static STRACE_COMM: SpinLock<[u8; 16]> = SpinLock::new([0u8; 16]);
+static STRACE_COMM_LEN: AtomicUsize = AtomicUsize::new(0);
+
 /// Enable syscall tracing for a specific PID. All syscalls from that PID
 /// will be logged to serial with arguments and results (like strace).
 pub fn set_strace_pid(pid: i32) {
@@ -769,6 +776,35 @@ pub fn set_strace_pid(pid: i32) {
     if pid != 0 {
         warn!("STRACE: enabled for PID {}", pid);
     }
+}
+
+/// Enable syscall tracing for any process whose comm matches `name`
+/// (max 15 chars + NUL — Linux convention for process comm).  When a
+/// process exec's into a binary with this comm, all of its syscalls
+/// are logged.  Useful for tracing a target program when its PID
+/// isn't known at boot time.
+pub fn set_strace_comm(name: &[u8]) {
+    let mut buf = STRACE_COMM.lock();
+    let len = core::cmp::min(name.len(), 15);
+    buf[..len].copy_from_slice(&name[..len]);
+    for b in &mut buf[len..] { *b = 0; }
+    STRACE_COMM_LEN.store(len, AtomOrd::Relaxed);
+    if len > 0 {
+        warn!("STRACE: enabled for comm={:?}",
+              core::str::from_utf8(&buf[..len]).unwrap_or("?"));
+    }
+}
+
+/// Returns true if the current process matches the strace-comm filter.
+fn current_process_matches_strace_comm() -> bool {
+    let len = STRACE_COMM_LEN.load(AtomOrd::Relaxed);
+    if len == 0 {
+        return false;
+    }
+    let buf = STRACE_COMM.lock();
+    let target = &buf[..len];
+    let comm = current_process().get_comm();
+    comm.len() == target.len() && comm.as_slice() == target
 }
 
 /// Read the current syscall number (called from page fault handler).
@@ -889,12 +925,17 @@ impl<'a> SyscallHandler<'a> {
         // the 5min test timeout while almost no useful work happened.
         // Re-enable explicitly via set_strace_pid() when needed.
         let strace_pid = STRACE_PID.load(core::sync::atomic::Ordering::Relaxed);
-        // Trace all syscalls for the target PID
-        let do_strace = strace_pid != 0 && current_process().pid().as_i32() == strace_pid;
+        // Trace all syscalls for the target PID, OR for the target comm
+        // (if strace-comm=NAME is set on the cmdline).  Comm-match is
+        // useful when the target's PID isn't known at boot.
+        let cur_pid = current_process().pid().as_i32();
+        let pid_match = strace_pid != 0 && cur_pid == strace_pid;
+        let comm_match = current_process_matches_strace_comm();
+        let do_strace = pid_match || comm_match;
         if do_strace {
             // Structured JSONL event for tools/strace-diff.py.
             debug::emit_force(&DebugEvent::SyscallEntry {
-                pid: strace_pid,
+                pid: cur_pid,
                 name: syscall_name_by_number(n),
                 number: n,
                 args: [a1, a2, a3, a4, a5, a6],
@@ -918,7 +959,7 @@ impl<'a> SyscallHandler<'a> {
                     Err(e) => (-(e.errno() as isize), Some(e.errno_name())),
                 };
                 debug::emit_force(&DebugEvent::SyscallExit {
-                    pid: strace_pid,
+                    pid: cur_pid,
                     name: syscall_name_by_number(n),
                     number: n,
                     result,
@@ -1043,7 +1084,7 @@ impl<'a> SyscallHandler<'a> {
         if do_strace {
             if let Ok(v) = &ret {
                 debug::emit_force(&DebugEvent::SyscallExit {
-                    pid: strace_pid,
+                    pid: cur_pid,
                     name: syscall_name_by_number(n),
                     number: n,
                     result: *v as isize,

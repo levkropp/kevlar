@@ -137,6 +137,7 @@ struct Cmdline {
     pub init_path: Option<ArrayString<128>>,
     pub debug_filter: ArrayString<64>,
     pub strace_pid: Option<i32>,
+    pub strace_comm: Option<ArrayString<16>>,
     pub raw_cmdline: ArrayString<512>,
 }
 
@@ -158,6 +159,7 @@ impl Cmdline {
         let mut init_path = None;
         let mut debug_filter = ArrayString::new();
         let mut strace_pid: Option<i32> = None;
+        let mut strace_comm: Option<ArrayString<16>> = None;
         if !s.is_empty() {
             for config in s.split(' ') {
                 if config.is_empty() {
@@ -240,6 +242,13 @@ impl Cmdline {
                             warn!("bootinfo: strace-pid value is not a valid integer: {}", value);
                         }
                     }
+                    (Some("strace-comm"), Some(value)) => {
+                        let mut s = ArrayString::new();
+                        if s.try_push_str(value).is_ok() {
+                            info!("bootinfo: strace-comm = {}", value);
+                            strace_comm = Some(s);
+                        }
+                    }
                     (Some("init"), Some(value)) => {
                         info!("bootinfo: init path = \"{}\"", value);
                         let mut s = ArrayString::new();
@@ -271,6 +280,7 @@ impl Cmdline {
             init_path,
             debug_filter,
             strace_pid,
+            strace_comm,
             raw_cmdline,
         }
     }
@@ -380,6 +390,7 @@ unsafe fn parse_multiboot2_info(header: &Multiboot2InfoHeader) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        strace_comm: cmdline.strace_comm,
         epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }
@@ -432,6 +443,7 @@ unsafe fn parse_multiboot_legacy_info(info: &MultibootLegacyInfo) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        strace_comm: cmdline.strace_comm,
         epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }
@@ -478,6 +490,7 @@ unsafe fn parse_linux_boot_params(boot_params: PAddr) -> BootInfo {
         init_path: cmdline.init_path,
         debug_filter: cmdline.debug_filter,
         strace_pid: cmdline.strace_pid,
+        strace_comm: cmdline.strace_comm,
         epoll_trace_fd: None,
         raw_cmdline: cmdline.raw_cmdline,
     }

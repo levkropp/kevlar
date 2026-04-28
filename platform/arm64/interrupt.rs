@@ -23,6 +23,7 @@ const EC_DATA_ABORT_CURR: u32 = 0b100101;   // Data abort from current EL
 const EC_INST_ABORT_LOWER: u32 = 0b100000;  // Instruction abort from lower EL
 const EC_INST_ABORT_CURR: u32 = 0b100001;   // Instruction abort from current EL
 const EC_FP_ASIMD: u32 = 0b000111;    // Access to Advanced SIMD / FP while CPACR.FPEN traps
+const EC_BRK_A64: u32 = 0b111100;     // BRK instruction (AArch64) — debug break
 
 /// Called from trap.S for synchronous exceptions.
 /// `from_user`: 0 = kernel, 1 = user.
@@ -53,6 +54,28 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
             // re-executes the faulting instruction.  See
             // platform/arm64/fp.rs for the state machine.
             super::fp::handle_fp_trap();
+        }
+        EC_BRK_A64 if from_user != 0 => {
+            // EL0 executed a BRK instruction.  Linux semantics: deliver
+            // SIGTRAP (signal 5) so user-space debuggers / handlers can
+            // observe.  musl libc uses `brk #1000` as `a_crash()` —
+            // executed at the END of abort() if SIGABRT was caught and
+            // ignored.  Without this case, our generic-EL0 fallthrough
+            // delivers a fatal SIGILL/SIGSEGV which masks the real
+            // SIGABRT cause.
+            //
+            // The ESR ISS field carries the BRK immediate (0x3e8 = 1000
+            // for musl's a_crash()).  We log it for diagnostics; the
+            // imm doesn't change signal disposition.
+            let pc = unsafe { (*frame).pc };
+            let imm = (esr & 0xffff) as u32;
+            log::warn!(
+                "EL0 BRK #{:#x} at pc={:#x} — delivering SIGTRAP",
+                imm, pc,
+            );
+            // Pass "BREAKPOINT" so handle_user_fault dispatches SIGTRAP
+            // (kernel/main.rs:149-153 maps this exception name → SIGTRAP).
+            handler().handle_user_fault("BREAKPOINT", pc as usize);
         }
         EC_DATA_ABORT_LOWER | EC_INST_ABORT_LOWER => {
             // User-space page fault.
@@ -124,6 +147,15 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
                 }
                 handler().handle_page_fault(unaligned_vaddr, pc as usize, reason);
             } else {
+                // Log the fault details via warn! BEFORE panicking — the
+                // panic_handler only prints "[PANIC] CPU=N at file:line"
+                // (PanicInfo::fmt can recursively crash on corrupt
+                // panics), so the panic!() format args get lost.  This
+                // ensures the pc/far/esr land on serial.
+                log::warn!(
+                    "KERNEL PAGE FAULT: cpu={} pc={:#x} far={:#x} esr={:#x}",
+                    crate::arch::cpu_id(), pc, far, esr,
+                );
                 panic!(
                     "kernel page fault: pc={:#x}, far={:#x}, esr={:#x}",
                     pc, far, esr

@@ -273,6 +273,14 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         info!("strace: enabling structured trace for pid={}", pid);
         syscalls::set_strace_pid(pid);
     }
+    // strace-comm=NAME — trace syscalls for any process whose comm
+    // matches.  Useful when the target's PID isn't known at boot
+    // (e.g. pcmanfm spawned by an init script after dbus / Xorg /
+    // openbox / tint2).
+    if let Some(ref comm) = bootinfo.strace_comm {
+        info!("strace: enabling structured trace for comm={}", comm.as_str());
+        syscalls::set_strace_comm(comm.as_bytes());
+    }
 
     // Per-fd epoll activity trace: when `epoll-trace-fd=N` is on the
     // cmdline, every iteration of `collect_ready` that touches fd=N
