@@ -87,6 +87,11 @@ LXDE_PACKAGES = [
     # xdg-open under the hood.  Without it, exec'ing the helper
     # fails and pcmanfm aborts.
     "xdg-utils",
+    # update-desktop-database + .desktop helpers — pcmanfm reads
+    # /usr/share/applications/*.desktop to map MIME types → apps
+    # for "open with" defaults.  When the cache is missing it
+    # asserts on first lookup.
+    "desktop-file-utils",
     # Utilities
     "xterm",
     # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
