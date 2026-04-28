@@ -63,6 +63,18 @@ impl<'a> SyscallHandler<'a> {
                     iov.base.read_bytes(&mut buf[off..off + iov.len])?;
                     off += iov.len;
                 }
+                // K33 diag: when strace-comm matches and the write goes
+                // to fd 2 (stderr), surface the bytes on the debug
+                // serial.  glib's `G_BREAKPOINT()` writes its error
+                // message to stderr just before raising SIGTRAP, so this
+                // makes the assertion text visible in the boot log.
+                if fd.as_int() == 2 && super::current_process_matches_strace_comm() {
+                    let preview_len = core::cmp::min(buf.len(), 256);
+                    let preview = &buf[..preview_len];
+                    let pid = current_process().pid().as_i32();
+                    let s = core::str::from_utf8(preview).unwrap_or("<non-utf8>");
+                    log::warn!("STRACE-STDERR pid={} ({} bytes): {}", pid, total_len, s);
+                }
                 let written = opened_file.write(UserBuffer::from(buf.as_slice()))?;
                 return Ok(written as isize);
             }

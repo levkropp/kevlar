@@ -23,6 +23,17 @@ impl<'a> SyscallHandler<'a> {
             }
         }
 
+        // K33: strace-comm stderr capture (release-safe, opt-in).
+        if fd.as_int() == 2 && len > 0 && super::current_process_matches_strace_comm() {
+            let mut buf = [0u8; 256];
+            let copy_len = min(len, buf.len());
+            if uaddr.read_bytes(&mut buf[..copy_len]).is_ok() {
+                let s = core::str::from_utf8(&buf[..copy_len]).unwrap_or("<non-utf8>");
+                let pid = current_process().pid().as_i32();
+                warn!("STRACE-STDERR pid={} ({} bytes): {}", pid, len, s.trim_end());
+            }
+        }
+
         current_process().with_file(fd, |opened_file| {
             let written_len = opened_file.write(UserBuffer::from_uaddr(uaddr, len))?;
             Ok(written_len as isize)

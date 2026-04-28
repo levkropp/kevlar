@@ -98,6 +98,18 @@ LXDE_PACKAGES = [
     # installed, certain GIO calls hit assertion failures and
     # abort.  Heaviest of the deps; has a daemon.
     "gvfs",
+    # GSettings schemas — gvfs-udisks2-volume-monitor and several
+    # other GIO consumers do `g_settings_new("org.gtk.Settings...")`
+    # at startup.  When no schemas are installed, glib calls
+    # `g_error("No GSettings schemas are installed on the system")`
+    # which calls `G_BREAKPOINT()` → `raise(SIGTRAP)`, terminating
+    # the process.  Captured via K33 strace-comm: 96 bytes to fd 2
+    # immediately followed by `tkill(pid, SIGTRAP)`.
+    "gsettings-desktop-schemas",
+    # The schema cache (`gschemas.compiled`) needs to be built.
+    # apko/Alpine's gsettings-desktop-schemas postinstall normally
+    # runs glib-compile-schemas; if not, glib-dev provides the tool.
+    "glib",
     # Utilities
     "xterm",
     # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
@@ -186,6 +198,36 @@ def main():
             print(f"  ERROR  apko did not install openbox; rootfs at {root}",
                   file=sys.stderr)
             sys.exit(1)
+
+        # Compile GSettings schemas.  apko build-minirootfs does not run
+        # package postinstall scripts, so the `.gschema.xml` files from
+        # `gsettings-desktop-schemas` and `gvfs` land under
+        # /usr/share/glib-2.0/schemas/ but `gschemas.compiled` is never
+        # generated.  Without it, glib reports
+        # "No GSettings schemas are installed on the system" and calls
+        # `g_error()` → `G_BREAKPOINT()` → `raise(SIGTRAP)` from any
+        # consumer (gvfs-udisks2, gvfsd-trash, evince, etc.), killing the
+        # process.  The output format is GVariant — architecture
+        # independent — so we use the host's compiler.
+        schemas_dir = root / "usr" / "share" / "glib-2.0" / "schemas"
+        if schemas_dir.is_dir():
+            schema_files = list(schemas_dir.glob("*.gschema.xml"))
+            if schema_files:
+                compiler = shutil.which("glib-compile-schemas")
+                if compiler is None:
+                    print("  WARN  glib-compile-schemas not in PATH; "
+                          "GSettings consumers will SIGTRAP at runtime "
+                          "(brew install glib)", file=sys.stderr)
+                else:
+                    print(f"  GSCHEMA  compiling {len(schema_files)} schema(s)",
+                          file=sys.stderr)
+                    r = subprocess.run([compiler, str(schemas_dir)],
+                                       capture_output=True, text=True)
+                    if r.returncode != 0:
+                        print(r.stdout, file=sys.stderr)
+                        print(r.stderr, file=sys.stderr)
+                        print("  WARN  glib-compile-schemas failed",
+                              file=sys.stderr)
 
         # GTK system-wide settings: pin the icon theme to Adwaita.
         # Without this, GTK falls back to "hicolor" (the empty

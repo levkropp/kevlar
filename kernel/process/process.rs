@@ -18,7 +18,7 @@ use crate::{
         elf::{Elf, ProgramHeader},
         init_stack::{estimate_user_init_stack_size, init_user_stack, Auxv},
         process_group::{PgId, ProcessGroup},
-        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGCHLD, SIGCONT, SIGKILL, SIGSTOP},
+        signal::{SigAction, SigSet, Signal, SignalDelivery, SignalMask, SIGABRT, SIGCHLD, SIGCONT, SIGILL, SIGKILL, SIGSEGV, SIGSTOP, SIGTRAP},
         switch, UserVAddr, JOIN_WAIT_QUEUE, SCHEDULER, SchedulerPolicy, WaitQueue,
     },
     random::read_secure_random,
@@ -1601,7 +1601,15 @@ impl Process {
         // XFCE startup — when this prints "from=N to=M" we can trace
         // the sender's PID back to a userspace process or a kernel
         // fault-handler path.
-        if signal == SIGKILL {
+        // K33: also log SIGTRAP/SIGSEGV/SIGABRT/SIGILL — same shape, used
+        // to track the gvfs-udisks2 SIGTRAP that has no preceding EL0
+        // unhandled exception (so it must be coming from a syscall path).
+        if signal == SIGKILL
+            || signal == SIGTRAP
+            || signal == SIGSEGV
+            || signal == SIGABRT
+            || signal == SIGILL
+        {
             let sender_pid = crate::process::try_current_pid();
             let sender_name = if sender_pid > 0 {
                 // Best-effort cmdline of sender.
@@ -1614,9 +1622,17 @@ impl Process {
                 alloc::string::String::from("kernel")
             };
             let target_name = self.cmdline().as_str().chars().take(48).collect::<alloc::string::String>();
+            let sig_label = match signal {
+                SIGKILL => "SIGKILL",
+                SIGTRAP => "SIGTRAP",
+                SIGSEGV => "SIGSEGV",
+                SIGABRT => "SIGABRT",
+                SIGILL  => "SIGILL",
+                _       => "SIG?",
+            };
             warn!(
-                "SIGKILL: from pid={} ({:?}) to pid={} ({:?})",
-                sender_pid, sender_name, self.pid().as_i32(), target_name,
+                "{}: from pid={} ({:?}) to pid={} ({:?})",
+                sig_label, sender_pid, sender_name, self.pid().as_i32(), target_name,
             );
         }
 

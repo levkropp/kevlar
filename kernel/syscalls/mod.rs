@@ -796,7 +796,7 @@ pub fn set_strace_comm(name: &[u8]) {
 }
 
 /// Returns true if the current process matches the strace-comm filter.
-fn current_process_matches_strace_comm() -> bool {
+pub(crate) fn current_process_matches_strace_comm() -> bool {
     let len = STRACE_COMM_LEN.load(AtomOrd::Relaxed);
     if len == 0 {
         return false;
@@ -804,7 +804,11 @@ fn current_process_matches_strace_comm() -> bool {
     let buf = STRACE_COMM.lock();
     let target = &buf[..len];
     let comm = current_process().get_comm();
-    comm.len() == target.len() && comm.as_slice() == target
+    // Prefix-match: Linux comm is truncated to TASK_COMM_LEN=16, so
+    // "gvfs-udisks2-volume-monitor" becomes "gvfs-udisks2-vol".
+    // Allow the user to write `strace-comm=gvfs-udisks2` and still
+    // catch it.
+    comm.as_slice().starts_with(target)
 }
 
 /// Read the current syscall number (called from page fault handler).
