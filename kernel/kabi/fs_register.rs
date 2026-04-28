@@ -75,6 +75,7 @@ unsafe fn cstr_equals(a: *const u8, b: &[u8]) -> bool {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn register_filesystem(fs_type: *mut c_void) -> c_int {
+    log::warn!("kabi-trace: register_filesystem({:p}) entered", fs_type);
     if fs_type.is_null() {
         return -22; // -EINVAL
     }

@@ -362,7 +362,10 @@ crate::ksym_static!(fs_bio_set);
 pub extern "C" fn kobject_init_and_add(_kobj: *mut c_void,
                                        _ktype: *mut c_void,
                                        _parent: *mut c_void,
-                                       _fmt: *const u8) -> c_int { 0 }
+                                       _fmt: *const u8) -> c_int {
+    log::warn!("kabi-trace: kobject_init_and_add (stub returns 0)");
+    0
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kset_register(_kset: *mut c_void) -> c_int { 0 }
@@ -461,6 +464,7 @@ pub extern "C" fn crc32c(_crc: u32, _data: *const c_void, _len: usize) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn crypto_alloc_acomp(_alg_name: *const u8, _type_: u32,
                                      _mask: u32) -> *mut c_void {
+    log::warn!("kabi-trace: crypto_alloc_acomp (stub) — null");
     core::ptr::null_mut()
 }
 
@@ -530,6 +534,7 @@ pub extern "C" fn zstd_get_error_name(_code: usize) -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn zstd_init_dstream(_max_window_size: usize, _workspace: *mut c_void,
                                     _workspace_size: usize) -> *mut c_void {
+    log::warn!("kabi-trace: zstd_init_dstream (stub) — null");
     core::ptr::null_mut()
 }
 #[unsafe(no_mangle)]
@@ -562,7 +567,10 @@ ksym!(zstd_is_error);
 #[unsafe(no_mangle)]
 pub extern "C" fn alloc_workqueue_noprof(_fmt: *const u8, _flags: u32,
                                          _max_active: c_int) -> *mut c_void {
-    core::ptr::null_mut()
+    log::warn!("kabi-trace: alloc_workqueue_noprof (stub) — fake handle");
+    // Return non-null so callers' "if (!wq)" check passes.  v1
+    // doesn't actually run the queue; queue_work_on returns false.
+    super::alloc::kmalloc(64, 0)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn destroy_workqueue(_wq: *mut c_void) {}
@@ -579,12 +587,23 @@ pub extern "C" fn kthread_destroy_worker(_w: *mut c_void) {}
 #[unsafe(no_mangle)]
 pub extern "C" fn kthread_queue_work(_w: *mut c_void,
                                      _kw: *mut c_void) -> bool { false }
+// shrinker_alloc returns a `struct shrinker *` that the caller
+// writes fields into (count_objects, scan_objects, seeks, …) and
+// then passes to shrinker_register.  We don't run shrinkers
+// (memory pressure callbacks); a 256-byte heap buffer is plenty
+// of room for the caller's writes and harmless because
+// shrinker_register never actually invokes the callbacks.
 #[unsafe(no_mangle)]
 pub extern "C" fn shrinker_alloc(_flags: u32, _fmt: *const u8) -> *mut c_void {
-    core::ptr::null_mut()
+    log::warn!("kabi: shrinker_alloc (stub) — 256-byte fake handle");
+    super::alloc::kmalloc(256, 0)
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn shrinker_free(_shrinker: *mut c_void) {}
+pub extern "C" fn shrinker_free(shrinker: *mut c_void) {
+    if !shrinker.is_null() {
+        super::alloc::kfree(shrinker);
+    }
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn shrinker_register(_shrinker: *mut c_void) -> c_int { 0 }
 
