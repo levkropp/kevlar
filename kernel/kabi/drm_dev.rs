@@ -188,8 +188,10 @@ const DRM_IOCTL_NR_VERSION: u32 = 0x00;
 const DRM_IOCTL_NR_GET_CAP: u32 = 0x0c;
 const DRM_IOCTL_NR_MODE_GETRESOURCES: u32 = 0xA0;
 const DRM_IOCTL_NR_MODE_GETCRTC: u32 = 0xA1;
+const DRM_IOCTL_NR_MODE_SETCRTC: u32 = 0xA2;
 const DRM_IOCTL_NR_MODE_GETENCODER: u32 = 0xA6;
 const DRM_IOCTL_NR_MODE_GETCONNECTOR: u32 = 0xA7;
+const DRM_IOCTL_NR_MODE_ADDFB2: u32 = 0xB8;
 
 // Synthesized object IDs.  drmModeGet{Crtc,Connector,Encoder}
 // from libdrm walks these in K26+.
@@ -237,6 +239,7 @@ pub struct DrmModeCardRes {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct DrmModeModeinfo {
     clock: u32,
     hdisplay: u16,
@@ -296,6 +299,73 @@ struct DrmModeGetConnector {
     subpixel: u32,
     pad: u32,
 }
+
+#[repr(C)]
+struct DrmModeFbCmd2 {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+    flags: u32,
+    handles: [u32; 4],
+    pitches: [u32; 4],
+    offsets: [u32; 4],
+    modifier: [u64; 4],
+}
+
+// VESA 1024x768@60Hz timing.  Advertised by GETCONNECTOR when
+// userspace asks for modes.
+static DEFAULT_MODE: DrmModeModeinfo = DrmModeModeinfo {
+    clock: 65000,
+    hdisplay: 1024,
+    hsync_start: 1048,
+    hsync_end: 1184,
+    htotal: 1344,
+    hskew: 0,
+    vdisplay: 768,
+    vsync_start: 771,
+    vsync_end: 777,
+    vtotal: 806,
+    vscan: 0,
+    vrefresh: 60,
+    flags: 0x5,   // DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC
+    type_: 0x48,  // DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER
+    name: *b"1024x768\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+};
+
+// ── Framebuffer registry (K27 ADDFB2) ─────────────────────────
+
+#[derive(Clone, Copy)]
+struct FbInfo {
+    fb_id: u32,
+    width: u32,
+    height: u32,
+    pixel_format: u32,
+}
+
+struct FbRegistry(alloc::vec::Vec<FbInfo>);
+unsafe impl Send for FbRegistry {}
+
+static NEXT_FB_ID: AtomicU32 = AtomicU32::new(1);
+static FBS: kevlar_platform::spinlock::SpinLock<FbRegistry> =
+    kevlar_platform::spinlock::SpinLock::new(FbRegistry(alloc::vec::Vec::new()));
+
+// ── CRTC current state (K27 SETCRTC) ──────────────────────────
+
+#[derive(Clone, Copy)]
+struct CrtcState {
+    fb_id: u32,
+    mode_valid: u32,
+    mode: DrmModeModeinfo,
+    x: u32,
+    y: u32,
+}
+
+struct CrtcStateHolder(Option<CrtcState>);
+unsafe impl Send for CrtcStateHolder {}
+
+static CRTC_STATE: kevlar_platform::spinlock::SpinLock<CrtcStateHolder> =
+    kevlar_platform::spinlock::SpinLock::new(CrtcStateHolder(None));
 
 fn copy_to_user_truncate(src: &[u8], dst: *mut u8, len: &mut usize) {
     if !dst.is_null() && *len > 0 {
@@ -413,12 +483,21 @@ fn drm_ioctl_mode_getcrtc(arg: usize) -> isize {
     if c.crtc_id != KABI_CRTC_ID_BASE {
         return EINVAL;
     }
-    c.fb_id = 0;
-    c.x = 0;
-    c.y = 0;
+    let state = CRTC_STATE.lock().0;
+    if let Some(s) = state {
+        c.fb_id = s.fb_id;
+        c.x = s.x;
+        c.y = s.y;
+        c.mode_valid = s.mode_valid;
+        c.mode = s.mode;
+    } else {
+        c.fb_id = 0;
+        c.x = 0;
+        c.y = 0;
+        c.mode_valid = 0;
+        c.mode = unsafe { core::mem::zeroed() };
+    }
     c.gamma_size = 0;
-    c.mode_valid = 0;
-    c.mode = unsafe { core::mem::zeroed() };
     unsafe { core::ptr::write(arg as *mut DrmModeCrtc, c); }
     0
 }
@@ -456,7 +535,17 @@ fn drm_ioctl_mode_getconnector(arg: usize) -> isize {
             );
         }
     }
-    c.count_modes = 0;
+    // K27: advertise one default mode (1024x768@60Hz) when
+    // userspace allocates room.
+    if c.modes_ptr != 0 && c.count_modes > 0 {
+        unsafe {
+            core::ptr::write_unaligned(
+                c.modes_ptr as *mut DrmModeModeinfo,
+                DEFAULT_MODE,
+            );
+        }
+    }
+    c.count_modes = 1;
     c.count_props = 0;
     c.count_encoders = 1;
     c.encoder_id = KABI_ENCODER_ID_BASE;
@@ -468,6 +557,53 @@ fn drm_ioctl_mode_getconnector(arg: usize) -> isize {
     c.subpixel = 0;
     c.pad = 0;
     unsafe { core::ptr::write(arg as *mut DrmModeGetConnector, c); }
+    0
+}
+
+fn drm_ioctl_mode_addfb2(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut cmd = unsafe { core::ptr::read(arg as *const DrmModeFbCmd2) };
+    let id = NEXT_FB_ID.fetch_add(1, Ordering::Relaxed);
+    let info = FbInfo {
+        fb_id: id,
+        width: cmd.width,
+        height: cmd.height,
+        pixel_format: cmd.pixel_format,
+    };
+    FBS.lock().0.push(info);
+    cmd.fb_id = id;
+    log::info!(
+        "kabi: MODE_ADDFB2: fb_id={} {}x{} format={:#x}",
+        info.fb_id, info.width, info.height, info.pixel_format,
+    );
+    unsafe { core::ptr::write(arg as *mut DrmModeFbCmd2, cmd); }
+    0
+}
+
+fn drm_ioctl_mode_setcrtc(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let cmd = unsafe { core::ptr::read(arg as *const DrmModeCrtc) };
+    if cmd.crtc_id != KABI_CRTC_ID_BASE {
+        return EINVAL;
+    }
+    *CRTC_STATE.lock() = CrtcStateHolder(Some(CrtcState {
+        fb_id: cmd.fb_id,
+        mode_valid: cmd.mode_valid,
+        mode: cmd.mode,
+        x: cmd.x,
+        y: cmd.y,
+    }));
+    let mode_name_str = core::str::from_utf8(&cmd.mode.name)
+        .unwrap_or("?")
+        .trim_end_matches('\0');
+    log::info!(
+        "kabi: MODE_SETCRTC: crtc=0x{:x} fb={} mode_valid={} mode={:?}",
+        cmd.crtc_id, cmd.fb_id, cmd.mode_valid, mode_name_str,
+    );
     0
 }
 
@@ -487,8 +623,10 @@ pub extern "C" fn drm_ioctl(
         DRM_IOCTL_NR_GET_CAP => drm_ioctl_get_cap(arg),
         DRM_IOCTL_NR_MODE_GETRESOURCES => drm_ioctl_mode_getresources(arg),
         DRM_IOCTL_NR_MODE_GETCRTC => drm_ioctl_mode_getcrtc(arg),
+        DRM_IOCTL_NR_MODE_SETCRTC => drm_ioctl_mode_setcrtc(arg),
         DRM_IOCTL_NR_MODE_GETENCODER => drm_ioctl_mode_getencoder(arg),
         DRM_IOCTL_NR_MODE_GETCONNECTOR => drm_ioctl_mode_getconnector(arg),
+        DRM_IOCTL_NR_MODE_ADDFB2 => drm_ioctl_mode_addfb2(arg),
         _ => ENOTTY,
     }
 }

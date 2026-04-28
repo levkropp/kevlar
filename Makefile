@@ -971,8 +971,11 @@ test-userspace-drm:
 	 && grep -q 'USERSPACE-DRM: getcrtc id=0x200 mode_valid=0' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: getenc id=0x400 type=0 crtc=0x200' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: getconn id=0x300 type=1 connection=1 enc=0x400' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: getconn.modes count=1 mode0=1024x768 1024x768@60Hz' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: addfb2 fb_id=1' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: setcrtc rc=0' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: done' /tmp/kevlar-test-userspace-drm.log; then \
-	    echo "TEST_PASS: kABI K22+K25+K26 — DRM ioctl path verified (VERSION + GETRESOURCES + per-ID walk)"; \
+	    echo "TEST_PASS: kABI K22+K25+K26+K27 — full ghost-modesetting path verified"; \
 	else \
 	    echo "TEST_FAIL: missing expected K22 markers"; \
 	    grep -E 'USERSPACE-DRM|kabi|panic' /tmp/kevlar-test-userspace-drm.log | head -30; \
