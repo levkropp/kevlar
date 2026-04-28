@@ -1113,6 +1113,10 @@ def compile_all_local_arm64(cc):
         # K22: opens /dev/dri/card0 and issues DRM_IOCTL_VERSION,
         # validating the K21 ioctl dispatcher from real userspace.
         ("testing/test_kabi_drm.c",     "test-kabi-drm",     []),
+        # K24: opens /dev/input/event0 and issues EVIOCGNAME.
+        # Validates that K23's virtio_input.probe + K24's
+        # input_register_device wired into Kevlar's evdev tree.
+        ("testing/test_kabi_input.c",   "test-kabi-input",   []),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
@@ -1840,6 +1844,19 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
             shutil.copy2(kabi_drm_src, dest)
             os.chmod(str(dest), 0o755)
             log("BIN", f"installed /usr/bin/test-kabi-drm ({kabi_drm_src.stat().st_size} bytes)")
+
+    # ── K24 kABI input userspace test binary ──
+    if local_arm64_bins:
+        kabi_input_src = CACHE / "local-bin-arm64" / "test-kabi-input"
+        if kabi_input_src.is_file():
+            usr_bin = ROOTFS / "usr" / "bin"
+            usr_bin.mkdir(parents=True, exist_ok=True)
+            dest = usr_bin / "test-kabi-input"
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(kabi_input_src, dest)
+            os.chmod(str(dest), 0o755)
+            log("BIN", f"installed /usr/bin/test-kabi-input ({kabi_input_src.stat().st_size} bytes)")
 
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")

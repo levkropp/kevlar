@@ -231,6 +231,18 @@ pub fn registered_devices() -> alloc::vec::Vec<Arc<InputDevice>> {
     INPUT_DEVICES.lock().clone()
 }
 
+/// Register an input device on behalf of a kABI-loaded Linux module
+/// (K24).  Mirrors the native virtio_input driver's
+/// `INPUT_DEVICES.lock().push(...)` step at the end of probe, but
+/// without the rest of the driver-side machinery.
+pub fn register_kabi_input_device(
+    name: alloc::string::String,
+) -> Arc<InputDevice> {
+    let dev = InputDevice::new(name);
+    INPUT_DEVICES.lock().push(dev.clone());
+    dev
+}
+
 /// Driver-private state for a single virtio-input device.  Owns the
 /// virtqueue + buffer-pool and the IRQ refill loop.
 struct VirtioInputDriver {

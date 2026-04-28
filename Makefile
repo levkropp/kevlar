@@ -927,6 +927,29 @@ test-module-k23: build
 	    false; \
 	fi
 
+# `make test-userspace-input` — boot with INIT_SCRIPT=test-kabi-input
+# and verify /dev/input/event0 is open()-able + EVIOCGNAME returns
+# the kABI device name.  K24 milestone.
+.PHONY: test-userspace-input
+test-userspace-input:
+	$(MAKE) build INIT_SCRIPT=/usr/bin/test-kabi-input
+	$(PROGRESS) "TEST" "kABI userspace input path (/dev/input/event0)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-userspace-input.log; true
+	@echo ""
+	@if grep -q 'USERSPACE-INPUT: starting' /tmp/kevlar-test-userspace-input.log \
+	 && grep -q 'USERSPACE-INPUT: open ok' /tmp/kevlar-test-userspace-input.log \
+	 && grep -q 'USERSPACE-INPUT: name=kabi-virtio-input' /tmp/kevlar-test-userspace-input.log \
+	 && grep -q 'USERSPACE-INPUT: done' /tmp/kevlar-test-userspace-input.log; then \
+	    echo "TEST_PASS: kABI K24 — userspace evdev path verified"; \
+	else \
+	    echo "TEST_FAIL: missing expected K24 markers"; \
+	    grep -E 'USERSPACE-INPUT|kabi|panic' /tmp/kevlar-test-userspace-input.log | head -30; \
+	    false; \
+	fi
+
 # `make test-userspace-drm` — boot with INIT_SCRIPT=test-kabi-drm and
 # verify the userspace DRM ioctl path against /dev/dri/card0.  Drives
 # the FULL syscall path: sys_openat → VFS → tmpfs lookup → K4

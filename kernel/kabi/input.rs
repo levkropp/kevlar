@@ -29,6 +29,23 @@ pub extern "C" fn input_free_device(dev: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn input_register_device(_dev: *mut c_void) -> i32 {
+    // K24: hand off to Kevlar's existing evdev infrastructure.
+    // /dev/input/event0..3 are statically registered at boot; the
+    // EvdevFile resolves to the i-th entry of
+    // virtio_input::registered_devices(), so a successful push here
+    // makes /dev/input/event0 (or eventN for the Nth registration)
+    // userspace-visible.
+    let name = alloc::string::String::from("kabi-virtio-input");
+    let arc_dev = virtio_input::register_kabi_input_device(name);
+    let n = virtio_input::registered_devices().len();
+    let dev_name = arc_dev.name.lock().clone();
+    log::info!(
+        "kabi: input_register_device: registered '{}' as \
+         /dev/input/event{} (total devices: {})",
+        dev_name,
+        n - 1,
+        n,
+    );
     0
 }
 
