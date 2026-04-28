@@ -53,3 +53,14 @@ pub struct FileOperationsShim {
         extern "C" fn(*mut InodeShim, *mut FileShim) -> i32,
     >,
 }
+
+/// Linux's `noop_llseek` — file_operations.llseek slot for files
+/// that don't support seeking.  Returns the current offset
+/// unchanged.  Drivers like cirrus-qemu / drm assign this to
+/// their fops table even if they don't seek.
+#[unsafe(no_mangle)]
+pub extern "C" fn noop_llseek(_filp: *mut FileShim, _off: i64, _whence: i32) -> i64 {
+    0
+}
+
+crate::ksym!(noop_llseek);

@@ -640,6 +640,31 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k17` — load /lib/modules/cirrus-qemu.ko:
+# Ubuntu's KMS driver for QEMU emulated Cirrus VGA.  88 undefs
+# (81 net new) across drm core / KMS / GEM-shadow / PCI / mmio
+# tracepoints.  Real driver — init_module registers a PCI
+# driver and returns 0.  Probe doesn't fire (no PCI bus walking
+# yet — K20+).
+.PHONY: test-module-k17
+test-module-k17: build
+	$(PROGRESS) "TEST" "kABI K17 demo (Ubuntu cirrus-qemu.ko + 81 DRM core/KMS/PCI stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k17.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/cirrus-qemu.ko' /tmp/kevlar-test-module-k17.log \
+	 && grep -q 'kabi: loaded /lib/modules/cirrus-qemu.ko' /tmp/kevlar-test-module-k17.log \
+	 && grep -q 'kabi: __pci_register_driver (stub)' /tmp/kevlar-test-module-k17.log \
+	 && grep -q 'kabi: cirrus init_module returned 0' /tmp/kevlar-test-module-k17.log; then \
+	    echo "TEST_PASS: kABI K17 — Ubuntu cirrus-qemu.ko loaded with DRM core / KMS / PCI stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K17 markers"; \
+	    grep -E 'kabi|cirrus|panic' /tmp/kevlar-test-module-k17.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k16` — load /lib/modules/drm_dma_helper.ko:
 # Ubuntu's DMA-coherent GEM buffer helper.  79 undefs (32 net
 # new) across DMA API, DRM GEM/prime/atomic, mm helpers, format/

@@ -84,3 +84,84 @@ pub extern "C" fn drm_gem_object_lookup(
 }
 
 ksym!(drm_gem_object_lookup);
+
+// ── K17 helpers (cirrus-qemu surface) ─────────────────────────
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_format_info(_format: u32) -> *const c_void {
+    core::ptr::null()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_format_info_min_pitch(
+    _info: *const c_void,
+    _plane: i32,
+    _buffer_width: u32,
+) -> u64 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_fb_clip_offset(
+    _pitch: u32,
+    _format: *const c_void,
+    _clip: *const c_void,
+) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_fb_memcpy(
+    _dst: *mut c_void,
+    _dst_pitch: *const u32,
+    _src: *const c_void,
+    _fb: *const c_void,
+    _clip: *const c_void,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_set_preferred_mode(
+    _connector: *mut c_void,
+    _hpref: i32,
+    _vpref: i32,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_helper_probe_single_connector_modes(
+    _connector: *mut c_void,
+    _max_width: u32,
+    _max_height: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_add_modes_noedid(
+    _connector: *mut c_void,
+    _hdisplay: i32,
+    _vdisplay: i32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_client_setup(
+    _dev: *mut c_void,
+    _format: *const c_void,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_mode_config_reset(_dev: *mut c_void) {}
+
+ksym!(drm_format_info);
+ksym!(drm_format_info_min_pitch);
+ksym!(drm_fb_clip_offset);
+ksym!(drm_fb_memcpy);
+ksym!(drm_set_preferred_mode);
+ksym!(drm_helper_probe_single_connector_modes);
+ksym!(drm_add_modes_noedid);
+ksym!(drm_client_setup);
+ksym!(drm_mode_config_reset);

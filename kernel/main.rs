@@ -873,6 +873,27 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi drm_dma_helper.ko load");
     }
 
+    // K17 — load /lib/modules/cirrus-qemu.ko: Ubuntu's KMS driver
+    // for QEMU's emulated Cirrus VGA.  88 undefs (81 net new)
+    // across drm core / lifecycle (12), drm_kms atomic + objects
+    // (31), drm_gem shadow + shmem (11), PCI surface (6),
+    // mmio tracepoints (8), drm helper extensions (9), and misc
+    // (_dev_warn / noop_llseek / logic_outb).  init_module
+    // registers a PCI driver and returns 0 (probe doesn't fire —
+    // no PCI bus walking yet, K20+).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/cirrus-qemu.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/cirrus-qemu.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: cirrus init_module returned {}", rc),
+                None => warn!("kabi: init_module not found in cirrus-qemu.ko"),
+            },
+            Err(e) => warn!("kabi: cirrus-qemu load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi cirrus-qemu.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

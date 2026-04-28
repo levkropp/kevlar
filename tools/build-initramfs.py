@@ -1772,6 +1772,26 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(drm_dma_helper_src, dest)
         log("MOD", f"installed /lib/modules/drm_dma_helper.ko ({drm_dma_helper_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K17 target: cirrus-qemu.ko (first real DRM driver,
+    # Ubuntu's KMS driver for QEMU emulated Cirrus VGA).  88
+    # undefs (81 net new) across drm core / KMS / GEM-shadow /
+    # PCI / mmio tracepoints.  init_module registers a PCI
+    # driver and returns 0; probe doesn't fire (K20+).
+    cirrus_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "tiny" / "cirrus-qemu.ko"
+    if not cirrus_src.exists():
+        # Fall back to non-tiny path — Ubuntu has shipped under both.
+        cirrus_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+            "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "cirrus-qemu.ko"
+    if cirrus_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "cirrus-qemu.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(cirrus_src, dest)
+        log("MOD", f"installed /lib/modules/cirrus-qemu.ko ({cirrus_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

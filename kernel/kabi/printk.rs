@@ -112,3 +112,28 @@ pub unsafe extern "C" fn __warn_printk(fmt: *const c_char, mut args: ...) -> i32
 }
 
 ksym!(__warn_printk);
+
+/// Linux's `_dev_warn(dev, fmt, ...)` — variadic dev_warn.
+/// Mirrors `_dev_err`; logs at warn level instead of error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _dev_warn(
+    _dev: *const core::ffi::c_void,
+    fmt: *const c_char,
+    mut args: ...
+) -> i32 {
+    if fmt.is_null() {
+        return 0;
+    }
+    let mut buf = [0u8; 512];
+    let n = {
+        let mut sink = Sink::new(&mut buf);
+        unsafe { format_into(&mut sink, fmt, &mut args) };
+        sink.pos()
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log::warn!("[mod-dev-warn] {}", s.trim_end_matches('\n'));
+    }
+    n as i32
+}
+
+ksym!(_dev_warn);

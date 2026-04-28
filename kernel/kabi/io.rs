@@ -121,3 +121,10 @@ ksym!(ioremap_wc);
 ksym!(ioremap_nocache);
 ksym!(ioremap_cache);
 ksym!(iounmap);
+
+/// Legacy x86 port-I/O helper.  cirrus-qemu inherits a reference
+/// from i386 vga code; on aarch64 it's a no-op (no port I/O).
+#[unsafe(no_mangle)]
+pub extern "C" fn logic_outb(_value: u8, _port: u16) {}
+
+ksym!(logic_outb);
