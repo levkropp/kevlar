@@ -360,6 +360,19 @@ int main(void) {
                 }
             }
             fflush(stdout);
+
+            // Persist /tmp/lxde-session.log + Xorg.0.log to /var/log/
+            // on the disk so the iterate-lxde extractor can pull them
+            // out via debugfs after shutdown.  sh_run() chroots into
+            // ROOT first, so paths here are inside the disk's
+            // filesystem.  /tmp is tmpfs (mounted at ROOT "/tmp");
+            // /var/log lives on the ext2 disk image.  Xorg writes to
+            // /tmp/Xorg.0.log when /var/log isn't pre-created.
+            sh_run("mkdir -p /var/log "
+                   "&& cp -f /tmp/lxde-session.log "
+                   "/var/log/lxde-session.log 2>/dev/null; "
+                   "cp -f /tmp/Xorg.0.log "
+                   "/var/log/Xorg.0.log 2>/dev/null; true", 3000);
         }
     }
 

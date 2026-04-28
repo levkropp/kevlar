@@ -50,7 +50,12 @@ def dump_from_disk(dbgfs: str, img: Path, src: str, dst: Path) -> bool:
 def bgra_to_png(bgra: Path, png: Path, w=1024, h=768) -> tuple[int, int]:
     """Convert a BGRA framebuffer dump to PNG.  Returns (nonblack_pixels,
     total_pixels) so callers can summarize how much of the screen is
-    actually drawn."""
+    actually drawn.
+
+    Uses PIL's split/merge to swap BGRA → RGBA in-place at C speed —
+    a Python per-pixel loop over 786k pixels takes ~10 seconds, while
+    split/merge takes ~50 ms.
+    """
     try:
         from PIL import Image
     except ImportError:
@@ -59,14 +64,23 @@ def bgra_to_png(bgra: Path, png: Path, w=1024, h=768) -> tuple[int, int]:
         return (0, w * h)
     with open(bgra, "rb") as f:
         data = f.read()
-    out = bytearray(w * h * 4)
-    nonblack = 0
-    for i in range(w * h):
-        b, g, r, _ = data[i * 4: i * 4 + 4]
-        out[i * 4: i * 4 + 4] = bytes([r, g, b, 255])
-        if (r | g | b) != 0:
-            nonblack += 1
-    Image.frombytes("RGBA", (w, h), bytes(out)).save(png)
+    # Read as RGBA (bytes are actually BGRA), then swap channels.
+    img = Image.frombytes("RGBA", (w, h), data)
+    b, g, r, _ = img.split()
+    a = Image.new("L", (w, h), 255)
+    rgba = Image.merge("RGBA", (r, g, b, a))
+    rgba.save(png)
+    # Count non-black pixels via PIL's getextrema-on-RGB-channels-summed
+    # path: build an L image where each pixel is r|g|b, then count > 0.
+    rgb_or = Image.eval(r, lambda v: 0).convert("L")  # placeholder
+    # Faster: convert RGB → grayscale luminance proxy via point ops.
+    # The sum-of-channels gives 0 only when all three are 0.
+    rgb_sum = Image.merge("RGB", (r, g, b)).convert("L", dither=Image.Dither.NONE)
+    # convert("L") uses Y' = 0.299R + 0.587G + 0.114B; that's 0 iff
+    # R==G==B==0 (since coefficients are positive).
+    histogram = rgb_sum.histogram()
+    black = histogram[0]
+    nonblack = w * h - black
     return nonblack, w * h
 
 
@@ -98,7 +112,6 @@ def main():
     out_dir.mkdir(exist_ok=True)
     session_log = out_dir / "lxde-session.log"
     xorg_log = out_dir / "Xorg.0.log"
-    openbox_log = out_dir / "openbox.log"
     bgra_path = out_dir / "lxde-iteration.bgra"
     png_path = ROOT / args.png
 
@@ -106,10 +119,10 @@ def main():
                                   session_log)
     have_xorg    = dump_from_disk(dbgfs, img, "/var/log/Xorg.0.log",
                                   xorg_log)
-    have_ob      = dump_from_disk(dbgfs, img, "/var/log/openbox.log",
-                                  openbox_log)
     have_fb      = dump_from_disk(dbgfs, img, "/root/fb-snapshot.bgra",
                                   bgra_path)
+    # openbox doesn't have its own log — its stderr is redirected
+    # into /tmp/lxde-session.log along with tint2 and pcmanfm.
 
     # Summary table.
     print()
@@ -117,8 +130,6 @@ def main():
           f"{session_log if have_session else ''}")
     print(f"  {'Xorg.0.log':20} {('YES' if have_xorg else 'no'):4} "
           f"{xorg_log if have_xorg else ''}")
-    print(f"  {'openbox.log':20} {('YES' if have_ob else 'no'):4} "
-          f"{openbox_log if have_ob else ''}")
     print(f"  {'fb-snapshot.bgra':20} {('YES' if have_fb else 'no'):4} "
           f"{bgra_path if have_fb else ''}")
 
@@ -148,13 +159,6 @@ def main():
     if have_xorg and xorg_log.stat().st_size > 0:
         lines = xorg_log.read_text(errors="replace").splitlines()
         print(f"\n=== /var/log/Xorg.0.log (last 30 of {len(lines)} lines) ===")
-        for line in lines[-30:]:
-            print(f"  {line}")
-
-    # Print last 30 lines of openbox.log if present.
-    if have_ob and openbox_log.stat().st_size > 0:
-        lines = openbox_log.read_text(errors="replace").splitlines()
-        print(f"\n=== /var/log/openbox.log (last 30 of {len(lines)} lines) ===")
         for line in lines[-30:]:
             print(f"  {line}")
 

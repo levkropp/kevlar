@@ -7,7 +7,12 @@ version = "0.1.0"
 description = "Kevlar - A permissively licensed Rust kernel for running Linux binaries"
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = []
+dependencies = [
+    # Pillow is required by `tools/iterate-lxde.py` to convert the
+    # extracted /dev/fb0 BGRA dump into a PNG screenshot (and to
+    # compute the non-black-pixel coverage that drives the verdict).
+    "pillow>=10.0",
+]
 
 [dependency-groups]
 dev = []

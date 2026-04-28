@@ -1256,8 +1256,7 @@ $(LXDE_IMG):
 # when bringing up new packages or fixing autostart — much faster
 # round-trip than `run-alpine-lxde` (which requires interaction).
 .PHONY: iterate-lxde
-iterate-lxde:
-	@rm -f $(LXDE_IMG)
+iterate-lxde: $(LXDE_IMG)
 	$(PYTHON3) tools/iterate-lxde.py --arch $(ARCH)
 
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
