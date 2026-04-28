@@ -92,6 +92,12 @@ LXDE_PACKAGES = [
     # for "open with" defaults.  When the cache is missing it
     # asserts on first lookup.
     "desktop-file-utils",
+    # gvfs — GIO's virtual filesystem layer.  pcmanfm's "open
+    # folder" path calls g_file_query_* which goes through GIO;
+    # without gvfs's daemon (gvfsd) running and the matching libs
+    # installed, certain GIO calls hit assertion failures and
+    # abort.  Heaviest of the deps; has a daemon.
+    "gvfs",
     # Utilities
     "xterm",
     # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
