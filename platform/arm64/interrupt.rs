@@ -23,7 +23,6 @@ const EC_DATA_ABORT_CURR: u32 = 0b100101;   // Data abort from current EL
 const EC_INST_ABORT_LOWER: u32 = 0b100000;  // Instruction abort from lower EL
 const EC_INST_ABORT_CURR: u32 = 0b100001;   // Instruction abort from current EL
 const EC_FP_ASIMD: u32 = 0b000111;    // Access to Advanced SIMD / FP while CPACR.FPEN traps
-const EC_BRK_A64: u32 = 0b111100;     // BRK instruction (AArch64) — debug break
 
 /// Called from trap.S for synchronous exceptions.
 /// `from_user`: 0 = kernel, 1 = user.
@@ -54,24 +53,6 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
             // re-executes the faulting instruction.  See
             // platform/arm64/fp.rs for the state machine.
             super::fp::handle_fp_trap();
-        }
-        EC_BRK_A64 if from_user != 0 => {
-            // EL0 executed a BRK instruction.  ESR ISS = BRK immediate.
-            // musl uses `brk #1000` as `a_crash()` (the fallback inside
-            // abort() if SIGABRT was caught).  Linux delivers SIGTRAP
-            // here, but in practice gvfs / glib install SIGTRAP handlers
-            // that block the process trying to print debug state, which
-            // hangs dbus and starves pcmanfm.  We deliver SIGSEGV (the
-            // generic "die now" path) instead — same outcome the
-            // previous EC=? fallthrough produced, just with a cleaner
-            // log line classifying the cause.
-            let pc = unsafe { (*frame).pc };
-            let imm = (esr & 0xffff) as u32;
-            log::warn!(
-                "EL0 BRK #{:#x} at pc={:#x} — delivering SIGSEGV",
-                imm, pc,
-            );
-            handler().handle_user_fault("arm64 EL0 BRK", pc as usize);
         }
         EC_DATA_ABORT_LOWER | EC_INST_ABORT_LOWER => {
             // User-space page fault.
