@@ -33,6 +33,24 @@ struct drm_version {
 
 #define DRM_IOCTL_VERSION _IOWR('d', 0x00, struct drm_version)
 
+/* K25: DRM_IOCTL_MODE_GETRESOURCES = _IOWR('d', 0xA0, struct
+ * drm_mode_card_res). */
+struct drm_mode_card_res {
+    uint64_t fb_id_ptr;
+    uint64_t crtc_id_ptr;
+    uint64_t connector_id_ptr;
+    uint64_t encoder_id_ptr;
+    uint32_t count_fbs;
+    uint32_t count_crtcs;
+    uint32_t count_connectors;
+    uint32_t count_encoders;
+    uint32_t min_width;
+    uint32_t max_width;
+    uint32_t min_height;
+    uint32_t max_height;
+};
+#define DRM_IOCTL_MODE_GETRESOURCES _IOWR('d', 0xA0, struct drm_mode_card_res)
+
 static void w(const char *s) {
     write(1, s, strlen(s));
 }
@@ -70,6 +88,31 @@ int main(void) {
         (int)v.name_len, name_buf,
         v.version_major, v.version_minor, v.version_patchlevel);
     if (n > 0) write(1, line, n);
+
+    /* K25: DRM_IOCTL_MODE_GETRESOURCES — counts + ID arrays. */
+    uint32_t crtc_ids[4] = {0};
+    uint32_t conn_ids[4] = {0};
+    uint32_t enc_ids[4] = {0};
+    struct drm_mode_card_res res;
+    memset(&res, 0, sizeof(res));
+    res.crtc_id_ptr = (uint64_t)(uintptr_t)crtc_ids;
+    res.connector_id_ptr = (uint64_t)(uintptr_t)conn_ids;
+    res.encoder_id_ptr = (uint64_t)(uintptr_t)enc_ids;
+    res.count_crtcs = 4;
+    res.count_connectors = 4;
+    res.count_encoders = 4;
+
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &res) < 0) {
+        w("USERSPACE-DRM: MODE_GETRESOURCES failed\n");
+    } else {
+        n = snprintf(line, sizeof(line),
+            "USERSPACE-DRM: getres crtcs=%u connectors=%u encoders=%u "
+            "geom=%ux%u-%ux%u crtc0=0x%x conn0=0x%x enc0=0x%x\n",
+            res.count_crtcs, res.count_connectors, res.count_encoders,
+            res.min_width, res.min_height, res.max_width, res.max_height,
+            crtc_ids[0], conn_ids[0], enc_ids[0]);
+        if (n > 0) write(1, line, n);
+    }
 
     close(fd);
     w("USERSPACE-DRM: done\n");

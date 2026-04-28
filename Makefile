@@ -967,8 +967,9 @@ test-userspace-drm:
 	@if grep -q 'USERSPACE-DRM: starting' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: open ok' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: name=kabi-drm version=2.0.0' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: getres crtcs=1 connectors=1 encoders=1 geom=320x200-4096x4096 crtc0=0x200' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: done' /tmp/kevlar-test-userspace-drm.log; then \
-	    echo "TEST_PASS: kABI K22 — userspace DRM ioctl path verified"; \
+	    echo "TEST_PASS: kABI K22+K25 — userspace DRM ioctl path verified (VERSION + MODE_GETRESOURCES)"; \
 	else \
 	    echo "TEST_FAIL: missing expected K22 markers"; \
 	    grep -E 'USERSPACE-DRM|kabi|panic' /tmp/kevlar-test-userspace-drm.log | head -30; \

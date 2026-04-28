@@ -181,11 +181,18 @@ pub extern "C" fn drm_poll(_filp: *mut c_void, _wait: *mut c_void) -> u32 {
     0
 }
 
-// ── DRM ioctl dispatch (K21) ──────────────────────────────────
+// ── DRM ioctl dispatch (K21 + K25) ─────────────────────────────
 
 const DRM_IOCTL_TYPE: u32 = b'd' as u32; // 0x64
 const DRM_IOCTL_NR_VERSION: u32 = 0x00;
 const DRM_IOCTL_NR_GET_CAP: u32 = 0x0c;
+const DRM_IOCTL_NR_MODE_GETRESOURCES: u32 = 0xA0;
+
+// Synthesized object IDs.  drmModeGet{Crtc,Connector,Encoder}
+// from libdrm walks these in K26+.
+const KABI_CRTC_ID_BASE: u32 = 0x0200;
+const KABI_CONNECTOR_ID_BASE: u32 = 0x0300;
+const KABI_ENCODER_ID_BASE: u32 = 0x0400;
 
 const ENOTTY: isize = -25;
 const EFAULT: isize = -14;
@@ -208,6 +215,22 @@ pub struct DrmVersion {
 struct DrmGetCap {
     capability: u64,
     value: u64,
+}
+
+#[repr(C)]
+pub struct DrmModeCardRes {
+    pub fb_id_ptr: u64,
+    pub crtc_id_ptr: u64,
+    pub connector_id_ptr: u64,
+    pub encoder_id_ptr: u64,
+    pub count_fbs: u32,
+    pub count_crtcs: u32,
+    pub count_connectors: u32,
+    pub count_encoders: u32,
+    pub min_width: u32,
+    pub max_width: u32,
+    pub min_height: u32,
+    pub max_height: u32,
 }
 
 fn copy_to_user_truncate(src: &[u8], dst: *mut u8, len: &mut usize) {
@@ -250,6 +273,72 @@ fn drm_ioctl_get_cap(arg: usize) -> isize {
     0
 }
 
+fn drm_ioctl_mode_getresources(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut r = unsafe { core::ptr::read(arg as *const DrmModeCardRes) };
+
+    // Our advertised counts: 1 CRTC + 1 connector + 1 encoder + 0 fbs.
+    let our_fbs: u32 = 0;
+    let our_crtcs: u32 = 1;
+    let our_connectors: u32 = 1;
+    let our_encoders: u32 = 1;
+
+    // Linux semantics: fill the user-supplied ID arrays up to
+    // min(in_count, our_count).  No FBs to write.
+
+    if r.crtc_id_ptr != 0 && r.count_crtcs > 0 {
+        let n = r.count_crtcs.min(our_crtcs);
+        for i in 0..n {
+            unsafe {
+                core::ptr::write_unaligned(
+                    (r.crtc_id_ptr as *mut u32).add(i as usize),
+                    KABI_CRTC_ID_BASE + i,
+                );
+            }
+        }
+    }
+    if r.connector_id_ptr != 0 && r.count_connectors > 0 {
+        let n = r.count_connectors.min(our_connectors);
+        for i in 0..n {
+            unsafe {
+                core::ptr::write_unaligned(
+                    (r.connector_id_ptr as *mut u32).add(i as usize),
+                    KABI_CONNECTOR_ID_BASE + i,
+                );
+            }
+        }
+    }
+    if r.encoder_id_ptr != 0 && r.count_encoders > 0 {
+        let n = r.count_encoders.min(our_encoders);
+        for i in 0..n {
+            unsafe {
+                core::ptr::write_unaligned(
+                    (r.encoder_id_ptr as *mut u32).add(i as usize),
+                    KABI_ENCODER_ID_BASE + i,
+                );
+            }
+        }
+    }
+
+    // Always write our actual counts back.
+    r.count_fbs = our_fbs;
+    r.count_crtcs = our_crtcs;
+    r.count_connectors = our_connectors;
+    r.count_encoders = our_encoders;
+
+    // Permissive geometry — matches Linux's modesetting drivers
+    // for emulated VGA hardware.
+    r.min_width = 320;
+    r.max_width = 4096;
+    r.min_height = 200;
+    r.max_height = 4096;
+
+    unsafe { core::ptr::write(arg as *mut DrmModeCardRes, r); }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn drm_ioctl(
     _filp: *mut c_void,
@@ -264,6 +353,7 @@ pub extern "C" fn drm_ioctl(
     match nr {
         DRM_IOCTL_NR_VERSION => drm_ioctl_version(arg),
         DRM_IOCTL_NR_GET_CAP => drm_ioctl_get_cap(arg),
+        DRM_IOCTL_NR_MODE_GETRESOURCES => drm_ioctl_mode_getresources(arg),
         _ => ENOTTY,
     }
 }
@@ -311,6 +401,40 @@ pub fn ioctl_smoke_test() {
         v.version_major,
         v.version_minor,
         v.version_patchlevel,
+    );
+
+    // K25: also exercise DRM_IOCTL_MODE_GETRESOURCES.
+    let res_cmd: u32 = 0xC000_0000
+        | (DRM_IOCTL_TYPE << 8)
+        | DRM_IOCTL_NR_MODE_GETRESOURCES
+        | ((core::mem::size_of::<DrmModeCardRes>() as u32 & 0x3fff) << 16);
+
+    let mut crtc_ids = [0u32; 4];
+    let mut conn_ids = [0u32; 4];
+    let mut enc_ids = [0u32; 4];
+    let mut res = DrmModeCardRes {
+        fb_id_ptr: 0,
+        crtc_id_ptr: crtc_ids.as_mut_ptr() as u64,
+        connector_id_ptr: conn_ids.as_mut_ptr() as u64,
+        encoder_id_ptr: enc_ids.as_mut_ptr() as u64,
+        count_fbs: 0,
+        count_crtcs: 4,
+        count_connectors: 4,
+        count_encoders: 4,
+        min_width: 0,
+        max_width: 0,
+        min_height: 0,
+        max_height: 0,
+    };
+    let res_arg = &raw mut res as usize;
+    let res_rc = drm_ioctl(core::ptr::null_mut(), res_cmd, res_arg);
+    log::info!(
+        "kabi: DRM_IOCTL_MODE_GETRESOURCES rc={} crtcs={} crtc[0]={:#x} \
+         connectors={} encoders={} fbs={} geom={}x{}-{}x{}",
+        res_rc,
+        res.count_crtcs, crtc_ids[0],
+        res.count_connectors, res.count_encoders, res.count_fbs,
+        res.min_width, res.min_height, res.max_width, res.max_height,
     );
 }
 
