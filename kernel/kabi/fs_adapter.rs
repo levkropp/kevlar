@@ -250,13 +250,73 @@ pub fn kabi_mount_filesystem(
         return Err(crate::result::Error::new(errno));
     }
 
+    info!("kabi: erofs init_fs_context returned 0 — fc->ops populated");
+
+    // ── Phase 3d v2: read fc->ops, invoke ops->get_tree(fc) ────────
+    //
+    // After init_fs_context succeeds, fc->ops at fs_context offset 0
+    // holds a pointer to the fs's struct fs_context_operations.
+    // Layout (include/linux/fs_context.h:115):
+    //
+    //   struct fs_context_operations {
+    //       void (*free)(...);            /* +0  */
+    //       int  (*dup)(...);             /* +8  */
+    //       int  (*parse_param)(...);     /* +16 */
+    //       int  (*parse_monolithic)(...); /* +24 */
+    //       int  (*get_tree)(...);        /* +32 */
+    //       int  (*reconfigure)(...);     /* +40 */
+    //   };
+
+    const FC_OPS_OFF: usize = 0;
+    const OPS_GET_TREE_OFF: usize = 32;
+
+    let ops_ptr = unsafe { *(fc.cast::<u8>().add(FC_OPS_OFF) as *const usize) };
+    if ops_ptr == 0 {
+        warn!("kabi: erofs init_fs_context didn't populate fc->ops");
+        super::alloc::kfree(fc);
+        return Err(crate::result::Error::new(crate::result::Errno::EIO));
+    }
+    info!("kabi: fc->ops = {:#x}", ops_ptr);
+
+    let get_tree_ptr = unsafe {
+        *((ops_ptr as *const u8).add(OPS_GET_TREE_OFF) as *const usize)
+    };
+    if get_tree_ptr == 0 {
+        warn!("kabi: fc->ops->get_tree is null");
+        super::alloc::kfree(fc);
+        return Err(crate::result::Error::new(crate::result::Errno::EIO));
+    }
+    info!("kabi: fc->ops->get_tree = {:#x}", get_tree_ptr);
+
+    type GetTreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+    let get_tree_fn: GetTreeFn = unsafe { core::mem::transmute(get_tree_ptr) };
+
+    info!("kabi: dispatching erofs ops->get_tree(fc={:p})", fc);
+    let rc = unsafe { get_tree_fn(fc) };
+
+    if rc < 0 {
+        warn!(
+            "kabi: erofs ops->get_tree returned {} — expected for v2 \
+             (no real block device behind bdev_file_open_by_path)",
+            rc,
+        );
+        super::alloc::kfree(fc);
+        let errno = match -rc {
+            12 => crate::result::Errno::ENOMEM,
+            16 => crate::result::Errno::EBUSY,
+            19 => crate::result::Errno::ENODEV,
+            22 => crate::result::Errno::EINVAL,
+            _  => crate::result::Errno::EIO,
+        };
+        return Err(crate::result::Error::new(errno));
+    }
+
+    // Success path: fc->root holds the mounted dentry.  Wrap and
+    // return.  Phase 3d v3 will walk the dentry to provide
+    // root_dir() backing.
     info!(
-        "kabi: erofs init_fs_context returned 0 — fs_context allocated, \
-         get_tree dispatch is Phase 3d v2",
+        "kabi: erofs ops->get_tree returned 0 — fc->root populated, \
+         dentry walk is Phase 3d v3",
     );
-    // TODO Phase 3d v2: read fc->ops (offset 0), invoke
-    // ops->get_tree(fc), then fc->root holds the mounted dentry.
-    // Bail with ENOSYS for now — the fc memory leaks here but it's
-    // a one-time cost during boot probe.
     Err(crate::result::Error::new(crate::result::Errno::ENOSYS))
 }
