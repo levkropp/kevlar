@@ -640,6 +640,27 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k19` — first probe-firing milestone.  Walks
+# the registered PCI drivers + fake devices and calls cirrus's
+# probe with a fake (vendor=0x1013, device=0x00B8) match.
+.PHONY: test-module-k19
+test-module-k19: build
+	$(PROGRESS) "TEST" "kABI K19 demo (PCI bus walking + cirrus probe firing)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k19.log; true
+	@echo ""
+	@if grep -q 'kabi: PCI walk:' /tmp/kevlar-test-module-k19.log \
+	 && grep -q 'kabi: PCI walk: probing driver' /tmp/kevlar-test-module-k19.log \
+	 && grep -q 'kabi: PCI walk: .* probe returned' /tmp/kevlar-test-module-k19.log; then \
+	    echo "TEST_PASS: kABI K19 — PCI walk fired cirrus probe"; \
+	else \
+	    echo "TEST_FAIL: missing expected K19 markers"; \
+	    grep -E 'kabi|cirrus|panic|PCI' /tmp/kevlar-test-module-k19.log | head -40; \
+	    false; \
+	fi
+
 # `make test-module-k18` — load /lib/modules/bochs.ko: Ubuntu's
 # KMS driver for QEMU Bochs Display Adapter.  107 undefs (18
 # net new — 83% compounded) across EDID, drm core extensions,
@@ -679,7 +700,7 @@ test-module-k17: build
 	@echo ""
 	@if grep -q 'kabi: loading /lib/modules/cirrus-qemu.ko' /tmp/kevlar-test-module-k17.log \
 	 && grep -q 'kabi: loaded /lib/modules/cirrus-qemu.ko' /tmp/kevlar-test-module-k17.log \
-	 && grep -q 'kabi: __pci_register_driver (stub)' /tmp/kevlar-test-module-k17.log \
+	 && grep -q 'kabi: __pci_register_driver: name=Some("cirrus-qemu")' /tmp/kevlar-test-module-k17.log \
 	 && grep -q 'kabi: cirrus init_module returned 0' /tmp/kevlar-test-module-k17.log; then \
 	    echo "TEST_PASS: kABI K17 — Ubuntu cirrus-qemu.ko loaded with DRM core / KMS / PCI stubs"; \
 	else \

@@ -21,10 +21,28 @@ use crate::ksym;
 pub extern "C" fn __devm_drm_dev_alloc(
     _parent: *mut c_void,
     _driver: *const c_void,
-    _size: usize,
-    _offset: usize,
+    size: usize,
+    offset: usize,
 ) -> *mut c_void {
-    core::ptr::null_mut()
+    // K19: real allocation — caller's wrapping struct embeds a
+    // `struct drm_device` at `offset` within a `size`-byte
+    // allocation.  Real Linux uses drm_managed so the allocation
+    // is freed when the device is destroyed; ours leaks.
+    if size == 0 {
+        return core::ptr::null_mut();
+    }
+    let buf = super::alloc::kzalloc(size, 0) as *mut u8;
+    if buf.is_null() {
+        return core::ptr::null_mut();
+    }
+    log::info!(
+        "kabi: __devm_drm_dev_alloc: size={} offset={} buf={:#x} drm_dev={:#x}",
+        size,
+        offset,
+        buf as usize,
+        unsafe { buf.add(offset) } as usize,
+    );
+    unsafe { buf.add(offset) as *mut c_void }
 }
 
 #[unsafe(no_mangle)]

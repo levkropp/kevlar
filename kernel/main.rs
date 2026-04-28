@@ -913,6 +913,15 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi bochs.ko load");
     }
 
+    // K19 — walk registered PCI drivers + fire probe on matching
+    // fake devices.  First milestone where an Ubuntu kernel
+    // module's callback runs inside Kevlar.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kabi::pci::walk_and_probe();
+        profiler.lap_time("kabi PCI walk");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.
