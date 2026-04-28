@@ -91,7 +91,17 @@ static void interactive_keepalive(void) {
     sync();
     printf("\n=== test-lxde: kevlar_interactive on cmdline; keeping desktop alive ===\n");
     fflush(stdout);
-    while (1) sleep(60);
+    // Periodic sync + log re-persist so pcmanfm's stderr output (which
+    // goes directly to /var/log/pcmanfm.log on the ext2 disk) actually
+    // lands before a hard shutdown / kernel halt.  Also re-copies
+    // /tmp/Xorg.0.log and /tmp/lxde-session.log every 30s.  Without
+    // this, post-halt `debugfs` extracts may show stale content.
+    while (1) {
+        sleep(30);
+        sh_run("cp -f /tmp/Xorg.0.log /var/log/Xorg.0.log 2>/dev/null; "
+               "cp -f /tmp/lxde-session.log /var/log/lxde-session.log 2>/dev/null; "
+               "sync; true", 2000);
+    }
 }
 
 // Find pcmanfm's PID by scanning /proc/*/comm.  Returns 0 if not
@@ -467,7 +477,16 @@ int main(void) {
     sleep(1);
 
     printf("  T+4 about to start_bg pcmanfm --desktop\n"); fflush(stdout);
-    snprintf(cmd, sizeof(cmd), "%s exec /usr/bin/pcmanfm --desktop >>/tmp/lxde-session.log 2>&1", env_prefix);
+    // Log directly to /var/log on the ext2 disk (NOT /tmp which is
+    // tmpfs and disappears at shutdown).  pcmanfm's last words
+    // before SIGABRT (glib criticals, libfm assertions) need to
+    // survive a halt for `debugfs -R "cat /var/log/pcmanfm.log"`
+    // post-mortem analysis.  The shell `tee` keeps stdout + stderr
+    // line-buffered so we don't lose the last partial line.
+    sh_run("mkdir -p /var/log && touch /var/log/pcmanfm.log", 1000);
+    snprintf(cmd, sizeof(cmd),
+             "%s exec /usr/bin/pcmanfm --desktop "
+             ">>/var/log/pcmanfm.log 2>&1", env_prefix);
     start_bg(cmd);
     printf("  T+4 pcmanfm start_bg returned\n"); fflush(stdout);
 

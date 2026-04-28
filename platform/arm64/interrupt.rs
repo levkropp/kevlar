@@ -141,10 +141,38 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
                 // a fatal signal to the current process) so the
                 // misbehaving process dies cleanly without taking the
                 // whole kernel down.
+                //
+                // Read the 4 instruction bytes at PC from the user
+                // address space so we can decode what HVF refused.
+                // This is best-effort: if PC isn't readable we just
+                // report 0.  Knowing the instruction tells us whether
+                // it's an arm64 v8.x extension (SVE/MTE/PAC/etc.)
+                // that needs a CPACR_EL1 / HCR_EL2 enable bit, or a
+                // real undefined opcode (genuine user-space bug).
+                let mut insn_bytes = [0u8; 4];
+                let uva_res = crate::address::UserVAddr::new_nonnull(pc as usize);
+                let insn = if let Ok(uva) = uva_res {
+                    if uva.read_bytes(&mut insn_bytes).is_ok() {
+                        u32::from_le_bytes(insn_bytes)
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let pstate = unsafe { (*frame).pstate };
+                let spsr_m = pstate & 0xf;
+                let from_el = match spsr_m {
+                    0b0000 => "EL0",
+                    0b0100 => "EL1t",
+                    0b0101 => "EL1h",
+                    _ => "?",
+                };
                 log::warn!(
                     "EL0 unhandled exception: ec={:#x} esr={:#x} pc={:#x} far={:#x} \
+                     insn={:#010x} pstate={:#x}({}) sp={:#x} \
                      — delivering signal to current process",
-                    ec, esr, pc, far,
+                    ec, esr, pc, far, insn, pstate, from_el, unsafe { (*frame).sp },
                 );
                 handler().handle_user_fault("arm64 EC=0 unknown", pc as usize);
                 return;
