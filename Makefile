@@ -978,8 +978,10 @@ test-userspace-drm:
 	 && grep -q 'USERSPACE-DRM: mapdumb offset=0x0' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: drew pattern\[0\]=0xcafef00d \[1\]=0xdeadbeef' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: addfb2(handle) fb_id=2' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'kabi: DUMB pool == bochs_fb' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: red square pixel(50,50)=0xff0000' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: done' /tmp/kevlar-test-userspace-drm.log; then \
-	    echo "TEST_PASS: kABI K22+K25+K26+K27+K28 — DUMB+mmap+draw verified"; \
+	    echo "TEST_PASS: kABI K22..K29 — DUMB pool == bochs_fb (visible if ramfb attached)"; \
 	else \
 	    echo "TEST_FAIL: missing expected K22 markers"; \
 	    grep -E 'USERSPACE-DRM|kabi|panic' /tmp/kevlar-test-userspace-drm.log | head -30; \

@@ -329,6 +329,26 @@ int main(void) {
                     "USERSPACE-DRM: drew pattern[0]=0x%x [1]=0x%x\n",
                     v0, v1);
                 if (n > 0) write(1, line, n);
+
+                /* K29: paint a red 100x100 square at (10, 10).
+                 * If QEMU has -device ramfb attached, this is
+                 * visible in the host display.  Test verifies
+                 * round-trip read of one interior pixel. */
+                const uint32_t RED = 0x00FF0000u;
+                for (int y = 10; y < 110; y++) {
+                    uint32_t *row = (uint32_t *)((uint8_t *)ptr
+                                    + y * cdumb.pitch);
+                    for (int x = 10; x < 110; x++) {
+                        row[x] = RED;
+                    }
+                }
+                uint32_t *row50 = (uint32_t *)((uint8_t *)ptr
+                                  + 50 * cdumb.pitch);
+                n = snprintf(line, sizeof(line),
+                    "USERSPACE-DRM: red square pixel(50,50)=0x%x\n",
+                    row50[50]);
+                if (n > 0) write(1, line, n);
+
                 munmap(ptr, (size_t)cdumb.size);
             }
         }
@@ -352,5 +372,11 @@ int main(void) {
 
     close(fd);
     w("USERSPACE-DRM: done\n");
+
+    /* Hold the test process alive for a moment so an external
+     * tool (qemu monitor screendump) has time to capture the
+     * framebuffer.  Doesn't affect regression timing — the
+     * markers are already printed.  Userspace gets 3 seconds. */
+    sleep(3);
     return 0;
 }

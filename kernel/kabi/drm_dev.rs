@@ -401,14 +401,42 @@ static DUMB_POOL: kevlar_platform::spinlock::SpinLock<Option<DumbPool>> =
 const DUMB_POOL_SIZE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 const DUMB_POOL_PAGES: usize = DUMB_POOL_SIZE_BYTES / 4096; // 1024
 
-/// Initialize the DUMB pool early in boot (before any
-/// drm_dev_register call) so the pool's phys_base is known when
-/// /dev/dri/cardN is installed.  Idempotent.
+/// Initialize the DUMB pool to overlap Kevlar's bochs_fb
+/// framebuffer (K29).  When QEMU has `-device ramfb` attached,
+/// userspace writes into a DUMB buffer become visible pixels.
+///
+/// Falls back to a fresh `alloc_pages` allocation if bochs_fb
+/// isn't initialized (e.g., x86_64 path that didn't run
+/// `init_ram_backed`).
 pub fn init_dumb_pool() {
     let mut pool = DUMB_POOL.lock();
     if pool.is_some() {
         return;
     }
+
+    if bochs_fb::is_initialized() {
+        let pa = bochs_fb::phys_addr();
+        let size = bochs_fb::size();
+        if pa != 0 && size != 0 {
+            log::info!(
+                "kabi: DUMB pool == bochs_fb: PA={:#x} size={} bytes \
+                 (visible if ramfb attached)",
+                pa, size,
+            );
+            *pool = Some(DumbPool {
+                base_va: 0,
+                base_pa: pa,
+                pool_size: size,
+                next_offset: 0,
+                handles: alloc::vec::Vec::new(),
+                next_handle: 1,
+            });
+            return;
+        }
+    }
+
+    // Fallback: standalone allocation when bochs_fb isn't
+    // available.  Pixels won't be visible but DUMB ioctls work.
     use kevlar_platform::page_allocator::{alloc_pages, AllocPageFlags};
     let pa = match alloc_pages(DUMB_POOL_PAGES, AllocPageFlags::KERNEL) {
         Ok(p) => p,
@@ -419,7 +447,7 @@ pub fn init_dumb_pool() {
     };
     let va = pa.as_vaddr().value();
     log::info!(
-        "kabi: DUMB pool allocated: VA={:#x} PA={:#x} size={} bytes",
+        "kabi: DUMB pool allocated (fallback): VA={:#x} PA={:#x} size={} bytes",
         va, pa.value(), DUMB_POOL_SIZE_BYTES,
     );
     *pool = Some(DumbPool {
