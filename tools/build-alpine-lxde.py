@@ -83,6 +83,10 @@ LXDE_PACKAGES = [
     # populated, the lookup hits an internal libfm/glib assertion
     # and pcmanfm SIGABRTs (signal 6) on certain operations.
     "shared-mime-info",
+    # xdg-open + xdg-mime — pcmanfm dispatches "open this" via
+    # xdg-open under the hood.  Without it, exec'ing the helper
+    # fails and pcmanfm aborts.
+    "xdg-utils",
     # Utilities
     "xterm",
     # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
