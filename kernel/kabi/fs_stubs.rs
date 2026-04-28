@@ -86,7 +86,14 @@ pub extern "C" fn kill_block_super(_sb: *mut c_void) {}
 #[unsafe(no_mangle)]
 pub extern "C" fn get_tree_bdev_flags(_fc: *mut c_void,
                                       _fill_super: *mut c_void,
-                                      _flags: u32) -> c_int { -22 }
+                                      _flags: u32) -> c_int {
+    // Return -ENOTBLK to push erofs into its file-backed-image
+    // fallback path (CONFIG_EROFS_FS_BACKED_BY_FILE), which uses
+    // filp_open(fc->source) instead of opening a block device.
+    // Phase 3e will replace this with a real bdev impl.
+    log::warn!("kabi: get_tree_bdev_flags (stub) — returning -ENOTBLK");
+    -15
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn get_tree_nodev(_fc: *mut c_void,
@@ -120,7 +127,9 @@ pub extern "C" fn fput(_file: *mut c_void) {}
 #[unsafe(no_mangle)]
 pub extern "C" fn filp_open(_filename: *const u8, _flags: c_int,
                             _mode: u32) -> *mut c_void {
-    core::ptr::null_mut()
+    // ERR_PTR(-ENOENT) — Linux IS_ERR detects this as an error,
+    // null would survive the check and crash on deref.
+    super::block::err_ptr(-2)
 }
 
 #[unsafe(no_mangle)]

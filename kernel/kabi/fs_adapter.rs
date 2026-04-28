@@ -217,16 +217,55 @@ pub fn kabi_mount_filesystem(
     // Zero-fill the buffer so init_fs_context sees clean defaults.
     unsafe { core::ptr::write_bytes(fc as *mut u8, 0, 512); }
 
-    // Field offsets sourced from include/linux/fs_context.h.  These
-    // are best-effort guesses for v1; Phase 3d v2 verifies against
-    // pahole or the matching headers and adjusts.
-    const FC_FS_TYPE_OFF: usize = 24;
-    const FC_PURPOSE_OFF: usize = 112;
-    const FS_CONTEXT_FOR_MOUNT: u32 = 1;
+    // Field offsets sourced from include/linux/fs_context.h.
+    //
+    //   struct fs_context {
+    //       const struct fs_context_operations *ops;  // +0   size 8
+    //       struct mutex uapi_mutex;                  // +8   size 32 (no DEBUG)
+    //       struct file_system_type *fs_type;         // +40  size 8
+    //       void *fs_private;                         // +48  size 8
+    //       void *sget_key;                           // +56  size 8
+    //       struct dentry *root;                      // +64  size 8
+    //       struct user_namespace *user_ns;           // +72  size 8
+    //       struct net *net_ns;                       // +80  size 8
+    //       const struct cred *cred;                  // +88  size 8
+    //       struct p_log log;                         // +96  size 16 (2 ptrs)
+    //       const char *source;                       // +112 size 8
+    //       ...
+    //       unsigned int sb_flags;                    // +128
+    //       unsigned int sb_flags_mask;               // +132
+    //       unsigned int s_iflags;                    // +136
+    //       enum fs_context_purpose purpose:8;        // +140 (bitfield)
+    //       enum fs_context_phase phase:8;            //
+    //   }
+    const FC_FS_TYPE_OFF: usize = 40;
+    const FC_SOURCE_OFF: usize = 112;
+    const FC_SB_FLAGS_OFF: usize = 128;
+    const FC_PURPOSE_OFF: usize = 140;
+    const FS_CONTEXT_FOR_MOUNT: u8 = 1;
+    const SB_RDONLY: u32 = 1;
+
+    // Source string lives in module-private memory; we kmalloc'd
+    // copy so erofs can dereference it without thinking about
+    // lifetime.  v3 uses a placeholder — the actual mount target
+    // comes from sys_mount's `source` arg in Phase 3e.
+    const SOURCE_PATH: &[u8] = b"/lib/modules/erofs.ko\0";
+    let source_buf = super::alloc::kmalloc(SOURCE_PATH.len(), 0) as *mut u8;
+    if source_buf.is_null() {
+        super::alloc::kfree(fc);
+        return Err(crate::result::Error::new(crate::result::Errno::ENOMEM));
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            SOURCE_PATH.as_ptr(), source_buf, SOURCE_PATH.len(),
+        );
+    }
 
     unsafe {
         *(fc.cast::<u8>().add(FC_FS_TYPE_OFF) as *mut *mut c_void) = fs_type;
-        *(fc.cast::<u8>().add(FC_PURPOSE_OFF) as *mut u32) =
+        *(fc.cast::<u8>().add(FC_SOURCE_OFF) as *mut *const u8) = source_buf;
+        *(fc.cast::<u8>().add(FC_SB_FLAGS_OFF) as *mut u32) = SB_RDONLY;
+        *(fc.cast::<u8>().add(FC_PURPOSE_OFF) as *mut u8) =
             FS_CONTEXT_FOR_MOUNT;
     }
 
