@@ -14,6 +14,52 @@ static ZONES: SpinLock<ArrayVec<Allocator, 8>> = SpinLock::new(ArrayVec::new_con
 static NUM_FREE_PAGES: AtomicUsize = AtomicUsize::new(0);
 static NUM_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
 
+/// Cheap cycle-counter read for free-tracking ring buffers.
+/// x86: rdtsc.  arm64: CNTVCT_EL0.  Either way ~20 cycles.
+#[inline(always)]
+#[allow(unsafe_code)]
+fn read_cycle_counter() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe { core::arch::x86_64::_rdtsc() }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let v: u64;
+        unsafe { core::arch::asm!("mrs {}, cntvct_el0", out(reg) v) };
+        v
+    }
+}
+
+/// Read the calling function's return address by walking the frame
+/// pointer.  Both x86_64 and arm64 store the saved (caller-FP, caller-RA)
+/// pair at [fp] and [fp+8] respectively when frame pointers are forced
+/// (`-Cforce-frame-pointers=yes`, set in our target spec).
+///
+/// On arm64 we could read x30 (LR) directly, but only at the very entry
+/// of the function before any nested call clobbers it; reading [fp+8]
+/// is safer and matches what backtrace-rs does.
+#[inline(always)]
+#[allow(unsafe_code)]
+fn caller_return_address() -> u64 {
+    let ra: u64;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(
+            "mov {0}, [rbp + 8]",
+            out(reg) ra,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [x29, #8]",
+            out(reg) ra,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    ra
+}
+
 
 
 /// A simple LIFO cache of single free pages to bypass the buddy allocator.
@@ -873,13 +919,10 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
         // Record the multi-page free in the ring buffer so that a later
         // PAGE_ZERO_MISS can correlate: did this paddr come from a
         // multi-page allocation that just got freed?
-        #[cfg(target_arch = "x86_64")]
-        {
-            let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-            let idx = MULTI_FREE_IDX.fetch_add(1, Ordering::Relaxed) % MULTI_FREE_RING_SIZE;
-            let mut ring = MULTI_FREE_RING.lock();
-            ring[idx] = (paddr.value(), num_pages, tsc);
-        }
+        let tsc = read_cycle_counter();
+        let idx = MULTI_FREE_IDX.fetch_add(1, Ordering::Relaxed) % MULTI_FREE_RING_SIZE;
+        let mut ring = MULTI_FREE_RING.lock();
+        ring[idx] = (paddr.value(), num_pages, tsc);
     }
 
     // INSTRUMENTATION (task #25): AP kernel stacks are never freed.
@@ -902,28 +945,16 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // Single page — try to push to cache.
     if num_pages == 1 {
         // INSTRUMENTATION (task #25): record the free in the single-page
-        // ring so PAGE_ZERO_MISS can correlate.  Also walk RBP once to
-        // capture the caller's RIP — direct-tells us *which call site*
-        // handed us the bogus paddr.  Cheap: ~20 ns (one lock + two
-        // memory reads + one store).
-        #[cfg(target_arch = "x86_64")]
-        {
-            let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-            // RBP walk: this function's frame has saved-rbp at [rbp]
-            // and our return address at [rbp+8].  That RIP belongs to
-            // our *direct* caller.
-            let caller_rip: u64;
-            unsafe {
-                core::arch::asm!(
-                    "mov {0}, [rbp + 8]",
-                    out(reg) caller_rip,
-                    options(nostack, preserves_flags, readonly),
-                );
-            }
-            let idx = SINGLE_FREE_IDX.fetch_add(1, Ordering::Relaxed) % SINGLE_FREE_RING_SIZE;
-            let mut ring = SINGLE_FREE_RING.lock();
-            ring[idx] = (paddr.value(), tsc, caller_rip);
-        }
+        // ring so PAGE_ZERO_MISS can correlate.  Also walk the frame
+        // pointer once to capture the caller's RIP/LR — direct-tells us
+        // *which call site* handed us the bogus paddr.  Cheap: ~20 ns
+        // (one lock + two memory reads + one store).
+        let tsc = read_cycle_counter();
+        let caller_rip = caller_return_address();
+        let idx = SINGLE_FREE_IDX.fetch_add(1, Ordering::Relaxed) % SINGLE_FREE_RING_SIZE;
+        let mut ring = SINGLE_FREE_RING.lock();
+        ring[idx] = (paddr.value(), tsc, caller_rip);
+        drop(ring);
         if PAGE_CACHE_COUNT.load(Ordering::Relaxed) < PAGE_CACHE_SIZE {
             let mut cache = PAGE_CACHE.lock();
             if cache.push(paddr) {
