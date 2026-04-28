@@ -24,6 +24,43 @@
 #define ROOT "/mnt"
 
 static int g_pass, g_fail, g_total;
+static int g_interactive;
+
+static int sh_run(const char *cmd, int timeout_ms);
+
+// Read /proc/cmdline (mounting initramfs /proc if needed) and return 1
+// if `kevlar_interactive` is on the kernel command line.  Used to skip
+// test-only delays and sub-tests when run-alpine-lxde launches the
+// desktop for interactive use rather than as a regression suite.
+static int read_kevlar_interactive(void) {
+    mkdir("/proc", 0755);
+    mount("proc", "/proc", "proc", 0, NULL);
+    int cfd = open("/proc/cmdline", O_RDONLY);
+    if (cfd < 0) return 0;
+    char buf[1024];
+    ssize_t n = read(cfd, buf, sizeof(buf) - 1);
+    close(cfd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    return strstr(buf, "kevlar_interactive") != NULL;
+}
+
+static void interactive_keepalive(void) {
+    // Persist Xorg + session logs to the ext2 disk before the keepalive
+    // sleep so users can `debugfs -R "cat /var/log/Xorg.0.log" ...` after
+    // shutting down to inspect input-device PreInit, driver loads, and
+    // any config errors.  In batch mode the harness does this at the
+    // end of main; in interactive we never reach that path.  sh_run
+    // chroots into /mnt first, so paths here are inside the disk fs.
+    sh_run("mkdir -p /var/log; "
+           "cp -f /tmp/Xorg.0.log /var/log/Xorg.0.log 2>/dev/null; "
+           "cp -f /tmp/lxde-session.log /var/log/lxde-session.log 2>/dev/null; "
+           "true", 3000);
+    sync();
+    printf("\n=== test-lxde: kevlar_interactive on cmdline; keeping desktop alive ===\n");
+    fflush(stdout);
+    while (1) sleep(60);
+}
 
 static void pass(const char *name) {
     printf("TEST_PASS %s\n", name);
@@ -149,6 +186,11 @@ static void setup_rootfs(void) {
 int main(void) {
     printf("T: LXDE Desktop End-to-End Test\n");
     fflush(stdout);
+    g_interactive = read_kevlar_interactive();
+    if (g_interactive) {
+        printf("T: kevlar_interactive — fast-boot path, sub-tests skipped\n");
+        fflush(stdout);
+    }
     setup_rootfs();
 
     // Start D-Bus system bus, then Xorg on fbdev.
@@ -157,7 +199,14 @@ int main(void) {
            2000);
     sh_run("dbus-daemon --system --fork 2>/dev/null", 3000);
     sh_run("rm -f /tmp/.X0-lock /tmp/.X11-unix/X0", 500);
-    sh_run("/usr/libexec/Xorg :0 -noreset -nolisten tcp "
+    // -logfile writes Xorg's full diagnostic log to /var/log on the
+    // ext2 disk (not /tmp/Xorg.0.log which is tmpfs and disappears at
+    // shutdown).  This is what `iterate-lxde` extracts via debugfs
+    // and what users can `cat` to debug InputDevice / driver-load
+    // failures.
+    sh_run("mkdir -p /var/log; "
+           "/usr/libexec/Xorg :0 -noreset -nolisten tcp "
+           "-logfile /var/log/Xorg.0.log "
            "-config /etc/X11/xorg.conf.d/10-fbdev.conf "
            "vt1 >/dev/null 2>&1 &"
            "sleep 3", 8000);
@@ -213,6 +262,19 @@ int main(void) {
     snprintf(cmd, sizeof(cmd), "%s exec /usr/bin/pcmanfm --desktop >>/tmp/lxde-session.log 2>&1", env_prefix);
     start_bg(cmd);
     printf("  T+4 pcmanfm start_bg returned\n"); fflush(stdout);
+
+    // Interactive fast-path: in run-alpine-lxde the user just wants
+    // the desktop on screen as fast as possible — skip the 15s
+    // settle, the lxde_pixels_visible 8-attempt retry, and the
+    // typed_text_arrived xterm spawn.  8s settle gives pcmanfm
+    // enough time to render its wallpaper (~6-7s on Kevlar) before
+    // we drop into the keepalive sleep loop; with only 3s the
+    // tint2 panel is up but the desktop background is still
+    // unrendered, leaving a black/transparent main area.
+    if (g_interactive) {
+        sleep(8);
+        interactive_keepalive();
+    }
 
     // Same 15-second wait as XFCE — session spawn pace varies.
     for (int s = 0; s < 15; s++) {
@@ -530,20 +592,20 @@ int main(void) {
 
     sync();
 
-    // `kevlar_interactive` on the kernel cmdline keeps the LXDE
-    // session alive so users can interact with the desktop in QEMU's
-    // window via `make run-alpine-lxde`.  Without it, test-lxde
-    // returns and Kevlar halts (the batch-mode default for `make
-    // test-lxde` / iterate-lxde).
-    {
-        // Mount /proc on the initramfs root if not already mounted.
-        // (test_lxde mounts proc inside the chroot at ROOT/proc, not
-        // here.)  Best-effort; ignore EBUSY.
-        mkdir("/proc", 0755);
-        mount("proc", "/proc", "proc", 0, NULL);
-
-        int interactive = 0;
-        int cfd = open("/proc/cmdline", O_RDONLY);
+    // Late-path keepalive: if the early read_kevlar_interactive() in
+    // main() returned 0 (e.g. /proc not mountable on initramfs root
+    // at that point), retry now — by this point setup_rootfs has
+    // mounted procfs, so /mnt/proc/cmdline is available even if
+    // /proc on the initramfs isn't.  Either source carries the same
+    // kernel cmdline.  Without this fallback, run-alpine-lxde would
+    // halt instead of staying alive when the early check fails.
+    if (!g_interactive) {
+        if (read_kevlar_interactive()) {
+            interactive_keepalive();
+        }
+        // Last resort: read /proc/cmdline through the chroot-mounted
+        // procfs that setup_rootfs created.
+        int cfd = open(ROOT "/proc/cmdline", O_RDONLY);
         if (cfd >= 0) {
             char buf[1024];
             ssize_t n = read(cfd, buf, sizeof(buf) - 1);
@@ -551,18 +613,11 @@ int main(void) {
             if (n > 0) {
                 buf[n] = '\0';
                 if (strstr(buf, "kevlar_interactive")) {
-                    interactive = 1;
+                    interactive_keepalive();
                 }
             }
         }
-
-        if (interactive) {
-            printf("\n=== test-lxde: kevlar_interactive on cmdline; keeping desktop alive ===\n");
-            fflush(stdout);
-            // Sleep forever; Xorg + LXDE keep running in the
-            // background.  Users hit Ctrl-A X to exit QEMU.
-            while (1) sleep(60);
-        }
     }
+
     return 0;
 }

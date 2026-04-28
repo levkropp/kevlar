@@ -176,11 +176,15 @@ def main():
         xorg_conf_dir.mkdir(parents=True, exist_ok=True)
         # Kevlar has no udev, so Xorg can't auto-discover input devices
         # via the standard hotplug path.  We bind /dev/input/event0 and
-        # /dev/input/event1 explicitly to xf86-input-evdev — one of
-        # them is the virtio-keyboard, the other is the virtio-mouse,
-        # depending on QEMU's MMIO assignment order on this VM.  The
-        # evdev driver auto-detects keyboard-vs-pointer from the
-        # device's EVIOCGBIT(EV_KEY) bitmap.
+        # /dev/input/event1 explicitly to xf86-input-evdev.
+        #
+        # Device assignment on QEMU virt: MMIO addresses are assigned
+        # low-to-high to -device args in *reverse* order, so the
+        # second -device arg (virtio-tablet) gets the lower MMIO and
+        # is walked first by the DTB scanner.  Result:
+        #   /dev/input/event0 → virtio-tablet (absolute pointer)
+        #   /dev/input/event1 → virtio-keyboard
+        # (kabi-virtio-input lands at event2 from the kABI walker.)
         (xorg_conf_dir / "10-fbdev.conf").write_text(
             '# Kevlar: disable udev auto-detect, use explicit fbdev + evdev config\n'
             'Section "ServerFlags"\n'
@@ -194,12 +198,6 @@ def main():
             '    Option "fbdev" "/dev/fb0"\n'
             'EndSection\n'
             '\n'
-            # NOTE: QEMU's virt MMIO assigns lower addresses to later
-            # -device args, so /dev/input/event1 is the
-            # virtio-keyboard-device (registered first via DTB walk).
-            # Bind only the keyboard for now — the mouse path needs
-            # virtio-input config-space evbit reading to disambiguate
-            # from the keyboard's "all keys" EVIOCGBIT response.
             'Section "InputDevice"\n'
             '    Identifier "kbd"\n'
             '    Driver "evdev"\n'
@@ -207,6 +205,17 @@ def main():
             '    Option "XkbRules" "evdev"\n'
             '    Option "XkbModel" "pc105"\n'
             '    Option "XkbLayout" "us"\n'
+            'EndSection\n'
+            '\n'
+            # virtio-tablet sends EV_ABS events on ABS_X/ABS_Y in the
+            # range 0..32767 (Kevlar reports this via EVIOCGABS).
+            # xf86-input-evdev recognizes the device as an absolute
+            # pointer and maps the host trackpad position directly to
+            # the guest cursor — no relative-motion grab needed.
+            'Section "InputDevice"\n'
+            '    Identifier "ptr"\n'
+            '    Driver "evdev"\n'
+            '    Option "Device" "/dev/input/event0"\n'
             'EndSection\n'
             '\n'
             'Section "Screen"\n'
@@ -219,16 +228,23 @@ def main():
             '    EndSubSection\n'
             'EndSection\n'
             '\n'
-            # NOTE: deliberately no `InputDevice "kbd" "CoreKeyboard"`
-            # in this ServerLayout — listing it both here AND in a
-            # standalone `Section "InputDevice"` causes Xorg to try
-            # to PreInit the device twice, the second attempt fails
-            # with "device file is duplicate", and Xorg unloads the
-            # whole device.  The standalone section is enough; with
-            # `AutoAddDevices=false` Xorg picks it up automatically.
+            # ServerLayout must explicitly reference both InputDevice
+            # sections.  With `AutoAddDevices=false` Xorg's fallback
+            # auto-load only picks up the first standalone InputDevice
+            # (typically the keyboard); a second standalone section
+            # ("ptr") never gets PreInit-ed without an explicit
+            # reference here.  The earlier "device file is duplicate"
+            # concern was specific to listing the SAME identifier with
+            # the SAME device path in both standalone + ServerLayout —
+            # that triggered Xorg's fallback PLUS the explicit reference
+            # to load the same device twice.  With unique identifiers
+            # and AutoAddDevices=false, fallback won't fire, so listing
+            # both here loads each device exactly once.
             'Section "ServerLayout"\n'
             '    Identifier "kevlar-lxde"\n'
             '    Screen "default"\n'
+            '    InputDevice "kbd" "CoreKeyboard"\n'
+            '    InputDevice "ptr" "CorePointer"\n'
             'EndSection\n'
         )
 

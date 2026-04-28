@@ -78,7 +78,7 @@ ARCHS = {
             "-device",
             "virtio-keyboard-device,event_idx=off,indirect_desc=off",
             "-device",
-            "virtio-mouse-device,event_idx=off,indirect_desc=off",
+            "virtio-tablet-device,event_idx=off,indirect_desc=off",
             "-d",
             "guest_errors,unimp",
         ]

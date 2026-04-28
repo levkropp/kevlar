@@ -16,6 +16,20 @@ const PREEMPT_PER_TICKS: usize = 3;
 /// the bug is in `switch()`'s interaction with the interrupt return path.
 pub const DIAG_SKIP_SWITCH: bool = false;
 
+/// Gate the per-second TICK_HB heartbeat warn! line that proves the timer
+/// ISR is still running during a hang.  Useful when chasing a livelock,
+/// noisy under normal operation (one line per second per CPU on the
+/// console).  Flip to `true` when investigating a hang.
+const TICK_HB_ENABLED: bool = false;
+
+/// Gate the PID1_STALL detector that fires when PID 1 hasn't been observed
+/// running on any CPU for >100 ticks (1s).  False-alarms when PID 1 is
+/// deliberately blocked (e.g. test-lxde's interactive_keepalive sleeps in
+/// 60s loops to keep the desktop alive in run-alpine-lxde) — the detector
+/// can't tell "stuck" from "voluntarily idle".  Flip to `true` when
+/// investigating a real init-process hang.
+const PID1_STALL_ENABLED: bool = false;
+
 static MONOTONIC_TICKS: AtomicUsize = AtomicUsize::new(0);
 /// Per-CPU tick counter — bumped from `handle_timer_irq` regardless
 /// of whether the global heartbeat fires.  Used to detect a dead
@@ -267,10 +281,12 @@ pub fn handle_timer_irq() -> bool {
         PER_CPU_TICKS[cpu_idx].fetch_add(1, Ordering::Relaxed);
     }
 
-    // Task #25 diagnostic: unconditional tick heartbeat + PID 1
+    // Task #25 diagnostic: per-second tick heartbeat + PID 1
     // starvation detector.  The heartbeat proves the timer ISR is
-    // still running during a hang.
-    if ticks % 100 == 0 {
+    // still running during a hang.  Gated by TICK_HB_ENABLED — flip
+    // it to `true` when chasing a hang; otherwise the line is a
+    // per-second per-CPU console spam.
+    if TICK_HB_ENABLED && ticks % 100 == 0 {
         let last = PID1_LAST_TICK.load(Ordering::Relaxed);
         let gap = ticks.saturating_sub(last);
         let cpu = kevlar_platform::arch::cpu_id();
@@ -279,7 +295,7 @@ pub fn handle_timer_irq() -> bool {
         warn!("TICK_HB: cpu={} tick={} pid1_last={} pid1_gap={} per_cpu={:?}",
               cpu, ticks, last, gap, pcs);
     }
-    if ticks % 50 == 25 {  // twice per second, offset from preempt
+    if PID1_STALL_ENABLED && ticks % 50 == 25 {  // twice per second, offset from preempt
         let last = PID1_LAST_TICK.load(Ordering::Relaxed);
         // Dump on every sample once gap > 100 ticks (1s).  Repeated
         // samples let us tell whether the userspace PC is stuck (a
