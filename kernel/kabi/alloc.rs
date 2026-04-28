@@ -248,6 +248,13 @@ pub extern "C" fn kvrealloc_node_align_noprof(
 ksym!(__kvmalloc_node_noprof);
 ksym!(kvrealloc_node_align_noprof);
 
+#[unsafe(no_mangle)]
+pub extern "C" fn vzalloc_noprof(size: usize) -> *mut core::ffi::c_void {
+    vzalloc(size)
+}
+
+ksym!(vzalloc_noprof);
+
 // `kmalloc_caches` is a static array the kmalloc inlining
 // machinery indexes into.  Modules read it to pick the right
 // cache for a given size; our shim ignores the cache pointer.

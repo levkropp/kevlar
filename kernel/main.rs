@@ -834,6 +834,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi drm_exec.ko load");
     }
 
+    // K15 — load /lib/modules/drm_ttm_helper.ko: Ubuntu's DRM
+    // framebuffer-emulation helper.  47 undefs (40 net new) across
+    // drm_fb_helper (11), drm_client (5), fb (5), fb raster (3),
+    // ttm_bo (3), drm_format (2), kernel mutex (2), module
+    // refcount (2), and assorted misc (drm dbg / printk warn /
+    // dev_driver_string / vzalloc rename / memcpy / memcpy_toio).
+    // Pure library module — no init_module.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/drm_ttm_helper.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/drm_ttm_helper.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: drm_ttm_helper init_module returned {}", rc),
+                None => info!("kabi: drm_ttm_helper is a library module (no init_module)"),
+            },
+            Err(e) => warn!("kabi: drm_ttm_helper load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi drm_ttm_helper.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

@@ -1742,6 +1742,21 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(drm_exec_src, dest)
         log("MOD", f"installed /lib/modules/drm_exec.ko ({drm_exec_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K15 target: drm_ttm_helper.ko (DRM framebuffer-
+    # emulation helper, 47 undefs across drm_fb_helper / drm_client
+    # / fb / sys_raster / ttm_bo / format / mutex / module ref /
+    # misc).  Pure library module — no init_module.
+    drm_ttm_helper_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "drm_ttm_helper.ko"
+    if drm_ttm_helper_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "drm_ttm_helper.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(drm_ttm_helper_src, dest)
+        log("MOD", f"installed /lib/modules/drm_ttm_helper.ko ({drm_ttm_helper_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

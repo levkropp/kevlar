@@ -618,6 +618,28 @@ test-module-k14: build
 	    false; \
 	fi
 
+# `make test-module-k15` — load /lib/modules/drm_ttm_helper.ko:
+# Ubuntu's DRM framebuffer-emulation helper.  47 undefs (40 net
+# new) across drm_fb_helper, drm_client, fb_*, fb_raster, ttm_bo,
+# drm_format, mutex, module_ref, misc.  Pure library module.
+.PHONY: test-module-k15
+test-module-k15: build
+	$(PROGRESS) "TEST" "kABI K15 demo (Ubuntu drm_ttm_helper.ko + 40 fbdev/TTM stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k15.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/drm_ttm_helper.ko' /tmp/kevlar-test-module-k15.log \
+	 && grep -q 'kabi: loaded /lib/modules/drm_ttm_helper.ko' /tmp/kevlar-test-module-k15.log \
+	 && grep -q 'kabi: drm_ttm_helper is a library module' /tmp/kevlar-test-module-k15.log; then \
+	    echo "TEST_PASS: kABI K15 — Ubuntu drm_ttm_helper.ko loaded with fbdev/TTM stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K15 markers"; \
+	    grep -E 'kabi|drm_ttm|panic' /tmp/kevlar-test-module-k15.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
 # network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
 # first milestone with subsystem-shaped stub work.

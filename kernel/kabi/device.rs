@@ -162,3 +162,14 @@ ksym!(get_device);
 ksym!(put_device);
 ksym!(dev_set_drvdata);
 ksym!(dev_get_drvdata);
+
+/// `dev_driver_string(dev)` — returns the driver name for logging.
+/// K15: return a static "kabi-stub" C string.  Real implementation
+/// would read `dev->driver->name`.
+#[unsafe(no_mangle)]
+pub extern "C" fn dev_driver_string(_dev: *const c_void) -> *const c_char {
+    static NAME: &[u8] = b"kabi-stub\0";
+    NAME.as_ptr() as *const c_char
+}
+
+ksym!(dev_driver_string);

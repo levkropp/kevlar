@@ -91,3 +91,24 @@ pub unsafe extern "C" fn _dev_err(
 }
 
 ksym!(_dev_err);
+
+/// Linux's `__warn_printk(fmt, ...)` — the variadic emitted by
+/// WARN() / WARN_ON() macros.  K15: log at warn level.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __warn_printk(fmt: *const c_char, mut args: ...) -> i32 {
+    if fmt.is_null() {
+        return 0;
+    }
+    let mut buf = [0u8; 512];
+    let n = {
+        let mut sink = Sink::new(&mut buf);
+        unsafe { format_into(&mut sink, fmt, &mut args) };
+        sink.pos()
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log::warn!("[mod-warn] {}", s.trim_end_matches('\n'));
+    }
+    n as i32
+}
+
+ksym!(__warn_printk);
