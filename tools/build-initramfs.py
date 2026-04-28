@@ -1819,6 +1819,26 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(bochs_src, dest)
         log("MOD", f"installed /lib/modules/bochs.ko ({bochs_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K33 target: erofs.ko (Enhanced Read-Only File
+    # System).  Block-based fs, read-only — same kABI surface
+    # as ext4 minus jbd2 journaling.  Used as the
+    # proof-of-concept for K33's filesystem-via-kABI playbook
+    # because Ubuntu builds ext4 builtin (=y) so its modules
+    # deb doesn't ship ext4.ko, but erofs.ko IS shipped.  271
+    # undef symbols; ~30 satisfied by the K33 Phase 2
+    # scaffolding in kernel/kabi/{block,filemap,fs_register,
+    # jbd2_stubs}.rs.  Loader will report the rest.
+    erofs_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "fs" / "erofs" / "erofs.ko"
+    if erofs_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "erofs.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(erofs_src, dest)
+        log("MOD", f"installed /lib/modules/erofs.ko ({erofs_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

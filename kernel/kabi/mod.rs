@@ -41,6 +41,7 @@ pub mod fb_raster;
 pub mod filemap;
 pub mod fops;
 pub mod fs_register;
+pub mod fs_stubs;
 pub mod input;
 pub mod io;
 pub mod jbd2_stubs;

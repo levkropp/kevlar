@@ -11,7 +11,8 @@ use kevlar_vfs::file_system::FileSystem;
 
 use crate::fs::initramfs::INITRAM_FS;
 use crate::fs::opened_file::OpenOptions;
-use crate::kabi::elf::{RelObj, SHF_ALLOC, SHT_NOBITS, SHT_PROGBITS};
+use crate::kabi::elf::{self, RelObj, SHF_ALLOC, SHT_NOBITS, SHT_PROGBITS};
+use crate::kabi::exports;
 use crate::kabi::reloc;
 use crate::kabi::symbols;
 use crate::prelude::*;
@@ -186,6 +187,39 @@ pub fn load_module(path: &str, init_sym: &str) -> Result<LoadedModule> {
                 }
             }
             _ => {} // other section types in the layout — shouldn't happen post-SHF_ALLOC filter
+        }
+    }
+
+    // ── Pre-pass: enumerate all undefined external symbols ──────
+    // Bailing on the first missing kABI export makes incremental
+    // development painful — you fix one, hit the next, repeat.
+    // Log the complete list up front so a single boot identifies
+    // the entire batch of stubs to add.
+    {
+        let mut missing: Vec<&str> = Vec::new();
+        for sym in obj.symtab.iter() {
+            if sym.st_shndx == symbols::SHN_UNDEF {
+                let name = obj.sym_name(sym);
+                if name.is_empty() {
+                    continue;
+                }
+                if exports::lookup(name).is_none()
+                    && !missing.iter().any(|n| *n == name)
+                {
+                    missing.push(name);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            log::warn!(
+                "kabi: {} undefined external symbol(s) for {}:",
+                missing.len(), path,
+            );
+            for name in &missing {
+                log::warn!("    UNDEF: {}", name);
+            }
+        } else {
+            log::info!("kabi: all external symbols resolved for {}", path);
         }
     }
 

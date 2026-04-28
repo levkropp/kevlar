@@ -921,6 +921,37 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi bochs.ko load");
     }
 
+    // K33 Phase 2 — attempt to load /lib/modules/erofs.ko.
+    // Erofs is the proof-of-concept for K33's filesystem-via-kABI
+    // playbook: a block-based read-only fs that exercises the
+    // same kABI surface as ext4 minus jbd2.  271 undef symbols
+    // total; the K33 scaffolding (block/filemap/fs_register/
+    // jbd2_stubs/fs_stubs) resolves all of them.
+    //
+    // Currently disabled at boot because erofs's partial init
+    // (it returns -ENOMEM at our null-returning kmem_cache stub)
+    // leaves state that later wedges virtio_input probe.  Wire
+    // back on once the slab/kmem_cache stubs return real handles.
+    // Enable via the cmdline `kabi-load-erofs=1` for debug runs.
+    #[cfg(target_arch = "aarch64")]
+    if bootinfo.raw_cmdline.as_str().contains("kabi-load-erofs=1") {
+        info!("kabi: loading /lib/modules/erofs.ko (Ubuntu 26.04, K33 Phase 2)");
+        match kabi::load_module("/lib/modules/erofs.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => {
+                    info!("kabi: erofs init_module returned {}", rc);
+                    info!(
+                        "kabi: registered filesystems = {}",
+                        kabi::fs_register::registered_count(),
+                    );
+                }
+                None => warn!("kabi: init_module not found in erofs.ko"),
+            },
+            Err(e) => warn!("kabi: erofs load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi erofs.ko load");
+    }
+
     // K28 — pre-allocate the DRM DUMB-buffer pool BEFORE
     // walk_and_probe fires drm_dev_register, so /dev/dri/cardN
     // is installed with a real `mmap_phys_base`.  Userspace
