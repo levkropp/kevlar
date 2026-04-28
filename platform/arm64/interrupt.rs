@@ -56,26 +56,22 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
             super::fp::handle_fp_trap();
         }
         EC_BRK_A64 if from_user != 0 => {
-            // EL0 executed a BRK instruction.  Linux semantics: deliver
-            // SIGTRAP (signal 5) so user-space debuggers / handlers can
-            // observe.  musl libc uses `brk #1000` as `a_crash()` —
-            // executed at the END of abort() if SIGABRT was caught and
-            // ignored.  Without this case, our generic-EL0 fallthrough
-            // delivers a fatal SIGILL/SIGSEGV which masks the real
-            // SIGABRT cause.
-            //
-            // The ESR ISS field carries the BRK immediate (0x3e8 = 1000
-            // for musl's a_crash()).  We log it for diagnostics; the
-            // imm doesn't change signal disposition.
+            // EL0 executed a BRK instruction.  ESR ISS = BRK immediate.
+            // musl uses `brk #1000` as `a_crash()` (the fallback inside
+            // abort() if SIGABRT was caught).  Linux delivers SIGTRAP
+            // here, but in practice gvfs / glib install SIGTRAP handlers
+            // that block the process trying to print debug state, which
+            // hangs dbus and starves pcmanfm.  We deliver SIGSEGV (the
+            // generic "die now" path) instead — same outcome the
+            // previous EC=? fallthrough produced, just with a cleaner
+            // log line classifying the cause.
             let pc = unsafe { (*frame).pc };
             let imm = (esr & 0xffff) as u32;
             log::warn!(
-                "EL0 BRK #{:#x} at pc={:#x} — delivering SIGTRAP",
+                "EL0 BRK #{:#x} at pc={:#x} — delivering SIGSEGV",
                 imm, pc,
             );
-            // Pass "BREAKPOINT" so handle_user_fault dispatches SIGTRAP
-            // (kernel/main.rs:149-153 maps this exception name → SIGTRAP).
-            handler().handle_user_fault("BREAKPOINT", pc as usize);
+            handler().handle_user_fault("arm64 EL0 BRK", pc as usize);
         }
         EC_DATA_ABORT_LOWER | EC_INST_ABORT_LOWER => {
             // User-space page fault.
