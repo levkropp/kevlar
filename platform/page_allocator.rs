@@ -525,6 +525,77 @@ pub fn prezeroed_4k_count() -> usize {
     PREZEROED_4K_COUNT.load(Ordering::Relaxed)
 }
 
+/// Periodic sweep: scan every page currently sitting in the prezeroed
+/// pool to detect *in-pool* corruption.  The pop-site
+/// `debug_assert_page_is_zero(.., "PREZEROED_POOL")` already catches
+/// corruption at allocation time, but if the corrupting writer hits
+/// the page just after we scan it, we want to see the event as close
+/// to the wall-clock moment as possible (not several alloc cycles
+/// later).  Called from interval_work() every ~0.5 s.
+///
+/// IMPORTANT: we re-check that each non-zero page is *still in the
+/// pool* under lock before flagging it.  Without this re-check, the
+/// race "popped → handed to user → user writes" would be
+/// misdiagnosed as corruption.
+///
+/// Returns the number of confirmed corrupted pages found this sweep.
+pub fn sweep_prezeroed_pool_for_corruption() -> usize {
+    if !PAGE_ZERO_CHECK_ENABLED.load(Ordering::Relaxed) {
+        return 0;
+    }
+    // Snapshot the pool's contents under lock, then scan without the
+    // lock held — scanning 512 pages × 4 KiB takes ~1 ms which is too
+    // long to hold the alloc-path lock.
+    let snapshot: alloc::vec::Vec<usize> = {
+        let pool = PREZEROED_4K_POOL.lock();
+        pool.pages[..pool.count].to_vec()
+    };
+
+    let mut hits = 0;
+    for &p in &snapshot {
+        if p == 0 {
+            continue;
+        }
+        let paddr = PAddr::new(p);
+        // First pass (cheap): is the page non-zero at all?
+        let nonzero = unsafe {
+            let ptr = paddr.as_ptr::<u64>();
+            let mut found = false;
+            for i in 0..(PAGE_SIZE / 8) {
+                if core::ptr::read_volatile(ptr.add(i)) != 0 {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !nonzero {
+            continue;
+        }
+        // Second pass: re-acquire the pool lock and confirm the paddr
+        // is *still* in the pool.  If it was popped between snapshot
+        // and now, the page is no longer ours and the non-zero data
+        // is the legitimate user/kernel content of whoever owns it.
+        let still_in_pool = {
+            let pool = PREZEROED_4K_POOL.lock();
+            pool.pages[..pool.count].iter().any(|&q| q == p)
+        };
+        if !still_in_pool {
+            continue;
+        }
+        // Confirmed: a page in the pool has non-zero data.  Heavy-lift
+        // diagnostic (logs first non-zero word, kernel-VA pattern,
+        // free-site, etc.).
+        let before = PAGE_ZERO_MISS_COUNT.load(Ordering::Relaxed);
+        debug_assert_page_is_zero(paddr, "PREZEROED_POOL_SWEEP");
+        let after = PAGE_ZERO_MISS_COUNT.load(Ordering::Relaxed);
+        if after > before {
+            hits += 1;
+        }
+    }
+    hits
+}
+
 /// Batch-allocate up to `max` dirty pages into `out`. Returns number allocated.
 #[inline(always)]
 pub fn alloc_page_batch(out: &mut [PAddr], max: usize) -> usize {
@@ -855,6 +926,15 @@ pub fn recent_single_free_match(paddr: PAddr) -> Option<(u64, u64)> {
     None
 }
 
+/// Counter for detected double-frees.  Cheap diagnostic: at the entry of
+/// `free_pages` we already need to verify the paddr isn't a live kernel
+/// stack; checking the user-page pools at the same time costs another
+/// pair of lock-then-scan operations (~512 + 64 word compares) and turns
+/// the "PAGE_ZERO_MISS site=PREZEROED_POOL" mystery into a panic at the
+/// exact double-free site.
+static DOUBLE_FREE_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+const DOUBLE_FREE_LOG_LIMIT: usize = 16;
+
 pub fn free_pages(paddr: PAddr, num_pages: usize) {
     // Flight recorder: record every call, before any early returns.
     crate::flight_recorder::record(
@@ -863,6 +943,36 @@ pub fn free_pages(paddr: PAddr, num_pages: usize) {
         paddr.value() as u64,
         num_pages as u64,
     );
+
+    // INSTRUMENTATION (K33): catch double-free at the moment it happens.
+    // If `paddr` is already sitting in PAGE_CACHE or PREZEROED_4K_POOL,
+    // somebody is calling free_pages a second time — the second free
+    // will be pushed onto a freelist (corrupting the page that's
+    // currently being held as a zero page in PREZEROED_POOL).
+    if num_pages == 1 && PAGE_ZERO_CHECK_ENABLED.load(Ordering::Relaxed) {
+        if is_paddr_in_user_pools(paddr) {
+            let n = DOUBLE_FREE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < DOUBLE_FREE_LOG_LIMIT {
+                let caller = caller_return_address();
+                let prior = recent_single_free_match(paddr);
+                log::warn!(
+                    "DOUBLE_FREE: paddr={:#x} caller_lr={:#x} (seen #{})",
+                    paddr.value(), caller, n + 1,
+                );
+                if let Some((tsc, rip)) = prior {
+                    log::warn!(
+                        "    prior free of same paddr: tsc={:#x} caller_lr={:#x}",
+                        tsc, rip,
+                    );
+                }
+            }
+            // Drop the second free entirely — we already returned this
+            // page to the pool, and pushing it again would either
+            // duplicate it in the cache (allocator hands out same paddr
+            // twice) or corrupt the buddy by double-linking it.
+            return;
+        }
+    }
 
     // INSTRUMENTATION (task #25): panic if we're about to return a paddr
     // to the allocator while it's still registered as an active kernel

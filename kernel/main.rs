@@ -1063,6 +1063,15 @@ pub fn interval_work() {
     if iw_count % 100 == 0 {
         kevlar_platform::stack_cache::check_all_guards();
     }
+
+    // Sweep the prezeroed pool for in-pool corruption.  Catches the
+    // "PAGE_ZERO_MISS site=PREZEROED_POOL" event close to the wall-clock
+    // moment a kernel writer corrupted a queued page (rather than waiting
+    // for a user to pop and execute it).  Cheap-ish — 512 pages × 4 KiB
+    // of volatile reads per sweep; ~1 ms on KVM.  Every 50 idles ≈ 0.5 s.
+    if iw_count % 50 == 0 {
+        kevlar_platform::page_allocator::sweep_prezeroed_pool_for_corruption();
+    }
 }
 
 fn idle_thread() -> ! {
