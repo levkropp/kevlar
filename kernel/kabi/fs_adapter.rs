@@ -76,23 +76,50 @@ impl FileSystem for KabiFileSystem {
     }
 }
 
-/// Mount entry point — looks up the registered filesystem by name,
-/// dispatches into its `->mount` op (or init_fs_context/get_tree
-/// chain), and wraps the result in a `KabiFileSystem` adapter.
+/// Linux 7.0.0-14 `struct file_system_type` layout (the fields we
+/// care about; the full struct is ~120 bytes).  Pinned to the
+/// version we load (Ubuntu 26.04's linux-modules-7.0.0-14-generic).
 ///
-/// v1: returns `Err(ENOSYS)` after lookup succeeds.  The lookup
-/// itself proves the registry contains the fs (Phase 2c
-/// achievement); the mount-op dispatch is Phase 3b.
+/// ```c
+/// struct file_system_type {
+///     const char *name;                  /* +0 */
+///     int fs_flags;                      /* +8 */
+///     int (*init_fs_context)(struct fs_context *);  /* +16 */
+///     const struct fs_parameter_spec *parameters;   /* +24 */
+///     struct dentry *(*mount)(struct file_system_type *, int,
+///                             const char *, void *); /* +32 */
+///     void (*kill_sb)(struct super_block *);         /* +40 */
+///     struct module *owner;                           /* +48 */
+///     ...
+/// };
+/// ```
+const FST_NAME_OFF: usize = 0;
+const FST_FS_FLAGS_OFF: usize = 8;
+const FST_INIT_FS_CONTEXT_OFF: usize = 16;
+const FST_MOUNT_OFF: usize = 32;
+const FST_KILL_SB_OFF: usize = 40;
+
+/// Mount entry point — looks up the registered filesystem by name,
+/// reads its struct file_system_type, dispatches into its mount
+/// pathway, and wraps the result in a `KabiFileSystem` adapter.
+///
+/// Phase 3 v1 (042f57a): registry lookup proven; mount-op dispatch
+/// returned ENOSYS unconditionally.
+///
+/// Phase 3b v1 (this commit): inspect file_system_type fields and
+/// log them.  If `->mount` is non-null, dispatch into it directly
+/// (older fs's like ext2 still use this path).  If only
+/// `->init_fs_context` is set (modern erofs/ext4/btrfs), log that
+/// the init_fs_context chain isn't implemented yet and return
+/// ENOSYS — Phase 3c lands the chain.
 pub fn kabi_mount_filesystem(
     name: &str,
     _source: Option<&str>,
     _flags: u32,
     _data: *const u8,
 ) -> Result<Arc<dyn FileSystem>> {
-    // Look up the registered file_system_type.  If not registered,
-    // return -ENODEV so mount.rs can fall back to other handlers.
     let name_bytes = name.as_bytes();
-    let _fs_type = match super::fs_register::lookup_fstype(name_bytes) {
+    let fs_type = match super::fs_register::lookup_fstype(name_bytes) {
         Some(p) => p,
         None => {
             warn!("kabi: kabi_mount_filesystem({}): not in fs registry", name);
@@ -102,12 +129,61 @@ pub fn kabi_mount_filesystem(
         }
     };
 
-    // TODO Phase 3b: read fs_type's `->mount` (offset 32) or
-    // `->init_fs_context` (offset 16); dispatch.
-    log::warn!(
-        "kabi: kabi_mount_filesystem({}): registry hit, dispatch to \
-         module ->mount op not yet implemented",
+    // Read the struct fields without dereferencing the full layout.
+    let fs_type_u8 = fs_type as *const u8;
+    let stored_name_ptr =
+        unsafe { *(fs_type_u8.add(FST_NAME_OFF) as *const *const u8) };
+    let fs_flags = unsafe { *(fs_type_u8.add(FST_FS_FLAGS_OFF) as *const i32) };
+    let init_fs_context_ptr =
+        unsafe { *(fs_type_u8.add(FST_INIT_FS_CONTEXT_OFF) as *const usize) };
+    let mount_op_ptr =
+        unsafe { *(fs_type_u8.add(FST_MOUNT_OFF) as *const usize) };
+    let kill_sb_ptr =
+        unsafe { *(fs_type_u8.add(FST_KILL_SB_OFF) as *const usize) };
+
+    // Read up to 16 bytes of the registered name string for diagnostics.
+    let mut stored_name_buf = [0u8; 16];
+    if !stored_name_ptr.is_null() {
+        for i in 0..16 {
+            let c = unsafe { *stored_name_ptr.add(i) };
+            stored_name_buf[i] = c;
+            if c == 0 { break; }
+        }
+    }
+    let stored_name = core::str::from_utf8(&stored_name_buf)
+        .unwrap_or("<non-utf8>")
+        .trim_end_matches('\0');
+
+    info!(
+        "kabi: file_system_type({}): name=\"{}\" fs_flags={:#x} \
+         init_fs_context={:#x} mount={:#x} kill_sb={:#x}",
+        name, stored_name, fs_flags,
+        init_fs_context_ptr, mount_op_ptr, kill_sb_ptr,
+    );
+
+    if mount_op_ptr != 0 {
+        // Older mount API: call ->mount directly.  Phase 3c can
+        // implement this if a registered fs uses it; modern Linux
+        // 7.x kernel fs's all use init_fs_context instead.
+        warn!(
+            "kabi: file_system_type({}) has ->mount at {:#x} — direct \
+             dispatch not yet implemented (Phase 3c)",
+            name, mount_op_ptr,
+        );
+        return Err(crate::result::Error::new(crate::result::Errno::ENOSYS));
+    }
+    if init_fs_context_ptr != 0 {
+        warn!(
+            "kabi: file_system_type({}) uses init_fs_context — fs_context \
+             dispatch not yet implemented (Phase 3c)",
+            name,
+        );
+        return Err(crate::result::Error::new(crate::result::Errno::ENOSYS));
+    }
+    warn!(
+        "kabi: file_system_type({}) has neither ->mount nor \
+         ->init_fs_context — module is malformed?",
         name,
     );
-    Err(crate::result::Error::new(crate::result::Errno::ENOSYS))
+    Err(crate::result::Error::new(crate::result::Errno::EINVAL))
 }
