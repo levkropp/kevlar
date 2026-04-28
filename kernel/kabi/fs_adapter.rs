@@ -162,13 +162,40 @@ pub fn kabi_mount_filesystem(
     );
 
     if mount_op_ptr != 0 {
-        // Older mount API: call ->mount directly.  Phase 3c can
-        // implement this if a registered fs uses it; modern Linux
-        // 7.x kernel fs's all use init_fs_context instead.
+        // Type-shape the dispatch.  We do NOT yet actually call the
+        // function pointer — first attempt (Phase 3c v0) crashed with
+        // a kernel page fault four instructions into erofs's
+        // ->mount thunk:
+        //
+        //   panic at platform/arm64/interrupt.rs:136:17:
+        //   kernel page fault: pc=0xffff00007cdc2c1c
+        //                      far=0x2820262029766574 (= "tev)&( (")
+        //                      esr=0x96000004
+        //
+        // The FAR value is ASCII text, suggesting the thunk reads a
+        // string-typed field that we haven't initialized.  Likely
+        // candidates: the kernel's `mount_bdev` helper (which most
+        // legacy mount thunks delegate to) reads `current->fs->...`
+        // or similar process-context state we don't model.
+        //
+        // Phase 3d will either (a) implement a real synthetic
+        // block_device wrapping virtio_blk + the process-context
+        // state mount_bdev needs, or (b) switch to the
+        // init_fs_context path which doesn't go through mount_bdev.
+        // Until then, log the dispatch shape and bail.
+        type MountFn = unsafe extern "C" fn(
+            fs_type: *mut c_void,
+            flags: i32,
+            dev_name: *const u8,
+            data: *mut c_void,
+        ) -> *mut c_void;
+        let _mount_fn: MountFn = unsafe { core::mem::transmute(mount_op_ptr) };
+
         warn!(
-            "kabi: file_system_type({}) has ->mount at {:#x} — direct \
-             dispatch not yet implemented (Phase 3c)",
-            name, mount_op_ptr,
+            "kabi: erofs ->mount at {:#x} — call gated off until Phase 3d \
+             provides synthetic block_device + process-context backing \
+             (v0 dispatch panicked at PC+0x24 with text-shaped FAR)",
+            mount_op_ptr,
         );
         return Err(crate::result::Error::new(crate::result::Errno::ENOSYS));
     }

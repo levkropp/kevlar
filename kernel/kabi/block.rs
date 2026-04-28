@@ -114,8 +114,22 @@ ksym!(errno_to_blk_status);
 pub extern "C" fn bdev_file_open_by_path(_path: *const u8, _mode: u32,
                                          _holder: *mut c_void,
                                          _hops: *const c_void) -> *mut c_void {
-    log::warn!("kabi: bdev_file_open_by_path (stub) — returning null");
-    core::ptr::null_mut()
+    log::warn!("kabi: bdev_file_open_by_path (stub) — ERR_PTR(-ENODEV)");
+    // Linux convention: error returns from pointer-typed functions are
+    // encoded as `(void *)(-errno)` where IS_ERR(ptr) checks the top
+    // bits.  Returning null would survive the IS_ERR check (null is
+    // not an error to Linux) and be dereferenced by the caller.
+    // -ENODEV = -19 → cast to *mut c_void gives a high-bits-set
+    // pointer that Linux's IS_ERR catches.
+    err_ptr(-19)
+}
+
+/// Encode an errno as Linux's `ERR_PTR(-errno)` pointer.  Linux's
+/// `IS_ERR(ptr)` is `(unsigned long)(ptr) >= (unsigned long)-MAX_ERRNO`,
+/// where MAX_ERRNO = 4095.  Negative-cast errno values fit naturally.
+#[inline(always)]
+pub(super) fn err_ptr(errno: isize) -> *mut c_void {
+    errno as *mut c_void
 }
 
 #[unsafe(no_mangle)]
