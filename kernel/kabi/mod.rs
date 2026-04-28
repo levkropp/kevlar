@@ -40,6 +40,7 @@ pub mod fb;
 pub mod fb_raster;
 pub mod filemap;
 pub mod fops;
+pub mod fs_adapter;
 pub mod fs_register;
 pub mod fs_stubs;
 pub mod input;

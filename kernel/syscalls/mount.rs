@@ -82,8 +82,32 @@ impl<'a> SyscallHandler<'a> {
             "proc" => PROC_FS.clone(),
             "sysfs" => SYS_FS.clone(),
             "tmpfs" => Arc::new(TmpFs::new()),
+            // K33 Phase 3: dispatch to the kABI fs registry first
+            // for any filesystem that loaded Linux's `.ko` module
+            // and called `register_filesystem(...)` from init.  As
+            // of K33, that's `erofs` (via `make` boot with
+            // `kabi-load-erofs=1` cmdline).  ext4 follows once the
+            // .ko build path is set up (task #99).  Falls through
+            // to the homegrown handlers below if the kABI registry
+            // doesn't have the fstype.
+            "erofs" => {
+                match crate::kabi::fs_adapter::kabi_mount_filesystem(
+                    fstype, None, flags as u32, core::ptr::null(),
+                ) {
+                    Ok(fs) => fs,
+                    Err(e) => {
+                        debug_warn!(
+                            "mount: kABI route for {} failed: {:?}",
+                            fstype, e,
+                        );
+                        return Err(e);
+                    }
+                }
+            }
             "ext2" | "ext3" | "ext4" => {
                 // Mount ext2/ext3/ext4 from the global block device.
+                // TODO: when ext4.ko is in the kABI registry, route
+                // ext4 here through `kabi_mount_filesystem` (task #99).
                 kevlar_ext2::mount_ext2()?
             }
             "devtmpfs" => {
