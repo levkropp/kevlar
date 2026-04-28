@@ -159,6 +159,21 @@ impl Dir {
         dir
     }
 
+    /// Like `add_dir`, but if a directory of the same name already
+    /// exists, return it instead of overwriting.  Useful for nested
+    /// runtime additions like `/dev/dri/cardN` where multiple call
+    /// sites create the subdir.  If a non-directory entry exists at
+    /// the name, it is overwritten with a fresh directory.
+    pub fn get_or_add_dir(&self, name: &str) -> Arc<Dir> {
+        let mut inner = self.inner.lock_no_irq();
+        if let Some(TmpFsINode::Directory(existing)) = inner.files.get(name) {
+            return existing.clone();
+        }
+        let dir = Arc::new(Dir::new(alloc_inode_no(), self.dev_id));
+        inner.insert(name.into(), TmpFsINode::Directory(dir.clone()));
+        dir
+    }
+
     pub fn add_file(&self, name: &str, file: Arc<dyn FileLike>) {
         self.inner.lock_no_irq().insert(name.into(), TmpFsINode::File(file));
     }

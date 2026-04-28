@@ -45,8 +45,85 @@ pub extern "C" fn __devm_drm_dev_alloc(
     unsafe { buf.add(offset) as *mut c_void }
 }
 
+// ── DRM minor allocation + char-device registration ───────────
+
+use core::sync::atomic::{AtomicU32, Ordering};
+
+/// Counter for /dev/dri/cardN names.  Linux uses major=226 for DRM
+/// primary nodes; we follow that convention so userspace tools
+/// recognize the major.
+static NEXT_DRM_MINOR: AtomicU32 = AtomicU32::new(0);
+const DRM_MAJOR: u32 = 226;
+
+/// Adapter fops: forward Kevlar K4 char-device callbacks to the
+/// drm_open / drm_release / drm_read / drm_poll / drm_ioctl /
+/// drm_compat_ioctl stubs.  All return 0 / 0-bytes today; real
+/// dispatch lands K21+.
+extern "C" fn drm_open_adapter(
+    inode: *mut crate::kabi::fops::InodeShim,
+    filp: *mut crate::kabi::fops::FileShim,
+) -> i32 {
+    drm_open(inode as *mut c_void, filp as *mut c_void)
+}
+
+extern "C" fn drm_release_adapter(
+    inode: *mut crate::kabi::fops::InodeShim,
+    filp: *mut crate::kabi::fops::FileShim,
+) -> i32 {
+    drm_release(inode as *mut c_void, filp as *mut c_void)
+}
+
+extern "C" fn drm_read_adapter(
+    filp: *mut crate::kabi::fops::FileShim,
+    buf: *mut u8,
+    count: usize,
+    ppos: *mut i64,
+) -> isize {
+    drm_read(filp as *mut c_void, buf as *mut c_void, count, ppos as *mut c_void)
+}
+
+extern "C" fn drm_poll_adapter(
+    filp: *mut crate::kabi::fops::FileShim,
+    wait: *const c_void,
+) -> u32 {
+    drm_poll(filp as *mut c_void, wait as *mut c_void)
+}
+
+/// Static FileOperationsShim used by every /dev/dri/cardN we
+/// install.  All slots route to the shared K17 drm_* stubs.
+struct DrmFopsHolder(crate::kabi::fops::FileOperationsShim);
+unsafe impl Sync for DrmFopsHolder {}
+
+static DRM_FOPS_ADAPTER: DrmFopsHolder = DrmFopsHolder(
+    crate::kabi::fops::FileOperationsShim {
+        owner: core::ptr::null(),
+        llseek: None,
+        read: Some(drm_read_adapter),
+        write: None,
+        unlocked_ioctl: None,
+        poll: Some(drm_poll_adapter),
+        mmap: None,
+        open: Some(drm_open_adapter),
+        release: Some(drm_release_adapter),
+    },
+);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn drm_dev_register(_dev: *mut c_void, _flags: u64) -> i32 {
+    let minor = NEXT_DRM_MINOR.fetch_add(1, Ordering::Relaxed);
+    let card_name = alloc::format!("card{}", minor);
+    crate::kabi::cdev::install_chrdev_in_subdir(
+        DRM_MAJOR,
+        minor,
+        1,
+        "dri",
+        &card_name,
+        &DRM_FOPS_ADAPTER.0,
+    );
+    log::info!(
+        "kabi: drm_dev_register: /dev/dri/{} installed (major={}, minor={})",
+        card_name, DRM_MAJOR, minor
+    );
     0
 }
 

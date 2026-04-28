@@ -640,6 +640,29 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k20` — fire bochs probe + register
+# /dev/dri/cardN.  Two probe-firing drivers (cirrus + bochs) and
+# two char devices visible to userspace.
+.PHONY: test-module-k20
+test-module-k20: build
+	$(PROGRESS) "TEST" "kABI K20 demo (/dev/dri/cardN + bochs probe)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k20.log; true
+	@echo ""
+	@if grep -q 'kabi: PCI walk:.*cirrus-qemu.*1013:00b8' /tmp/kevlar-test-module-k20.log \
+	 && grep -q "kabi: PCI walk: 'cirrus-qemu' probe returned 0" /tmp/kevlar-test-module-k20.log \
+	 && grep -q 'kabi: PCI walk:.*bochs-drm.*1234:1111' /tmp/kevlar-test-module-k20.log \
+	 && grep -q "kabi: PCI walk: 'bochs-drm' probe returned" /tmp/kevlar-test-module-k20.log \
+	 && grep -q 'kabi: drm_dev_register: /dev/dri/card0 installed' /tmp/kevlar-test-module-k20.log; then \
+	    echo "TEST_PASS: kABI K20 — both probes fired (cirrus succeeded, bochs fired); /dev/dri/card0 installed"; \
+	else \
+	    echo "TEST_FAIL: missing expected K20 markers"; \
+	    grep -E 'kabi|cirrus|bochs|panic|PCI|drm_dev' /tmp/kevlar-test-module-k20.log | head -50; \
+	    false; \
+	fi
+
 # `make test-module-k19` — first probe-firing milestone.  Walks
 # the registered PCI drivers + fake devices and calls cirrus's
 # probe with a fake (vendor=0x1013, device=0x00B8) match.

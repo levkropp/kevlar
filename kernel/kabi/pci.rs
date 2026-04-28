@@ -86,41 +86,25 @@ unsafe impl Send for FakePciDev {}
 
 static FAKE_DEVICES: SpinLock<Vec<FakePciDev>> = SpinLock::new(Vec::new());
 
-/// Lazy initializer for the fake Cirrus PCI device.  Allocates:
-/// - A 4KB pdev buffer (zeroed).
-/// - A 16MB BAR0 (fake VRAM).
-/// - A 4KB BAR2 (fake mmio regs).
-///
-/// Then writes resource[0/2] start/end into the pdev buffer at the
-/// known offsets.  PAs are synthesized as the buffer addresses
-/// themselves (we don't have real BAR addresses; the lookup table
-/// in `devm_ioremap` translates by exact match).
-fn ensure_cirrus_fake_device() {
-    let mut devices = FAKE_DEVICES.lock();
-    if !devices.is_empty() {
-        return;
-    }
-    drop(devices);
-
+/// Allocate a single fake PCI device with two 4KB BARs.  Returns
+/// the (pdev_buf, fake_dev) pair fully populated.  The PAs use
+/// the supplied bar0_pa / bar2_pa so multiple devices don't
+/// collide.
+fn make_fake_pci_dev(
+    vendor: u16,
+    device: u16,
+    bar0_pa: u64,
+    bar2_pa: u64,
+) -> Option<FakePciDev> {
     let pdev_buf = super::alloc::kzalloc(PDEV_BUF_SIZE, 0) as *mut u8;
-    // Small fake BARs at K19 — cirrus's probe stores the ioremap'd
-    // pointers in drm_dev fields but doesn't read/write them at
-    // probe time.  4 KB each is plenty.
     let bar0_size: usize = 4096;
     let bar2_size: usize = 4096;
     let bar0_va = super::alloc::kzalloc(bar0_size, 0) as usize;
     let bar2_va = super::alloc::kzalloc(bar2_size, 0) as usize;
     if pdev_buf.is_null() || bar0_va == 0 || bar2_va == 0 {
-        log::warn!("kabi: failed to allocate fake cirrus PCI device backing");
-        return;
+        return None;
     }
 
-    // Synthesize PA values that won't collide with anything real.
-    // Choose high addresses (>= 4 GB) as plausible PCI BARs.
-    let bar0_pa: u64 = 0x1_0000_0000;
-    let bar2_pa: u64 = 0x1_1000_0000;
-
-    // Write resource[0].start/end
     unsafe {
         core::ptr::write_unaligned(
             pdev_buf.add(PDEV_OFF_RESOURCE0_START) as *mut u64,
@@ -140,10 +124,9 @@ fn ensure_cirrus_fake_device() {
         );
     }
 
-    let mut devices = FAKE_DEVICES.lock();
-    devices.push(FakePciDev {
-        vendor: 0x1013,
-        device: 0x00B8,
+    Some(FakePciDev {
+        vendor,
+        device,
         pdev_buf,
         bar0_pa,
         bar0_va,
@@ -151,16 +134,40 @@ fn ensure_cirrus_fake_device() {
         bar2_pa,
         bar2_va,
         bar2_size,
-    });
-    log::info!(
-        "kabi: registered fake PCI device 0x1013:0x00B8 (Cirrus VGA), \
-         pdev_buf={:#x}, BAR0_pa={:#x} VA={:#x}, BAR2_pa={:#x} VA={:#x}",
-        pdev_buf as usize,
-        bar0_pa,
-        bar0_va,
-        bar2_pa,
-        bar2_va,
-    );
+    })
+}
+
+/// Lazy initializer: register one fake Cirrus VGA + one fake
+/// QEMU bochs-display device.  Both back 4KB BARs.
+fn ensure_fake_devices() {
+    let mut devices = FAKE_DEVICES.lock();
+    if !devices.is_empty() {
+        return;
+    }
+    drop(devices);
+
+    let cirrus = make_fake_pci_dev(0x1013, 0x00B8, 0x1_0000_0000, 0x1_1000_0000);
+    let bochs = make_fake_pci_dev(0x1234, 0x1111, 0x1_2000_0000, 0x1_3000_0000);
+
+    let mut devices = FAKE_DEVICES.lock();
+    if let Some(d) = cirrus {
+        log::info!(
+            "kabi: registered fake PCI device {:04x}:{:04x} (Cirrus VGA), \
+             pdev_buf={:#x}, BAR0_pa={:#x} VA={:#x}, BAR2_pa={:#x} VA={:#x}",
+            d.vendor, d.device, d.pdev_buf as usize,
+            d.bar0_pa, d.bar0_va, d.bar2_pa, d.bar2_va,
+        );
+        devices.push(d);
+    }
+    if let Some(d) = bochs {
+        log::info!(
+            "kabi: registered fake PCI device {:04x}:{:04x} (Bochs Display), \
+             pdev_buf={:#x}, BAR0_pa={:#x} VA={:#x}, BAR2_pa={:#x} VA={:#x}",
+            d.vendor, d.device, d.pdev_buf as usize,
+            d.bar0_pa, d.bar0_va, d.bar2_pa, d.bar2_va,
+        );
+        devices.push(d);
+    }
 }
 
 /// `devm_ioremap` translates a fake-PA back to its backing VA.
@@ -216,7 +223,7 @@ fn match_id_table(id_table: usize, vendor: u16, device: u16) -> Option<usize> {
 /// Walk all registered drivers + all fake devices; for each match,
 /// invoke `probe(pdev, matched_id)` and log the return.
 pub fn walk_and_probe() {
-    ensure_cirrus_fake_device();
+    ensure_fake_devices();
     let drivers = REGISTERED.lock().clone();
     let devices: Vec<*mut u8> = FAKE_DEVICES
         .lock()

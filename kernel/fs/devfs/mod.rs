@@ -101,6 +101,19 @@ impl DevFs {
     pub fn add_runtime_file(&self, name: &str, file: Arc<dyn FileLike>) {
         self.0.root_tmpfs_dir().add_file(name, file);
     }
+
+    /// Add a file at /dev/<subdir>/<name>, creating the subdir if
+    /// it doesn't yet exist.  Used by the DRM char-device path so
+    /// modules can install /dev/dri/cardN entries.
+    pub fn add_runtime_file_in_subdir(
+        &self,
+        subdir: &str,
+        name: &str,
+        file: Arc<dyn FileLike>,
+    ) {
+        let dir = self.0.root_tmpfs_dir().get_or_add_dir(subdir);
+        dir.add_file(name, file);
+    }
 }
 
 pub fn init() {

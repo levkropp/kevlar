@@ -229,6 +229,40 @@ fn install_chrdev(
     );
 }
 
+/// Install a char device at /dev/<subdir>/<name>.  Used by the
+/// DRM registration path (K20+) for /dev/dri/cardN.
+pub fn install_chrdev_in_subdir(
+    major: u32,
+    minor: u32,
+    count: u32,
+    subdir: &str,
+    name: &str,
+    fops: *const FileOperationsShim,
+) {
+    let rdev = make_dev(major, minor);
+    let registry_name = format!("{}/{}", subdir, name);
+    let entry = CharDevEntry {
+        name: registry_name.clone(),
+        major,
+        minor,
+        count,
+        fops,
+    };
+    CHRDEV_REGISTRY.lock().push(entry);
+
+    let adapter: Arc<dyn FileLike> = Arc::new(KabiCharDevFile {
+        fops,
+        name: registry_name,
+        rdev,
+    });
+    let devfs: &DevFs = &*DEV_FS;
+    devfs.add_runtime_file_in_subdir(subdir, name, adapter);
+    log::info!(
+        "kabi: /dev/{}/{} registered (major={}, minor={}, rdev={:#x})",
+        subdir, name, major, minor, rdev
+    );
+}
+
 // ── FileLike adapter ────────────────────────────────────────────
 
 struct KabiCharDevFile {
