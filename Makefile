@@ -640,6 +640,29 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k18` — load /lib/modules/bochs.ko: Ubuntu's
+# KMS driver for QEMU Bochs Display Adapter.  107 undefs (18
+# net new — 83% compounded) across EDID, drm core extensions,
+# PCI/IO resources, port I/O, drm error.  Real driver — same
+# shape as cirrus-qemu (registers PCI driver, returns 0).
+.PHONY: test-module-k18
+test-module-k18: build
+	$(PROGRESS) "TEST" "kABI K18 demo (Ubuntu bochs.ko + 18 EDID/IO stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k18.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/bochs.ko' /tmp/kevlar-test-module-k18.log \
+	 && grep -q 'kabi: loaded /lib/modules/bochs.ko' /tmp/kevlar-test-module-k18.log \
+	 && grep -q 'kabi: bochs init_module returned 0' /tmp/kevlar-test-module-k18.log; then \
+	    echo "TEST_PASS: kABI K18 — Ubuntu bochs.ko loaded with EDID + IO stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K18 markers"; \
+	    grep -E 'kabi|bochs|panic' /tmp/kevlar-test-module-k18.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k17` — load /lib/modules/cirrus-qemu.ko:
 # Ubuntu's KMS driver for QEMU emulated Cirrus VGA.  88 undefs
 # (81 net new) across drm core / KMS / GEM-shadow / PCI / mmio

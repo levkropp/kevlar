@@ -269,3 +269,8 @@ ksym!(drm_vblank_init);
 ksym!(drm_connector_attach_encoder);
 ksym!(drm_connector_cleanup);
 ksym!(drm_connector_init);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_crtc_vblank_off(_crtc: *mut c_void) {}
+
+ksym!(drm_crtc_vblank_off);

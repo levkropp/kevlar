@@ -107,3 +107,10 @@ ksym!(drm_read);
 ksym!(drm_poll);
 ksym!(drm_ioctl);
 ksym!(drm_compat_ioctl);
+
+/// `drm_dev_put(dev)` — drop a refcount on a drm_device.  K18:
+/// no-op (no refcounts tracked yet).
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_dev_put(_dev: *mut c_void) {}
+
+ksym!(drm_dev_put);

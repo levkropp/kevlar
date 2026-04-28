@@ -894,6 +894,25 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi cirrus-qemu.ko load");
     }
 
+    // K18 — load /lib/modules/bochs.ko: Ubuntu's KMS driver for
+    // QEMU Bochs Display Adapter.  107 undefs (18 net new) across
+    // EDID (5), drm core extensions (5), PCI/IO resources (4),
+    // port I/O (3), drm error log (1).  Same shape as cirrus-qemu
+    // — registers PCI driver via __pci_register_driver and
+    // returns 0.  Probe doesn't fire (no PCI bus walking yet).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/bochs.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/bochs.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: bochs init_module returned {}", rc),
+                None => warn!("kabi: init_module not found in bochs.ko"),
+            },
+            Err(e) => warn!("kabi: bochs load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi bochs.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

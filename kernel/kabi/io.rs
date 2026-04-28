@@ -122,9 +122,26 @@ ksym!(ioremap_nocache);
 ksym!(ioremap_cache);
 ksym!(iounmap);
 
-/// Legacy x86 port-I/O helper.  cirrus-qemu inherits a reference
-/// from i386 vga code; on aarch64 it's a no-op (no port I/O).
+/// Legacy x86 port-I/O helpers.  cirrus-qemu / bochs inherit
+/// references from i386 vga code; on aarch64 there is no port
+/// I/O, so all writes are no-ops and reads return 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn logic_outb(_value: u8, _port: u16) {}
 
+#[unsafe(no_mangle)]
+pub extern "C" fn logic_outw(_value: u16, _port: u16) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn logic_inb(_port: u16) -> u8 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn logic_inw(_port: u16) -> u16 {
+    0
+}
+
 ksym!(logic_outb);
+ksym!(logic_outw);
+ksym!(logic_inb);
+ksym!(logic_inw);

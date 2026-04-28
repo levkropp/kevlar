@@ -26,6 +26,7 @@ pub mod drm;
 pub mod drm_atomic;
 pub mod drm_client;
 pub mod drm_dev;
+pub mod drm_edid;
 pub mod drm_fb_helper;
 pub mod drm_format;
 pub mod drm_gem;

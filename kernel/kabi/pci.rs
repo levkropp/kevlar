@@ -74,3 +74,46 @@ ksym!(pcim_request_all_regions);
 ksym!(aperture_remove_conflicting_pci_devices);
 ksym!(devm_ioremap);
 ksym!(video_firmware_drivers_only);
+
+// ── K18 additions (bochs surface) ─────────────────────────────
+
+/// `__devm_request_region(parent, start, n, name)` — request a
+/// resource region.  K18: no-op returning a non-null cookie so
+/// callers don't treat it as failure.  Real region tracking is
+/// K20+.
+#[unsafe(no_mangle)]
+pub extern "C" fn __devm_request_region(
+    _dev: *mut c_void,
+    _parent: *mut c_void,
+    _start: u64,
+    _n: u64,
+    _name: *const c_char,
+) -> *mut c_void {
+    // Return any non-null sentinel; bochs only checks for null.
+    1 as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn devm_ioremap_wc(
+    _dev: *mut c_void,
+    _addr: u64,
+    _size: usize,
+) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+ksym!(__devm_request_region);
+ksym!(devm_ioremap_wc);
+
+// `iomem_resource` and `ioport_resource` are the system-wide
+// trees Linux uses to track IO memory and port-IO regions.
+// K18 exposes 64-byte zero buffers — nothing dereferences fields
+// at K18 since probe doesn't fire.
+
+#[unsafe(no_mangle)]
+pub static iomem_resource: [u8; 64] = [0; 64];
+crate::ksym_static!(iomem_resource);
+
+#[unsafe(no_mangle)]
+pub static ioport_resource: [u8; 64] = [0; 64];
+crate::ksym_static!(ioport_resource);

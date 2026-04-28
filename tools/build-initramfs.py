@@ -1792,6 +1792,26 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(cirrus_src, dest)
         log("MOD", f"installed /lib/modules/cirrus-qemu.ko ({cirrus_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K18 target: bochs.ko (second real DRM driver,
+    # Ubuntu's KMS driver for QEMU Bochs Display Adapter).
+    # 107 undefs (18 net new — 83% compounded from K17's
+    # surface) across EDID (5), drm core extensions (5),
+    # PCI/IO resources (4), port I/O (3), drm error (1).
+    # init_module same shape as cirrus.
+    bochs_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "tiny" / "bochs.ko"
+    if not bochs_src.exists():
+        bochs_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+            "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "bochs.ko"
+    if bochs_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "bochs.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(bochs_src, dest)
+        log("MOD", f"installed /lib/modules/bochs.ko ({bochs_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

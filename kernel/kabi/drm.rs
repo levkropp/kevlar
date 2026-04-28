@@ -165,3 +165,41 @@ ksym!(drm_helper_probe_single_connector_modes);
 ksym!(drm_add_modes_noedid);
 ksym!(drm_client_setup);
 ksym!(drm_mode_config_reset);
+
+// ── K18 additions (bochs surface) ─────────────────────────────
+
+/// `__drm_err(fmt, ...)` — DRM's variadic error logger.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __drm_err(fmt: *const c_char, mut args: ...) {
+    if fmt.is_null() {
+        return;
+    }
+    let mut buf = [0u8; 512];
+    let n = {
+        let mut sink = Sink::new(&mut buf);
+        unsafe { format_into(&mut sink, fmt, &mut args) };
+        sink.pos()
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log::error!("[mod-drm-err] {}", s.trim_end_matches('\n'));
+    }
+}
+
+ksym!(__drm_err);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_connector_attach_edid_property(_connector: *mut c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_mode_config_helper_resume(_dev: *mut c_void) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_mode_config_helper_suspend(_dev: *mut c_void) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+ksym!(drm_connector_attach_edid_property);
+ksym!(drm_mode_config_helper_resume);
+ksym!(drm_mode_config_helper_suspend);
