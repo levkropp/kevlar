@@ -42,3 +42,19 @@ ksym!(drm_client_buffer_delete);
 ksym!(drm_client_buffer_vmap_local);
 ksym!(drm_client_buffer_vunmap_local);
 ksym!(drm_client_release);
+
+// K16: drm_dma_helper uses the non-`_local` variants.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_client_buffer_vmap(
+    _buffer: *mut c_void,
+    _map: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_client_buffer_vunmap(_buffer: *mut c_void) {}
+
+ksym!(drm_client_buffer_vmap);
+ksym!(drm_client_buffer_vunmap);

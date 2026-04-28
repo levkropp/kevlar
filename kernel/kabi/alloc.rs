@@ -379,6 +379,18 @@ pub extern "C" fn kvfree(ptr: *mut c_void) {
     }
 }
 
+/// Used by `kabi::mm::is_vmalloc_addr` to expose vmalloc-region
+/// membership without leaking VMALLOC_TABLE's type.  The address
+/// matches if it lies anywhere within a recorded vmalloc range,
+/// not just at the exact base.
+pub fn is_vmalloc_addr_internal(addr: usize) -> bool {
+    VMALLOC_TABLE.lock().iter().any(|e| {
+        let lo = e.va;
+        let hi = e.va + e.num_pages * PAGE_SIZE;
+        addr >= lo && addr < hi
+    })
+}
+
 ksym!(kvmalloc);
 ksym!(kvzalloc);
 ksym!(kvfree);

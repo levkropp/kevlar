@@ -30,3 +30,24 @@ pub extern "C" fn drm_driver_legacy_fb_format(
 
 ksym!(drm_format_info_bpp);
 ksym!(drm_driver_legacy_fb_format);
+
+// K16: drm_dma_helper queries block dimensions for tiled formats.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_format_info_block_height(
+    _info: *const c_void,
+    _plane: i32,
+) -> u32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_format_info_block_width(
+    _info: *const c_void,
+    _plane: i32,
+) -> u32 {
+    1
+}
+
+ksym!(drm_format_info_block_height);
+ksym!(drm_format_info_block_width);

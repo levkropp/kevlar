@@ -107,3 +107,118 @@ ksym!(dma_map_single);
 ksym!(dma_unmap_single);
 ksym!(virt_to_phys);
 ksym!(phys_to_virt);
+
+// ── K16 additions: Linux 7.0 _attrs / _pages variants + dma_buf
+//    + sync helpers.  drm_dma_helper.ko references these but no
+//    caller fires at load (no init_module).
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_alloc_attrs(
+    _dev: *mut c_void,
+    _size: usize,
+    _dma_handle: *mut u64,
+    _flag: u32,
+    _attrs: usize,
+) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_free_attrs(
+    _dev: *mut c_void,
+    _size: usize,
+    _vaddr: *mut c_void,
+    _dma_handle: u64,
+    _attrs: usize,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_alloc_pages(
+    _dev: *mut c_void,
+    _size: usize,
+    _dma_handle: *mut u64,
+    _dir: u32,
+    _gfp: u32,
+) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_free_pages(
+    _dev: *mut c_void,
+    _size: usize,
+    _page: *mut c_void,
+    _dma_handle: u64,
+    _dir: u32,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_get_sgtable_attrs(
+    _dev: *mut c_void,
+    _sgt: *mut c_void,
+    _cpu_addr: *mut c_void,
+    _dma_addr: u64,
+    _size: usize,
+    _attrs: usize,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_mmap_attrs(
+    _dev: *mut c_void,
+    _vma: *mut c_void,
+    _cpu_addr: *mut c_void,
+    _dma_addr: u64,
+    _size: usize,
+    _attrs: usize,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_mmap_pages(
+    _dev: *mut c_void,
+    _vma: *mut c_void,
+    _size: usize,
+    _page: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_buf_vmap_unlocked(
+    _dmabuf: *mut c_void,
+    _map: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dma_buf_vunmap_unlocked(
+    _dmabuf: *mut c_void,
+    _map: *mut c_void,
+) {
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __dma_sync_single_for_device(
+    _dev: *mut c_void,
+    _addr: u64,
+    _size: usize,
+    _dir: u32,
+) {
+}
+
+ksym!(dma_alloc_attrs);
+ksym!(dma_free_attrs);
+ksym!(dma_alloc_pages);
+ksym!(dma_free_pages);
+ksym!(dma_get_sgtable_attrs);
+ksym!(dma_mmap_attrs);
+ksym!(dma_mmap_pages);
+ksym!(dma_buf_vmap_unlocked);
+ksym!(dma_buf_vunmap_unlocked);
+ksym!(__dma_sync_single_for_device);

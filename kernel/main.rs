@@ -854,6 +854,25 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi drm_ttm_helper.ko load");
     }
 
+    // K16 — load /lib/modules/drm_dma_helper.ko: Ubuntu's DRM
+    // helper layer for DMA-coherent GEM buffers.  79 undefs (32
+    // net new) across DMA API (10), DRM GEM (9), DRM prime (3),
+    // DRM atomic (2), drm_client extension (2), drm_format
+    // extension (2), and mm helpers (4).  Pure library module —
+    // no init_module.
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/drm_dma_helper.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/drm_dma_helper.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: drm_dma_helper init_module returned {}", rc),
+                None => info!("kabi: drm_dma_helper is a library module (no init_module)"),
+            },
+            Err(e) => warn!("kabi: drm_dma_helper load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi drm_dma_helper.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

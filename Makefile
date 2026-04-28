@@ -640,6 +640,28 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k16` — load /lib/modules/drm_dma_helper.ko:
+# Ubuntu's DMA-coherent GEM buffer helper.  79 undefs (32 net
+# new) across DMA API, DRM GEM/prime/atomic, mm helpers, format/
+# client extensions.  Pure library module.
+.PHONY: test-module-k16
+test-module-k16: build
+	$(PROGRESS) "TEST" "kABI K16 demo (Ubuntu drm_dma_helper.ko + 32 DMA/GEM/mm stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k16.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/drm_dma_helper.ko' /tmp/kevlar-test-module-k16.log \
+	 && grep -q 'kabi: loaded /lib/modules/drm_dma_helper.ko' /tmp/kevlar-test-module-k16.log \
+	 && grep -q 'kabi: drm_dma_helper is a library module' /tmp/kevlar-test-module-k16.log; then \
+	    echo "TEST_PASS: kABI K16 — Ubuntu drm_dma_helper.ko loaded with DMA/GEM/mm stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K16 markers"; \
+	    grep -E 'kabi|drm_dma|panic' /tmp/kevlar-test-module-k16.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
 # network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
 # first milestone with subsystem-shaped stub work.
