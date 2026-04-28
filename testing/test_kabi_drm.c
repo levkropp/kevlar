@@ -51,6 +51,59 @@ struct drm_mode_card_res {
 };
 #define DRM_IOCTL_MODE_GETRESOURCES _IOWR('d', 0xA0, struct drm_mode_card_res)
 
+/* K26: per-ID DRM ioctl structs. */
+struct drm_mode_modeinfo {
+    uint32_t clock;
+    uint16_t hdisplay, hsync_start, hsync_end, htotal, hskew;
+    uint16_t vdisplay, vsync_start, vsync_end, vtotal, vscan;
+    uint32_t vrefresh;
+    uint32_t flags;
+    uint32_t type;
+    char     name[32];
+};
+
+struct drm_mode_crtc {
+    uint64_t set_connectors_ptr;
+    uint32_t count_connectors;
+    uint32_t crtc_id;
+    uint32_t fb_id;
+    uint32_t x, y;
+    uint32_t gamma_size;
+    uint32_t mode_valid;
+    struct drm_mode_modeinfo mode;
+};
+
+struct drm_mode_get_encoder {
+    uint32_t encoder_id;
+    uint32_t encoder_type;
+    uint32_t crtc_id;
+    uint32_t possible_crtcs;
+    uint32_t possible_clones;
+};
+
+struct drm_mode_get_connector {
+    uint64_t encoders_ptr;
+    uint64_t modes_ptr;
+    uint64_t props_ptr;
+    uint64_t prop_values_ptr;
+    uint32_t count_modes;
+    uint32_t count_props;
+    uint32_t count_encoders;
+    uint32_t encoder_id;
+    uint32_t connector_id;
+    uint32_t connector_type;
+    uint32_t connector_type_id;
+    uint32_t connection;
+    uint32_t mm_width;
+    uint32_t mm_height;
+    uint32_t subpixel;
+    uint32_t pad;
+};
+
+#define DRM_IOCTL_MODE_GETCRTC      _IOWR('d', 0xA1, struct drm_mode_crtc)
+#define DRM_IOCTL_MODE_GETENCODER   _IOWR('d', 0xA6, struct drm_mode_get_encoder)
+#define DRM_IOCTL_MODE_GETCONNECTOR _IOWR('d', 0xA7, struct drm_mode_get_connector)
+
 static void w(const char *s) {
     write(1, s, strlen(s));
 }
@@ -111,6 +164,43 @@ int main(void) {
             res.count_crtcs, res.count_connectors, res.count_encoders,
             res.min_width, res.min_height, res.max_width, res.max_height,
             crtc_ids[0], conn_ids[0], enc_ids[0]);
+        if (n > 0) write(1, line, n);
+    }
+
+    /* K26: per-ID walk. */
+    struct drm_mode_crtc crtc;
+    memset(&crtc, 0, sizeof(crtc));
+    crtc.crtc_id = crtc_ids[0];
+    if (ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &crtc) < 0) {
+        w("USERSPACE-DRM: MODE_GETCRTC failed\n");
+    } else {
+        n = snprintf(line, sizeof(line),
+            "USERSPACE-DRM: getcrtc id=0x%x mode_valid=%u\n",
+            crtc.crtc_id, crtc.mode_valid);
+        if (n > 0) write(1, line, n);
+    }
+
+    struct drm_mode_get_encoder enc;
+    memset(&enc, 0, sizeof(enc));
+    enc.encoder_id = enc_ids[0];
+    if (ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &enc) < 0) {
+        w("USERSPACE-DRM: MODE_GETENCODER failed\n");
+    } else {
+        n = snprintf(line, sizeof(line),
+            "USERSPACE-DRM: getenc id=0x%x type=%u crtc=0x%x\n",
+            enc.encoder_id, enc.encoder_type, enc.crtc_id);
+        if (n > 0) write(1, line, n);
+    }
+
+    struct drm_mode_get_connector conn;
+    memset(&conn, 0, sizeof(conn));
+    conn.connector_id = conn_ids[0];
+    if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &conn) < 0) {
+        w("USERSPACE-DRM: MODE_GETCONNECTOR failed\n");
+    } else {
+        n = snprintf(line, sizeof(line),
+            "USERSPACE-DRM: getconn id=0x%x type=%u connection=%u enc=0x%x\n",
+            conn.connector_id, conn.connector_type, conn.connection, conn.encoder_id);
         if (n > 0) write(1, line, n);
     }
 

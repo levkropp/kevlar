@@ -187,6 +187,9 @@ const DRM_IOCTL_TYPE: u32 = b'd' as u32; // 0x64
 const DRM_IOCTL_NR_VERSION: u32 = 0x00;
 const DRM_IOCTL_NR_GET_CAP: u32 = 0x0c;
 const DRM_IOCTL_NR_MODE_GETRESOURCES: u32 = 0xA0;
+const DRM_IOCTL_NR_MODE_GETCRTC: u32 = 0xA1;
+const DRM_IOCTL_NR_MODE_GETENCODER: u32 = 0xA6;
+const DRM_IOCTL_NR_MODE_GETCONNECTOR: u32 = 0xA7;
 
 // Synthesized object IDs.  drmModeGet{Crtc,Connector,Encoder}
 // from libdrm walks these in K26+.
@@ -231,6 +234,67 @@ pub struct DrmModeCardRes {
     pub max_width: u32,
     pub min_height: u32,
     pub max_height: u32,
+}
+
+#[repr(C)]
+struct DrmModeModeinfo {
+    clock: u32,
+    hdisplay: u16,
+    hsync_start: u16,
+    hsync_end: u16,
+    htotal: u16,
+    hskew: u16,
+    vdisplay: u16,
+    vsync_start: u16,
+    vsync_end: u16,
+    vtotal: u16,
+    vscan: u16,
+    vrefresh: u32,
+    flags: u32,
+    type_: u32,
+    name: [u8; 32],
+}
+
+#[repr(C)]
+struct DrmModeCrtc {
+    set_connectors_ptr: u64,
+    count_connectors: u32,
+    crtc_id: u32,
+    fb_id: u32,
+    x: u32,
+    y: u32,
+    gamma_size: u32,
+    mode_valid: u32,
+    mode: DrmModeModeinfo,
+}
+
+#[repr(C)]
+struct DrmModeGetEncoder {
+    encoder_id: u32,
+    encoder_type: u32,
+    crtc_id: u32,
+    possible_crtcs: u32,
+    possible_clones: u32,
+}
+
+#[repr(C)]
+struct DrmModeGetConnector {
+    encoders_ptr: u64,
+    modes_ptr: u64,
+    props_ptr: u64,
+    prop_values_ptr: u64,
+    count_modes: u32,
+    count_props: u32,
+    count_encoders: u32,
+    encoder_id: u32,
+    connector_id: u32,
+    connector_type: u32,
+    connector_type_id: u32,
+    connection: u32,
+    mm_width: u32,
+    mm_height: u32,
+    subpixel: u32,
+    pad: u32,
 }
 
 fn copy_to_user_truncate(src: &[u8], dst: *mut u8, len: &mut usize) {
@@ -339,6 +403,74 @@ fn drm_ioctl_mode_getresources(arg: usize) -> isize {
     0
 }
 
+const EINVAL: isize = -22;
+
+fn drm_ioctl_mode_getcrtc(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut c = unsafe { core::ptr::read(arg as *const DrmModeCrtc) };
+    if c.crtc_id != KABI_CRTC_ID_BASE {
+        return EINVAL;
+    }
+    c.fb_id = 0;
+    c.x = 0;
+    c.y = 0;
+    c.gamma_size = 0;
+    c.mode_valid = 0;
+    c.mode = unsafe { core::mem::zeroed() };
+    unsafe { core::ptr::write(arg as *mut DrmModeCrtc, c); }
+    0
+}
+
+fn drm_ioctl_mode_getencoder(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut e = unsafe { core::ptr::read(arg as *const DrmModeGetEncoder) };
+    if e.encoder_id != KABI_ENCODER_ID_BASE {
+        return EINVAL;
+    }
+    e.encoder_type = 0; // DRM_MODE_ENCODER_NONE
+    e.crtc_id = KABI_CRTC_ID_BASE;
+    e.possible_crtcs = 0x1; // bit 0 = our one CRTC
+    e.possible_clones = 0;
+    unsafe { core::ptr::write(arg as *mut DrmModeGetEncoder, e); }
+    0
+}
+
+fn drm_ioctl_mode_getconnector(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut c = unsafe { core::ptr::read(arg as *const DrmModeGetConnector) };
+    if c.connector_id != KABI_CONNECTOR_ID_BASE {
+        return EINVAL;
+    }
+    // Fill the encoders array if userspace allocated room.
+    if c.encoders_ptr != 0 && c.count_encoders > 0 {
+        unsafe {
+            core::ptr::write_unaligned(
+                c.encoders_ptr as *mut u32,
+                KABI_ENCODER_ID_BASE,
+            );
+        }
+    }
+    c.count_modes = 0;
+    c.count_props = 0;
+    c.count_encoders = 1;
+    c.encoder_id = KABI_ENCODER_ID_BASE;
+    c.connector_type = 1; // DRM_MODE_CONNECTOR_VGA
+    c.connector_type_id = 0;
+    c.connection = 1; // connector_status_connected
+    c.mm_width = 0;
+    c.mm_height = 0;
+    c.subpixel = 0;
+    c.pad = 0;
+    unsafe { core::ptr::write(arg as *mut DrmModeGetConnector, c); }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn drm_ioctl(
     _filp: *mut c_void,
@@ -354,6 +486,9 @@ pub extern "C" fn drm_ioctl(
         DRM_IOCTL_NR_VERSION => drm_ioctl_version(arg),
         DRM_IOCTL_NR_GET_CAP => drm_ioctl_get_cap(arg),
         DRM_IOCTL_NR_MODE_GETRESOURCES => drm_ioctl_mode_getresources(arg),
+        DRM_IOCTL_NR_MODE_GETCRTC => drm_ioctl_mode_getcrtc(arg),
+        DRM_IOCTL_NR_MODE_GETENCODER => drm_ioctl_mode_getencoder(arg),
+        DRM_IOCTL_NR_MODE_GETCONNECTOR => drm_ioctl_mode_getconnector(arg),
         _ => ENOTTY,
     }
 }
