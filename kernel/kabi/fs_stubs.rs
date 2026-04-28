@@ -682,24 +682,55 @@ ksym!(rcu_barrier);
 ksym!(dynamic_preempt_schedule_notrace);
 
 // ── Page allocator wrappers (Linux-named) ───────────────────────
+// Real impls — delegate to platform::page_allocator + kabi::alloc.
+// erofs's init does several `__alloc_pages_node()`-shaped calls
+// for its inode-cache slab pages and shrinker book-keeping.  Null
+// returns make init bail with -ENOMEM.
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __free_pages(_page: *mut c_void, _order: u32) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn alloc_pages_noprof(_gfp: u32, _order: u32) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn __free_pages(page: *mut c_void, _order: u32) {
+    // Linux's `struct page *` is the page-frame descriptor.  In our
+    // model `kmalloc` returns a kernel direct-map VA, and we used
+    // that VA as the "page" pointer in alloc_pages_noprof.  Free
+    // through the kabi::alloc kfree path which understands both
+    // small heap allocations and full-page kmallocs.
+    super::alloc::kfree(page);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn alloc_pages_bulk_noprof(_gfp: u32, _nr_pages: usize,
-                                          _page_array: *mut *mut c_void) -> usize {
-    0
+pub extern "C" fn alloc_pages_noprof(gfp: u32, order: u32) -> *mut c_void {
+    // 2^order pages.  K33 v1: implement up to order=4 (64 KiB)
+    // via kabi::alloc::kmalloc with a page-aligned size.  Anything
+    // beyond that returns null; erofs's hot path is order-0/1.
+    let size = (1usize << order) * kevlar_platform::arch::PAGE_SIZE;
+    if size > 64 * 1024 {
+        log::warn!("kabi: alloc_pages_noprof order={} too large", order);
+        return core::ptr::null_mut();
+    }
+    super::alloc::kmalloc(size, gfp)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn vmalloc_noprof(_size: usize) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn alloc_pages_bulk_noprof(gfp: u32, nr_pages: usize,
+                                          page_array: *mut *mut c_void) -> usize {
+    if page_array.is_null() {
+        return 0;
+    }
+    let mut filled = 0usize;
+    for i in 0..nr_pages {
+        let p = super::alloc::kmalloc(kevlar_platform::arch::PAGE_SIZE, gfp);
+        if p.is_null() {
+            break;
+        }
+        unsafe { *page_array.add(i) = p };
+        filled += 1;
+    }
+    filled
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn vmalloc_noprof(size: usize) -> *mut c_void {
+    super::alloc::vmalloc(size)
 }
 
 #[unsafe(no_mangle)]
@@ -740,37 +771,71 @@ ksym!(vm_unmap_aliases);
 ksym!(thp_get_unmapped_area);
 
 // ── slab kmemcache wrappers ─────────────────────────────────────
+// Wired to the existing kmem_cache_alloc_noprof in kabi::slab so
+// erofs's inode-cache allocations succeed.  The "_lru" variant
+// just adds an LRU-list hint for memory-pressure-aware caches;
+// we ignore it (no LRU tracking yet).
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kmem_cache_alloc_lru_noprof(_cache: *mut c_void,
+pub extern "C" fn kmem_cache_alloc_lru_noprof(cache: *mut c_void,
                                               _lru: *mut c_void,
-                                              _gfp: u32) -> *mut c_void {
-    core::ptr::null_mut()
+                                              gfp: u32) -> *mut c_void {
+    super::slab::kmem_cache_alloc_noprof(cache, gfp)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn krealloc_node_align_noprof(_p: *mut c_void, _new_size: usize,
-                                             _align: usize, _gfp: u32,
+pub extern "C" fn krealloc_node_align_noprof(p: *mut c_void, new_size: usize,
+                                             _align: usize, gfp: u32,
                                              _node: c_int) -> *mut c_void {
-    core::ptr::null_mut()
+    // Best-effort: free the old + alloc the new.  We don't have a
+    // realloc primitive in kabi::alloc; size is opaque on free, so
+    // we can't actually preserve old contents.  v1: kmalloc fresh.
+    // erofs uses this rarely; if a real caller bites, write a real
+    // realloc in kabi::alloc.
+    if !p.is_null() {
+        super::alloc::kfree(p);
+    }
+    super::alloc::kmalloc(new_size, gfp)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kfree_sensitive(_p: *mut c_void) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn kmemdup_nul(_s: *const u8, _len: usize, _gfp: u32) -> *mut u8 {
-    core::ptr::null_mut()
+pub extern "C" fn kfree_sensitive(p: *mut c_void) {
+    super::alloc::kfree(p);
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kstrdup(_s: *const u8, _gfp: u32) -> *mut u8 {
-    core::ptr::null_mut()
+pub extern "C" fn kmemdup_nul(s: *const u8, len: usize, gfp: u32) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    let buf = super::alloc::kmalloc(len + 1, gfp) as *mut u8;
+    if buf.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(s, buf, len);
+        *buf.add(len) = 0;
+    }
+    buf
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kstrndup(_s: *const u8, _max: usize, _gfp: u32) -> *mut u8 {
-    core::ptr::null_mut()
+pub unsafe extern "C" fn kstrdup(s: *const u8, gfp: u32) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Bounded strlen; fs callers pass NUL-terminated names ≤ 256.
+    let len = unsafe { super::mem::strnlen(s, 4096) };
+    kmemdup_nul(s, len, gfp)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kstrndup(s: *const u8, max: usize, gfp: u32) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    let len = unsafe { super::mem::strnlen(s, max) };
+    kmemdup_nul(s, len, gfp)
 }
 
 ksym!(kmem_cache_alloc_lru_noprof);
