@@ -247,9 +247,12 @@ pub fn kabi_mount_filesystem(
 
     // Source string lives in module-private memory; we kmalloc'd
     // copy so erofs can dereference it without thinking about
-    // lifetime.  v3 uses a placeholder — the actual mount target
-    // comes from sys_mount's `source` arg in Phase 3e.
-    const SOURCE_PATH: &[u8] = b"/lib/modules/erofs.ko\0";
+    // lifetime.  Phase 3e: point at the embedded test image
+    // (mkfs.erofs-built; see tools/build-initramfs.py).  When
+    // filp_open is implemented (Phase 3f) it will open this path
+    // through Kevlar's initramfs lookup and erofs's fc_fill_super
+    // will then read the on-disk superblock.
+    const SOURCE_PATH: &[u8] = b"/lib/test.erofs\0";
     let source_buf = super::alloc::kmalloc(SOURCE_PATH.len(), 0) as *mut u8;
     if source_buf.is_null() {
         super::alloc::kfree(fc);

@@ -1839,6 +1839,22 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(erofs_src, dest)
         log("MOD", f"installed /lib/modules/erofs.ko ({erofs_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── K33 Phase 3e test image: a tiny erofs disk image to
+    # mount via the kABI fs registry.  Built by hand with
+    # `mkfs.erofs -d 0 /tmp/test.erofs /tmp/erofs-content/`
+    # then dropped at /Users/neo/kevlar/build/test-fixtures/.
+    # Filp_open will read this file; erofs's fc_fill_super
+    # parses the on-disk superblock + builds the dentry tree.
+    erofs_img_src = ROOT / "build" / "test-fixtures" / "test.erofs"
+    if erofs_img_src.exists():
+        lib_dir = ROOTFS / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        dest = lib_dir / "test.erofs"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(erofs_img_src, dest)
+        log("IMG", f"installed /lib/test.erofs ({erofs_img_src.stat().st_size} bytes) [K33 Phase 3 fixture]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"
