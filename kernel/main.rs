@@ -922,6 +922,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi PCI walk");
     }
 
+    // K21 — verify DRM ioctl dispatch end-to-end via a kernel-side
+    // smoke test that issues DRM_IOCTL_VERSION against the
+    // dispatcher.  Confirms /dev/dri/card0's ioctl path returns
+    // the expected name + version.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kabi::drm_dev::ioctl_smoke_test();
+        profiler.lap_time("kabi DRM ioctl smoke");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

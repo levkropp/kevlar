@@ -89,8 +89,17 @@ extern "C" fn drm_poll_adapter(
     drm_poll(filp as *mut c_void, wait as *mut c_void)
 }
 
+extern "C" fn drm_ioctl_adapter(
+    filp: *mut crate::kabi::fops::FileShim,
+    cmd: u32,
+    arg: usize,
+) -> isize {
+    drm_ioctl(filp as *mut c_void, cmd, arg)
+}
+
 /// Static FileOperationsShim used by every /dev/dri/cardN we
-/// install.  All slots route to the shared K17 drm_* stubs.
+/// install.  Routes K4 char-device callbacks to the K17/K21 drm_*
+/// stubs (drm_open / _release / _read / _poll / _ioctl).
 struct DrmFopsHolder(crate::kabi::fops::FileOperationsShim);
 unsafe impl Sync for DrmFopsHolder {}
 
@@ -100,7 +109,7 @@ static DRM_FOPS_ADAPTER: DrmFopsHolder = DrmFopsHolder(
         llseek: None,
         read: Some(drm_read_adapter),
         write: None,
-        unlocked_ioctl: None,
+        unlocked_ioctl: Some(drm_ioctl_adapter),
         poll: Some(drm_poll_adapter),
         mmap: None,
         open: Some(drm_open_adapter),
@@ -172,13 +181,137 @@ pub extern "C" fn drm_poll(_filp: *mut c_void, _wait: *mut c_void) -> u32 {
     0
 }
 
+// ── DRM ioctl dispatch (K21) ──────────────────────────────────
+
+const DRM_IOCTL_TYPE: u32 = b'd' as u32; // 0x64
+const DRM_IOCTL_NR_VERSION: u32 = 0x00;
+const DRM_IOCTL_NR_GET_CAP: u32 = 0x0c;
+
+const ENOTTY: isize = -25;
+const EFAULT: isize = -14;
+
+#[repr(C)]
+pub struct DrmVersion {
+    pub version_major: i32,
+    pub version_minor: i32,
+    pub version_patchlevel: i32,
+    pub _pad: i32,
+    pub name_len: usize,
+    pub name: *mut u8,
+    pub date_len: usize,
+    pub date: *mut u8,
+    pub desc_len: usize,
+    pub desc: *mut u8,
+}
+
+#[repr(C)]
+struct DrmGetCap {
+    capability: u64,
+    value: u64,
+}
+
+fn copy_to_user_truncate(src: &[u8], dst: *mut u8, len: &mut usize) {
+    if !dst.is_null() && *len > 0 {
+        let n = src.len().min(*len);
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, n); }
+    }
+    *len = src.len();
+}
+
+fn drm_ioctl_version(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut v = unsafe { core::ptr::read(arg as *const DrmVersion) };
+
+    v.version_major = 2;
+    v.version_minor = 0;
+    v.version_patchlevel = 0;
+
+    static NAME: &[u8] = b"kabi-drm";
+    static DATE: &[u8] = b"2026-04-27";
+    static DESC: &[u8] = b"Kevlar kABI DRM driver";
+
+    copy_to_user_truncate(NAME, v.name, &mut v.name_len);
+    copy_to_user_truncate(DATE, v.date, &mut v.date_len);
+    copy_to_user_truncate(DESC, v.desc, &mut v.desc_len);
+
+    unsafe { core::ptr::write(arg as *mut DrmVersion, v); }
+    0
+}
+
+fn drm_ioctl_get_cap(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut c = unsafe { core::ptr::read(arg as *const DrmGetCap) };
+    c.value = 0;
+    unsafe { core::ptr::write(arg as *mut DrmGetCap, c); }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn drm_ioctl(
     _filp: *mut c_void,
-    _cmd: u32,
-    _arg: usize,
+    cmd: u32,
+    arg: usize,
 ) -> isize {
-    0
+    let nr = cmd & 0xff;
+    let typ = (cmd >> 8) & 0xff;
+    if typ != DRM_IOCTL_TYPE {
+        return ENOTTY;
+    }
+    match nr {
+        DRM_IOCTL_NR_VERSION => drm_ioctl_version(arg),
+        DRM_IOCTL_NR_GET_CAP => drm_ioctl_get_cap(arg),
+        _ => ENOTTY,
+    }
+}
+
+/// Kernel-side smoke test: issue DRM_IOCTL_VERSION against the
+/// dispatcher and log the result.  Verifies the K21 path
+/// end-to-end without needing a userspace program.  Called from
+/// `kernel/main.rs` after `walk_and_probe()`.
+pub fn ioctl_smoke_test() {
+    let cmd: u32 = 0xC000_0000
+        | (DRM_IOCTL_TYPE << 8)
+        | DRM_IOCTL_NR_VERSION
+        | ((core::mem::size_of::<DrmVersion>() as u32 & 0x3fff) << 16);
+
+    let mut name_buf = [0u8; 64];
+    let mut date_buf = [0u8; 64];
+    let mut desc_buf = [0u8; 64];
+
+    let mut v = DrmVersion {
+        version_major: 0,
+        version_minor: 0,
+        version_patchlevel: 0,
+        _pad: 0,
+        name_len: name_buf.len(),
+        name: name_buf.as_mut_ptr(),
+        date_len: date_buf.len(),
+        date: date_buf.as_mut_ptr(),
+        desc_len: desc_buf.len(),
+        desc: desc_buf.as_mut_ptr(),
+    };
+
+    let arg = &raw mut v as usize;
+    let rc = drm_ioctl(core::ptr::null_mut(), cmd, arg);
+
+    let nb = v.name_len.min(name_buf.len());
+    let db = v.date_len.min(date_buf.len());
+    let cb = v.desc_len.min(desc_buf.len());
+    log::info!(
+        "kabi: DRM_IOCTL_VERSION returned rc={} name={:?} date={:?} \
+         desc={:?} version={}.{}.{}",
+        rc,
+        core::str::from_utf8(&name_buf[..nb]).unwrap_or("?"),
+        core::str::from_utf8(&date_buf[..db]).unwrap_or("?"),
+        core::str::from_utf8(&desc_buf[..cb]).unwrap_or("?"),
+        v.version_major,
+        v.version_minor,
+        v.version_patchlevel,
+    );
 }
 
 #[unsafe(no_mangle)]

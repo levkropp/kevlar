@@ -640,6 +640,27 @@ test-module-k15: build
 	    false; \
 	fi
 
+# `make test-module-k21` — DRM ioctl dispatch.  Kernel-side
+# smoke test issues DRM_IOCTL_VERSION against drm_ioctl, expects
+# back name="kabi-drm" and version 2.0.0.
+.PHONY: test-module-k21
+test-module-k21: build
+	$(PROGRESS) "TEST" "kABI K21 demo (DRM_IOCTL_VERSION + GET_CAP dispatch)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k21.log; true
+	@echo ""
+	@if grep -q 'kabi: drm_dev_register: /dev/dri/card0 installed' /tmp/kevlar-test-module-k21.log \
+	 && grep -q 'kabi: DRM_IOCTL_VERSION returned rc=0 name="kabi-drm"' /tmp/kevlar-test-module-k21.log \
+	 && grep -q 'version=2.0.0' /tmp/kevlar-test-module-k21.log; then \
+	    echo "TEST_PASS: kABI K21 — DRM_IOCTL_VERSION returned name=kabi-drm version=2.0.0"; \
+	else \
+	    echo "TEST_FAIL: missing expected K21 markers"; \
+	    grep -E 'kabi|DRM_IOCTL|panic' /tmp/kevlar-test-module-k21.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k20` — fire bochs probe + register
 # /dev/dri/cardN.  Two probe-firing drivers (cirrus + bochs) and
 # two char devices visible to userspace.
