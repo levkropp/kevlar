@@ -529,5 +529,40 @@ int main(void) {
     fflush(stdout);
 
     sync();
+
+    // `kevlar_interactive` on the kernel cmdline keeps the LXDE
+    // session alive so users can interact with the desktop in QEMU's
+    // window via `make run-alpine-lxde`.  Without it, test-lxde
+    // returns and Kevlar halts (the batch-mode default for `make
+    // test-lxde` / iterate-lxde).
+    {
+        // Mount /proc on the initramfs root if not already mounted.
+        // (test_lxde mounts proc inside the chroot at ROOT/proc, not
+        // here.)  Best-effort; ignore EBUSY.
+        mkdir("/proc", 0755);
+        mount("proc", "/proc", "proc", 0, NULL);
+
+        int interactive = 0;
+        int cfd = open("/proc/cmdline", O_RDONLY);
+        if (cfd >= 0) {
+            char buf[1024];
+            ssize_t n = read(cfd, buf, sizeof(buf) - 1);
+            close(cfd);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "kevlar_interactive")) {
+                    interactive = 1;
+                }
+            }
+        }
+
+        if (interactive) {
+            printf("\n=== test-lxde: kevlar_interactive on cmdline; keeping desktop alive ===\n");
+            fflush(stdout);
+            // Sleep forever; Xorg + LXDE keep running in the
+            // background.  Users hit Ctrl-A X to exit QEMU.
+            while (1) sleep(60);
+        }
+    }
     return 0;
 }

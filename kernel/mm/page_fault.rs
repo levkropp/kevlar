@@ -1105,10 +1105,14 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                 }
             }
 
-            // Task #25: trace the demand-fault fill for pages that keep
-            // showing up as all-zeros at crash time.  offset_in_file
-            // around 0x1e000 is the hot one for xfce4-session.
-            if (vma.prot().bits() & 4 != 0) && copy_len > 0 {
+            // Task #25 leftover: FILL_TRACE was a temporary
+            // diagnostic for an xfce4-session demand-fault corruption
+            // (offset_in_file ~0x1e000 was the hot range).  The
+            // underlying issue is fixed; the trace was spamming the
+            // console during graphical boots.  Disabled by default;
+            // re-enable by flipping `FILL_TRACE_ENABLED` to true.
+            const FILL_TRACE_ENABLED: bool = false;
+            if FILL_TRACE_ENABLED && (vma.prot().bits() & 4 != 0) && copy_len > 0 {
                 if offset_in_file >= 0x1d000 && offset_in_file <= 0x1f000 {
                     warn!(
                         "FILL_TRACE: pid={} vaddr={:#x} file_off={:#x} copy_len={} \
@@ -1225,9 +1229,12 @@ fn handle_page_fault_inner(unaligned_vaddr: Option<UserVAddr>, ip: usize, _reaso
                                     copy_len, n, offset_in_page,
                                 );
                             }
-                            // Task #25: after read, verify the first 8 bytes
-                            // of the hot page to catch immediate corruption.
-                            if offset_in_file >= 0x1d000 && offset_in_file <= 0x1f000
+                            // Task #25 leftover (see FILL_TRACE above).
+                            // Disabled by default; controlled by the
+                            // same flag.
+                            if FILL_TRACE_ENABLED
+                                && offset_in_file >= 0x1d000
+                                && offset_in_file <= 0x1f000
                                 && (vma.prot().bits() & 4 != 0)
                             {
                                 let actual = page_as_slice_mut(paddr);

@@ -1338,11 +1338,17 @@ linux-iterate-program:
 # `-vga std` is required for ramfb to be configured — without it, the
 # QEMU window stays blank because /dev/fb0 isn't backed by anything.
 # `-smp 2` matches the test runner so timing/scheduler behavior matches.
+# Uses /bin/test-lxde + `kevlar_interactive` on the cmdline so the
+# desktop stays alive after the sub-tests pass (boot-alpine has a
+# known page_fault.rs:674 panic during the long-running busybox-init
+# flow; the test-lxde harness brings Xorg+LXDE up cleanly and
+# kevlar_interactive makes it sleep instead of exit).
 .PHONY: run-alpine-lxde
 run-alpine-lxde: $(LXDE_IMG)
-	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/boot-alpine"
+	$(MAKE) build PROFILE=$(PROFILE) INIT_SCRIPT="/bin/test-lxde"
 	$(PYTHON3) tools/run-qemu.py \
 		--arch $(ARCH) --kvm --gui --disk $(LXDE_IMG) \
+		--append-cmdline "kevlar_interactive" \
 		$(kernel_qemu_arg) -- -smp $(or $(SMP),2) -m 1024 -vga std -mem-prealloc
 
 # Build Alpine i3 disk image — uses apko for cross-platform resolution
