@@ -1110,6 +1110,9 @@ def compile_all_local_arm64(cc):
         # kABI userspace harness: opens /dev/k4-demo, validates K4 path
         # through real sys_openat/read syscalls.
         ("testing/test_kabi_userspace.c","test-kabi-userspace",[]),
+        # K22: opens /dev/dri/card0 and issues DRM_IOCTL_VERSION,
+        # validating the K21 ioctl dispatcher from real userspace.
+        ("testing/test_kabi_drm.c",     "test-kabi-drm",     []),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
@@ -1824,6 +1827,19 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
             shutil.copy2(kabi_userspace_src, dest)
             os.chmod(str(dest), 0o755)
             log("BIN", f"installed /usr/bin/test-kabi-userspace ({kabi_userspace_src.stat().st_size} bytes)")
+
+    # ── K22 kABI DRM userspace test binary ──
+    if local_arm64_bins:
+        kabi_drm_src = CACHE / "local-bin-arm64" / "test-kabi-drm"
+        if kabi_drm_src.is_file():
+            usr_bin = ROOTFS / "usr" / "bin"
+            usr_bin.mkdir(parents=True, exist_ok=True)
+            dest = usr_bin / "test-kabi-drm"
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(kabi_drm_src, dest)
+            os.chmod(str(dest), 0o755)
+            log("BIN", f"installed /usr/bin/test-kabi-drm ({kabi_drm_src.stat().st_size} bytes)")
 
     # Always use QEMU's user-mode DNS forwarder
     (ROOTFS / "etc" / "resolv.conf").write_text("nameserver 10.0.2.3\n")

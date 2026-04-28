@@ -906,6 +906,31 @@ test-module-k6: build
 	    false; \
 	fi
 
+# `make test-userspace-drm` — boot with INIT_SCRIPT=test-kabi-drm and
+# verify the userspace DRM ioctl path against /dev/dri/card0.  Drives
+# the FULL syscall path: sys_openat → VFS → tmpfs lookup → K4
+# KabiCharDevFile → K20 fops adapter → K21 drm_ioctl dispatcher →
+# DrmVersion struct read/write → return.  K22 milestone.
+.PHONY: test-userspace-drm
+test-userspace-drm:
+	$(MAKE) build INIT_SCRIPT=/usr/bin/test-kabi-drm
+	$(PROGRESS) "TEST" "kABI userspace DRM ioctl path (/dev/dri/card0)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-userspace-drm.log; true
+	@echo ""
+	@if grep -q 'USERSPACE-DRM: starting' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: open ok' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: name=kabi-drm version=2.0.0' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: done' /tmp/kevlar-test-userspace-drm.log; then \
+	    echo "TEST_PASS: kABI K22 — userspace DRM ioctl path verified"; \
+	else \
+	    echo "TEST_FAIL: missing expected K22 markers"; \
+	    grep -E 'USERSPACE-DRM|kabi|panic' /tmp/kevlar-test-userspace-drm.log | head -30; \
+	    false; \
+	fi
+
 # `make test-userspace-kabi` — boot with INIT_SCRIPT=test-kabi-userspace
 # and verify the userspace fd path against /dev/k4-demo.  Rebuilds the
 # kernel with the INIT_SCRIPT compile-time env (arm64 cmdline parsing
