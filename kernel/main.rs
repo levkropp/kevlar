@@ -932,6 +932,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi DRM ioctl smoke");
     }
 
+    // K23 — walk registered virtio drivers + fire probe on
+    // matching fake devices.  Mirror of K19's PCI walker, but
+    // for the virtio bus.  First milestone where virtio_input's
+    // probe runs inside Kevlar.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kabi::virtio::walk_and_probe();
+        profiler.lap_time("kabi virtio walk");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

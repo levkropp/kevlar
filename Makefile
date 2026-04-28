@@ -564,7 +564,7 @@ test-module-k12: build
 		| tee /tmp/kevlar-test-module-k12.log; true
 	@echo ""
 	@if grep -q 'kabi: loading /lib/modules/virtio_input.ko' /tmp/kevlar-test-module-k12.log \
-	 && grep -q 'kabi: __register_virtio_driver (stub)' /tmp/kevlar-test-module-k12.log \
+	 && grep -q 'kabi: __register_virtio_driver: name=Some("virtio_input")' /tmp/kevlar-test-module-k12.log \
 	 && grep -q 'kabi: virtio_input init_module returned 0' /tmp/kevlar-test-module-k12.log; then \
 	    echo "TEST_PASS: kABI K12 — Ubuntu virtio_input.ko loaded with input + virtio core stubs"; \
 	else \
@@ -903,6 +903,27 @@ test-module-k6: build
 	else \
 	    echo "TEST_FAIL: missing expected K6 markers"; \
 	    grep -E 'kabi|\[k6\]|panic' /tmp/kevlar-test-module-k6.log | head -30; \
+	    false; \
+	fi
+
+# `make test-module-k23` — virtio bus walking + virtio_input
+# probe firing.  Mirrors K19's PCI walking pattern for the
+# virtio bus.  Walks fake virtio_input device, fires probe.
+.PHONY: test-module-k23
+test-module-k23: build
+	$(PROGRESS) "TEST" "kABI K23 demo (virtio bus walking + virtio_input probe)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k23.log; true
+	@echo ""
+	@if grep -q 'kabi: __register_virtio_driver: name=Some("virtio_input")' /tmp/kevlar-test-module-k23.log \
+	 && grep -q 'kabi: virtio walk: probing driver .virtio_input. against device_id=18' /tmp/kevlar-test-module-k23.log \
+	 && grep -q "kabi: virtio walk: 'virtio_input' probe returned" /tmp/kevlar-test-module-k23.log; then \
+	    echo "TEST_PASS: kABI K23 — virtio_input probe fired"; \
+	else \
+	    echo "TEST_FAIL: missing expected K23 markers"; \
+	    grep -E 'kabi|virtio|panic' /tmp/kevlar-test-module-k23.log | head -40; \
 	    false; \
 	fi
 
