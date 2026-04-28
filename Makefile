@@ -974,8 +974,12 @@ test-userspace-drm:
 	 && grep -q 'USERSPACE-DRM: getconn.modes count=1 mode0=1024x768 1024x768@60Hz' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: addfb2 fb_id=1' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: setcrtc rc=0' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: dumb handle=1 pitch=4096 size=3145728' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: mapdumb offset=0x0' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: drew pattern\[0\]=0xcafef00d \[1\]=0xdeadbeef' /tmp/kevlar-test-userspace-drm.log \
+	 && grep -q 'USERSPACE-DRM: addfb2(handle) fb_id=2' /tmp/kevlar-test-userspace-drm.log \
 	 && grep -q 'USERSPACE-DRM: done' /tmp/kevlar-test-userspace-drm.log; then \
-	    echo "TEST_PASS: kABI K22+K25+K26+K27 — full ghost-modesetting path verified"; \
+	    echo "TEST_PASS: kABI K22+K25+K26+K27+K28 — DUMB+mmap+draw verified"; \
 	else \
 	    echo "TEST_FAIL: missing expected K22 markers"; \
 	    grep -E 'USERSPACE-DRM|kabi|panic' /tmp/kevlar-test-userspace-drm.log | head -30; \

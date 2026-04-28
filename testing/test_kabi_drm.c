@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 
 /* Mirror of Linux's struct drm_version.  Same layout K21's
  * `DrmVersion` mirrors on the kernel side.  3×i32 + 4 bytes
@@ -119,6 +120,26 @@ struct drm_mode_fb_cmd2 {
 
 #define DRM_IOCTL_MODE_SETCRTC _IOWR('d', 0xA2, struct drm_mode_crtc)
 #define DRM_IOCTL_MODE_ADDFB2  _IOWR('d', 0xB8, struct drm_mode_fb_cmd2)
+
+/* K28: DUMB buffer + mmap structs. */
+struct drm_mode_create_dumb {
+    uint32_t height;
+    uint32_t width;
+    uint32_t bpp;
+    uint32_t flags;
+    uint32_t handle;
+    uint32_t pitch;
+    uint64_t size;
+};
+
+struct drm_mode_map_dumb {
+    uint32_t handle;
+    uint32_t pad;
+    uint64_t offset;
+};
+
+#define DRM_IOCTL_MODE_CREATE_DUMB _IOWR('d', 0xB2, struct drm_mode_create_dumb)
+#define DRM_IOCTL_MODE_MAP_DUMB    _IOWR('d', 0xB3, struct drm_mode_map_dumb)
 
 static void w(const char *s) {
     write(1, s, strlen(s));
@@ -266,6 +287,67 @@ int main(void) {
         w("USERSPACE-DRM: MODE_SETCRTC failed\n");
     } else {
         w("USERSPACE-DRM: setcrtc rc=0\n");
+    }
+
+    /* K28: DUMB buffer creation + mmap + draw + read-back. */
+    struct drm_mode_create_dumb cdumb;
+    memset(&cdumb, 0, sizeof(cdumb));
+    cdumb.width = 1024;
+    cdumb.height = 768;
+    cdumb.bpp = 32;
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &cdumb) < 0) {
+        w("USERSPACE-DRM: CREATE_DUMB failed\n");
+    } else {
+        n = snprintf(line, sizeof(line),
+            "USERSPACE-DRM: dumb handle=%u pitch=%u size=%llu\n",
+            cdumb.handle, cdumb.pitch, (unsigned long long)cdumb.size);
+        if (n > 0) write(1, line, n);
+
+        struct drm_mode_map_dumb mdumb;
+        memset(&mdumb, 0, sizeof(mdumb));
+        mdumb.handle = cdumb.handle;
+        if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mdumb) < 0) {
+            w("USERSPACE-DRM: MAP_DUMB failed\n");
+        } else {
+            n = snprintf(line, sizeof(line),
+                "USERSPACE-DRM: mapdumb offset=0x%llx\n",
+                (unsigned long long)mdumb.offset);
+            if (n > 0) write(1, line, n);
+
+            void *ptr = mmap(NULL, (size_t)cdumb.size,
+                             PROT_READ | PROT_WRITE, MAP_SHARED,
+                             fd, (off_t)mdumb.offset);
+            if (ptr == MAP_FAILED) {
+                w("USERSPACE-DRM: mmap failed\n");
+            } else {
+                volatile uint32_t *p = (volatile uint32_t *)ptr;
+                p[0] = 0xCAFEF00Du;
+                p[1] = 0xDEADBEEFu;
+                uint32_t v0 = p[0];
+                uint32_t v1 = p[1];
+                n = snprintf(line, sizeof(line),
+                    "USERSPACE-DRM: drew pattern[0]=0x%x [1]=0x%x\n",
+                    v0, v1);
+                if (n > 0) write(1, line, n);
+                munmap(ptr, (size_t)cdumb.size);
+            }
+        }
+
+        /* Re-issue ADDFB2 with the real handle this time. */
+        struct drm_mode_fb_cmd2 fbcmd2;
+        memset(&fbcmd2, 0, sizeof(fbcmd2));
+        fbcmd2.width = cdumb.width;
+        fbcmd2.height = cdumb.height;
+        fbcmd2.pixel_format = 0x34325258;
+        fbcmd2.handles[0] = cdumb.handle;
+        fbcmd2.pitches[0] = cdumb.pitch;
+        if (ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &fbcmd2) < 0) {
+            w("USERSPACE-DRM: ADDFB2(handle) failed\n");
+        } else {
+            n = snprintf(line, sizeof(line),
+                "USERSPACE-DRM: addfb2(handle) fb_id=%u\n", fbcmd2.fb_id);
+            if (n > 0) write(1, line, n);
+        }
     }
 
     close(fd);

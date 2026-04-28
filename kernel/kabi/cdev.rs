@@ -220,6 +220,7 @@ fn install_chrdev(
         fops,
         name: name.to_string(),
         rdev,
+        mmap_phys_base: None,
     });
     let devfs: &DevFs = &*DEV_FS;
     devfs.add_runtime_file(name, adapter);
@@ -230,7 +231,9 @@ fn install_chrdev(
 }
 
 /// Install a char device at /dev/<subdir>/<name>.  Used by the
-/// DRM registration path (K20+) for /dev/dri/cardN.
+/// DRM registration path (K20+) for /dev/dri/cardN.  Optional
+/// `mmap_phys_base` exposes a contiguous physical region for
+/// userspace mmap (K28+ DRM dumb buffers).
 pub fn install_chrdev_in_subdir(
     major: u32,
     minor: u32,
@@ -238,6 +241,7 @@ pub fn install_chrdev_in_subdir(
     subdir: &str,
     name: &str,
     fops: *const FileOperationsShim,
+    mmap_phys_base: Option<usize>,
 ) {
     let rdev = make_dev(major, minor);
     let registry_name = format!("{}/{}", subdir, name);
@@ -254,12 +258,13 @@ pub fn install_chrdev_in_subdir(
         fops,
         name: registry_name,
         rdev,
+        mmap_phys_base,
     });
     let devfs: &DevFs = &*DEV_FS;
     devfs.add_runtime_file_in_subdir(subdir, name, adapter);
     log::info!(
-        "kabi: /dev/{}/{} registered (major={}, minor={}, rdev={:#x})",
-        subdir, name, major, minor, rdev
+        "kabi: /dev/{}/{} registered (major={}, minor={}, rdev={:#x}, mmap_phys_base={:?})",
+        subdir, name, major, minor, rdev, mmap_phys_base
     );
 }
 
@@ -269,6 +274,11 @@ struct KabiCharDevFile {
     fops: *const FileOperationsShim,
     name: String,
     rdev: u32,
+    /// Optional phys_addr for `FileLike::mmap_phys_base()`.  Set by
+    /// devices that back their mmap with a contiguous physical
+    /// region (e.g., DRM cards' DUMB-buffer pool).  None for
+    /// regular char devices.
+    mmap_phys_base: Option<usize>,
 }
 
 impl fmt::Debug for KabiCharDevFile {
@@ -407,6 +417,10 @@ impl FileLike for KabiCharDevFile {
             return Err(errno_from_neg(rc));
         }
         Ok(rc)
+    }
+
+    fn mmap_phys_base(&self) -> Option<usize> {
+        self.mmap_phys_base
     }
 }
 

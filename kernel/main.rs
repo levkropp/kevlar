@@ -913,6 +913,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi bochs.ko load");
     }
 
+    // K28 — pre-allocate the DRM DUMB-buffer pool BEFORE
+    // walk_and_probe fires drm_dev_register, so /dev/dri/cardN
+    // is installed with a real `mmap_phys_base`.  Userspace
+    // mmap'ing a DUMB buffer ends up at this region.
+    #[cfg(target_arch = "aarch64")]
+    {
+        kabi::drm_dev::init_dumb_pool();
+        profiler.lap_time("kabi DRM DUMB pool init");
+    }
+
     // K19 — walk registered PCI drivers + fire probe on matching
     // fake devices.  First milestone where an Ubuntu kernel
     // module's callback runs inside Kevlar.

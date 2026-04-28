@@ -121,6 +121,10 @@ static DRM_FOPS_ADAPTER: DrmFopsHolder = DrmFopsHolder(
 pub extern "C" fn drm_dev_register(_dev: *mut c_void, _flags: u64) -> i32 {
     let minor = NEXT_DRM_MINOR.fetch_add(1, Ordering::Relaxed);
     let card_name = alloc::format!("card{}", minor);
+    let mmap_phys_base = {
+        let pa = dumb_pool_phys_base();
+        if pa != 0 { Some(pa) } else { None }
+    };
     crate::kabi::cdev::install_chrdev_in_subdir(
         DRM_MAJOR,
         minor,
@@ -128,6 +132,7 @@ pub extern "C" fn drm_dev_register(_dev: *mut c_void, _flags: u64) -> i32 {
         "dri",
         &card_name,
         &DRM_FOPS_ADAPTER.0,
+        mmap_phys_base,
     );
     log::info!(
         "kabi: drm_dev_register: /dev/dri/{} installed (major={}, minor={})",
@@ -191,6 +196,8 @@ const DRM_IOCTL_NR_MODE_GETCRTC: u32 = 0xA1;
 const DRM_IOCTL_NR_MODE_SETCRTC: u32 = 0xA2;
 const DRM_IOCTL_NR_MODE_GETENCODER: u32 = 0xA6;
 const DRM_IOCTL_NR_MODE_GETCONNECTOR: u32 = 0xA7;
+const DRM_IOCTL_NR_MODE_CREATE_DUMB: u32 = 0xB2;
+const DRM_IOCTL_NR_MODE_MAP_DUMB: u32 = 0xB3;
 const DRM_IOCTL_NR_MODE_ADDFB2: u32 = 0xB8;
 
 // Synthesized object IDs.  drmModeGet{Crtc,Connector,Encoder}
@@ -349,6 +356,165 @@ unsafe impl Send for FbRegistry {}
 static NEXT_FB_ID: AtomicU32 = AtomicU32::new(1);
 static FBS: kevlar_platform::spinlock::SpinLock<FbRegistry> =
     kevlar_platform::spinlock::SpinLock::new(FbRegistry(alloc::vec::Vec::new()));
+
+// ── DUMB-buffer pool (K28 CREATE_DUMB / MAP_DUMB) ─────────────
+
+#[repr(C)]
+struct DrmModeCreateDumb {
+    height: u32,
+    width: u32,
+    bpp: u32,
+    flags: u32,
+    handle: u32,
+    pitch: u32,
+    size: u64,
+}
+
+#[repr(C)]
+struct DrmModeMapDumb {
+    handle: u32,
+    pad: u32,
+    offset: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DumbHandle {
+    handle: u32,
+    offset: usize,
+    size: usize,
+}
+
+struct DumbPool {
+    base_va: usize,
+    base_pa: usize,
+    pool_size: usize,
+    next_offset: usize,
+    handles: alloc::vec::Vec<DumbHandle>,
+    next_handle: u32,
+}
+
+unsafe impl Send for DumbPool {}
+
+static DUMB_POOL: kevlar_platform::spinlock::SpinLock<Option<DumbPool>> =
+    kevlar_platform::spinlock::SpinLock::new(None);
+
+const DUMB_POOL_SIZE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
+const DUMB_POOL_PAGES: usize = DUMB_POOL_SIZE_BYTES / 4096; // 1024
+
+/// Initialize the DUMB pool early in boot (before any
+/// drm_dev_register call) so the pool's phys_base is known when
+/// /dev/dri/cardN is installed.  Idempotent.
+pub fn init_dumb_pool() {
+    let mut pool = DUMB_POOL.lock();
+    if pool.is_some() {
+        return;
+    }
+    use kevlar_platform::page_allocator::{alloc_pages, AllocPageFlags};
+    let pa = match alloc_pages(DUMB_POOL_PAGES, AllocPageFlags::KERNEL) {
+        Ok(p) => p,
+        Err(_) => {
+            log::warn!("kabi: DUMB pool allocation failed");
+            return;
+        }
+    };
+    let va = pa.as_vaddr().value();
+    log::info!(
+        "kabi: DUMB pool allocated: VA={:#x} PA={:#x} size={} bytes",
+        va, pa.value(), DUMB_POOL_SIZE_BYTES,
+    );
+    *pool = Some(DumbPool {
+        base_va: va,
+        base_pa: pa.value(),
+        pool_size: DUMB_POOL_SIZE_BYTES,
+        next_offset: 0,
+        handles: alloc::vec::Vec::new(),
+        next_handle: 1,
+    });
+}
+
+/// Get the DUMB pool's phys base, for use as `mmap_phys_base` on
+/// /dev/dri/cardN.  Returns 0 if pool isn't initialized.
+pub fn dumb_pool_phys_base() -> usize {
+    DUMB_POOL.lock().as_ref().map(|p| p.base_pa).unwrap_or(0)
+}
+
+fn drm_ioctl_mode_create_dumb(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut cmd = unsafe { core::ptr::read(arg as *const DrmModeCreateDumb) };
+    if cmd.width == 0 || cmd.height == 0 || cmd.bpp == 0 {
+        return EINVAL;
+    }
+    // 64-byte stride alignment.
+    let bytes_per_row = (cmd.width as usize) * ((cmd.bpp as usize) / 8);
+    let pitch = (bytes_per_row + 63) & !63;
+    let row_size = pitch * (cmd.height as usize);
+    // Round up to page size.
+    let size = (row_size + 4095) & !4095;
+
+    let mut pool_guard = DUMB_POOL.lock();
+    let pool = match pool_guard.as_mut() {
+        Some(p) => p,
+        None => {
+            log::warn!("kabi: CREATE_DUMB called before pool init");
+            return -12; // ENOMEM
+        }
+    };
+    if pool.next_offset + size > pool.pool_size {
+        log::warn!("kabi: DUMB pool exhausted");
+        return -12;
+    }
+    let handle = pool.next_handle;
+    pool.next_handle += 1;
+    let offset = pool.next_offset;
+    pool.next_offset += size;
+    pool.handles.push(DumbHandle { handle, offset, size });
+    drop(pool_guard);
+
+    cmd.handle = handle;
+    cmd.pitch = pitch as u32;
+    cmd.size = size as u64;
+    log::info!(
+        "kabi: MODE_CREATE_DUMB: handle={} {}x{} bpp={} pitch={} size={}",
+        handle, cmd.width, cmd.height, cmd.bpp, cmd.pitch, cmd.size,
+    );
+    unsafe { core::ptr::write(arg as *mut DrmModeCreateDumb, cmd); }
+    0
+}
+
+fn drm_ioctl_mode_map_dumb(arg: usize) -> isize {
+    if arg == 0 {
+        return EFAULT;
+    }
+    let mut cmd = unsafe { core::ptr::read(arg as *const DrmModeMapDumb) };
+    let pool_guard = DUMB_POOL.lock();
+    let pool = match pool_guard.as_ref() {
+        Some(p) => p,
+        None => return -22,
+    };
+    let entry = pool.handles.iter().find(|h| h.handle == cmd.handle);
+    match entry {
+        Some(h) => {
+            cmd.offset = h.offset as u64;
+            log::info!(
+                "kabi: MODE_MAP_DUMB: handle={} offset={:#x}",
+                cmd.handle, cmd.offset,
+            );
+            drop(pool_guard);
+            unsafe { core::ptr::write(arg as *mut DrmModeMapDumb, cmd); }
+            0
+        }
+        None => -2, // ENOENT
+    }
+}
+
+/// Look up a DUMB handle's metadata.  Used by ADDFB2 to validate.
+fn dumb_handle_lookup(handle: u32) -> Option<DumbHandle> {
+    DUMB_POOL.lock().as_ref().and_then(|p| {
+        p.handles.iter().find(|h| h.handle == handle).copied()
+    })
+}
 
 // ── CRTC current state (K27 SETCRTC) ──────────────────────────
 
@@ -565,6 +731,18 @@ fn drm_ioctl_mode_addfb2(arg: usize) -> isize {
         return EFAULT;
     }
     let mut cmd = unsafe { core::ptr::read(arg as *const DrmModeFbCmd2) };
+    // K28: validate that handles[0] (if non-zero) names a real
+    // DUMB-pool handle.  Real Linux returns -ENOENT for invalid
+    // GEM handles; we follow the same contract.
+    if cmd.handles[0] != 0 {
+        if dumb_handle_lookup(cmd.handles[0]).is_none() {
+            log::warn!(
+                "kabi: MODE_ADDFB2: unknown handle {}",
+                cmd.handles[0],
+            );
+            return -2; // ENOENT
+        }
+    }
     let id = NEXT_FB_ID.fetch_add(1, Ordering::Relaxed);
     let info = FbInfo {
         fb_id: id,
@@ -575,8 +753,8 @@ fn drm_ioctl_mode_addfb2(arg: usize) -> isize {
     FBS.lock().0.push(info);
     cmd.fb_id = id;
     log::info!(
-        "kabi: MODE_ADDFB2: fb_id={} {}x{} format={:#x}",
-        info.fb_id, info.width, info.height, info.pixel_format,
+        "kabi: MODE_ADDFB2: fb_id={} {}x{} format={:#x} handle={}",
+        info.fb_id, info.width, info.height, info.pixel_format, cmd.handles[0],
     );
     unsafe { core::ptr::write(arg as *mut DrmModeFbCmd2, cmd); }
     0
@@ -627,6 +805,8 @@ pub extern "C" fn drm_ioctl(
         DRM_IOCTL_NR_MODE_GETENCODER => drm_ioctl_mode_getencoder(arg),
         DRM_IOCTL_NR_MODE_GETCONNECTOR => drm_ioctl_mode_getconnector(arg),
         DRM_IOCTL_NR_MODE_ADDFB2 => drm_ioctl_mode_addfb2(arg),
+        DRM_IOCTL_NR_MODE_CREATE_DUMB => drm_ioctl_mode_create_dumb(arg),
+        DRM_IOCTL_NR_MODE_MAP_DUMB => drm_ioctl_mode_map_dumb(arg),
         _ => ENOTTY,
     }
 }
