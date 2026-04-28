@@ -78,6 +78,11 @@ LXDE_PACKAGES = [
     # GTK icon themes
     "adwaita-icon-theme",
     "hicolor-icon-theme",
+    # MIME database — pcmanfm uses GIO's MIME-type lookup to decide
+    # what to do when a file is opened.  Without /usr/share/mime
+    # populated, the lookup hits an internal libfm/glib assertion
+    # and pcmanfm SIGABRTs (signal 6) on certain operations.
+    "shared-mime-info",
     # Utilities
     "xterm",
     # First-portfolio test programs — pure-Xlib, no GTK/D-Bus deps,
