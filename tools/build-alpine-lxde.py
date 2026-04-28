@@ -167,6 +167,28 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
 
+        # GTK system-wide settings: pin the icon theme to Adwaita.
+        # Without this, GTK falls back to "hicolor" (the empty
+        # fallback theme), and pcmanfm renders folders + files
+        # without icons.  Adwaita is installed under
+        # /usr/share/icons/Adwaita by the apko package set.
+        gtk3_etc = root / "etc" / "gtk-3.0"
+        gtk3_etc.mkdir(parents=True, exist_ok=True)
+        (gtk3_etc / "settings.ini").write_text(
+            "[Settings]\n"
+            "gtk-icon-theme-name=Adwaita\n"
+            "gtk-theme-name=Adwaita\n"
+            "gtk-fallback-icon-theme=hicolor\n"
+        )
+        # GTK 2 uses a different config path.  pcmanfm-1.x is GTK 2.
+        gtk2_rc = root / "etc" / "gtk-2.0" / "gtkrc"
+        gtk2_rc.parent.mkdir(parents=True, exist_ok=True)
+        gtk2_rc.write_text(
+            'gtk-icon-theme-name="Adwaita"\n'
+            'gtk-theme-name="Adwaita"\n'
+            'gtk-fallback-icon-theme="hicolor"\n'
+        )
+
         # Xorg fbdev config — uses Kevlar's /dev/fb0 (ramfb).
         # ShadowFB defaults to "on"; the arm64 fb mmap fix in blog 245
         # (Normal-NC vs Device-nGnRnE) makes that path work.  No BusID
