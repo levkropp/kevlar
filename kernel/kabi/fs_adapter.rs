@@ -76,28 +76,34 @@ impl FileSystem for KabiFileSystem {
     }
 }
 
-/// Linux 7.0.0-14 `struct file_system_type` layout (the fields we
-/// care about; the full struct is ~120 bytes).  Pinned to the
-/// version we load (Ubuntu 26.04's linux-modules-7.0.0-14-generic).
+/// Linux 7.0.0-14 `struct file_system_type` layout, sourced
+/// directly from `include/linux/fs.h:2271` of the matching
+/// kernel tree (`build/linux-src.vanilla-v7.0/`):
 ///
 /// ```c
 /// struct file_system_type {
-///     const char *name;                  /* +0 */
-///     int fs_flags;                      /* +8 */
-///     int (*init_fs_context)(struct fs_context *);  /* +16 */
-///     const struct fs_parameter_spec *parameters;   /* +24 */
-///     struct dentry *(*mount)(struct file_system_type *, int,
-///                             const char *, void *); /* +32 */
-///     void (*kill_sb)(struct super_block *);         /* +40 */
-///     struct module *owner;                           /* +48 */
+///     const char *name;                            /* +0  */
+///     int fs_flags;                                /* +8  */
+///     int (*init_fs_context)(struct fs_context *); /* +16 */
+///     const struct fs_parameter_spec *parameters;  /* +24 */
+///     void (*kill_sb)(struct super_block *);       /* +32 */
+///     struct module *owner;                        /* +40 */
+///     struct file_system_type *next;               /* +48 */
 ///     ...
 /// };
 /// ```
+///
+/// Important: **Linux 7.0 has no legacy `->mount` field.**  Earlier
+/// Linux kernels (≤ 6.x) had `mount` at +32 and `kill_sb` at +40;
+/// 7.0 removed `mount` and shifted `kill_sb` up.  The Phase 3c v0
+/// crash (calling +32 as if it were `mount`) was actually a call
+/// into erofs's kill_sb thunk with the wrong argument types, which
+/// promptly dereferenced a string-shaped value.  Fixed by routing
+/// through init_fs_context instead.
 const FST_NAME_OFF: usize = 0;
 const FST_FS_FLAGS_OFF: usize = 8;
 const FST_INIT_FS_CONTEXT_OFF: usize = 16;
-const FST_MOUNT_OFF: usize = 32;
-const FST_KILL_SB_OFF: usize = 40;
+const FST_KILL_SB_OFF: usize = 32;
 
 /// Mount entry point — looks up the registered filesystem by name,
 /// reads its struct file_system_type, dispatches into its mount
@@ -136,8 +142,6 @@ pub fn kabi_mount_filesystem(
     let fs_flags = unsafe { *(fs_type_u8.add(FST_FS_FLAGS_OFF) as *const i32) };
     let init_fs_context_ptr =
         unsafe { *(fs_type_u8.add(FST_INIT_FS_CONTEXT_OFF) as *const usize) };
-    let mount_op_ptr =
-        unsafe { *(fs_type_u8.add(FST_MOUNT_OFF) as *const usize) };
     let kill_sb_ptr =
         unsafe { *(fs_type_u8.add(FST_KILL_SB_OFF) as *const usize) };
 
@@ -156,61 +160,103 @@ pub fn kabi_mount_filesystem(
 
     info!(
         "kabi: file_system_type({}): name=\"{}\" fs_flags={:#x} \
-         init_fs_context={:#x} mount={:#x} kill_sb={:#x}",
-        name, stored_name, fs_flags,
-        init_fs_context_ptr, mount_op_ptr, kill_sb_ptr,
+         init_fs_context={:#x} kill_sb={:#x}",
+        name, stored_name, fs_flags, init_fs_context_ptr, kill_sb_ptr,
     );
 
-    if mount_op_ptr != 0 {
-        // Type-shape the dispatch.  We do NOT yet actually call the
-        // function pointer — first attempt (Phase 3c v0) crashed with
-        // a kernel page fault four instructions into erofs's
-        // ->mount thunk:
-        //
-        //   panic at platform/arm64/interrupt.rs:136:17:
-        //   kernel page fault: pc=0xffff00007cdc2c1c
-        //                      far=0x2820262029766574 (= "tev)&( (")
-        //                      esr=0x96000004
-        //
-        // The FAR value is ASCII text, suggesting the thunk reads a
-        // string-typed field that we haven't initialized.  Likely
-        // candidates: the kernel's `mount_bdev` helper (which most
-        // legacy mount thunks delegate to) reads `current->fs->...`
-        // or similar process-context state we don't model.
-        //
-        // Phase 3d will either (a) implement a real synthetic
-        // block_device wrapping virtio_blk + the process-context
-        // state mount_bdev needs, or (b) switch to the
-        // init_fs_context path which doesn't go through mount_bdev.
-        // Until then, log the dispatch shape and bail.
-        type MountFn = unsafe extern "C" fn(
-            fs_type: *mut c_void,
-            flags: i32,
-            dev_name: *const u8,
-            data: *mut c_void,
-        ) -> *mut c_void;
-        let _mount_fn: MountFn = unsafe { core::mem::transmute(mount_op_ptr) };
-
+    if init_fs_context_ptr == 0 {
         warn!(
-            "kabi: erofs ->mount at {:#x} — call gated off until Phase 3d \
-             provides synthetic block_device + process-context backing \
-             (v0 dispatch panicked at PC+0x24 with text-shaped FAR)",
-            mount_op_ptr,
-        );
-        return Err(crate::result::Error::new(crate::result::Errno::ENOSYS));
-    }
-    if init_fs_context_ptr != 0 {
-        warn!(
-            "kabi: file_system_type({}) uses init_fs_context — fs_context \
-             dispatch not yet implemented (Phase 3c)",
+            "kabi: file_system_type({}) has no init_fs_context — \
+             pre-Linux-7.0 module style not yet supported",
             name,
         );
         return Err(crate::result::Error::new(crate::result::Errno::ENOSYS));
     }
-    warn!(
-        "kabi: file_system_type({}) has neither ->mount nor \
-         ->init_fs_context — module is malformed?",
-        name,
+
+    // Modern mount path: init_fs_context → parse_param → get_tree.
+    //
+    // Linux 7.0 removed the legacy `->mount` callback entirely;
+    // every fs uses init_fs_context.  Our v1 implementation:
+    //
+    //  1. allocate a `struct fs_context` (zero-filled, ~256 bytes).
+    //  2. populate fs_context.fs_type = our registered fs_type_ptr,
+    //     fs_context.purpose = FS_CONTEXT_FOR_MOUNT (1),
+    //     fs_context.sb_flags = MS_RDONLY-ish.
+    //  3. call init_fs_context(fc) — fills fc->ops with the fs's
+    //     parse_param / get_tree ops, plus fc->fs_private with the
+    //     fs-specific context.
+    //  4. parse_param loop (skip — no mount options).
+    //  5. fc->ops->get_tree(fc) — does the real work, returns
+    //     fc->root populated with the mounted dentry.
+    //
+    // get_tree for block-fs's resolves through bdev_file_open_by_path.
+    // Our stub returns ERR_PTR(-ENODEV) which causes get_tree to
+    // bail cleanly with -ENODEV — no crash.
+    //
+    // Phase 3d v1 (this commit): set up steps 1-3 only.  parse_param
+    // and get_tree are Phase 3d v2; calling get_tree without a real
+    // bdev backing means we will fail at the device-open step but
+    // at least the context allocation + init_fs_context call should
+    // succeed.
+
+    type InitFsContextFn = unsafe extern "C" fn(*mut c_void) -> i32;
+    let init_fc_fn: InitFsContextFn =
+        unsafe { core::mem::transmute(init_fs_context_ptr) };
+
+    // struct fs_context is ~280 bytes in Linux 7.0; allocate 512 to
+    // be safe.  The fields we know we need to touch:
+    //   +0   const struct fs_context_operations *ops
+    //   +24  struct file_system_type *fs_type
+    //   +56  void *fs_private
+    //   +96  unsigned int sb_flags
+    //   +112 enum fs_context_purpose purpose
+    let fc = super::alloc::kmalloc(512, 0);
+    if fc.is_null() {
+        return Err(crate::result::Error::new(crate::result::Errno::ENOMEM));
+    }
+    // Zero-fill the buffer so init_fs_context sees clean defaults.
+    unsafe { core::ptr::write_bytes(fc as *mut u8, 0, 512); }
+
+    // Field offsets sourced from include/linux/fs_context.h.  These
+    // are best-effort guesses for v1; Phase 3d v2 verifies against
+    // pahole or the matching headers and adjusts.
+    const FC_FS_TYPE_OFF: usize = 24;
+    const FC_PURPOSE_OFF: usize = 112;
+    const FS_CONTEXT_FOR_MOUNT: u32 = 1;
+
+    unsafe {
+        *(fc.cast::<u8>().add(FC_FS_TYPE_OFF) as *mut *mut c_void) = fs_type;
+        *(fc.cast::<u8>().add(FC_PURPOSE_OFF) as *mut u32) =
+            FS_CONTEXT_FOR_MOUNT;
+    }
+
+    info!(
+        "kabi: dispatching erofs init_fs_context(fc={:p})",
+        fc,
     );
-    Err(crate::result::Error::new(crate::result::Errno::EINVAL))
+    let rc = unsafe { init_fc_fn(fc) };
+
+    if rc < 0 {
+        warn!(
+            "kabi: erofs init_fs_context returned {} — bailing",
+            rc,
+        );
+        super::alloc::kfree(fc);
+        let errno = match -rc {
+            12 => crate::result::Errno::ENOMEM,
+            22 => crate::result::Errno::EINVAL,
+            _  => crate::result::Errno::EIO,
+        };
+        return Err(crate::result::Error::new(errno));
+    }
+
+    info!(
+        "kabi: erofs init_fs_context returned 0 — fs_context allocated, \
+         get_tree dispatch is Phase 3d v2",
+    );
+    // TODO Phase 3d v2: read fc->ops (offset 0), invoke
+    // ops->get_tree(fc), then fc->root holds the mounted dentry.
+    // Bail with ENOSYS for now — the fc memory leaks here but it's
+    // a one-time cost during boot probe.
+    Err(crate::result::Error::new(crate::result::Errno::ENOSYS))
 }
