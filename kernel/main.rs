@@ -794,6 +794,27 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         profiler.lap_time("kabi virtio_input.ko load");
     }
 
+    // K13 — load /lib/modules/drm_buddy.ko: Ubuntu's DRM buddy-
+    // allocator helper, the first DRM-stack module.  21 undefs
+    // across slab (kmem_cache_*), rbtree (rb_*), list debug
+    // (__list_*_or_report), drm_printf, __sw_hweight64, and the
+    // already-stubbed kmalloc/sched/ubsan surface.  init_module
+    // does almost nothing (publishes drm_buddy_init via
+    // EXPORT_SYMBOL); the heavy code only runs when a real DRM
+    // driver calls into it (K14+).
+    #[cfg(target_arch = "aarch64")]
+    {
+        info!("kabi: loading /lib/modules/drm_buddy.ko (Ubuntu 26.04)");
+        match kabi::load_module("/lib/modules/drm_buddy.ko", "init_module") {
+            Ok(m) => match m.call_init() {
+                Some(rc) => info!("kabi: drm_buddy init_module returned {}", rc),
+                None => warn!("kabi: init_module not found in drm_buddy.ko"),
+            },
+            Err(e) => warn!("kabi: drm_buddy load_module failed: {:?}", e),
+        }
+        profiler.lap_time("kabi drm_buddy.ko load");
+    }
+
     // Create the init process.
     if let Some(path) = init_slot_path {
         // Init slot (patched by compare-contracts.py): run binary directly as PID 1.

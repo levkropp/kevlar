@@ -1713,6 +1713,20 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(vinput_src, dest)
         log("MOD", f"installed /lib/modules/virtio_input.ko ({vinput_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── kABI K13 target: drm_buddy.ko (DRM buddy-allocator helper) ──
+    # Library module (no init_module).  21 undef symbols, mostly
+    # kmem_cache_* + rb_* + list debug.  First DRM-stack module.
+    drm_buddy_src = ROOT / "build" / "linux-modules" / "lib" / "modules" / \
+        "7.0.0-14-generic" / "kernel" / "drivers" / "gpu" / "drm" / "drm_buddy.ko"
+    if drm_buddy_src.exists():
+        modules_dir = ROOTFS / "lib" / "modules"
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        dest = modules_dir / "drm_buddy.ko"
+        if dest.exists():
+            dest.unlink()
+        shutil.copy2(drm_buddy_src, dest)
+        log("MOD", f"installed /lib/modules/drm_buddy.ko ({drm_buddy_src.stat().st_size} bytes) [Ubuntu 26.04]")
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

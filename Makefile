@@ -573,6 +573,29 @@ test-module-k12: build
 	    false; \
 	fi
 
+# `make test-module-k13` — load /lib/modules/drm_buddy.ko:
+# Ubuntu's DRM buddy-allocator helper.  21 undefs across slab,
+# rbtree, list-debug, drm_printf, and __sw_hweight64.  Library
+# module — no init_module — so the test verifies "loaded"
+# rather than "init returned 0".
+.PHONY: test-module-k13
+test-module-k13: build
+	$(PROGRESS) "TEST" "kABI K13 demo (Ubuntu drm_buddy.ko + slab/rbtree/list stubs)"
+	$(PYTHON3) tools/run-qemu.py --timeout 20 \
+		--kvm --batch --arch $(ARCH) \
+		$(kernel_qemu_arg) -- -no-reboot 2>&1 \
+		| tee /tmp/kevlar-test-module-k13.log; true
+	@echo ""
+	@if grep -q 'kabi: loading /lib/modules/drm_buddy.ko' /tmp/kevlar-test-module-k13.log \
+	 && grep -q 'kabi: loaded /lib/modules/drm_buddy.ko' /tmp/kevlar-test-module-k13.log \
+	 && grep -q 'kabi: drm_buddy init_module returned 0' /tmp/kevlar-test-module-k13.log; then \
+	    echo "TEST_PASS: kABI K13 — Ubuntu drm_buddy.ko loaded with DRM-stack stubs"; \
+	else \
+	    echo "TEST_FAIL: missing expected K13 markers"; \
+	    grep -E 'kabi|drm_buddy|panic' /tmp/kevlar-test-module-k13.log | head -30; \
+	    false; \
+	fi
+
 # `make test-module-k11` — load /lib/modules/dummy.ko: Ubuntu's
 # network dummy device.  23 undefs across rtnl/netdev/ethtool/skb;
 # first milestone with subsystem-shaped stub work.
