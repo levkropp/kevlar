@@ -16,10 +16,41 @@ use core::ffi::{c_int, c_void};
 use crate::ksym;
 
 // ── VFS / inode ──────────────────────────────────────────────────
+//
+// Phase 4c-4e: real allocation for inode + dentry.  Each kmalloc'd,
+// zero-filled, with the few fields erofs reads/writes populated.
+// Field offsets verified via struct_layouts.rs.
 
+use super::struct_layouts as fl;
+
+/// `d_make_root(inode)` — Linux's "make a root dentry pointing at
+/// `inode`".  We allocate a `DENTRY_SIZE`-byte dentry, link it to
+/// the inode, and set the parent to itself (root convention).
 #[unsafe(no_mangle)]
-pub extern "C" fn d_make_root(_inode: *mut c_void) -> *mut c_void {
-    log::warn!("kabi: d_make_root (stub) — null"); core::ptr::null_mut()
+pub extern "C" fn d_make_root(inode: *mut c_void) -> *mut c_void {
+    if inode.is_null() {
+        log::warn!("kabi: d_make_root: inode is null");
+        return core::ptr::null_mut();
+    }
+    let dentry = super::alloc::kmalloc(fl::DENTRY_SIZE, 0);
+    if dentry.is_null() {
+        log::warn!("kabi: d_make_root: kmalloc failed");
+        return core::ptr::null_mut();
+    }
+    unsafe { core::ptr::write_bytes(dentry as *mut u8, 0, fl::DENTRY_SIZE); }
+    // d_inode at +56, d_parent at +32 (self-pointer for root).
+    // d_flags = DCACHE_DIRECTORY_TYPE (0x00200000) at +0.
+    const DCACHE_DIRECTORY_TYPE: u32 = 0x0020_0000;
+    unsafe {
+        *(dentry.cast::<u8>().add(fl::DENTRY_D_FLAGS_OFF) as *mut u32) =
+            DCACHE_DIRECTORY_TYPE;
+        *(dentry.cast::<u8>().add(fl::DENTRY_D_PARENT_OFF) as *mut *mut c_void) =
+            dentry;
+        *(dentry.cast::<u8>().add(fl::DENTRY_D_INODE_OFF) as *mut *mut c_void) =
+            inode;
+    }
+    log::info!("kabi: d_make_root: dentry={:p} inode={:p}", dentry, inode);
+    dentry
 }
 
 #[unsafe(no_mangle)]
@@ -39,16 +70,71 @@ pub static dotdot_name: [u8; 32] = *b"..\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0
 #[unsafe(no_mangle)]
 pub extern "C" fn iget_failed(_inode: *mut c_void) {}
 
+/// `iget5_locked(sb, hashval, test, set, data)` — Linux's
+/// "find-or-allocate inode by 64-bit key" helper.  We don't have
+/// a real inode hash, so each call allocates a fresh inode and
+/// runs the `set` callback.  Returns NULL on alloc failure
+/// (Linux's contract — caller IS_ERR-checks separately).
+///
+/// The `set` callback signature is `int (*)(struct inode *, void *)`
+/// where the second arg is `data`.  Erofs uses it (`erofs_iget5_set`
+/// at 0x5068) to store the inode number passed in `data`.
 #[unsafe(no_mangle)]
-pub extern "C" fn iget5_locked(_sb: *mut c_void, _hashval: u64,
-                               _test: *mut c_void, _set: *mut c_void,
-                               _data: *mut c_void) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
+                               _test: *mut c_void, set: *mut c_void,
+                               data: *mut c_void) -> *mut c_void {
+    let inode = super::alloc::kmalloc(fl::INODE_SIZE, 0);
+    if inode.is_null() {
+        log::warn!("kabi: iget5_locked: kmalloc failed");
+        return core::ptr::null_mut();
+    }
+    unsafe { core::ptr::write_bytes(inode as *mut u8, 0, fl::INODE_SIZE); }
+    // Set i_sb; rest of the fields are populated by erofs's set
+    // callback + erofs_read_inode after iget5 returns.
+    unsafe {
+        *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
+    }
+    // Mark I_NEW (bit 0 of i_state at +144 in Linux 7.0).  Kernel
+    // checks this in unlock_new_inode.  Field is volatile-ish in
+    // Linux but a single write here is safe.
+    const I_NEW: u32 = 1 << 3;
+    unsafe {
+        *(inode.cast::<u8>().add(144) as *mut u32) = I_NEW;
+    }
+    // Run the set callback if non-null — erofs uses it to store
+    // the inode number.
+    if !set.is_null() {
+        type SetFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+        let set_fn: SetFn = unsafe { core::mem::transmute(set) };
+        // Set callbacks have the same SCS hand-off requirement.
+        let rc = super::loader::call_with_scs_2(
+            set as *const (), inode as usize, data as usize,
+        );
+        log::info!("kabi: iget5_locked: set_fn returned {}", rc);
+        let _ = set_fn; // keep type alias for documentation
+    }
+    log::info!("kabi: iget5_locked: inode={:p} sb={:p} data={:p}",
+               inode, sb, data);
+    inode
 }
 
+/// `new_inode(sb)` — allocate a fresh inode without going through
+/// the inode hash.  Used by z_erofs_init_super for an internal
+/// "managed" inode that caches decompressed pages.  Just kmalloc +
+/// zero + i_sb.
 #[unsafe(no_mangle)]
-pub extern "C" fn new_inode(_sb: *mut c_void) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn new_inode(sb: *mut c_void) -> *mut c_void {
+    let inode = super::alloc::kmalloc(fl::INODE_SIZE, 0);
+    if inode.is_null() {
+        log::warn!("kabi: new_inode: kmalloc failed");
+        return core::ptr::null_mut();
+    }
+    unsafe { core::ptr::write_bytes(inode as *mut u8, 0, fl::INODE_SIZE); }
+    unsafe {
+        *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
+    }
+    log::info!("kabi: new_inode: inode={:p} sb={:p}", inode, sb);
+    inode
 }
 
 #[unsafe(no_mangle)]

@@ -72,20 +72,24 @@ fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code)]
 pub fn call_with_scs_1(f: *const (), arg0: usize) -> isize {
-    let mut scs: Vec<u8> = alloc::vec![0u8; 8192];
+    let mut scs: Vec<u8> = alloc::vec![0u8; 65536];
     let scs_ptr = scs.as_mut_ptr();
     let result: isize;
     unsafe {
+        // Save x18 on the stack across the .ko call: AAPCS64 says x9
+        // is caller-saved, so the .ko's call chain will clobber it
+        // and any "saved" copy of x18 we leave in x9 gets corrupted.
+        // After the call, we need x18 back to whatever Rust set it
+        // to, so save+restore via the stack (16-byte SP alignment).
         core::arch::asm!(
-            "mov x9, x18",
+            "str x18, [sp, #-16]!",
             "mov x18, {scs}",
             "blr {fp}",
-            "mov x18, x9",
+            "ldr x18, [sp], #16",
             scs = in(reg) scs_ptr,
             fp = in(reg) f,
             in("x0") arg0,
             lateout("x0") result,
-            out("x9") _,
             clobber_abi("C"),
         );
     }
@@ -103,7 +107,7 @@ pub fn call_with_scs_1(f: *const (), arg0: usize) -> isize {
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code)]
 pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
-    let mut scs: Vec<u8> = alloc::vec![0u8; 8192];
+    let mut scs: Vec<u8> = alloc::vec![0u8; 65536];
     let scs_ptr = scs.as_mut_ptr();
     let result: isize;
     unsafe {
