@@ -76,6 +76,24 @@ pub fn lookup_synth_file(file_ptr: usize) -> Option<(String, u64)> {
         .map(|s| (s.path.clone(), s.size))
 }
 
+/// Look up the backing path for a file or address_space pointer.
+/// Used by `read_cache_folio` when erofs passes either the file
+/// or the file's f_mapping as the mapping argument.
+pub fn lookup_synth_file_path_for_mapping(
+    mapping: *mut c_void,
+    file: *mut c_void,
+) -> Option<String> {
+    let mapping_addr = mapping as usize;
+    let file_addr = file as usize;
+    let table = SYNTH_FILES.lock();
+    for s in table.iter() {
+        if s.file_ptr == file_addr || s.mapping_ptr == mapping_addr {
+            return Some(s.path.clone());
+        }
+    }
+    None
+}
+
 /// Synthesise a struct file backed by the given path.  Allocates
 /// the file + inode + address_space + populates fields erofs
 /// reads at mount time.
