@@ -123,7 +123,17 @@ pub fn filp_open_synth(path_ptr: *const u8) -> *mut c_void {
     let file_buf = super::alloc::kmalloc(fl::FILE_SIZE, 0);
     let inode_buf = super::alloc::kmalloc(fl::INODE_SIZE, 0);
     let mapping_buf = super::alloc::kmalloc(fl::AS_SIZE, 0);
-    if file_buf.is_null() || inode_buf.is_null() || mapping_buf.is_null() {
+    // Fake "host" super_block so erofs's `dif0.file->f_inode->i_sb` deref
+    // returns a valid (zeroed) pointer.  Erofs's fc_fill_super at offset
+    // 0x49ac compares `i_sb->s_op == &shmem_ops_constant`; we want the
+    // not-shmem path, which `s_op = 0` selects.  Phase 7 fix: in-kernel
+    // boot probe accidentally worked because the boot page tables map
+    // low VAs; userspace process context has NULL protection so the
+    // null deref faulted.
+    let host_sb_buf = super::alloc::kmalloc(fl::SB_SIZE, 0);
+    if file_buf.is_null() || inode_buf.is_null() || mapping_buf.is_null()
+        || host_sb_buf.is_null()
+    {
         log::warn!("kabi: filp_open_synth: kmalloc failed");
         // Best-effort cleanup; on partial-alloc failure we leak the
         // ones that did succeed.  Boot-time so harmless.
@@ -133,6 +143,7 @@ pub fn filp_open_synth(path_ptr: *const u8) -> *mut c_void {
         core::ptr::write_bytes(file_buf as *mut u8, 0, fl::FILE_SIZE);
         core::ptr::write_bytes(inode_buf as *mut u8, 0, fl::INODE_SIZE);
         core::ptr::write_bytes(mapping_buf as *mut u8, 0, fl::AS_SIZE);
+        core::ptr::write_bytes(host_sb_buf as *mut u8, 0, fl::SB_SIZE);
     }
 
     // Populate struct file fields erofs reads.
@@ -153,6 +164,12 @@ pub fn filp_open_synth(path_ptr: *const u8) -> *mut c_void {
         *(i.add(fl::INODE_I_SIZE_OFF) as *mut i64) = size as i64;
         // i_mapping at +48 (some erofs paths read this)
         *(i.add(fl::INODE_I_MAPPING_OFF) as *mut *mut c_void) = mapping_buf;
+        // i_sb at +40 — host superblock for the BACKING file.  Erofs's
+        // fc_fill_super reads `dif0.file->f_inode->i_sb->s_op` to detect
+        // shmem-backed mounts; with i_sb=NULL this faults under user
+        // process context (where low VAs aren't mapped).  Point it at
+        // a zero-filled fake sb so the s_op comparison fails cleanly.
+        *(i.add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = host_sb_buf;
     }
 
     // Populate struct address_space fields.

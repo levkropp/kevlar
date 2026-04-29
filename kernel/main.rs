@@ -952,14 +952,15 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                         "kabi: registered filesystems = {}",
                         kabi::fs_register::registered_count(),
                     );
-                    // K33 Phase 3 routing probe — exercise the
-                    // kabi_mount_filesystem path.  We expect
-                    // Err(ENOSYS) at v1: lookup hits the registry,
-                    // but the module ->mount op dispatch is Phase 3b.
-                    // The interesting log lines are:
-                    //   "kabi: kabi_mount_filesystem(erofs): registry hit, ..."
-                    //   "kabi: KabiFileSystem(...).root_dir() — not yet implemented"
-                    match kabi::fs_adapter::kabi_mount_filesystem(
+                    // In-kernel mount probe — exercise the
+                    // kabi_mount_filesystem path from kernel context.
+                    // Single-mount v1: this consumes the one allowed
+                    // mount, so the userspace test (`init=/bin/test-
+                    // kabi-mount-erofs`) MUST run with the probe
+                    // disabled — gated on `kabi-mount-probe=1`.
+                    if bootinfo.raw_cmdline.as_str()
+                        .contains("kabi-mount-probe=1")
+                    { match kabi::fs_adapter::kabi_mount_filesystem(
                         "erofs", None, 0, core::ptr::null(),
                     ) {
                         Ok(fs) => {
@@ -1081,7 +1082,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                             "kabi: erofs mount route returned {:?}",
                             e,
                         ),
-                    }
+                    } }
                 }
                 None => warn!("kabi: init_module not found in erofs.ko"),
             },

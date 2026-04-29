@@ -106,6 +106,7 @@ def compile_all_local():
         ("testing/mini_cgroups_ns.c",    "mini-cgroups-ns",  []),
         ("testing/test_ext2_rw.c",       "test-ext2-rw",     []),
         ("testing/test_ext4_mknod.c",    "test-ext4-mknod",  []),
+        ("testing/test-kabi-mount-erofs.c", "test-kabi-mount-erofs", []),
         ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/test_alpine_apk.c",    "test-alpine-apk",  []),
         ("testing/test_cgroups_hang.c",  "test-cgroups-hang", []),
@@ -1117,6 +1118,11 @@ def compile_all_local_arm64(cc):
         # Validates that K23's virtio_input.probe + K24's
         # input_register_device wired into Kevlar's evdev tree.
         ("testing/test_kabi_input.c",   "test-kabi-input",   []),
+        # Phase 7: userspace mount(2) → opendir/readdir → open/read
+        # against the kABI-mounted erofs filesystem.  Runs as PID 1
+        # via init=/bin/test-kabi-mount-erofs (see Makefile target
+        # `test-kabi-mount-erofs`).
+        ("testing/test-kabi-mount-erofs.c", "test-kabi-mount-erofs", []),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
@@ -1505,6 +1511,7 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
 
     for d in ["bin", "sbin", "usr/bin", "usr/sbin",
               "etc", "etc/network", "dev", "proc", "sys", "tmp", "mnt",
+              "mnt/erofs",  # Phase 7: pre-create kABI mount target
               "var/www/html", "run", "lib"]:
         (ROOTFS / d).mkdir(parents=True, exist_ok=True)
 

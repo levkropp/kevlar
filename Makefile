@@ -1281,6 +1281,31 @@ itest-all:
 	done; \
 	exit $$fail
 
+# Phase 7: userspace integration test for the kABI-mounted erofs
+# filesystem.  Boots Kevlar with init=/bin/test-kabi-mount-erofs as
+# PID 1 — the test does mount(2) → opendir/readdir → open/read against
+# /mnt/erofs and prints TEST_PASS / TEST_FAIL.  Requires the kABI cmdline
+# gates to load erofs.ko + enable fill_super dispatch.
+.PHONY: test-kabi-mount-erofs
+test-kabi-mount-erofs: build
+	$(PROGRESS) "TEST" "kABI userspace mount(erofs) end-to-end ($(ARCH))"
+	$(PYTHON3) tools/run-qemu.py --timeout 60 --kvm --batch \
+		--arch $(ARCH) \
+		--append-cmdline "kabi-load-erofs=1 kabi-fill-super=1 init=/bin/test-kabi-mount-erofs" \
+		$(kernel_qemu_arg) -- -smp 2 -m 1024 2>&1 \
+		| tee /tmp/kevlar-test-kabi-mount-erofs-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|PASS|FAIL|RESULTS)' \
+		/tmp/kevlar-test-kabi-mount-erofs-$(ARCH)-$(PROFILE).log \
+		|| echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-kabi-mount-erofs-$(ARCH)-$(PROFILE).log; then \
+		echo "kABI MOUNT TEST: FAIL"; exit 1; \
+	elif grep -q '^TEST_PASS' /tmp/kevlar-test-kabi-mount-erofs-$(ARCH)-$(PROFILE).log; then \
+		echo "kABI MOUNT TEST: PASS"; \
+	else \
+		echo "kABI MOUNT TEST: no result line"; exit 1; \
+	fi
+
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-lxde
 test-lxde: $(LXDE_IMG)
