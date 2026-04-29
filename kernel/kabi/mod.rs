@@ -74,6 +74,7 @@ pub mod spinlock;
 pub mod stack;
 pub mod struct_layouts;
 pub mod symbols;
+pub mod task_mock;
 pub mod tracepoints;
 pub mod ttm;
 pub mod ubsan;
@@ -92,5 +93,10 @@ pub fn init() {
     work::init();
     platform::init();
     fs_synth::init_synth();
-    log::info!("kabi: runtime initialized (workqueue + platform bus + fs_synth)");
+    #[cfg(target_arch = "aarch64")]
+    {
+        task_mock::init_per_cpu_mocks();
+        task_mock::install_for_current_cpu();
+    }
+    log::info!("kabi: runtime initialized (workqueue + platform bus + fs_synth + task_mock)");
 }

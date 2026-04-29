@@ -33,6 +33,19 @@
     str     x30,       [sp, #(30 * 8)]
     mrs     x0, sp_el0
     str     x0,        [sp, #(31 * 8)]
+    // Phase 1 (Linux fs .ko compat): set sp_el0 to the per-CPU
+    // KabiTaskMock so kernel-mode code that reads `mrs xN, sp_el0`
+    // (Linux's `current` macro on arm64) gets a Linux-shaped task
+    // struct with stack_canary at +1912.  `kabi_task_mock_ptr`
+    // lives at offset 32 in CpuLocalHead (see
+    // `platform/arm64/cpu_local.rs`).  Zero = mock not installed
+    // (very early boot, or AP that hasn't run install_for_current_cpu);
+    // skip in that case.
+    mrs     x0, tpidr_el1
+    ldr     x0, [x0, #32]            // CpuLocalHead.kabi_task_mock_ptr
+    cbz     x0, 1f
+    msr     sp_el0, x0
+1:
     mrs     x0, elr_el1
     str     x0,        [sp, #(32 * 8)]
     mrs     x0, spsr_el1

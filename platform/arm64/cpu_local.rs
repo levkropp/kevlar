@@ -73,6 +73,7 @@ macro_rules! cpu_local {
 ///   16:  preempt_count
 ///   20:  need_resched
 ///   24:  fp_owner
+///   32:  kabi_task_mock_ptr
 /// Do NOT reorder the first four fields — asm accesses them by offset.
 /// New fields must be appended at the end.
 #[repr(C)]
@@ -97,6 +98,14 @@ pub struct CpuLocalHead {
     /// the current task's.  Cleared on task exit if the exiting task owns
     /// the CPU's FP state.
     pub fp_owner: u64,
+    /// Linux task_struct mock pointer for kABI-loaded fs `.ko` modules.
+    /// Linux's compiled fs code uses `sp_el0` as a `task_struct *`; trap.S
+    /// reads this field on every EL0→EL1 entry and `msr sp_el0, x` so kABI
+    /// kernel-mode code sees a Linux-shaped current-task.  Zero on CPUs
+    /// where `kabi::task_mock::install_for_current_cpu()` hasn't run yet —
+    /// trap.S skips the mock-install in that case.  See
+    /// `kernel/kabi/task_mock.rs`.
+    pub kabi_task_mock_ptr: u64,
 }
 
 #[used]
