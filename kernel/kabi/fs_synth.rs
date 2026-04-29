@@ -307,9 +307,11 @@ pub fn get_tree_nodev_synth(fc: *mut c_void,
 
     log::info!("kabi: get_tree_nodev_synth: sb={:p}, calling fill_super", sb);
 
-    type FillSuperFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
-    let fill_fn: FillSuperFn = unsafe { core::mem::transmute(fill_super) };
-    let rc = unsafe { fill_fn(sb, fc) };
+    // SCS hand-off — see kabi::loader::call_with_scs_2 for rationale.
+    // fill_super(sb, fc) → 2 ptr args.
+    let rc = super::loader::call_with_scs_2(
+        fill_super as *const (), sb as usize, fc as usize,
+    ) as i32;
 
     if rc < 0 {
         log::warn!(

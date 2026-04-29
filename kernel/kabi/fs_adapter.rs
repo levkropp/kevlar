@@ -199,9 +199,15 @@ pub fn kabi_mount_filesystem(
     // at least the context allocation + init_fs_context call should
     // succeed.
 
-    type InitFsContextFn = unsafe extern "C" fn(*mut c_void) -> i32;
-    let init_fc_fn: InitFsContextFn =
-        unsafe { core::mem::transmute(init_fs_context_ptr) };
+    // SCS pointer hand-off: Linux modules built with
+    // CONFIG_SHADOW_CALL_STACK=y use x18 as the per-task SCS pointer.
+    // Without a real SCS area, the module's `str x30, [x18], #8`
+    // prologue writes to whatever x18 happened to hold — works
+    // silently if it lands on writable memory, faults
+    // unpredictably (HVF can't classify the abort) when it
+    // doesn't.  Route every dispatch into the .ko through
+    // `call_with_scs_*` to set x18 to a fresh SCS.
+    let _ = init_fs_context_ptr; // documented below; actual call uses SCS
 
     // struct fs_context is ~280 bytes in Linux 7.0; allocate 512 to
     // be safe.  The fields we know we need to touch:
@@ -273,7 +279,9 @@ pub fn kabi_mount_filesystem(
         "kabi: dispatching erofs init_fs_context(fc={:p})",
         fc,
     );
-    let rc = unsafe { init_fc_fn(fc) };
+    let rc = super::loader::call_with_scs_1(
+        init_fs_context_ptr as *const (), fc as usize,
+    ) as i32;
 
     if rc < 0 {
         warn!(
@@ -327,11 +335,10 @@ pub fn kabi_mount_filesystem(
     }
     info!("kabi: fc->ops->get_tree = {:#x}", get_tree_ptr);
 
-    type GetTreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
-    let get_tree_fn: GetTreeFn = unsafe { core::mem::transmute(get_tree_ptr) };
-
     info!("kabi: dispatching erofs ops->get_tree(fc={:p})", fc);
-    let rc = unsafe { get_tree_fn(fc) };
+    let rc = super::loader::call_with_scs_1(
+        get_tree_ptr as *const (), fc as usize,
+    ) as i32;
 
     if rc < 0 {
         warn!(

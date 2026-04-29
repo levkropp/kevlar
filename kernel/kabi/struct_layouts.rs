@@ -128,8 +128,14 @@ pub const SB_S_MAXBYTES_OFF: usize = 32;        // loff_t
 pub const SB_S_TYPE_OFF: usize = 40;            // file_system_type *
 pub const SB_S_OP_OFF: usize = 48;              // super_operations *
 // Many fields between op and s_root; pin via runtime probe.
-pub const SB_S_ROOT_OFF: usize = 256;      // GUESS
-pub const SB_S_FS_INFO_OFF: usize = 320;   // GUESS
+pub const SB_S_ROOT_OFF: usize = 256;      // GUESS — verify when fc->root populated
+// `sb->s_fs_info` verified via erofs.ko `erofs_read_superblock` disasm:
+//   43ec: ldr x20, [x22, #912]   ; x22 = sb arg, x20 = sb->s_fs_info
+// Subsequent reads at offsets 912/256-aligned in fc_fill_super and
+// erofs_iget5_set match.  Was guessed at 320; that misalignment caused
+// sbi reads to come back zero, sbi writes to land at user-VA 0+offset,
+// and crc32c to be called with len=blocksize-8 from blkszbits=0.
+pub const SB_S_FS_INFO_OFF: usize = 912;
 pub const SB_SIZE: usize = 4096;
 
 // ── struct dentry (include/linux/dcache.h:92) ───────────────────

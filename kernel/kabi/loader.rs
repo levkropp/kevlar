@@ -50,11 +50,31 @@ impl LoadedModule {
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code)]
 fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
-    // 1 KB SCS area — Linux's per-task default.  Module init's call
-    // depth is bounded; this is plenty.
-    let mut scs: Vec<u8> = alloc::vec![0u8; 1024];
+    call_with_scs_1(f as *const (), 0) as i32
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
+    f()
+}
+
+/// Call a Linux module function (1 pointer arg → i32) with a fresh
+/// shadow-call-stack pointer in `x18`.  Same rationale as
+/// `call_module_init_with_scs`, generalised for the deeper kABI
+/// dispatch paths (`init_fs_context`, `ops->get_tree`, `fc_fill_super`,
+/// etc.).  Without SCS handling on these calls, the module's
+/// `str x30, [x18], #8` prologue can write to whatever x18 happens
+/// to hold — fine when it lands on writable memory, fatal when it
+/// doesn't.  The fault HVF can't classify when it lands on an RO
+/// page is one such case.
+///
+/// 8 KiB SCS — plenty for fc_fill_super's deepest call chain.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+pub fn call_with_scs_1(f: *const (), arg0: usize) -> isize {
+    let mut scs: Vec<u8> = alloc::vec![0u8; 8192];
     let scs_ptr = scs.as_mut_ptr();
-    let result: i32;
+    let result: isize;
     unsafe {
         core::arch::asm!(
             "mov x9, x18",
@@ -63,19 +83,52 @@ fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
             "mov x18, x9",
             scs = in(reg) scs_ptr,
             fp = in(reg) f,
+            in("x0") arg0,
             lateout("x0") result,
             out("x9") _,
             clobber_abi("C"),
         );
     }
-    // Keep SCS allocation alive across the asm block.
     drop(scs);
     result
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn call_module_init_with_scs(f: extern "C" fn() -> i32) -> i32 {
-    f()
+pub fn call_with_scs_1(f: *const (), arg0: usize) -> isize {
+    let f: extern "C" fn(usize) -> isize = unsafe { core::mem::transmute(f) };
+    f(arg0)
+}
+
+/// 2-arg variant for `fill_super(sb, fc)`.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
+    let mut scs: Vec<u8> = alloc::vec![0u8; 8192];
+    let scs_ptr = scs.as_mut_ptr();
+    let result: isize;
+    unsafe {
+        core::arch::asm!(
+            "mov x9, x18",
+            "mov x18, {scs}",
+            "blr {fp}",
+            "mov x18, x9",
+            scs = in(reg) scs_ptr,
+            fp = in(reg) f,
+            in("x0") arg0,
+            in("x1") arg1,
+            lateout("x0") result,
+            out("x9") _,
+            clobber_abi("C"),
+        );
+    }
+    drop(scs);
+    result
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
+    let f: extern "C" fn(usize, usize) -> isize = unsafe { core::mem::transmute(f) };
+    f(arg0, arg1)
 }
 
 /// Load a `.ko` from the initramfs at `path`, resolve its undefined

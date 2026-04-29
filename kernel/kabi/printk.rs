@@ -137,3 +137,52 @@ pub unsafe extern "C" fn _dev_warn(
 }
 
 ksym!(_dev_warn);
+
+/// Erofs's `_erofs_printk(sb, fmt, ...)` — sb-context-aware logger.
+///
+/// Linux 7.0 erofs prefixes every diagnostic with the per-mount
+/// device name and runs the message through `_printk`.  We don't
+/// have erofs's sb→bd_dev_name lookup wired, so we just format
+/// the message and log it.  Any leading priority prefix (a
+/// `\x01N` byte pair from `KERN_ERR`/`KERN_WARNING`/etc) is
+/// stripped before logging — same convention as the rest of our
+/// printk shims.
+///
+/// Routing erofs's own error strings to our log makes Phase 4's
+/// iterative bring-up dramatically easier: we see the exact
+/// reason erofs is failing (`"cannot find valid superblock"`,
+/// `"blkszbits %u isn't supported"`, etc.) instead of just an
+/// errno or an HVF assertion.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _erofs_printk(
+    _sb: *const core::ffi::c_void,
+    fmt: *const c_char,
+    mut args: ...
+) -> i32 {
+    if fmt.is_null() {
+        return 0;
+    }
+    // Strip the leading `\x01N` priority pair if present.  Linux
+    // encodes `KERN_ERR` etc. as `"\x013"` at the start of the
+    // format string; printk_get_level extracts it.
+    let fmt_stripped = unsafe {
+        let b0 = *fmt;
+        if b0 as u8 == 0x01 {
+            fmt.add(2)
+        } else {
+            fmt
+        }
+    };
+    let mut buf = [0u8; 512];
+    let n = {
+        let mut sink = Sink::new(&mut buf);
+        unsafe { format_into(&mut sink, fmt_stripped, &mut args) };
+        sink.pos()
+    };
+    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+        log::warn!("[erofs] {}", s.trim_end_matches('\n'));
+    }
+    n as i32
+}
+
+ksym!(_erofs_printk);
