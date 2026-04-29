@@ -36,35 +36,55 @@ use core::ffi::{c_int, c_void};
 use crate::ksym;
 
 // ── folio lookup / allocation ────────────────────────────────────
+//
+// Phase 2 ERR_PTR safety pass: the v1 stubs returned null pointers,
+// which Linux callers don't IS_ERR-check (null is "not in cache" or
+// equivalent, then the caller calls read_folio etc.).  But our
+// downstream stubs also return null/garbage, and erofs's compiled
+// code eventually calls inline `kmap_local_page(folio)` on a
+// null-or-garbage folio, producing a Linux-PAGE_OFFSET-relative VA
+// we don't have mapped.
+//
+// Fix: return ERR_PTR(-EIO) from the lookup/alloc paths so erofs's
+// `IS_ERR(folio)` checks catch the failure cleanly and the caller
+// returns -EIO up through the mount chain instead of dereferencing
+// garbage.  Phase 3 replaces these with real folio infrastructure.
+
+#[inline]
+fn err_ptr_eio() -> *mut c_void {
+    super::block::err_ptr(-5)
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __filemap_get_folio_mpol(_mapping: *mut c_void,
                                            _index: u64, _fgp_flags: u32,
                                            _gfp: u32,
                                            _mpol: *const c_void) -> *mut c_void {
-    log::warn!("kabi: __filemap_get_folio_mpol (stub) — returning null");
-    core::ptr::null_mut()
+    log::warn!("kabi: __filemap_get_folio_mpol (stub) — ERR_PTR(-EIO)");
+    err_ptr_eio()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pagecache_get_page(_mapping: *mut c_void, _index: u64,
                                      _fgp_flags: u32,
                                      _gfp: u32) -> *mut c_void {
-    log::warn!("kabi: pagecache_get_page (stub) — returning null");
-    core::ptr::null_mut()
+    log::warn!("kabi: pagecache_get_page (stub) — ERR_PTR(-EIO)");
+    err_ptr_eio()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn find_get_page(_mapping: *mut c_void,
                                 _index: u64) -> *mut c_void {
+    // find_get_page returns NULL on miss (NOT an error pointer).
+    // Caller responsibility to handle null.
     core::ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn filemap_alloc_folio_noprof(_gfp: u32,
                                              _order: u32) -> *mut c_void {
-    log::warn!("kabi: filemap_alloc_folio_noprof (stub)");
-    core::ptr::null_mut()
+    log::warn!("kabi: filemap_alloc_folio_noprof (stub) — ERR_PTR(-EIO)");
+    err_ptr_eio()
 }
 
 #[unsafe(no_mangle)]
@@ -137,8 +157,8 @@ pub extern "C" fn filemap_splice_read(_in_file: *mut c_void, _ppos: *mut u64,
 pub extern "C" fn read_cache_folio(_mapping: *mut c_void, _index: u64,
                                    _filler: *const c_void,
                                    _file: *mut c_void) -> *mut c_void {
-    log::warn!("kabi: read_cache_folio (stub)");
-    core::ptr::null_mut()
+    log::warn!("kabi: read_cache_folio (stub) — ERR_PTR(-EIO)");
+    err_ptr_eio()
 }
 
 #[unsafe(no_mangle)]
