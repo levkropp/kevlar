@@ -23,6 +23,38 @@ use crate::ksym;
 
 use super::struct_layouts as fl;
 
+/// Walk `sb->s_fs_info->dif0.file->f_mapping` to find the per-mount
+/// synth address_space pointer.  Phase 5 v2: every kABI-allocated
+/// inode points its `i_mapping` at this so erofs's directory + file
+/// read paths (which set `buf.mapping = inode->i_mapping`) get a
+/// mapping that's registered in our SYNTH_FILES table — letting
+/// `read_cache_folio` look up the backing initramfs path.
+///
+/// Returns null if the chain isn't yet populated (e.g. first
+/// allocations during init_fs_context, before sbi->dif0.file is set).
+fn synth_mapping_from_sb(sb: *mut c_void) -> *mut c_void {
+    if sb.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        let sbi = *((sb as *const u8)
+            .add(fl::SB_S_FS_INFO_OFF) as *const *mut c_void);
+        if sbi.is_null() {
+            return core::ptr::null_mut();
+        }
+        // sbi->dif0.file at offset 16 (struct erofs_device_info:
+        // .path +0, .fscache +8, .file +16).  Verified via Phase 4g
+        // sbi dump (file pointer at sbi+0x10).
+        let file = *((sbi as *const u8).add(16) as *const *mut c_void);
+        if file.is_null() {
+            return core::ptr::null_mut();
+        }
+        // file->f_mapping at +16 (FILE_F_MAPPING_OFF).
+        *((file as *const u8).add(fl::FILE_F_MAPPING_OFF)
+            as *const *mut c_void)
+    }
+}
+
 /// `d_make_root(inode)` — Linux's "make a root dentry pointing at
 /// `inode`".  We allocate a `DENTRY_SIZE`-byte dentry, link it to
 /// the inode, and set the parent to itself (root convention).
@@ -94,6 +126,16 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
     unsafe {
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
     }
+    // Phase 5 v2: set i_mapping to the per-mount synth address_space
+    // (= sbi->dif0.file->f_mapping).  Erofs's directory iterator
+    // sets `buf.mapping = dir->i_mapping` directly, so without this
+    // erofs_bread receives a NULL mapping and our read_cache_folio
+    // fallback reads the wrong block, returning -EUCLEAN.
+    let mapping = synth_mapping_from_sb(sb);
+    unsafe {
+        *(inode.cast::<u8>().add(fl::INODE_I_MAPPING_OFF)
+            as *mut *mut c_void) = mapping;
+    }
     // Mark I_NEW (bit 0 of i_state at +144 in Linux 7.0).  Linux's
     // enum sets `__I_NEW = 0U`, so `I_NEW = 1 << 0 = 1`.  Erofs
     // checks this bit in `erofs_iget` (at offset 0x5f30) to decide
@@ -124,7 +166,7 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
 /// `new_inode(sb)` — allocate a fresh inode without going through
 /// the inode hash.  Used by z_erofs_init_super for an internal
 /// "managed" inode that caches decompressed pages.  Just kmalloc +
-/// zero + i_sb.
+/// zero + i_sb + i_mapping.
 #[unsafe(no_mangle)]
 pub extern "C" fn new_inode(sb: *mut c_void) -> *mut c_void {
     let inode = super::alloc::kmalloc(fl::INODE_SIZE, 0);
@@ -133,10 +175,14 @@ pub extern "C" fn new_inode(sb: *mut c_void) -> *mut c_void {
         return core::ptr::null_mut();
     }
     unsafe { core::ptr::write_bytes(inode as *mut u8, 0, fl::INODE_SIZE); }
+    let mapping = synth_mapping_from_sb(sb);
     unsafe {
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
+        *(inode.cast::<u8>().add(fl::INODE_I_MAPPING_OFF)
+            as *mut *mut c_void) = mapping;
     }
-    log::info!("kabi: new_inode: inode={:p} sb={:p}", inode, sb);
+    log::info!("kabi: new_inode: inode={:p} sb={:p} mapping={:p}",
+               inode, sb, mapping);
     inode
 }
 
