@@ -228,21 +228,27 @@ pub fn get_tree_nodev_synth(fc: *mut c_void,
     }
     unsafe { core::ptr::write_bytes(sb as *mut u8, 0, fl::SB_SIZE); }
 
-    // Read fc->s_fs_info (erofs's erofs_sb_info, allocated in
-    // init_fs_context).  Copy it into sb->s_fs_info.  Offset
-    // unknown; for now we leave it zero.
-    //
-    // Set basic super_block fields.  Offsets are best-guess and
-    // may need adjustment as erofs reads them.
+    // Propagate fc->s_fs_info → sb->s_fs_info (Linux's
+    // vfs_get_super does this; we replace it).  Without this,
+    // EROFS_SB(sb) returns null and erofs's first-line read of
+    // sbi->ino_oversion in erofs_squash_ino faults.
+    let fc_s_fs_info = unsafe {
+        *(fc.cast::<u8>().add(fl::FC_S_FS_INFO_OFF) as *const *mut c_void)
+    };
+
+    // Set basic super_block fields with offsets verified against
+    // erofs.ko disasm at fc_fill_super offset 0x49c0.
     unsafe {
         let s = sb.cast::<u8>();
-        // s_blocksize at +32 (guess; verify)
-        *(s.add(fl::SB_S_BLOCKSIZE_OFF) as *mut u64) = 4096;
-        // s_blocksize_bits at +24
         *(s.add(fl::SB_S_BLOCKSIZE_BITS_OFF) as *mut u8) = 12;
-        // s_maxbytes at +40 (large enough for any real file)
+        *(s.add(fl::SB_S_BLOCKSIZE_OFF) as *mut u64) = 4096;
         *(s.add(fl::SB_S_MAXBYTES_OFF) as *mut i64) = i64::MAX;
+        *(s.add(fl::SB_S_FS_INFO_OFF) as *mut *mut c_void) = fc_s_fs_info;
     }
+    log::info!(
+        "kabi: get_tree_nodev_synth: propagating fc->s_fs_info={:p} to sb->s_fs_info",
+        fc_s_fs_info,
+    );
 
     // K34 Day 2 finding: dispatching fill_super takes erofs deep
     // into its on-disk superblock read path.  At PC offset 0x49d0

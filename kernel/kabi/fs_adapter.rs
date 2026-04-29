@@ -238,10 +238,7 @@ pub fn kabi_mount_filesystem(
     //       enum fs_context_purpose purpose:8;        // +140 (bitfield)
     //       enum fs_context_phase phase:8;            //
     //   }
-    const FC_FS_TYPE_OFF: usize = 40;
-    const FC_SOURCE_OFF: usize = 112;
-    const FC_SB_FLAGS_OFF: usize = 128;
-    const FC_PURPOSE_OFF: usize = 140;
+    use super::struct_layouts as fl;
     const FS_CONTEXT_FOR_MOUNT: u8 = 1;
     const SB_RDONLY: u32 = 1;
 
@@ -265,10 +262,10 @@ pub fn kabi_mount_filesystem(
     }
 
     unsafe {
-        *(fc.cast::<u8>().add(FC_FS_TYPE_OFF) as *mut *mut c_void) = fs_type;
-        *(fc.cast::<u8>().add(FC_SOURCE_OFF) as *mut *const u8) = source_buf;
-        *(fc.cast::<u8>().add(FC_SB_FLAGS_OFF) as *mut u32) = SB_RDONLY;
-        *(fc.cast::<u8>().add(FC_PURPOSE_OFF) as *mut u8) =
+        *(fc.cast::<u8>().add(fl::FC_FS_TYPE_OFF) as *mut *mut c_void) = fs_type;
+        *(fc.cast::<u8>().add(fl::FC_SOURCE_OFF) as *mut *const u8) = source_buf;
+        *(fc.cast::<u8>().add(fl::FC_SB_FLAGS_OFF) as *mut u32) = SB_RDONLY;
+        *(fc.cast::<u8>().add(fl::FC_PURPOSE_OFF) as *mut u8) =
             FS_CONTEXT_FOR_MOUNT;
     }
 

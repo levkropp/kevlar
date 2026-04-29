@@ -148,7 +148,8 @@ pub extern "C" fn bdi_dev_name(_bdi: *mut c_void) -> *const u8 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn super_setup_bdi(_sb: *mut c_void) -> c_int {
+pub extern "C" fn super_setup_bdi(sb: *mut c_void) -> c_int {
+    log::warn!("kabi: super_setup_bdi(sb={:p}) called", sb);
     0
 }
 

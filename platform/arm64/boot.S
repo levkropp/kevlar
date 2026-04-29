@@ -72,12 +72,25 @@ _start:
     // --- TTBR1 (kernel) page tables ---
 
     // PGD[0] → PUD
+    // Maps the kernel direct map at VA 0xffff_0000_0000_0000.
     adrp    x0, __kernel_pgd_ttbr1
     add     x0, x0, :lo12:__kernel_pgd_ttbr1
     adrp    x1, __kernel_pud_ttbr1
     add     x1, x1, :lo12:__kernel_pud_ttbr1
     orr     x1, x1, #0x3           // Valid + Table
     str     x1, [x0]
+
+    // K35: Linux-compat alias mapping at PGD[256] removed.
+    // Tested briefly: it does change the trap class from L0 to
+    // L1 (PGD entry valid, PUD entry missing for VA's PUD index
+    // 64).  But the deeper blocker is also `sp_el0` semantics —
+    // Linux 7.0 arm64 reads `sp_el0` as the current `task_struct *`
+    // (e.g. `ldr x1, [sp_el0, #1912]` for stack canary in
+    // erofs_read_superblock), but Kevlar's `sp_el0` holds the
+    // user stack pointer.  Both compat layers (VA aliasing AND
+    // task-struct ABI mock) are needed; just one isn't enough.
+    // Reverted PGD[256] alias for now since it adds page-table
+    // surface without unblocking the actual mount.
 
     // PUD[0..3] → PMD[0..3]
     adrp    x0, __kernel_pud_ttbr1

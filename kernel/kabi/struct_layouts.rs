@@ -117,16 +117,19 @@ pub const AOPS_SIZE: usize = 152;
 // Offsets verified iteratively as erofs reads them.  Initial guess
 // based on header layout walk:
 
-pub const SB_S_LIST_OFF: usize = 0;        // struct list_head s_list
-pub const SB_S_DEV_OFF: usize = 16;
-pub const SB_S_BLOCKSIZE_BITS_OFF: usize = 24;
-pub const SB_S_BLOCKSIZE_OFF: usize = 32;
-pub const SB_S_MAXBYTES_OFF: usize = 40;
-pub const SB_S_TYPE_OFF: usize = 48;       // file_system_type *
-pub const SB_S_OP_OFF: usize = 56;         // super_operations *
+// Layout verified against erofs.ko disasm at offset 0x49c0:
+//   str x0, [x19, #24]   ; sb->s_blocksize at +24 (8 bytes)
+//   strb w0, [x19, #20]  ; sb->s_blocksize_bits at +20 (1 byte)
+pub const SB_S_LIST_OFF: usize = 0;        // struct list_head s_list (16)
+pub const SB_S_DEV_OFF: usize = 16;        // dev_t (4)
+pub const SB_S_BLOCKSIZE_BITS_OFF: usize = 20;  // u8
+pub const SB_S_BLOCKSIZE_OFF: usize = 24;       // u64 (8 bytes, padding aligns)
+pub const SB_S_MAXBYTES_OFF: usize = 32;        // loff_t
+pub const SB_S_TYPE_OFF: usize = 40;            // file_system_type *
+pub const SB_S_OP_OFF: usize = 48;              // super_operations *
 // Many fields between op and s_root; pin via runtime probe.
-pub const SB_S_ROOT_OFF: usize = 256;      // GUESS — verify Day 4
-pub const SB_S_FS_INFO_OFF: usize = 320;   // GUESS — verify Day 4
+pub const SB_S_ROOT_OFF: usize = 256;      // GUESS
+pub const SB_S_FS_INFO_OFF: usize = 320;   // GUESS
 pub const SB_SIZE: usize = 4096;
 
 // ── struct dentry (include/linux/dcache.h:92) ───────────────────
@@ -150,13 +153,32 @@ pub const DENTRY_SIZE: usize = 256;
 //
 // (Already used in fs_adapter.rs; centralise here for reference.)
 
+// fs_context layout (Ubuntu 7.0 arm64 with no-debug, RWSEM_SPIN_ON_OWNER=y):
+//   +0   const struct fs_context_operations *ops    (8)
+//   +8   struct mutex uapi_mutex                    (32)
+//   +40  struct file_system_type *fs_type           (8)
+//   +48  void *fs_private                           (8)
+//   +56  void *sget_key                             (8)
+//   +64  struct dentry *root                        (8)
+//   +72  struct user_namespace *user_ns             (8)
+//   +80  struct net *net_ns                         (8)
+//   +88  const struct cred *cred                    (8)
+//   +96  struct p_log log                           (16)
+//   +112 const char *source                         (8)
+//   +120 void *security                             (8)
+//   +128 void *s_fs_info                            (8)
+//   +136 unsigned int sb_flags                      (4)
+//   +140 unsigned int sb_flags_mask                 (4)
+//   +144 unsigned int s_iflags                      (4)
+//   +148 fs_context_purpose:8 + phase:8 + bools     (4 incl. padding)
 pub const FC_OPS_OFF: usize = 0;
 pub const FC_FS_TYPE_OFF: usize = 40;
 pub const FC_FS_PRIVATE_OFF: usize = 48;
 pub const FC_ROOT_OFF: usize = 64;          // struct dentry *root
 pub const FC_SOURCE_OFF: usize = 112;
-pub const FC_SB_FLAGS_OFF: usize = 128;
-pub const FC_PURPOSE_OFF: usize = 140;
+pub const FC_S_FS_INFO_OFF: usize = 128;    // fs's per-mount stash (erofs_sb_info)
+pub const FC_SB_FLAGS_OFF: usize = 136;
+pub const FC_PURPOSE_OFF: usize = 148;
 
 // ── struct fs_context_operations (include/linux/fs_context.h:115) ─
 
