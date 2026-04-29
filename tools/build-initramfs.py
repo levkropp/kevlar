@@ -1840,12 +1840,27 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         log("MOD", f"installed /lib/modules/erofs.ko ({erofs_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
     # ── K33 Phase 3e test image: a tiny erofs disk image to
-    # mount via the kABI fs registry.  Built by hand with
-    # `mkfs.erofs -d 0 /tmp/test.erofs /tmp/erofs-content/`
-    # then dropped at /Users/neo/kevlar/build/test-fixtures/.
-    # Filp_open will read this file; erofs's fc_fill_super
-    # parses the on-disk superblock + builds the dentry tree.
+    # mount via the kABI fs registry.  Generated inline by mkfs.erofs
+    # so the fixture stays in sync with the kABI layer (Phase 3b
+    # requires `-b 4096` because erofs.ko's blkszbits validation
+    # accepts only 9..12; macOS's mkfs.erofs default is 16 KB).
     erofs_img_src = ROOT / "build" / "test-fixtures" / "test.erofs"
+    erofs_img_src.parent.mkdir(parents=True, exist_ok=True)
+    mkfs_erofs = shutil.which("mkfs.erofs")
+    if mkfs_erofs and not erofs_img_src.exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            content_dir = Path(tmp) / "erofs-content"
+            content_dir.mkdir()
+            (content_dir / "hello.txt").write_text(
+                "hello from kABI-mounted erofs!\n"
+            )
+            (content_dir / "info.txt").write_text("kevlar: K33 demo\n")
+            subprocess.run(
+                [mkfs_erofs, "-d", "0", "-b", "4096",
+                 str(erofs_img_src), str(content_dir)],
+                check=True, capture_output=True,
+            )
+            log("IMG", f"generated {erofs_img_src.name} (4 KB blocks)")
     if erofs_img_src.exists():
         lib_dir = ROOTFS / "lib"
         lib_dir.mkdir(parents=True, exist_ok=True)

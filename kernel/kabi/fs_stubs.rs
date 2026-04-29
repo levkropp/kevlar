@@ -490,10 +490,30 @@ ksym!(__xa_erase);
 // ── crypto / compression (return -ENOSYS so fs disables that
 // compression path; erofs-uncompressed read still works) ────────
 
+/// CRC32C (Castagnoli, polynomial `0x1EDC6F41`).
+///
+/// Used by erofs to validate the on-disk superblock when the
+/// `EROFS_FEATURE_COMPAT_SB_CHKSUM` bit is set.  The poly is the
+/// reflected/reversed form `0x82F63B78`.
+///
+/// Bitwise loop, no lookup table — superblock validation runs once
+/// per mount, not in a hot path.  When something hot needs this,
+/// pull in the Slicing-by-8 table or PMULL hw acceleration.
 #[unsafe(no_mangle)]
-pub extern "C" fn crc32c(_crc: u32, _data: *const c_void, _len: usize) -> u32 {
-    log::warn!("kabi: crc32c (stub) — returning 0");
-    0 // TODO: wire to platform/crc32c when needed
+pub extern "C" fn crc32c(crc: u32, data: *const c_void, len: usize) -> u32 {
+    if data.is_null() || len == 0 {
+        return crc;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
+    let mut c = crc;
+    for &b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            let mask = (c & 1).wrapping_neg();
+            c = (c >> 1) ^ (0x82F6_3B78 & mask);
+        }
+    }
+    c
 }
 
 #[unsafe(no_mangle)]
