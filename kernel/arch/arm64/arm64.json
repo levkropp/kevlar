@@ -15,7 +15,7 @@
     "relocation-model": "pic",
     "os": "none",
     "code-model": "small",
-    "features": "+v8a,+strict-align,-neon",
+    "features": "+v8a,+strict-align,-neon,+reserve-x18",
     "abi": "softfloat",
     "rustc-abi": "softfloat",
     "panic-strategy": "abort",

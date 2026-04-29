@@ -364,5 +364,6 @@ pub fn kabi_mount_filesystem(
         "kabi: erofs ops->get_tree returned 0 — fc->root populated, \
          dentry walk is Phase 3d v3",
     );
+    super::alloc::kfree(fc);
     Err(crate::result::Error::new(crate::result::Errno::ENOSYS))
 }
