@@ -186,6 +186,19 @@ extern "C" fn arm64_handle_exception(from_user: u64, frame: *mut PtRegs) {
                 handler().handle_user_fault("arm64 EC=0 unknown", pc as usize);
                 return;
             }
+            // Dump callee-saved + LR/FP/SP from the saved frame so a
+            // ret-to-NULL or PAC auth-fail is identifiable.  Helped
+            // diagnose the SCS-x18-clobber bug fixed in Phase 4 — keep
+            // the diagnostic; it pays for itself the first time a
+            // future kABI call corrupts a return chain.
+            let lr = unsafe { (*frame).regs[30] };
+            let fp = unsafe { (*frame).regs[29] };
+            let sp_saved = unsafe { (*frame).sp };
+            let x18 = unsafe { (*frame).regs[18] };
+            log::warn!(
+                "EL1 EC=0 details: lr={:#x} fp={:#x} sp={:#x} x18={:#x}",
+                lr, fp, sp_saved, x18,
+            );
             panic!(
                 "kernel unhandled synchronous exception: ec={:#x}, esr={:#x}, pc={:#x}, far={:#x}",
                 ec, esr, pc, far

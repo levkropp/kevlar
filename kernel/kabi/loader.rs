@@ -104,6 +104,11 @@ pub fn call_with_scs_1(f: *const (), arg0: usize) -> isize {
 }
 
 /// 2-arg variant for `fill_super(sb, fc)`.
+///
+/// Same stack-save pattern as `call_with_scs_1`: x9 is caller-saved
+/// in AAPCS64, so saving x18 in x9 across `blr` lets the .ko's deep
+/// call chain clobber it; the closing `mov x18, x9` then restores
+/// garbage.  Use the regular stack instead.
 #[cfg(target_arch = "aarch64")]
 #[allow(unsafe_code)]
 pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
@@ -112,16 +117,15 @@ pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
     let result: isize;
     unsafe {
         core::arch::asm!(
-            "mov x9, x18",
+            "str x18, [sp, #-16]!",
             "mov x18, {scs}",
             "blr {fp}",
-            "mov x18, x9",
+            "ldr x18, [sp], #16",
             scs = in(reg) scs_ptr,
             fp = in(reg) f,
             in("x0") arg0,
             in("x1") arg1,
             lateout("x0") result,
-            out("x9") _,
             clobber_abi("C"),
         );
     }

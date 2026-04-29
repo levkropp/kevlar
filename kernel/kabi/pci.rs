@@ -270,9 +270,20 @@ pub fn walk_and_probe() {
                     vendor,
                     device
                 );
-                let probe: extern "C" fn(*mut c_void, *const c_void) -> i32 =
+                // SCS hand-off: probe functions in Linux modules use
+                // x18 for shadow-call-stack push.  Without setup, the
+                // `str x30, [x18], #8` prologue writes to whatever x18
+                // happens to hold — typically lands on freed-but-not-
+                // unmapped memory (no fault) but on Apple Silicon HVF
+                // it sometimes hits a memory class HVF can't classify.
+                // Route via call_with_scs_2 to provide a fresh SCS.
+                let _probe_unused: extern "C" fn(*mut c_void, *const c_void) -> i32 =
                     unsafe { core::mem::transmute(probe_fn) };
-                let rc = probe(*pdev as *mut c_void, matched_id as *const c_void);
+                let rc = super::loader::call_with_scs_2(
+                    probe_fn as *const (),
+                    *pdev as usize,
+                    matched_id as usize,
+                ) as i32;
                 log::info!(
                     "kabi: PCI walk: '{}' probe returned {}",
                     drv_name,

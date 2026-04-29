@@ -358,9 +358,15 @@ pub fn walk_and_probe() {
                      device_id={}",
                     drv_name, device_id,
                 );
-                let probe: extern "C" fn(*mut c_void) -> i32 =
+                // SCS hand-off — see kabi::loader::call_with_scs_1.
+                // Linux modules' probe prologue does
+                // `str x30, [x18], #8`; without a real SCS, x18
+                // points at whatever Rust left it.
+                let _probe: extern "C" fn(*mut c_void) -> i32 =
                     unsafe { core::mem::transmute(probe_fn) };
-                let rc = probe(vdev_buf as *mut c_void);
+                let rc = super::loader::call_with_scs_1(
+                    probe_fn as *const (), vdev_buf as usize,
+                ) as i32;
                 log::info!(
                     "kabi: virtio walk: '{}' probe returned {}",
                     drv_name, rc,
