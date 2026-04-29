@@ -977,6 +977,21 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         if load_chain {
             try_load("/lib/modules/ext4.ko", "ext4");
         }
+
+        // Phase 11 (ext4 arc): in-kernel mount probe.  Only attempt
+        // if `kabi-mount-ext4-probe=1` is set AND the load chain ran
+        // (otherwise no fs_type registered).
+        if load_chain && cmdline.contains("kabi-mount-ext4-probe=1") {
+            info!("kabi: [Phase 11 probe] mount-ext4 via kABI(/dev/vda, MS_RDONLY)");
+            let source = "/dev/vda\0";
+            match kabi::fs_adapter::kabi_mount_filesystem(
+                "ext4", Some("/dev/vda"), 1 /* MS_RDONLY */,
+                source.as_ptr(),
+            ) {
+                Ok(_fs) => info!("kabi: ext4 mount probe Ok — KabiFileSystem ready"),
+                Err(e) => info!("kabi: ext4 mount probe returned {:?}", e),
+            }
+        }
     }
     #[cfg(target_arch = "aarch64")]
     if bootinfo.raw_cmdline.as_str().contains("kabi-load-erofs=1") {

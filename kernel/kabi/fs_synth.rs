@@ -380,6 +380,119 @@ pub fn get_tree_nodev_synth(fc: *mut c_void,
     0
 }
 
+/// Phase 11 (ext4 arc): kernel `get_tree_bdev(fc, fill_super)`.
+/// ext4_get_tree is just `bl get_tree_bdev`.  In real Linux this
+/// helper opens the bdev named by `fc->source`, allocates an sb,
+/// dispatches fill_super, and sets fc->root.  Mirror our existing
+/// `get_tree_nodev_synth` but with bdev wiring.
+#[unsafe(no_mangle)]
+pub extern "C" fn get_tree_bdev(fc: *mut c_void,
+                                fill_super: *mut c_void) -> i32 {
+    log::warn!(
+        "kabi: get_tree_bdev(fc={:p}, fill_super={:p})",
+        fc, fill_super,
+    );
+    if fc.is_null() || fill_super.is_null() {
+        return -22; // -EINVAL
+    }
+
+    // Read fc->source — string pointer at fc[+112].
+    let source_ptr = unsafe {
+        *(fc.cast::<u8>().add(fl::FC_SOURCE_OFF) as *const *const u8)
+    };
+    if source_ptr.is_null() {
+        log::warn!("kabi: get_tree_bdev: fc->source is null");
+        return -22;
+    }
+    // Stringify for diagnostics (best-effort).
+    let source = unsafe {
+        let mut len = 0usize;
+        while *source_ptr.add(len) != 0 && len < 64 { len += 1; }
+        let bytes = core::slice::from_raw_parts(source_ptr, len);
+        core::str::from_utf8(bytes).unwrap_or("<non-utf8>")
+    };
+    log::info!("kabi: get_tree_bdev: fc->source = {:?}", source);
+
+    // Open the backing block device.
+    let bdev_file = super::block::bdev_file_open_by_path(
+        source_ptr, 1 /* FMODE_READ */, core::ptr::null_mut(), core::ptr::null(),
+    );
+    let bdev_file_addr = bdev_file as isize;
+    if bdev_file_addr < 0 && bdev_file_addr >= -4095 {
+        log::warn!("kabi: get_tree_bdev: bdev_file_open_by_path returned errno {}",
+                   -bdev_file_addr);
+        return bdev_file_addr as i32;
+    }
+    let bdev = super::block::file_bdev(bdev_file);
+    if bdev.is_null() {
+        log::warn!("kabi: get_tree_bdev: file_bdev returned NULL");
+        return -19; // -ENODEV
+    }
+
+    // Allocate sb buffer (same as get_tree_nodev_synth).
+    let sb = super::alloc::kmalloc(fl::SB_SIZE, 0);
+    if sb.is_null() {
+        return -12;
+    }
+    unsafe { core::ptr::write_bytes(sb as *mut u8, 0, fl::SB_SIZE); }
+
+    let fc_s_fs_info = unsafe {
+        *(fc.cast::<u8>().add(fl::FC_S_FS_INFO_OFF) as *const *mut c_void)
+    };
+    unsafe {
+        let s = sb.cast::<u8>();
+        // ext4 will call sb_min_blocksize / sb_set_blocksize to set
+        // these; pre-populate sane defaults so any reads before that
+        // return non-zero.
+        *(s.add(fl::SB_S_BLOCKSIZE_BITS_OFF) as *mut u8) = 10;
+        *(s.add(fl::SB_S_BLOCKSIZE_OFF) as *mut u64) = 1024;
+        *(s.add(fl::SB_S_MAXBYTES_OFF) as *mut i64) = i64::MAX;
+        *(s.add(fl::SB_S_FS_INFO_OFF) as *mut *mut c_void) = fc_s_fs_info;
+        *(s.add(fl::SB_S_BDEV_OFF) as *mut *mut c_void) = bdev;
+    }
+    log::info!(
+        "kabi: get_tree_bdev: sb={:p} bdev={:p} fc_s_fs_info={:p}",
+        sb, bdev, fc_s_fs_info,
+    );
+
+    let allow_fill = unsafe { ALLOW_FILL_SUPER };
+    if !allow_fill {
+        log::warn!("kabi: get_tree_bdev: fill_super gated off");
+        super::alloc::kfree(sb);
+        return -38;
+    }
+
+    log::info!("kabi: get_tree_bdev: dispatching fill_super(sb, fc)");
+    let rc = super::loader::call_with_scs_2(
+        fill_super as *const (), sb as usize, fc as usize,
+    ) as i32;
+    log::info!("kabi: get_tree_bdev: fill_super returned {}", rc);
+
+    if rc < 0 {
+        super::alloc::kfree(sb);
+        return rc;
+    }
+
+    let s_root = unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_ROOT_OFF) as *const *mut c_void)
+    };
+    if s_root.is_null() {
+        log::warn!("kabi: get_tree_bdev: sb->s_root is null after fill_super");
+        return -22;
+    }
+    unsafe {
+        *(fc.cast::<u8>().add(fl::FC_ROOT_OFF) as *mut *mut c_void) = s_root;
+    }
+    log::info!(
+        "kabi: get_tree_bdev: fc->root = {:p} — mount succeeded",
+        s_root,
+    );
+    *LAST_MOUNT_STATE.lock() = Some((sb as usize, s_root as usize));
+    0
+}
+
+crate::ksym!(get_tree_bdev);
+
 /// Initialise the kABI aops table.  Heap-allocates it and sets
 /// read_folio to our synth impl.  Called once at boot from
 /// kabi::init().

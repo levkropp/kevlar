@@ -33,6 +33,7 @@
 use core::ffi::{c_int, c_void};
 
 use crate::ksym;
+use super::struct_layouts as fl;
 
 // ── bio ──────────────────────────────────────────────────────────
 // Linux's bio is the request descriptor for block I/O.  Filesystem
@@ -110,19 +111,77 @@ ksym!(errno_to_blk_status);
 // eventually inject a synthetic `block_device` wrapping our
 // `exts/virtio_blk` driver.
 
+/// Phase 11: real `bdev_file_open_by_path`.  Allocate a synth
+/// `struct file` (256 B) + `struct inode` (1024 B) + `struct
+/// block_device` (256 B) trio.  The block_device pointer is the
+/// handle ext4's mount path passes around (via `file_bdev`,
+/// `sb->s_bdev`).  Block reads route through the registered
+/// `kevlar_api::driver::block::block_device()` directly — single-
+/// device v1.
 #[unsafe(no_mangle)]
-pub extern "C" fn bdev_file_open_by_path(_path: *const u8, _mode: u32,
+pub extern "C" fn bdev_file_open_by_path(path: *const u8, _mode: u32,
                                          _holder: *mut c_void,
                                          _hops: *const c_void) -> *mut c_void {
-    log::warn!("kabi: bdev_file_open_by_path (stub) — ERR_PTR(-ENODEV)");
-    // Linux convention: error returns from pointer-typed functions are
-    // encoded as `(void *)(-errno)` where IS_ERR(ptr) checks the top
-    // bits.  Returning null would survive the IS_ERR check (null is
-    // not an error to Linux) and be dereferenced by the caller.
-    // -ENODEV = -19 → cast to *mut c_void gives a high-bits-set
-    // pointer that Linux's IS_ERR catches.
-    err_ptr(-19)
+    let path_str = if !path.is_null() {
+        let len = unsafe {
+            let mut n = 0usize;
+            while *path.add(n) != 0 && n < 64 { n += 1; }
+            n
+        };
+        let bytes = unsafe { core::slice::from_raw_parts(path, len) };
+        core::str::from_utf8(bytes).unwrap_or("<non-utf8>")
+    } else { "<null>" };
+
+    if kevlar_api::driver::block::block_device().is_none() {
+        log::warn!("kabi: bdev_file_open_by_path({:?}) — no BlockDevice registered",
+                   path_str);
+        return err_ptr(-19); // -ENODEV
+    }
+
+    let file = super::alloc::kmalloc(fl::FILE_SIZE, super::alloc::__GFP_ZERO);
+    let inode = super::alloc::kmalloc(fl::INODE_SIZE, super::alloc::__GFP_ZERO);
+    let bdev = super::alloc::kmalloc(fl::SB_SIZE, super::alloc::__GFP_ZERO);
+    let host_sb = super::alloc::kmalloc(fl::SB_SIZE, super::alloc::__GFP_ZERO);
+    if file.is_null() || inode.is_null() || bdev.is_null() || host_sb.is_null() {
+        log::warn!("kabi: bdev_file_open_by_path: kmalloc failed");
+        return err_ptr(-12); // -ENOMEM
+    }
+
+    unsafe {
+        // file->f_inode = inode
+        *(file.cast::<u8>().add(fl::FILE_F_INODE_OFF) as *mut *mut c_void) = inode;
+        // inode->i_sb = host_sb (Phase 7 fix — avoid NULL deref on
+        // i_sb->s_op under user page tables).
+        *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = host_sb;
+        // inode->i_mode = S_IFBLK | 0666
+        const S_IFBLK: u16 = 0o060000;
+        *(inode.cast::<u8>().add(fl::INODE_I_MODE_OFF) as *mut u16)
+            = S_IFBLK | 0o666;
+        // inode->i_blkbits = 9 (512-byte sectors)
+        *(inode.cast::<u8>().add(fl::INODE_I_BLKBITS_OFF) as *mut u8) = 9;
+    }
+
+    // Stash the bdev pointer in a side-table keyed by `file`.  ext4's
+    // file_bdev() reads this back.
+    SYNTH_BDEV_TABLE.lock().push(SynthBdevEntry {
+        file_ptr: file as usize,
+        bdev_ptr: bdev as usize,
+    });
+
+    log::info!("kabi: bdev_file_open_by_path({:?}) → file={:p} bdev={:p}",
+               path_str, file, bdev);
+    file
 }
+
+#[derive(Clone, Copy)]
+struct SynthBdevEntry {
+    file_ptr: usize,
+    bdev_ptr: usize,
+}
+
+static SYNTH_BDEV_TABLE: kevlar_platform::spinlock::SpinLock<
+    alloc::vec::Vec<SynthBdevEntry>,
+> = kevlar_platform::spinlock::SpinLock::new(alloc::vec::Vec::new());
 
 /// Encode an errno as Linux's `ERR_PTR(-errno)` pointer.  Linux's
 /// `IS_ERR(ptr)` is `(unsigned long)(ptr) >= (unsigned long)-MAX_ERRNO`,
@@ -132,8 +191,17 @@ pub(super) fn err_ptr(errno: isize) -> *mut c_void {
     errno as *mut c_void
 }
 
+/// Phase 11: real `file_bdev` — look up the synth bdev pointer
+/// allocated by `bdev_file_open_by_path` for the given file.
 #[unsafe(no_mangle)]
-pub extern "C" fn file_bdev(_file: *mut c_void) -> *mut c_void {
+pub extern "C" fn file_bdev(file: *mut c_void) -> *mut c_void {
+    let table = SYNTH_BDEV_TABLE.lock();
+    for entry in table.iter() {
+        if entry.file_ptr == file as usize {
+            return entry.bdev_ptr as *mut c_void;
+        }
+    }
+    log::warn!("kabi: file_bdev({:p}) — not in side-table", file);
     core::ptr::null_mut()
 }
 
@@ -166,33 +234,111 @@ ksym!(super_setup_bdi);
 // holding a kernel buffer with the block's contents.  v1 stub
 // returns null — first fs that hits this gets the real impl.
 
+/// Phase 11: real `__bread`.  Read `size` bytes at block `block` from
+/// the registered virtio_blk device, allocate a `struct buffer_head`
+/// + 4 KiB data buffer, populate fields, return.  ext4/jbd2's
+/// metadata reads (superblock, BGDT, inode tables) all flow here.
 #[unsafe(no_mangle)]
-pub extern "C" fn __bread(_bdev: *mut c_void, _block: u64,
-                          _size: u32) -> *mut c_void {
-    log::warn!("kabi: __bread (stub) — returning null");
-    core::ptr::null_mut()
+pub extern "C" fn __bread(bdev: *mut c_void, block: u64,
+                          size: u32) -> *mut c_void {
+    let device = match kevlar_api::driver::block::block_device() {
+        Some(d) => d,
+        None => {
+            log::warn!("kabi: __bread: no BlockDevice registered");
+            return core::ptr::null_mut();
+        }
+    };
+    let sector_size = device.sector_size() as u64;
+    if sector_size == 0 || (size as u64) % sector_size != 0 {
+        log::warn!("kabi: __bread: size {} not a multiple of sector_size {}",
+                   size, sector_size);
+        return core::ptr::null_mut();
+    }
+    let start_sector = block * (size as u64) / sector_size;
+
+    // Allocate buffer_head + data buffer.
+    let bh = super::alloc::kmalloc(fl::BH_SIZE, super::alloc::__GFP_ZERO);
+    if bh.is_null() {
+        return core::ptr::null_mut();
+    }
+    let data_void = super::alloc::kmalloc(size as usize, super::alloc::__GFP_ZERO);
+    if data_void.is_null() {
+        super::alloc::kfree(bh);
+        return core::ptr::null_mut();
+    }
+    let data = data_void as *mut u8;
+
+    // Issue the read.
+    let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
+    if let Err(e) = device.read_sectors(start_sector, buf) {
+        log::warn!("kabi: __bread: read_sectors(start={}, len={}) failed: {:?}",
+                   start_sector, size, e);
+        super::alloc::kfree(data_void);
+        super::alloc::kfree(bh);
+        return core::ptr::null_mut();
+    }
+
+    // Populate buffer_head fields.
+    unsafe {
+        *(bh.cast::<u8>().add(fl::BH_B_STATE_OFF) as *mut u64) = fl::BH_UPTODATE;
+        *(bh.cast::<u8>().add(fl::BH_B_BLOCKNR_OFF) as *mut u64) = block;
+        *(bh.cast::<u8>().add(fl::BH_B_SIZE_OFF) as *mut u64) = size as u64;
+        *(bh.cast::<u8>().add(fl::BH_B_DATA_OFF) as *mut *mut u8) = data;
+        *(bh.cast::<u8>().add(fl::BH_B_BDEV_OFF) as *mut *mut c_void) = bdev;
+    }
+
+    log::info!("kabi: __bread(block={}, size={}) → bh={:p} data={:p}",
+               block, size, bh, data);
+    bh
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __getblk(_bdev: *mut c_void, _block: u64,
-                           _size: u32) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn __getblk(bdev: *mut c_void, block: u64,
+                           size: u32) -> *mut c_void {
+    // For RO mount __getblk is rarely distinct from __bread; just
+    // return a buffer_head we can read into later if needed.
+    __bread(bdev, block, size)
+}
+
+/// Phase 11: real `sb_bread` — derive blocksize + bdev from sb,
+/// dispatch to `__bread`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_bread(sb: *mut c_void, block: u64) -> *mut c_void {
+    if sb.is_null() {
+        return core::ptr::null_mut();
+    }
+    let blocksize = unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_BLOCKSIZE_OFF) as *const u64) as u32
+    };
+    let bdev = unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_BDEV_OFF) as *const *mut c_void)
+    };
+    if blocksize == 0 {
+        log::warn!("kabi: sb_bread: sb->s_blocksize == 0");
+        return core::ptr::null_mut();
+    }
+    __bread(bdev, block, blocksize)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_bread(_sb: *mut c_void, _block: u64) -> *mut c_void {
-    log::warn!("kabi: sb_bread (stub) — returning null");
-    core::ptr::null_mut()
+pub extern "C" fn sb_getblk(sb: *mut c_void, block: u64) -> *mut c_void {
+    sb_bread(sb, block)
 }
 
+/// Phase 11: real `sb_set_blocksize` — write the new blocksize +
+/// blocksize_bits into sb.  Returns the new size on success, 0 on
+/// failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_getblk(_sb: *mut c_void, _block: u64) -> *mut c_void {
-    core::ptr::null_mut()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn sb_set_blocksize(_sb: *mut c_void, _size: c_int) -> c_int {
-    0
+pub extern "C" fn sb_set_blocksize(sb: *mut c_void, size: c_int) -> c_int {
+    if sb.is_null() || size < 512 || (size as u32 & (size as u32 - 1)) != 0 {
+        return 0;
+    }
+    let bits = (size as u32).trailing_zeros() as u8;
+    unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_BLOCKSIZE_BITS_OFF) as *mut u8) = bits;
+        *(sb.cast::<u8>().add(fl::SB_S_BLOCKSIZE_OFF) as *mut u64) = size as u64;
+    }
+    size
 }
 
 ksym!(__bread);

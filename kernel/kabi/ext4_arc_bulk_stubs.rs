@@ -481,9 +481,7 @@ fn fake_alloc() -> *mut c_void {
 #[unsafe(no_mangle)] pub extern "C" fn get_random_u32(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
-#[unsafe(no_mangle)] pub extern "C" fn get_tree_bdev(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+// get_tree_bdev — Phase 11: real impl in kabi/fs_synth.rs.
 #[unsafe(no_mangle)] pub extern "C" fn iget_locked(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -691,9 +689,16 @@ fn fake_alloc() -> *mut c_void {
 #[unsafe(no_mangle)] pub extern "C" fn remove_proc_subtree(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
+// sb_min_blocksize — Phase 11: ext4_fill_super calls this with min
+// size 1024 to set the initial sb->s_blocksize before reading the
+// on-disk superblock.  Returns the chosen blocksize on success, 0
+// on failure.  Just delegate to sb_set_blocksize with the requested
+// minimum.
 #[unsafe(no_mangle)] pub extern "C" fn sb_min_blocksize(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+    sb: *mut c_void, size: i32,
+) -> i32 {
+    super::block::sb_set_blocksize(sb, size)
+}
 #[unsafe(no_mangle)] pub extern "C" fn schedule_timeout_interruptible(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -709,9 +714,12 @@ fn fake_alloc() -> *mut c_void {
 #[unsafe(no_mangle)] pub extern "C" fn seq_putc(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
+// set_blocksize — Phase 11: bdev-side blocksize setter.  Called by
+// ext4_fill_super before sb_bread reads the real on-disk superblock
+// at the chosen block size.  Returns 0 on success.
 #[unsafe(no_mangle)] pub extern "C" fn set_blocksize(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+    _bdev: *mut c_void, _size: i32,
+) -> i32 { 0 }
 #[unsafe(no_mangle)] pub extern "C" fn set_cached_acl(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -953,7 +961,7 @@ ksym!(generic_write_checks);
 ksym!(get_inode_acl);
 ksym!(get_random_u16);
 ksym!(get_random_u32);
-ksym!(get_tree_bdev);
+// ksym!(get_tree_bdev) — registered in kabi/fs_synth.rs
 ksym!(iget_locked);
 ksym!(igrab);
 ksym!(ihold);

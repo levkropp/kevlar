@@ -277,15 +277,31 @@ pub fn kabi_mount_filesystem(
     // filp_open is implemented (Phase 3f) it will open this path
     // through Kevlar's initramfs lookup and erofs's fc_fill_super
     // will then read the on-disk superblock.
-    const SOURCE_PATH: &[u8] = b"/lib/test.erofs\0";
-    let source_buf = super::alloc::kmalloc(SOURCE_PATH.len(), 0) as *mut u8;
+    // Phase 11: use the caller-supplied source path when given (e.g.
+    // "/dev/vda" for ext4 bdev mount).  Erofs's existing in-kernel
+    // probe passes None and gets the legacy /lib/test.erofs path.
+    let (source_bytes_owned, source_slice): (alloc::vec::Vec<u8>, &[u8]) = match _source {
+        Some(s) => {
+            let mut v = alloc::vec::Vec::with_capacity(s.len() + 1);
+            v.extend_from_slice(s.as_bytes());
+            v.push(0);
+            (v, &[])
+        }
+        None => (alloc::vec::Vec::new(), b"/lib/test.erofs\0"),
+    };
+    let source_path: &[u8] = if !source_bytes_owned.is_empty() {
+        &source_bytes_owned
+    } else {
+        source_slice
+    };
+    let source_buf = super::alloc::kmalloc(source_path.len(), 0) as *mut u8;
     if source_buf.is_null() {
         super::alloc::kfree(fc);
         return Err(crate::result::Error::new(crate::result::Errno::ENOMEM));
     }
     unsafe {
         core::ptr::copy_nonoverlapping(
-            SOURCE_PATH.as_ptr(), source_buf, SOURCE_PATH.len(),
+            source_path.as_ptr(), source_buf, source_path.len(),
         );
     }
 

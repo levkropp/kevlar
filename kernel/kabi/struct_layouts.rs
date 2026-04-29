@@ -146,7 +146,38 @@ pub const SB_S_ROOT_OFF: usize = 104;
 // sbi reads to come back zero, sbi writes to land at user-VA 0+offset,
 // and crc32c to be called with len=blocksize-8 from blkszbits=0.
 pub const SB_S_FS_INFO_OFF: usize = 912;
+/// `sb->s_bdev` — verified via erofs.ko's fc_fill_super disasm at
+/// 0x47d4 (`ldr x0, [x19, #232]`) which loads sb->s_bdev to check
+/// for non-null before taking the bdev branch.
+pub const SB_S_BDEV_OFF: usize = 232;
 pub const SB_SIZE: usize = 4096;
+
+// ── struct buffer_head (include/linux/buffer_head.h) ────────────
+//
+// Linux 7.0 layout (pre-CONFIG_DEBUG_KERNEL, no extra debug fields):
+//   +0    unsigned long      b_state         (8)
+//   +8    struct buffer_head *b_this_page    (8)
+//   +16   struct page *      b_page          (8)  (union with b_folio)
+//   +24   sector_t           b_blocknr       (8)
+//   +32   size_t             b_size          (8)
+//   +40   char *             b_data          (8)
+//   +48   struct block_device *b_bdev        (8)
+//   +56   bh_end_io_t *      b_end_io        (8)
+//   +64   void *             b_private       (8)
+//   ...   list_head + assoc_map + b_count + b_uptodate_lock
+//
+// Allocate 128 bytes — covers all fields ext4/jbd2 actually read.
+pub const BH_B_STATE_OFF:    usize = 0;
+pub const BH_B_BLOCKNR_OFF:  usize = 24;
+pub const BH_B_SIZE_OFF:     usize = 32;
+pub const BH_B_DATA_OFF:     usize = 40;
+pub const BH_B_BDEV_OFF:     usize = 48;
+pub const BH_SIZE: usize = 128;
+
+/// Bit 0 of `b_state` — set by every successful block read.  Filesystems
+/// check `buffer_uptodate(bh)` (= `test_bit(BH_Uptodate, &bh->b_state)`)
+/// before reading bh->b_data.
+pub const BH_UPTODATE: u64 = 1 << 0;
 
 // ── struct dentry (include/linux/dcache.h:92) ───────────────────
 //
