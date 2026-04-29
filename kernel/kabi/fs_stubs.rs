@@ -95,9 +95,22 @@ pub extern "C" fn get_tree_bdev_flags(_fc: *mut c_void,
     -15
 }
 
+/// `get_tree_nodev(fc, fill_super)` — Linux's "no device" mount helper.
+/// Allocates an anonymous super_block, calls `fill_super(sb, fc)`, and
+/// sets `fc->root` to the result.
+///
+/// K34 Day 2 minimum impl:
+///   1. Allocate a zero-filled super_block buffer (~4KB).
+///   2. Set sb->s_fs_info from fc->s_fs_info (erofs already populated).
+///   3. Set sb->s_blocksize = 4096, sb->s_blocksize_bits = 12.
+///   4. Call fill_super(sb, fc).
+///   5. fc->root is supposed to be set by fill_super.
+///   6. Return the result.
 #[unsafe(no_mangle)]
-pub extern "C" fn get_tree_nodev(_fc: *mut c_void,
-                                 _fill_super: *mut c_void) -> c_int { -22 }
+pub extern "C" fn get_tree_nodev(fc: *mut c_void,
+                                 fill_super: *mut c_void) -> c_int {
+    super::fs_synth::get_tree_nodev_synth(fc, fill_super)
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lockref_get_not_zero(_lr: *mut c_void) -> c_int { 0 }

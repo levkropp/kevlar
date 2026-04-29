@@ -934,6 +934,14 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     // back on once the slab/kmem_cache stubs return real handles.
     // Enable via the cmdline `kabi-load-erofs=1` for debug runs.
     #[cfg(target_arch = "aarch64")]
+    if bootinfo.raw_cmdline.as_str().contains("kabi-fill-super=1") {
+        // K34 Day 2 gate: only enabled when explicitly requested
+        // via cmdline.  See kernel/kabi/fs_synth.rs ALLOW_FILL_SUPER
+        // comment.
+        unsafe { kabi::fs_synth::ALLOW_FILL_SUPER = true; }
+        info!("kabi: ALLOW_FILL_SUPER set — erofs fill_super dispatch enabled");
+    }
+    #[cfg(target_arch = "aarch64")]
     if bootinfo.raw_cmdline.as_str().contains("kabi-load-erofs=1") {
         info!("kabi: loading /lib/modules/erofs.ko (Ubuntu 26.04, K33 Phase 2)");
         match kabi::load_module("/lib/modules/erofs.ko", "init_module") {

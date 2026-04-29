@@ -33,6 +33,12 @@ use super::struct_layouts as fl;
 /// to multiple addresses, defeating the indirect-call setup).
 static KABI_AOPS_PTR: AtomicUsize = AtomicUsize::new(0);
 
+/// Day 2 gate: erofs's fill_super dispatch crashes on inline
+/// `kmap_local_page` expansions that target Linux-PAGE_OFFSET VAs
+/// we don't map.  Until VA aliasing is implemented (K35+), keep
+/// the call gated off.  Set via cmdline `kabi-fill-super=1`.
+pub static mut ALLOW_FILL_SUPER: bool = false;
+
 /// Returns the address of the kABI aops table.  Panics if
 /// init_synth() hasn't been called.
 fn kabi_aops_addr() -> usize {
@@ -197,6 +203,121 @@ fn initramfs_file_size(path: &str) -> Option<u64> {
         }
     }
     None
+}
+
+/// `get_tree_nodev`: allocate a synth super_block, call fill_super,
+/// set fc->root.  Linux's helper expanded out by hand because the
+/// real one allocates dentries and inodes through a chain of
+/// helpers we don't have.  K34 Day 2: drive erofs's
+/// fc_fill_super and observe the next failure mode.
+pub fn get_tree_nodev_synth(fc: *mut c_void,
+                            fill_super: *mut c_void) -> i32 {
+    log::warn!(
+        "kabi: get_tree_nodev_synth(fc={:p}, fill_super={:p})",
+        fc, fill_super,
+    );
+
+    if fc.is_null() || fill_super.is_null() {
+        return -22; // -EINVAL
+    }
+
+    // Allocate a zero-filled super_block buffer.
+    let sb = super::alloc::kmalloc(fl::SB_SIZE, 0);
+    if sb.is_null() {
+        return -12; // -ENOMEM
+    }
+    unsafe { core::ptr::write_bytes(sb as *mut u8, 0, fl::SB_SIZE); }
+
+    // Read fc->s_fs_info (erofs's erofs_sb_info, allocated in
+    // init_fs_context).  Copy it into sb->s_fs_info.  Offset
+    // unknown; for now we leave it zero.
+    //
+    // Set basic super_block fields.  Offsets are best-guess and
+    // may need adjustment as erofs reads them.
+    unsafe {
+        let s = sb.cast::<u8>();
+        // s_blocksize at +32 (guess; verify)
+        *(s.add(fl::SB_S_BLOCKSIZE_OFF) as *mut u64) = 4096;
+        // s_blocksize_bits at +24
+        *(s.add(fl::SB_S_BLOCKSIZE_BITS_OFF) as *mut u8) = 12;
+        // s_maxbytes at +40 (large enough for any real file)
+        *(s.add(fl::SB_S_MAXBYTES_OFF) as *mut i64) = i64::MAX;
+    }
+
+    // K34 Day 2 finding: dispatching fill_super takes erofs deep
+    // into its on-disk superblock read path.  At PC offset 0x49d0
+    // inside erofs_iget5_set the .ko's compiled code does an inline
+    // `kmap_local_page` expansion that produces VAs in Linux's
+    // PAGE_OFFSET region.  Linux 7.0 arm64 builds with VA_BITS=52
+    // → PAGE_OFFSET = 0xfff0_0000_0000_0000; Kevlar's KERNEL_BASE
+    // = 0xffff_0000_0000_0000.  The two direct maps don't overlap,
+    // so erofs's pointer arithmetic produces unmapped VAs:
+    //
+    //   panicked at platform/arm64/interrupt.rs:136:17:
+    //   kernel page fault: pc=0xffff00007cdc49d0
+    //                      far=0xffff_8010_0000_0400
+    //                      esr=0x96000004
+    //
+    // Fixing this requires K35+ work — either:
+    //   A. Realign Kevlar's kernel VA layout to Linux 7.0's
+    //      PAGE_OFFSET (multi-week kernel mm work).
+    //   B. Set up an alias mapping that places our paddrs at
+    //      Linux-compat VAs (arm64 page-table extension).
+    //   C. Build a custom erofs.ko with kABI hooks that bypass
+    //      the inline VA math (defeats "drop-in Linux replacement").
+    //
+    // Gate the dispatch behind `kabi-fill-super=1` so default boot
+    // + kabi-load-erofs=1 stay clean.  When the gate is off,
+    // return -ENOSYS — the kABI control flow ran end-to-end but
+    // the data flow needs Linux-compat VA mappings to proceed.
+    let allow_fill = unsafe { ALLOW_FILL_SUPER };
+    if !allow_fill {
+        log::warn!(
+            "kabi: get_tree_nodev_synth: fill_super gated off (need \
+             `kabi-fill-super=1` cmdline + Linux-compat VA aliasing). \
+             erofs control flow proven; data flow blocked at VA layout.",
+        );
+        super::alloc::kfree(sb);
+        return -38; // -ENOSYS
+    }
+
+    log::info!("kabi: get_tree_nodev_synth: sb={:p}, calling fill_super", sb);
+
+    type FillSuperFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+    let fill_fn: FillSuperFn = unsafe { core::mem::transmute(fill_super) };
+    let rc = unsafe { fill_fn(sb, fc) };
+
+    if rc < 0 {
+        log::warn!(
+            "kabi: get_tree_nodev_synth: fill_super returned {} — bailing",
+            rc,
+        );
+        super::alloc::kfree(sb);
+        return rc;
+    }
+
+    log::info!(
+        "kabi: get_tree_nodev_synth: fill_super returned 0; \
+         setting fc->root from sb->s_root",
+    );
+
+    // Read sb->s_root (set by fill_super) and write to fc->root.
+    let s_root = unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_ROOT_OFF) as *const *mut c_void)
+    };
+    if s_root.is_null() {
+        log::warn!("kabi: get_tree_nodev_synth: sb->s_root is null after fill_super");
+        return -22;
+    }
+    unsafe {
+        *(fc.cast::<u8>().add(fl::FC_ROOT_OFF) as *mut *mut c_void) = s_root;
+    }
+
+    log::info!(
+        "kabi: get_tree_nodev_synth: fc->root = {:p} — mount succeeded",
+        s_root,
+    );
+    0
 }
 
 /// Initialise the kABI aops table.  Heap-allocates it and sets
