@@ -90,9 +90,43 @@ pub extern "C" fn d_obtain_alias(_inode: *mut c_void) -> *mut c_void {
     core::ptr::null_mut()
 }
 
+/// `d_splice_alias(inode, dentry)` — Linux's helper that
+/// connects a freshly-allocated dentry to a looked-up inode.
+///
+/// Real-Linux behavior:
+///   * `inode == NULL`                         → negative dentry; return NULL.
+///   * `IS_ERR(inode)` (top byte is -errno)    → forward the error pointer.
+///   * Existing alias for inode                → return the alias dentry.
+///   * Otherwise                               → set dentry->d_inode = inode;
+///                                                return NULL ("use input").
+///
+/// Phase 5 v4: minimal impl covering the cases erofs's
+/// `erofs_lookup` produces — set `d_inode` on the input dentry,
+/// or forward error/NULL.  No alias-table walk; we don't have one.
 #[unsafe(no_mangle)]
-pub extern "C" fn d_splice_alias(_inode: *mut c_void,
-                                 _dentry: *mut c_void) -> *mut c_void {
+pub extern "C" fn d_splice_alias(inode: *mut c_void,
+                                 dentry: *mut c_void) -> *mut c_void {
+    if inode.is_null() {
+        // Negative dentry — name not found.  Caller checks
+        // dentry->d_inode == NULL.
+        return core::ptr::null_mut();
+    }
+    let v = inode as isize;
+    if v >= -4095 && v < 0 {
+        // ERR_PTR — forward.
+        return inode;
+    }
+    if dentry.is_null() {
+        log::warn!("kabi: d_splice_alias: null dentry");
+        return core::ptr::null_mut();
+    }
+    // Positive: set dentry->d_inode = inode; return NULL.
+    unsafe {
+        *(dentry.cast::<u8>().add(fl::DENTRY_D_INODE_OFF)
+            as *mut *mut c_void) = inode;
+    }
+    log::info!("kabi: d_splice_alias: dentry={:p} ← inode={:p}",
+               dentry, inode);
     core::ptr::null_mut()
 }
 
@@ -167,6 +201,16 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, hashval: u64,
     const I_NEW: u32 = 1 << 0;
     unsafe {
         *(inode.cast::<u8>().add(144) as *mut u32) = I_NEW;
+    }
+    // i_blkbits — Linux's `inode_init_always` sets this from
+    // `sb->s_blocksize_bits` (= 12 for our test image).  Erofs's
+    // `find_target_block_classic` reads `dir->[+134]` to compute
+    // `iblks = round_up(i_size, 1 << blkbits) >> blkbits`; with
+    // blkbits=0 the binary search probes mid = (i_size-1)/2 = 33
+    // blocks past EOF for a 68-byte root dir, returning
+    // -EFSCORRUPTED.
+    unsafe {
+        *(inode.cast::<u8>().add(fl::INODE_I_BLKBITS_OFF) as *mut u8) = 12;
     }
     // Run the set callback if non-null — erofs uses it to store
     // the inode number.
@@ -248,6 +292,7 @@ pub extern "C" fn new_inode(sb: *mut c_void) -> *mut c_void {
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
         *(inode.cast::<u8>().add(fl::INODE_I_MAPPING_OFF)
             as *mut *mut c_void) = mapping;
+        *(inode.cast::<u8>().add(fl::INODE_I_BLKBITS_OFF) as *mut u8) = 12;
     }
     log::info!("kabi: new_inode: inode={:p} sb={:p} mapping={:p}",
                inode, sb, mapping);

@@ -988,6 +988,91 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                                             }
                                         }
                                     }
+                                    // Phase 5 v4: lookup probe.
+                                    info!("kabi: testing lookup(\"hello.txt\")");
+                                    match root.lookup("hello.txt") {
+                                        Ok(node) => {
+                                            info!("kabi: lookup ok, is_file={}",
+                                                  node.is_file());
+                                            if let Ok(file) = node.as_file() {
+                                                match file.stat() {
+                                                    Ok(st) => {
+                                                        let sz = st.size.0;
+                                                        info!(
+                                                            "kabi: stat hello.txt: \
+                                                             mode={:#o} size={} ino={}",
+                                                            st.mode.as_u32(),
+                                                            sz,
+                                                            st.inode_no.as_u64(),
+                                                        );
+                                                    },
+                                                    Err(e) => warn!(
+                                                        "kabi: stat hello.txt: {:?}", e,
+                                                    ),
+                                                }
+                                                // Phase 6: real read.
+                                                use kevlar_vfs::user_buffer::UserBufferMut;
+                                                use crate::fs::opened_file::OpenOptions;
+                                                let mut rbuf = [0u8; 64];
+                                                match file.read(0,
+                                                    UserBufferMut::from(&mut rbuf[..]),
+                                                    &OpenOptions::readwrite())
+                                                {
+                                                    Ok(n) => {
+                                                        let s = core::str::from_utf8(&rbuf[..n])
+                                                            .unwrap_or("(non-utf8)");
+                                                        info!(
+                                                            "kabi: read hello.txt ({} bytes): {:?}",
+                                                            n, s,
+                                                        );
+                                                    },
+                                                    Err(e) => warn!(
+                                                        "kabi: read hello.txt failed: {:?}", e,
+                                                    ),
+                                                }
+                                                let mut rbuf2 = [0u8; 16];
+                                                match file.read(6,
+                                                    UserBufferMut::from(&mut rbuf2[..]),
+                                                    &OpenOptions::readwrite())
+                                                {
+                                                    Ok(m) => info!(
+                                                        "kabi: read hello.txt @6 ({} bytes): {:?}",
+                                                        m,
+                                                        core::str::from_utf8(&rbuf2[..m])
+                                                            .unwrap_or("(non-utf8)"),
+                                                    ),
+                                                    Err(e) => warn!(
+                                                        "kabi: read hello.txt @6 failed: {:?}", e,
+                                                    ),
+                                                }
+                                                let mut rbuf3 = [0u8; 16];
+                                                match file.read(100,
+                                                    UserBufferMut::from(&mut rbuf3[..]),
+                                                    &OpenOptions::readwrite())
+                                                {
+                                                    Ok(z) => info!(
+                                                        "kabi: read hello.txt @100 = {} (expect 0)",
+                                                        z,
+                                                    ),
+                                                    Err(e) => warn!(
+                                                        "kabi: read hello.txt @100 failed: {:?}", e,
+                                                    ),
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            "kabi: lookup(hello.txt) failed: {:?}", e,
+                                        ),
+                                    }
+                                    info!("kabi: testing lookup(\"nonexistent\")");
+                                    match root.lookup("nonexistent") {
+                                        Err(e) => info!(
+                                            "kabi: lookup(nonexistent) → {:?}", e,
+                                        ),
+                                        Ok(_) => warn!(
+                                            "kabi: lookup(nonexistent) unexpectedly Ok",
+                                        ),
+                                    }
                                 }
                                 Err(e) => warn!("kabi: root_dir failed: {:?}", e),
                             }

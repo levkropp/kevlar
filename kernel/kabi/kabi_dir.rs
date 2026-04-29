@@ -29,7 +29,7 @@ use kevlar_vfs::inode::{
 };
 use kevlar_vfs::result::{Errno, Error, Result as VfsResult};
 use kevlar_vfs::stat::{DevId, FileMode, FileSize, NLink, Stat};
-use kevlar_vfs::user_buffer::{UserBuffer, UserBufferMut};
+use kevlar_vfs::user_buffer::{UserBufWriter, UserBuffer, UserBufferMut};
 
 use super::struct_layouts as fl;
 
@@ -56,6 +56,22 @@ const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
 const S_IFLNK: u32 = 0o120000;
+
+/// Map a positive Linux errno to a kevlar_vfs Errno.  Phase 5 v4
+/// scope: only the codes erofs's lookup/namei produces.
+fn map_errno(errno: i32) -> Error {
+    let e = match errno {
+        2  => Errno::ENOENT,
+        12 => Errno::ENOMEM,
+        20 => Errno::ENOTDIR,
+        22 => Errno::EINVAL,
+        // ENAMETOOLONG (36) is used by erofs but kevlar_vfs's Errno
+        // enum maps to EINVAL — close enough for now.
+        36 => Errno::EINVAL,
+        _  => Errno::EIO,
+    };
+    Error::new(e)
+}
 
 // ── KabiDirectory ───────────────────────────────────────────────
 
@@ -188,15 +204,144 @@ impl KabiDirectory {
 
 impl Directory for KabiDirectory {
     fn lookup(&self, name: &str) -> VfsResult<INode> {
-        // Phase 5e — wrap inode->i_op->lookup(parent, child_dentry, 0).
-        // Allocate child dentry, fill name + parent + sb, dispatch.
-        // Phase 5f wraps the result as INode::FileLike(KabiFile) /
-        // INode::Directory(KabiDirectory).
-        log::warn!(
-            "kabi: KabiDirectory({}).lookup({:?}) — not yet implemented",
-            self.name, name,
+        // Phase 5 v4: SCS-wrapped dispatch into
+        // `parent_inode->i_op->lookup(parent_inode, child_dentry, 0)`.
+        // Erofs's compiled `erofs_lookup` reads dentry->d_name,
+        // calls `erofs_namei` which walks the dir blocks (now
+        // working since Phase 5 v3's layout-aware read_cache_folio),
+        // calls `erofs_iget` for the matching inode, and dispatches
+        // through `d_splice_alias` (now real, sets d_inode).
+        log::info!("kabi: KabiDirectory({}).lookup({:?}) — dispatching",
+                   self.name, name);
+
+        // 1. Allocate child dentry (zeroed).
+        let dentry = super::alloc::kzalloc(fl::DENTRY_SIZE,
+            super::alloc::__GFP_ZERO);
+        if dentry.is_null() {
+            return Err(Error::new(Errno::ENOMEM));
+        }
+
+        // 2. Allocate name buffer + null terminator.
+        let name_buf = super::alloc::kmalloc(name.len() + 1, 0)
+            as *mut u8;
+        if name_buf.is_null() {
+            super::alloc::kfree(dentry);
+            return Err(Error::new(Errno::ENOMEM));
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), name_buf,
+                                           name.len());
+            *name_buf.add(name.len()) = 0;
+        }
+
+        // 3. Populate d_name qstr (16 bytes at +40):
+        //    +0..+4: hash (u32, 0 — erofs computes its own)
+        //    +4..+8: len  (u32)
+        //    +8..+16: name pointer
+        unsafe {
+            let qstr = (dentry as *mut u8).add(fl::DENTRY_D_NAME_OFF);
+            *(qstr.add(0) as *mut u32) = 0;
+            *(qstr.add(4) as *mut u32) = name.len() as u32;
+            *(qstr.add(8) as *mut *mut u8) = name_buf;
+        }
+
+        // 4. Set d_parent + d_sb.
+        unsafe {
+            *((dentry as *mut u8).add(fl::DENTRY_D_PARENT_OFF)
+                as *mut usize) = self.dentry;
+            *((dentry as *mut u8).add(fl::DENTRY_D_SB_OFF)
+                as *mut usize) = self.sb;
+        }
+
+        // 5. Read parent_inode->i_op->lookup.
+        let i_op: usize = unsafe {
+            *((self.inode as *const u8)
+                .add(fl::INODE_I_OP_OFF) as *const usize)
+        };
+        if i_op == 0 {
+            log::warn!("kabi: lookup: i_op is null");
+            unsafe {
+                super::alloc::kfree(name_buf as *mut c_void);
+                super::alloc::kfree(dentry);
+            }
+            return Err(Error::new(Errno::ENOSYS));
+        }
+        let lookup_fn: usize = unsafe { *(i_op as *const usize) };
+        if lookup_fn == 0 {
+            log::warn!("kabi: lookup: i_op->lookup is null");
+            unsafe {
+                super::alloc::kfree(name_buf as *mut c_void);
+                super::alloc::kfree(dentry);
+            }
+            return Err(Error::new(Errno::ENOSYS));
+        }
+
+        // 6. SCS-wrap the call.
+        log::info!("kabi: lookup: dispatching i_op->lookup={:#x} \
+                    inode={:#x} dentry={:p} name={:?}",
+                   lookup_fn, self.inode, dentry, name);
+        let result_raw = super::loader::call_with_scs_3(
+            lookup_fn as *const (),
+            self.inode,
+            dentry as usize,
+            0, // flags
         );
-        Err(Error::new(Errno::ENOSYS))
+        log::info!("kabi: lookup: returned {:#x}", result_raw);
+
+        // 7. Decode result.
+        let target_dentry: *mut c_void = if result_raw == 0 {
+            // NULL — caller uses input dentry.  d_splice_alias has
+            // already set its d_inode (or left it null for negative).
+            dentry
+        } else if result_raw < 0 && result_raw >= -4095 {
+            // ERR_PTR — forward the errno.
+            let errno = -(result_raw as i32);
+            unsafe {
+                super::alloc::kfree(name_buf as *mut c_void);
+                super::alloc::kfree(dentry);
+            }
+            return Err(map_errno(errno));
+        } else {
+            // Replacement dentry returned.
+            result_raw as *mut c_void
+        };
+
+        // 8. Read child_dentry->d_inode.
+        let inode: usize = unsafe {
+            *((target_dentry as *const u8)
+                .add(fl::DENTRY_D_INODE_OFF) as *const usize)
+        };
+        if inode == 0 {
+            // Negative dentry — name not found.
+            log::info!("kabi: lookup({:?}): negative dentry", name);
+            return Err(Error::new(Errno::ENOENT));
+        }
+
+        // 9. Wrap based on i_mode.
+        let i_mode: u16 = unsafe {
+            *((inode as *const u8)
+                .add(fl::INODE_I_MODE_OFF) as *const u16)
+        };
+        const S_IFMT: u16 = 0o170000;
+        const S_IFDIR_K: u16 = 0o040000;
+        const S_IFREG_K: u16 = 0o100000;
+        let kind = i_mode & S_IFMT;
+        log::info!("kabi: lookup({:?}): inode={:#x} i_mode={:#o}",
+                   name, inode, i_mode);
+        match kind {
+            S_IFDIR_K => Ok(INode::Directory(Arc::new(KabiDirectory::new(
+                target_dentry as usize, inode, self.sb,
+                self.dev_id, self.name.clone(),
+            )))),
+            S_IFREG_K => Ok(INode::FileLike(Arc::new(KabiFile::new(
+                inode, self.sb, self.name.clone(),
+            )))),
+            _ => {
+                log::warn!("kabi: lookup({:?}): unsupported i_mode {:#o}",
+                           name, i_mode);
+                Err(Error::new(Errno::ENOSYS))
+            }
+        }
     }
 
     fn create_file(
@@ -325,11 +470,48 @@ impl FileLike for KabiFile {
     }
 
     fn read(
-        &self, _offset: usize, _buf: UserBufferMut<'_>,
+        &self, offset: usize, buf: UserBufferMut<'_>,
         _options: &OpenOptions,
     ) -> VfsResult<usize> {
-        log::warn!("kabi: KabiFile({}).read — Phase 6 lands this", self.name);
-        Err(Error::new(Errno::ENOSYS))
+        let i_size: i64 = self.read_inode_field(fl::INODE_I_SIZE_OFF);
+        let i_size = i_size.max(0) as usize;
+        if offset >= i_size {
+            return Ok(0);
+        }
+        let want = buf.len().min(i_size - offset);
+        if want == 0 {
+            return Ok(0);
+        }
+        let meta = super::inode_meta::lookup_meta(self.inode)
+            .ok_or_else(|| Error::new(Errno::EIO))?;
+
+        let mut writer = UserBufWriter::from(buf);
+        let mut done = 0usize;
+        let mut kbuf = [0u8; 4096];
+        while done < want {
+            let file_pos = offset + done;
+            let page_idx = (file_pos / 4096) as u64;
+            let (path, phys_off, inline_shift) =
+                super::inode_meta::translate_offset(&meta, page_idx)
+                    .ok_or_else(|| Error::new(Errno::EIO))?;
+            super::filemap::read_initramfs_at(
+                &path, phys_off as usize,
+                kbuf.as_mut_ptr(), 4096,
+            ).map_err(|_| Error::new(Errno::EIO))?;
+            let in_page = file_pos % 4096;
+            let src = (inline_shift as usize) + in_page;
+            if src >= 4096 {
+                break;
+            }
+            let chunk = (want - done).min(4096 - src);
+            if chunk == 0 {
+                break;
+            }
+            writer.write_bytes(&kbuf[src..src + chunk])
+                .map_err(|_| Error::new(Errno::EIO))?;
+            done += chunk;
+        }
+        Ok(done)
     }
 
     fn write(

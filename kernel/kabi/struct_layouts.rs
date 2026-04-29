@@ -59,6 +59,14 @@ pub const INODE_I_SB_OFF: usize = 40;
 pub const INODE_I_MAPPING_OFF: usize = 48;
 pub const INODE_I_INO_OFF: usize = 64;
 pub const INODE_I_SIZE_OFF: usize = 80;
+/// `i_blkbits` (u8) — log2 of inode blocksize.  Linux's
+/// `inode_init_always` sets this to `sb->s_blocksize_bits` at
+/// inode-allocation time.  Erofs's `find_target_block_classic`
+/// reads `dir->[+134]` to compute `iblks = round_up(i_size, blksz)
+/// >> blkbits`; if blkbits=0 the binary search probes far past
+/// EOF and returns -EFSCORRUPTED.  Verified via erofs.ko disasm
+/// at offset 0x8164 (`ldrb w23, [x1, #134]`).
+pub const INODE_I_BLKBITS_OFF: usize = 134;
 pub const INODE_SIZE: usize = 1024;
 
 // S_IFREG and access-mode constants (include/uapi/linux/stat.h).
@@ -142,19 +150,45 @@ pub const SB_SIZE: usize = 4096;
 
 // ── struct dentry (include/linux/dcache.h:92) ───────────────────
 //
+// Phase 5 v4 disasm verification (erofs_lookup at .ko offset
+// 0x877c reads `ldr w1, [x19, #36]` for `d_name.len`, so qstr
+// starts at +32 not +40):
+//
 //   +0   unsigned int d_flags                         (4 bytes)
-//   +4   seqcount_spinlock_t d_seq                    (~8 bytes)
-//   +16  struct hlist_bl_node d_hash                  (16 bytes)
-//   +32  struct dentry *d_parent                      (8 bytes)
-//   +40  union { qstr d_name; ... }                   (16 bytes; qstr = u32 hash+len, *name)
-//   +56  struct inode *d_inode                        (8 bytes)
-//   ...  more fields, ~256 bytes total
+//   +4   seqcount_spinlock_t d_seq                    (4 bytes — no LOCKDEP)
+//   +8   struct hlist_bl_node d_hash                  (16 bytes)
+//   +24  struct dentry *d_parent                      (8 bytes)
+//   +32  union { qstr d_name; ... }                   (16 bytes;
+//        qstr = { union { hash u32 + len u32; hash_len u64 }; name *u8 })
+//        - +32: hash (u32)
+//        - +36: len (u32)              ← erofs reads this
+//        - +40: name (*u8)
+//   +48  struct inode *d_inode                        (per source)
+//   +56  union shortname_store d_shortname            (per source)
+//   ...
+//
+// HOWEVER, our kABI d_make_root + d_splice_alias write `inode`
+// at +56 and our adapter reads it back at +56.  Because Linux's
+// erofs_lookup DOESN'T read dentry->d_inode directly (it goes
+// through d_splice_alias which is our shim), our +56 convention
+// is internally consistent and the actual on-disk vmlinux layout
+// of `d_inode` doesn't matter for our codepath.  Same logic
+// applies to `d_parent` and `d_sb` — we never read them via
+// erofs's compiled code, so their offsets are our private
+// convention.
 
 pub const DENTRY_D_FLAGS_OFF: usize = 0;
-pub const DENTRY_D_PARENT_OFF: usize = 32;
-pub const DENTRY_D_NAME_OFF: usize = 40;   // struct qstr
+/// Erofs reads `dentry->d_name.len` at +36 (verified disasm).
+/// qstr starts at +32: hash u32, len u32, name *u8.
+pub const DENTRY_D_NAME_OFF: usize = 32;
+/// Our private convention for d_inode storage.  d_make_root and
+/// d_splice_alias write here; KabiFileSystem.root_dir + lookup
+/// read from here.  Erofs never reads d_inode directly.
 pub const DENTRY_D_INODE_OFF: usize = 56;
-pub const DENTRY_D_SB_OFF: usize = 88;     // GUESS — verify Day 4
+/// Our private convention for d_parent storage.  Not read by erofs.
+pub const DENTRY_D_PARENT_OFF: usize = 64;
+/// Our private convention for d_sb storage.  Not read by erofs.
+pub const DENTRY_D_SB_OFF: usize = 72;
 pub const DENTRY_SIZE: usize = 256;
 
 // ── struct fs_context (include/linux/fs_context.h:90) ───────────

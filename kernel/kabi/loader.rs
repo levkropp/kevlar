@@ -139,6 +139,44 @@ pub fn call_with_scs_2(f: *const (), arg0: usize, arg1: usize) -> isize {
     f(arg0, arg1)
 }
 
+/// 3-arg variant — used for `i_op->lookup(parent_inode, dentry, flags)`
+/// in Phase 5 v4.  Same SCS hand-off as `_2`.
+#[cfg(target_arch = "aarch64")]
+#[allow(unsafe_code)]
+pub fn call_with_scs_3(
+    f: *const (), arg0: usize, arg1: usize, arg2: usize,
+) -> isize {
+    let mut scs: Vec<u8> = alloc::vec![0u8; 65536];
+    let scs_ptr = scs.as_mut_ptr();
+    let result: isize;
+    unsafe {
+        core::arch::asm!(
+            "str x18, [sp, #-16]!",
+            "mov x18, {scs}",
+            "blr {fp}",
+            "ldr x18, [sp], #16",
+            scs = in(reg) scs_ptr,
+            fp = in(reg) f,
+            in("x0") arg0,
+            in("x1") arg1,
+            in("x2") arg2,
+            lateout("x0") result,
+            clobber_abi("C"),
+        );
+    }
+    drop(scs);
+    result
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn call_with_scs_3(
+    f: *const (), arg0: usize, arg1: usize, arg2: usize,
+) -> isize {
+    let f: extern "C" fn(usize, usize, usize) -> isize =
+        unsafe { core::mem::transmute(f) };
+    f(arg0, arg1, arg2)
+}
+
 /// Load a `.ko` from the initramfs at `path`, resolve its undefined
 /// symbols against the kernel exports, apply relocations, and return
 /// a `LoadedModule` whose `init_fn` is the address of the symbol named
