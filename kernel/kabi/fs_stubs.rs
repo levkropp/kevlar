@@ -125,11 +125,24 @@ pub extern "C" fn iov_iter_bvec(_iter: *mut c_void, _direction: u32,
 pub extern "C" fn fput(_file: *mut c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn filp_open(_filename: *const u8, _flags: c_int,
+pub extern "C" fn filp_open(filename: *const u8, _flags: c_int,
                             _mode: u32) -> *mut c_void {
-    // ERR_PTR(-ENOENT) — Linux IS_ERR detects this as an error,
-    // null would survive the check and crash on deref.
-    super::block::err_ptr(-2)
+    // K34 Day 1: synthesize a struct file backed by an initramfs
+    // file lookup.  The call chain at boot is:
+    //   erofs's get_tree → filp_open(fc->source) → us
+    // Erofs uses the returned file* for:
+    //   1. file_inode(file)->i_mode S_ISREG check
+    //   2. file->f_mapping->a_ops->read_folio non-null check
+    //   3. then calls get_tree_nodev(fc, fill_super)
+    // and during fc_fill_super, calls a_ops->read_folio to read
+    // disk pages.
+    //
+    // Returns ERR_PTR(-errno) on failure; real struct file* on
+    // success.
+    if filename.is_null() {
+        return super::block::err_ptr(-22); // -EINVAL
+    }
+    super::fs_synth::filp_open_synth(filename)
 }
 
 #[unsafe(no_mangle)]

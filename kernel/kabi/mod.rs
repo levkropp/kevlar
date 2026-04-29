@@ -43,6 +43,8 @@ pub mod fops;
 pub mod fs_adapter;
 pub mod fs_register;
 pub mod fs_stubs;
+pub mod fs_synth;
+pub mod fs_synth_io;
 pub mod input;
 pub mod io;
 pub mod jbd2_stubs;
@@ -70,6 +72,7 @@ pub mod sched;
 pub mod slab;
 pub mod spinlock;
 pub mod stack;
+pub mod struct_layouts;
 pub mod symbols;
 pub mod tracepoints;
 pub mod ttm;
@@ -88,5 +91,6 @@ pub use loader::{load_module, LoadedModule};
 pub fn init() {
     work::init();
     platform::init();
-    log::info!("kabi: runtime initialized (workqueue + platform bus)");
+    fs_synth::init_synth();
+    log::info!("kabi: runtime initialized (workqueue + platform bus + fs_synth)");
 }
