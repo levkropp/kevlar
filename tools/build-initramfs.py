@@ -1846,6 +1846,22 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(erofs_src, dest)
         log("MOD", f"installed /lib/modules/erofs.ko ({erofs_src.stat().st_size} bytes) [Ubuntu 26.04]")
 
+    # ── ext4.ko / jbd2.ko / mbcache.ko (built locally via Docker against
+    # Ubuntu's linux-7.0.0-14 source — see tools/docker-kabi-modules/.
+    # Ubuntu compiles these into vmlinux=y by default; we flip them to =m
+    # so the kABI loader can dispatch through them).
+    kabi_modules_dir = ROOT / "build" / "kabi-modules"
+    for mod_name in ("mbcache.ko", "jbd2.ko", "ext4.ko"):
+        src = kabi_modules_dir / mod_name
+        if src.exists():
+            modules_dir = ROOTFS / "lib" / "modules"
+            modules_dir.mkdir(parents=True, exist_ok=True)
+            dest = modules_dir / mod_name
+            if dest.exists():
+                dest.unlink()
+            shutil.copy2(src, dest)
+            log("MOD", f"installed /lib/modules/{mod_name} ({src.stat().st_size} bytes) [docker-built]")
+
     # ── K33 Phase 3e test image: a tiny erofs disk image to
     # mount via the kABI fs registry.  Generated inline by mkfs.erofs
     # so the fixture stays in sync with the kABI layer (Phase 3b

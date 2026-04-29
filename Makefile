@@ -1281,6 +1281,20 @@ itest-all:
 	done; \
 	exit $$fail
 
+# kabi-modules: build ext4.ko / jbd2.ko / mbcache.ko via Docker against
+# Ubuntu's linux-7.0.0-14 source so the binary ABI matches what our kABI
+# compat layer expects.  Output: build/kabi-modules/{ext4,jbd2,mbcache}.ko.
+# The next `make ARCH=arm64 build` then drops them into /lib/modules/ in
+# the initramfs (see tools/build-initramfs.py).
+.PHONY: kabi-modules
+kabi-modules:
+	$(PROGRESS) "DOCKER" "build kabi-modules image"
+	docker build -t kevlar-kabi-modules tools/docker-kabi-modules
+	$(PROGRESS) "BUILD" "ext4.ko / jbd2.ko / mbcache.ko (Linux 7.0.0-14)"
+	@mkdir -p build/kabi-modules
+	docker run --rm -v "$$PWD/build/kabi-modules:/output" kevlar-kabi-modules
+	@ls -la build/kabi-modules/
+
 # Phase 7: userspace integration test for the kABI-mounted erofs
 # filesystem.  Boots Kevlar with init=/bin/test-kabi-mount-erofs as
 # PID 1 — the test does mount(2) → opendir/readdir → open/read against
