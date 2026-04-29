@@ -134,9 +134,40 @@ pub extern "C" fn kobject_del(_k: *mut KobjectShim) {
     // K3: no sysfs.
 }
 
+/// Allocate + return a `struct kobject *` named `name`, parented at
+/// `parent`.  Phase 10 ext4-arc: ext4_init_sysfs calls this to create
+/// `/sys/fs/ext4`; if NULL it bails with -ENOMEM.  We return a small
+/// heap-allocated `KobjectShim` that satisfies the non-null check
+/// without wiring into a real sysfs tree.
+#[unsafe(no_mangle)]
+pub extern "C" fn kobject_create_and_add(
+    name: *const c_char, _parent: *mut KobjectShim,
+) -> *mut KobjectShim {
+    let boxed = Box::new(KobjectShim { inner: core::ptr::null_mut() });
+    let raw = Box::into_raw(boxed);
+    let _ = ensure_inner(raw);
+    if !name.is_null() {
+        let len = unsafe {
+            let mut n = 0usize;
+            while *name.add(n) != 0 && n < 64 { n += 1; }
+            n
+        };
+        let bytes = unsafe { core::slice::from_raw_parts(name as *const u8, len) };
+        if let Ok(s) = core::str::from_utf8(bytes) {
+            let inner = unsafe { (*raw).inner };
+            if !inner.is_null() {
+                let mut name_lock = unsafe { (*inner).name.lock() };
+                *name_lock = Some(String::from(s));
+            }
+        }
+    }
+    raw
+}
+
 ksym!(kobject_init);
 ksym!(kobject_get);
 ksym!(kobject_put);
 ksym!(kobject_set_name);
 ksym!(kobject_add);
 ksym!(kobject_del);
+ksym!(kobject_create_and_add);

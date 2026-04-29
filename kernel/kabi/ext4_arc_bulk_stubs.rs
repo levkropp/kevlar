@@ -12,6 +12,15 @@
 use core::ffi::c_void;
 use crate::ksym;
 
+/// Small non-null heap allocation.  Phase 10: many ext4_init paths
+/// `cbz x0, error` on the result of an "alloc/create" stub; returning
+/// a 64-byte zeroed buffer instead of NULL clears that gate.  The
+/// returned object isn't a real Linux struct, but during init most
+/// callers just store the pointer and don't deref the contents.
+fn fake_alloc() -> *mut c_void {
+    super::alloc::kmalloc(64, super::alloc::__GFP_ZERO)
+}
+
 #[unsafe(no_mangle)] pub extern "C" fn __arch_copy_from_user(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -551,9 +560,8 @@ use crate::ksym;
 #[unsafe(no_mangle)] pub extern "C" fn kfree_link(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
-#[unsafe(no_mangle)] pub extern "C" fn kobject_create_and_add(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+// kobject_create_and_add — Phase 10: moved to kabi/kobject.rs to
+// return a real (non-null) kobject so ext4_init_sysfs proceeds.
 #[unsafe(no_mangle)] pub extern "C" fn kstrtouint(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -598,7 +606,7 @@ use crate::ksym;
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn mempool_create_node_noprof(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn mempool_destroy(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -972,7 +980,7 @@ ksym!(iov_iter_alignment);
 ksym!(is_bad_inode);
 ksym!(iter_file_splice_write);
 ksym!(kfree_link);
-ksym!(kobject_create_and_add);
+// ksym!(kobject_create_and_add) — registered in kabi/kobject.rs
 ksym!(kstrtouint);
 ksym!(kthread_should_stop);
 ksym!(kthread_stop);
