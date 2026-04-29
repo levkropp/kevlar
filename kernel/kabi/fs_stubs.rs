@@ -94,10 +94,13 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
     unsafe {
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
     }
-    // Mark I_NEW (bit 0 of i_state at +144 in Linux 7.0).  Kernel
-    // checks this in unlock_new_inode.  Field is volatile-ish in
-    // Linux but a single write here is safe.
-    const I_NEW: u32 = 1 << 3;
+    // Mark I_NEW (bit 0 of i_state at +144 in Linux 7.0).  Linux's
+    // enum sets `__I_NEW = 0U`, so `I_NEW = 1 << 0 = 1`.  Erofs
+    // checks this bit in `erofs_iget` (at offset 0x5f30) to decide
+    // whether to call `erofs_read_inode` to populate fields from
+    // disk.  Without this set, erofs returns the bare inode with
+    // i_mode=0 → fc_fill_super's S_IFDIR check fails → -EINVAL.
+    const I_NEW: u32 = 1 << 0;
     unsafe {
         *(inode.cast::<u8>().add(144) as *mut u32) = I_NEW;
     }

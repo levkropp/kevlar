@@ -127,8 +127,10 @@ pub const SB_S_BLOCKSIZE_OFF: usize = 24;       // u64 (8 bytes, padding aligns)
 pub const SB_S_MAXBYTES_OFF: usize = 32;        // loff_t
 pub const SB_S_TYPE_OFF: usize = 40;            // file_system_type *
 pub const SB_S_OP_OFF: usize = 48;              // super_operations *
-// Many fields between op and s_root; pin via runtime probe.
-pub const SB_S_ROOT_OFF: usize = 256;      // GUESS — verify when fc->root populated
+// `sb->s_root` verified via erofs.ko `fc_fill_super` disasm at 0x4940:
+//   str x0, [x19, #104]   ; sb[+104] = result of d_make_root
+// Was guessed at 256; real offset is 104.
+pub const SB_S_ROOT_OFF: usize = 104;
 // `sb->s_fs_info` verified via erofs.ko `erofs_read_superblock` disasm:
 //   43ec: ldr x20, [x22, #912]   ; x22 = sb arg, x20 = sb->s_fs_info
 // Subsequent reads at offsets 912/256-aligned in fc_fill_super and
