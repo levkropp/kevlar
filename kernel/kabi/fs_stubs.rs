@@ -111,8 +111,15 @@ pub extern "C" fn iget_failed(_inode: *mut c_void) {}
 /// The `set` callback signature is `int (*)(struct inode *, void *)`
 /// where the second arg is `data`.  Erofs uses it (`erofs_iget5_set`
 /// at 0x5068) to store the inode number passed in `data`.
+///
+/// Phase 5 v3: hashval doubles as the erofs nid (per
+/// erofs_iget at 0x5edc which loads `lsr x5, x1, #63` — the hashval
+/// arg).  We use `hashval >> 1` (since erofs encodes nid in the
+/// bottom 31 bits + a flag in bit 32+) to derive the on-disk inode
+/// location.  Fallback: for v3 we trust `data` which is a `*const u64`
+/// holding the raw nid set by erofs's caller.
 #[unsafe(no_mangle)]
-pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
+pub extern "C" fn iget5_locked(sb: *mut c_void, hashval: u64,
                                _test: *mut c_void, set: *mut c_void,
                                data: *mut c_void) -> *mut c_void {
     let inode = super::alloc::kmalloc(fl::INODE_SIZE, 0);
@@ -126,12 +133,27 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
     unsafe {
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF) as *mut *mut c_void) = sb;
     }
-    // Phase 5 v2: set i_mapping to the per-mount synth address_space
-    // (= sbi->dif0.file->f_mapping).  Erofs's directory iterator
-    // sets `buf.mapping = dir->i_mapping` directly, so without this
-    // erofs_bread receives a NULL mapping and our read_cache_folio
-    // fallback reads the wrong block, returning -EUCLEAN.
-    let mapping = synth_mapping_from_sb(sb);
+    // Phase 5 v3: allocate a PER-INODE address_space so that
+    // `mapping->host` uniquely identifies this inode.  Our
+    // `read_cache_folio` reads `mapping->host` to look up
+    // KabiInodeMeta in INODE_META and translate logical-page-N
+    // to physical disk offset.  The a_ops field stays empty (our
+    // read_cache_folio doesn't dispatch through it; it does its
+    // own translation).
+    let per_inode_mapping = super::alloc::kzalloc(fl::AS_SIZE,
+        super::alloc::__GFP_ZERO);
+    if !per_inode_mapping.is_null() {
+        unsafe {
+            *(per_inode_mapping.cast::<u8>().add(fl::AS_HOST_OFF)
+                as *mut *mut c_void) = inode;
+        }
+    }
+    let mapping = if per_inode_mapping.is_null() {
+        // Fall back to the global synth mapping if alloc fails.
+        synth_mapping_from_sb(sb)
+    } else {
+        per_inode_mapping
+    };
     unsafe {
         *(inode.cast::<u8>().add(fl::INODE_I_MAPPING_OFF)
             as *mut *mut c_void) = mapping;
@@ -158,9 +180,55 @@ pub extern "C" fn iget5_locked(sb: *mut c_void, _hashval: u64,
         log::info!("kabi: iget5_locked: set_fn returned {}", rc);
         let _ = set_fn; // keep type alias for documentation
     }
-    log::info!("kabi: iget5_locked: inode={:p} sb={:p} data={:p}",
-               inode, sb, data);
+
+    // Phase 5 v3: register this inode's metadata in the side-table.
+    // The nid is in `data` (per erofs_iget5_set which dereferences
+    // `*data` as `erofs_nid_t`); on the first call (root inode),
+    // `data` points at a u64 = sbi->root_nid.
+    //
+    // Backing path: derived from sb's s_fs_info.dif0.file via the
+    // synth file lookup (filp_open_synth registered the path).
+    let nid = if !data.is_null() {
+        unsafe { *(data as *const u64) }
+    } else {
+        // Fallback — derive from hashval (erofs_iget passes hashval
+        // = encoded nid; the low bits are the actual nid).
+        hashval & 0x7fff_ffff
+    };
+    let backing_path = synth_backing_path(sb);
+    if let Some(path) = backing_path {
+        let _ = super::inode_meta::register_inode_from_nid(
+            inode as usize, nid, &path,
+        );
+    } else {
+        log::warn!("kabi: iget5_locked: no backing path for sb={:p}", sb);
+    }
+
+    log::info!("kabi: iget5_locked: inode={:p} sb={:p} data={:p} nid={}",
+               inode, sb, data, nid);
     inode
+}
+
+/// Resolve the backing-file path for a kABI-mounted sb by looking
+/// up `sb->s_fs_info->dif0.file` in the SYNTH_FILES table.
+fn synth_backing_path(sb: *mut c_void) -> Option<alloc::string::String> {
+    if sb.is_null() {
+        return None;
+    }
+    let file_ptr = unsafe {
+        let sbi = *((sb as *const u8)
+            .add(fl::SB_S_FS_INFO_OFF) as *const *mut c_void);
+        if sbi.is_null() {
+            return None;
+        }
+        // sbi->dif0.file at +16 (verified Phase 4g).
+        *((sbi as *const u8).add(16) as *const *mut c_void)
+    };
+    if file_ptr.is_null() {
+        return None;
+    }
+    super::fs_synth::lookup_synth_file(file_ptr as usize)
+        .map(|(path, _size)| path)
 }
 
 /// `new_inode(sb)` — allocate a fresh inode without going through
@@ -509,8 +577,35 @@ pub extern "C" fn fs_param_is_string(_p: *mut c_void, _param: *mut c_void,
 pub extern "C" fn fs_param_is_u64(_p: *mut c_void, _param: *mut c_void,
                                   _result: *mut c_void) -> c_int { -22 }
 
+/// Translate erofs's on-disk file_type byte (FT_*) to Linux's
+/// `getdents`-style d_type (DT_*).  Linux 7.0 keeps this as a
+/// `static inline` in `include/linux/fs.h` over a static array;
+/// erofs's compiled `erofs_fill_dentries` (out-of-line in .ko)
+/// calls this symbol.
+///
+/// FT_*  → DT_*:
+///   0 UNKNOWN  → 0  DT_UNKNOWN
+///   1 REG_FILE → 8  DT_REG
+///   2 DIR      → 4  DT_DIR
+///   3 CHRDEV   → 2  DT_CHR
+///   4 BLKDEV   → 6  DT_BLK
+///   5 FIFO     → 1  DT_FIFO
+///   6 SOCK     → 12 DT_SOCK
+///   7 SYMLINK  → 10 DT_LNK
 #[unsafe(no_mangle)]
-pub extern "C" fn fs_ftype_to_dtype(_filetype: u32) -> u32 { 0 }
+pub extern "C" fn fs_ftype_to_dtype(filetype: u32) -> u32 {
+    match filetype {
+        0 => 0,
+        1 => 8,
+        2 => 4,
+        3 => 2,
+        4 => 6,
+        5 => 1,
+        6 => 12,
+        7 => 10,
+        _ => 0,
+    }
+}
 
 #[unsafe(no_mangle)]
 pub static fs_kobj: [u8; 8] = [0; 8];

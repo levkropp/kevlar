@@ -158,35 +158,22 @@ pub extern "C" fn filemap_splice_read(_in_file: *mut c_void, _ppos: *mut u64,
 pub extern "C" fn read_cache_folio(mapping: *mut c_void, index: u64,
                                    _filler: *const c_void,
                                    file: *mut c_void) -> *mut c_void {
-    // Phase 3b: folio backed by VMEMMAP shadow.
+    // Phase 5 v3: layout-aware translation.
     //
-    // Erofs's inline `kmap_local_page(folio)` on arm64 expands to:
-    //   idx = (folio - VMEMMAP_START) / sizeof(struct page)
-    //   data_va = PAGE_OFFSET + idx * PAGE_SIZE
+    // 1. If `mapping->host` is registered in INODE_META, do
+    //    erofs-layout translation (FLAT_PLAIN / FLAT_INLINE).
+    // 2. Else fall back to the raw initramfs read at `index * 4096`
+    //    (mount-time superblock-read path; backing file's mapping
+    //    points at the raw fs image).
     //
-    // Linux's PAGE_OFFSET equals Kevlar's KERNEL_BASE_ADDR, so if we
-    // hand erofs a folio pointer at `VMEMMAP_START + data_paddr/64`,
-    // the math computes exactly `KERNEL_BASE + data_paddr` — our
-    // direct-map VA where the data lives.
-    //
-    // `folio_shadow::alloc_folio` does the synth: returns
-    // `(fake_page_va, data_va)` where data_va is in Kevlar's direct
-    // map and fake_page_va is in the shadow region.  We populate
-    // the data buffer from the initramfs file and return
-    // fake_page_va to erofs.
-    let path = super::fs_synth::lookup_synth_file_path_for_mapping(mapping, file)
-        .unwrap_or_else(|| {
-            // Fallback: erofs's BDEV path goes through
-            // sb->s_bdev->bd_mapping (which we don't synthesise),
-            // passing null for both mapping and file.  Use the
-            // canonical test image.
-            log::warn!(
-                "kabi: read_cache_folio: null mapping/file ({:p}/{:p}); \
-                 falling back to /lib/test.erofs",
-                mapping, file,
-            );
-            String::from("/lib/test.erofs")
-        });
+    // For FLAT_INLINE, the inode's logical data lives WITHIN its
+    // own block at `inline_offset = (iloc % 4096) + 32 + xattr_isize`.
+    // We read the whole 4 KiB block then memcpy bytes
+    // `[inline_offset..inline_offset + i_size]` to dst[0..i_size]
+    // and zero the tail.
+
+    let (path, physical_offset, inline_shift, inline_size) =
+        resolve_read_request(mapping, file, index);
 
     let (fake_page_va, data_va) = match super::folio_shadow::alloc_folio(
         super::folio_shadow::PG_UPTODATE,
@@ -200,29 +187,99 @@ pub extern "C" fn read_cache_folio(mapping: *mut c_void, index: u64,
         }
     };
 
-    // Read 4 KiB of file data into the data buffer.  The buffer is
-    // already zeroed by alloc_folio; short reads (e.g. last chunk
-    // of a file) leave the tail as zeros, matching Linux's
-    // `folio_zero_range` behaviour.
-    let offset = (index * 4096) as usize;
-    if let Err(e) = read_initramfs_at(&path, offset, data_va, 4096) {
-        log::warn!(
-            "kabi: read_cache_folio: initramfs read of {} @ {} failed: {:?}",
-            path, offset, e,
+    if inline_shift == 0 {
+        // Direct read at physical_offset.
+        if let Err(e) = read_initramfs_at(
+            &path, physical_offset as usize, data_va, 4096,
+        ) {
+            log::warn!(
+                "kabi: read_cache_folio: read of {} @ {} failed: {:?}",
+                path, physical_offset, e,
+            );
+            return err_ptr_eio();
+        }
+        log::info!(
+            "kabi: read_cache_folio: fake_page={:#x} data_va={:p} \
+             mapping={:p} index={} path={} phys={:#x}",
+            fake_page_va, data_va, mapping, index, path, physical_offset,
         );
-        return err_ptr_eio();
+    } else {
+        // FLAT_INLINE: read the whole block, then shift the
+        // inline portion to dst[0..inline_size], zero the tail.
+        let mut tmp = alloc::vec![0u8; 4096];
+        if let Err(e) = read_initramfs_at(
+            &path, physical_offset as usize, tmp.as_mut_ptr(), 4096,
+        ) {
+            log::warn!(
+                "kabi: read_cache_folio: inline read of {} @ {} failed: {:?}",
+                path, physical_offset, e,
+            );
+            return err_ptr_eio();
+        }
+        let copy_len = (inline_size as usize)
+            .min(4096_usize.saturating_sub(inline_shift as usize));
+        unsafe {
+            // Zero the destination first (alloc_folio already did).
+            core::ptr::copy_nonoverlapping(
+                tmp.as_ptr().add(inline_shift as usize),
+                data_va,
+                copy_len,
+            );
+        }
+        log::info!(
+            "kabi: read_cache_folio: fake_page={:#x} data_va={:p} \
+             mapping={:p} index={} path={} INLINE phys={:#x} \
+             shift={} size={}",
+            fake_page_va, data_va, mapping, index, path, physical_offset,
+            inline_shift, copy_len,
+        );
     }
-    log::info!(
-        "kabi: read_cache_folio: fake_page={:#x} data_va={:p} mapping={:p} \
-         index={} path={}",
-        fake_page_va, data_va, mapping, index, path,
-    );
     fake_page_va as *mut c_void
+}
+
+/// Returns (backing_path, physical_byte_offset, inline_shift,
+/// inline_size).  inline_shift > 0 means a FLAT_INLINE read where
+/// the data needs to be relocated within the page; otherwise the
+/// raw bytes at physical_offset are the page contents.
+fn resolve_read_request(
+    mapping: *mut c_void, file: *mut c_void, index: u64,
+) -> (String, u64, u32, u64) {
+    // Layout-aware: inspect mapping->host (the inode), look up
+    // its KabiInodeMeta in the side-table.
+    if !mapping.is_null() {
+        let host: usize = unsafe {
+            *(mapping.cast::<u8>()
+                .add(super::struct_layouts::AS_HOST_OFF)
+                as *const usize)
+        };
+        if host != 0 {
+            if let Some(meta) = super::inode_meta::lookup_meta(host) {
+                if let Some((path, phys, shift)) =
+                    super::inode_meta::translate_offset(&meta, index)
+                {
+                    return (path, phys, shift, meta.i_size);
+                }
+            }
+        }
+    }
+    // Fallback: raw read at `index * 4096`.  Used by the mount-time
+    // superblock-read path where the backing file's f_mapping is
+    // the global synth (host not registered in INODE_META).
+    let path = super::fs_synth::lookup_synth_file_path_for_mapping(mapping, file)
+        .unwrap_or_else(|| {
+            log::warn!(
+                "kabi: read_cache_folio: null mapping/file ({:p}/{:p}); \
+                 falling back to /lib/test.erofs",
+                mapping, file,
+            );
+            String::from("/lib/test.erofs")
+        });
+    (path, index * 4096, 0, 0)
 }
 
 /// Read up to `len` bytes from the initramfs file at `path`,
 /// starting at byte `offset`, into the kernel buffer at `dst`.
-fn read_initramfs_at(path: &str, offset: usize, dst: *mut u8, len: usize)
+pub fn read_initramfs_at(path: &str, offset: usize, dst: *mut u8, len: usize)
     -> Result<usize, kevlar_vfs::result::Error>
 {
     use kevlar_vfs::file_system::FileSystem;

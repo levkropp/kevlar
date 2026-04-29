@@ -376,6 +376,12 @@ pub extern "C" fn kabi_filldir(
         Ok(s) => alloc::string::String::from(s),
         Err(_) => return 1,
     };
+    // Filter "." and ".." — KabiDirectory::readdir synthesises
+    // those at indices 0/1 from the inode's i_ino, matching the
+    // tmpfs convention.  Erofs emits them too; skip the dups.
+    if name_str == "." || name_str == ".." {
+        return 1;
+    }
     let file_type = match dt_type {
         4 => FileType::Directory,
         8 => FileType::Regular,

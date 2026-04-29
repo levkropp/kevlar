@@ -38,7 +38,7 @@ const KVMALLOC_THRESHOLD: usize = 8 * 1024;
 /// to `kzalloc`.  `kzalloc(size, gfp)` is a Linux macro that ORs
 /// this into `gfp` and calls `kmalloc(...)`, so any kmalloc-class
 /// shim must honor it.
-const __GFP_ZERO: u32 = 0x100;
+pub const __GFP_ZERO: u32 = 0x100;
 
 #[inline]
 fn align_up(x: usize, a: usize) -> usize {
