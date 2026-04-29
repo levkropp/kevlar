@@ -157,6 +157,17 @@ pub extern "C" fn filemap_splice_read(_in_file: *mut c_void, _ppos: *mut u64,
 pub extern "C" fn read_cache_folio(_mapping: *mut c_void, _index: u64,
                                    _filler: *const c_void,
                                    _file: *mut c_void) -> *mut c_void {
+    // Phase 3 finding: erofs reads folio fields directly (not just
+    // via inline `kmap_local_page` that does VA arithmetic).
+    // Specifically erofs_map_blocks at +0x368 does
+    // `ldurb [x20, #-30]` to read a `flags` byte upstream of the
+    // folio struct.  So returning a non-mapped page pointer causes
+    // a direct deref fault, not a kmap-arithmetic fault.
+    //
+    // Phase 3 v1: return ERR_PTR(-EIO) until folio buffers are
+    // allocated in mapped memory + populated.  Phase 3b lands
+    // the real impl with kmalloc'd folio structs whose flags
+    // signal "uptodate" so erofs uses the data directly.
     log::warn!("kabi: read_cache_folio (stub) — ERR_PTR(-EIO)");
     err_ptr_eio()
 }
