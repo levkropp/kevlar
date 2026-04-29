@@ -39,6 +39,7 @@ pub mod exports;
 pub mod fb;
 pub mod fb_raster;
 pub mod filemap;
+pub mod folio_shadow;
 pub mod fops;
 pub mod fs_adapter;
 pub mod fs_register;
@@ -93,10 +94,14 @@ pub fn init() {
     work::init();
     platform::init();
     fs_synth::init_synth();
+    folio_shadow::init();
     #[cfg(target_arch = "aarch64")]
     {
         task_mock::init_per_cpu_mocks();
         task_mock::install_for_current_cpu();
     }
-    log::info!("kabi: runtime initialized (workqueue + platform bus + fs_synth + task_mock)");
+    log::info!(
+        "kabi: runtime initialized (workqueue + platform bus + fs_synth + \
+         folio_shadow + task_mock)"
+    );
 }

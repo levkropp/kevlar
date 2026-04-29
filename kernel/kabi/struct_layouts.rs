@@ -202,3 +202,21 @@ pub const FST_NEXT_OFF: usize = 48;
 // ── SB flags (include/linux/fs.h, "Possible states of 'frozen' field") ─
 pub const SB_RDONLY: u32 = 1;
 pub const FS_CONTEXT_FOR_MOUNT: u8 = 1;
+
+// ── arm64 7.0 VA model (decoded from erofs.ko `kmap_local_page`) ─
+//
+// Verified by disassembling `erofs_bread+0x138` in
+// `linux-modules-7.0.0-14-generic`.  See `kabi::folio_shadow` for the
+// implementation that uses these constants.
+//
+//   PAGE_OFFSET     = 0xffff_0000_0000_0000  (= Kevlar's KERNEL_BASE_ADDR)
+//   VMEMMAP_START   = 0xffff_fdff_c000_0000
+//   VMEMMAP_END     = -SZ_1G = 0xffff_ffff_c000_0000
+//   sizeof(struct page) = 64
+//
+// Linux's inline `kmap_local_page(folio)`:
+//     idx = (folio - VMEMMAP_START) / sizeof(struct page)
+//     va  = PAGE_OFFSET + idx * PAGE_SIZE
+pub const LINUX_PAGE_OFFSET: u64 = 0xffff_0000_0000_0000;
+pub const LINUX_VMEMMAP_START: u64 = 0xffff_fdff_c000_0000;
+pub const LINUX_SIZEOF_STRUCT_PAGE: u64 = 64;

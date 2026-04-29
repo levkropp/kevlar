@@ -158,40 +158,28 @@ pub extern "C" fn filemap_splice_read(_in_file: *mut c_void, _ppos: *mut u64,
 pub extern "C" fn read_cache_folio(mapping: *mut c_void, index: u64,
                                    _filler: *const c_void,
                                    file: *mut c_void) -> *mut c_void {
-    // Phase 3 v1: kmalloc a 4 KiB folio-shaped buffer in Kevlar VA
-    // space + populate it with file data from the initramfs at
-    // offset = index * 4096.
+    // Phase 3b: folio backed by VMEMMAP shadow.
     //
-    // Layout we hand back: the buffer IS the folio.  Linux folio
-    // accessors expect:
-    //   +0   unsigned long flags    — set bit 1 (PG_uptodate)
-    //   +8   misc lru/mlock fields
-    //   +16  struct address_space *mapping  — populate from arg
-    //   +24  pgoff_t index           — populate from arg
-    //   ...
+    // Erofs's inline `kmap_local_page(folio)` on arm64 expands to:
+    //   idx = (folio - VMEMMAP_START) / sizeof(struct page)
+    //   data_va = PAGE_OFFSET + idx * PAGE_SIZE
     //
-    // The actual file data lives starting at offset
-    // `_data_off` inside the folio buffer.  Erofs reads it via
-    // either:
-    //   (a) `kmap_local_page(folio)` — inline VA arithmetic that
-    //       in Linux's view returns the data buffer's VA.
-    //   (b) Direct field reads on the folio struct.
+    // Linux's PAGE_OFFSET equals Kevlar's KERNEL_BASE_ADDR, so if we
+    // hand erofs a folio pointer at `VMEMMAP_START + data_paddr/64`,
+    // the math computes exactly `KERNEL_BASE + data_paddr` — our
+    // direct-map VA where the data lives.
     //
-    // (b) works as long as we have flags + mapping + index sane.
-    // (a) is the next blocker — erofs's compiled `kmap_local_page`
-    // does `__va(__pfn_to_phys(page_to_pfn(page)))` arithmetic
-    // that produces an address based on Linux's VMEMMAP_START.
-    //
-    // For now, the v1 implementation places the data starting at
-    // offset 64 (skipping a small folio-header area) so direct
-    // reads at small offsets see folio fields, but that's a
-    // half-measure.  Phase 3b adds a real folio-→data mapping.
+    // `folio_shadow::alloc_folio` does the synth: returns
+    // `(fake_page_va, data_va)` where data_va is in Kevlar's direct
+    // map and fake_page_va is in the shadow region.  We populate
+    // the data buffer from the initramfs file and return
+    // fake_page_va to erofs.
     let path = super::fs_synth::lookup_synth_file_path_for_mapping(mapping, file)
         .unwrap_or_else(|| {
-            // Fallback: when erofs goes through sb->s_bdev->bd_mapping
-            // (which we don't synthesise), the mapping arg is null.
-            // Use the canonical Phase 3 test image until the bdev
-            // path is wired through.
+            // Fallback: erofs's BDEV path goes through
+            // sb->s_bdev->bd_mapping (which we don't synthesise),
+            // passing null for both mapping and file.  Use the
+            // canonical test image.
             log::warn!(
                 "kabi: read_cache_folio: null mapping/file ({:p}/{:p}); \
                  falling back to /lib/test.erofs",
@@ -200,43 +188,36 @@ pub extern "C" fn read_cache_folio(mapping: *mut c_void, index: u64,
             String::from("/lib/test.erofs")
         });
 
-    let folio = super::alloc::kmalloc(4096, 0);
-    if folio.is_null() {
-        return err_ptr_eio();
-    }
-    unsafe { core::ptr::write_bytes(folio as *mut u8, 0, 4096); }
+    let (fake_page_va, data_va) = match super::folio_shadow::alloc_folio(
+        super::folio_shadow::PG_UPTODATE,
+        mapping,
+        index,
+    ) {
+        Some(t) => t,
+        None => {
+            log::warn!("kabi: read_cache_folio: folio_shadow exhausted");
+            return err_ptr_eio();
+        }
+    };
 
-    // Set flags = PG_uptodate (bit 3 in Linux 7.0).  This signals
-    // the folio's data is valid; callers that check uptodate skip
-    // calling read_folio and use the data directly.
-    const PG_UPTODATE_BIT: u64 = 1 << 3;
-    unsafe {
-        *(folio.cast::<u64>().add(0)) = PG_UPTODATE_BIT;
-        // mapping at +16, index at +24
-        *(folio.cast::<u8>().add(16) as *mut *mut c_void) = mapping;
-        *(folio.cast::<u8>().add(24) as *mut u64) = index;
-    }
-
-    // Read file data at offset = index * 4096 into the folio,
-    // starting at byte 0 of a backing data buffer.  We'd allocate
-    // a separate data buffer for Phase 3b; for v1 we overwrite the
-    // folio buffer past offset 64 (skipping the synthetic folio
-    // header).
+    // Read 4 KiB of file data into the data buffer.  The buffer is
+    // already zeroed by alloc_folio; short reads (e.g. last chunk
+    // of a file) leave the tail as zeros, matching Linux's
+    // `folio_zero_range` behaviour.
     let offset = (index * 4096) as usize;
-    let data_start = unsafe { folio.cast::<u8>().add(64) };
-    let to_read = 4096 - 64;
-    if let Err(e) = read_initramfs_at(&path, offset, data_start, to_read) {
-        log::warn!("kabi: read_cache_folio: initramfs read of {} @ {} failed: {:?}",
-                   path, offset, e);
-        super::alloc::kfree(folio);
+    if let Err(e) = read_initramfs_at(&path, offset, data_va, 4096) {
+        log::warn!(
+            "kabi: read_cache_folio: initramfs read of {} @ {} failed: {:?}",
+            path, offset, e,
+        );
         return err_ptr_eio();
     }
     log::info!(
-        "kabi: read_cache_folio: folio={:p} mapping={:p} index={} \
-         path={} data@+64 (4032 bytes)",
-        folio, mapping, index, path,
+        "kabi: read_cache_folio: fake_page={:#x} data_va={:p} mapping={:p} \
+         index={} path={}",
+        fake_page_va, data_va, mapping, index, path,
     );
-    folio
+    fake_page_va as *mut c_void
 }
 
 /// Read up to `len` bytes from the initramfs file at `path`,

@@ -165,11 +165,17 @@ _start:
     //   SH0/SH1 = 0b11 (Inner Shareable)
     //   AS   = 1    (16-bit ASID, 65535 contexts; ASID in TTBR0[63:48])
     //   TBI0 = 1    (top-byte-ignore on TTBR0 user accesses)
+    //   TBI1 = 1    (top-byte-ignore on TTBR1 kernel accesses)
     //   HA   = 1    (hardware Access-Flag update — Apple Silicon + Linux
     //                enable this unconditionally; CPU advertises HAFDBS)
     //   A1   = 0    (ASID source = TTBR0_EL1 — single-MSR switch path)
-    // Encoded: 0x000000B5_B5103510.
-    ldr     x0, =0x000000B5B5103510
+    // Encoded: 0x000000F5_B5103510.  TBI1 (bit 38) added vs Linux 7.0
+    // arm64 default — `__tag_set` puts the kasan tag (0xff) in bits
+    // 56-63 of `kmap_local_page` results, and TBI1=0 would treat those
+    // as significant VA bits, triggering translation faults on every
+    // tagged kernel pointer.  Kevlar doesn't itself use top-byte
+    // tagging on kernel pointers, so this is purely additive.
+    ldr     x0, =0x000000F5B5103510
     msr     tcr_el1, x0
 
     // Set TTBR0 and TTBR1.
@@ -243,7 +249,7 @@ secondary_entry:
     msr     mair_el1, x0
 
     // TCR_EL1 (same as BSP — see BSP block for field breakdown).
-    ldr     x0, =0x000000B5B5103510
+    ldr     x0, =0x000000F5B5103510
     msr     tcr_el1, x0
 
     // TTBR0: identity map (reuse BSP's page tables).
