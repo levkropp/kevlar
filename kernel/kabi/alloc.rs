@@ -33,6 +33,13 @@ const HEADER_ALIGN: usize = 16;
 const PAGE_SIZE: usize = 4096;
 const KVMALLOC_THRESHOLD: usize = 8 * 1024;
 
+/// Linux's `__GFP_ZERO` bit (gfp_types.h).  When set, the
+/// allocator must hand back zero-initialized memory — equivalent
+/// to `kzalloc`.  `kzalloc(size, gfp)` is a Linux macro that ORs
+/// this into `gfp` and calls `kmalloc(...)`, so any kmalloc-class
+/// shim must honor it.
+const __GFP_ZERO: u32 = 0x100;
+
 #[inline]
 fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
@@ -84,8 +91,12 @@ fn kfree_internal(ptr: *mut u8) {
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn kmalloc(size: usize, _gfp: u32) -> *mut c_void {
-    kmalloc_internal(size, false) as *mut c_void
+pub extern "C" fn kmalloc(size: usize, gfp: u32) -> *mut c_void {
+    // Linux's `kzalloc(size, gfp)` macro ORs __GFP_ZERO into gfp
+    // and calls kmalloc.  Honor that so erofs (and any other
+    // module using kzalloc_*) gets zeroed memory.
+    let zero = gfp & __GFP_ZERO != 0;
+    kmalloc_internal(size, zero) as *mut c_void
 }
 
 #[allow(unsafe_code)]
@@ -154,7 +165,11 @@ ksym!(kfree);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __kmalloc_noprof(size: usize, gfp: u32) -> *mut core::ffi::c_void {
-    kmalloc(size, gfp)
+    if gfp & __GFP_ZERO != 0 {
+        kzalloc(size, gfp)
+    } else {
+        kmalloc(size, gfp)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -163,7 +178,15 @@ pub extern "C" fn __kmalloc_cache_noprof(
     gfp: u32,
     size: usize,
 ) -> *mut core::ffi::c_void {
-    kmalloc(size, gfp)
+    // Erofs's `kzalloc_obj(*sbi)` macro expands to a call here
+    // with `gfp = GFP_KERNEL_ACCOUNT | __GFP_ZERO`.  Without
+    // honoring `__GFP_ZERO`, sbi comes back with dirty memory
+    // and erofs reads stale pointers as struct fields.
+    if gfp & __GFP_ZERO != 0 {
+        kzalloc(size, gfp)
+    } else {
+        kmalloc(size, gfp)
+    }
 }
 
 #[unsafe(no_mangle)]

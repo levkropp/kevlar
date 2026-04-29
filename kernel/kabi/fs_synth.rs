@@ -312,13 +312,16 @@ pub fn get_tree_nodev_synth(fc: *mut c_void,
     let rc = super::loader::call_with_scs_2(
         fill_super as *const (), sb as usize, fc as usize,
     ) as i32;
+    log::info!("kabi: fill_super dispatch returned rc={}", rc);
 
     if rc < 0 {
         log::warn!(
             "kabi: get_tree_nodev_synth: fill_super returned {} — bailing",
             rc,
         );
+        log::info!("kabi: about to kfree sb={:p}", sb);
         super::alloc::kfree(sb);
+        log::info!("kabi: kfree done; returning rc={}", rc);
         return rc;
     }
 
