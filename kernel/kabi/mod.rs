@@ -51,6 +51,8 @@ pub mod kabi_dir;
 pub mod input;
 pub mod io;
 pub mod jbd2_stubs;
+pub mod ext4_arc_stubs;
+pub mod ext4_arc_bulk_stubs;
 pub mod kobject;
 pub mod kref;
 pub mod list;

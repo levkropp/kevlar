@@ -941,24 +941,41 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         unsafe { kabi::fs_synth::ALLOW_FILL_SUPER = true; }
         info!("kabi: ALLOW_FILL_SUPER set — erofs fill_super dispatch enabled");
     }
-    // Phase 8 (ext4 arc): smoke-test inter-module symbol export by
-    // loading mbcache.ko (smallest, 17KB) and observing runtime export
-    // registration.  Subsequent ext4-arc phases will load jbd2.ko +
-    // ext4.ko in sequence.
+    // Phase 8/9 (ext4 arc): load the mbcache → jbd2 → ext4 chain so
+    // their runtime exports become visible across modules.  Gated on
+    // `kabi-load-ext4=1` for full chain; `kabi-load-mbcache=1` loads
+    // only mbcache (smoke test).
     #[cfg(target_arch = "aarch64")]
-    if bootinfo.raw_cmdline.as_str().contains("kabi-load-mbcache=1") {
-        info!("kabi: [Phase 8 probe] loading /lib/modules/mbcache.ko");
-        match kabi::load_module("/lib/modules/mbcache.ko", "init_module") {
-            Ok(m) => {
-                info!(
-                    "kabi: mbcache loaded; runtime exports = {}",
-                    kabi::exports::runtime::count(),
-                );
-                if let Some(rc) = m.call_init() {
-                    info!("kabi: mbcache init_module returned {}", rc);
+    {
+        let cmdline = bootinfo.raw_cmdline.as_str();
+        let load_chain = cmdline.contains("kabi-load-ext4=1");
+        let load_mbcache = load_chain || cmdline.contains("kabi-load-mbcache=1");
+        let load_jbd2 = load_chain || cmdline.contains("kabi-load-jbd2=1");
+
+        let try_load = |path: &str, label: &str| {
+            info!("kabi: [ext4-arc] loading {}", path);
+            match kabi::load_module(path, "init_module") {
+                Ok(m) => {
+                    info!(
+                        "kabi: {} loaded; runtime exports = {}",
+                        label, kabi::exports::runtime::count(),
+                    );
+                    if let Some(rc) = m.call_init() {
+                        info!("kabi: {} init_module returned {}", label, rc);
+                    }
                 }
+                Err(e) => warn!("kabi: {} load failed: {:?}", label, e),
             }
-            Err(e) => warn!("kabi: mbcache load_module failed: {:?}", e),
+        };
+
+        if load_mbcache {
+            try_load("/lib/modules/mbcache.ko", "mbcache");
+        }
+        if load_jbd2 {
+            try_load("/lib/modules/jbd2.ko", "jbd2");
+        }
+        if load_chain {
+            try_load("/lib/modules/ext4.ko", "ext4");
         }
     }
     #[cfg(target_arch = "aarch64")]
