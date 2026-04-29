@@ -397,6 +397,26 @@ pub fn load_module(path: &str, init_sym: &str) -> Result<LoadedModule> {
     // observable + invalidate the I-cache before transferring control.
     kevlar_platform::arch::sync_icache_range(base_va, total);
 
+    // ── Phase 8: register __ksymtab entries into runtime exports ──
+    // After relocations, each 12-byte kernel_symbol entry holds
+    // PREL32 offsets to {function, name string, namespace}.  Walk
+    // the __ksymtab and __ksymtab_gpl sections and register each
+    // (name, function_va) pair so subsequent module loads can
+    // resolve them via `exports::lookup()`.
+    for ksymtab_name in &["__ksymtab", "__ksymtab_gpl"] {
+        for (i, sh) in obj.sections.iter().enumerate() {
+            if obj.section_name(sh) != *ksymtab_name {
+                continue;
+            }
+            let sec_va = match section_va_map.get(i).and_then(|v| *v) {
+                Some(va) => va,
+                None => continue,
+            };
+            let size = sh.sh_size as usize;
+            register_ksymtab_entries(sec_va, size, ksymtab_name);
+        }
+    }
+
     // ── Find the entry function ───────────────────────────────────
     let mut init_fn: Option<extern "C" fn() -> i32> = None;
     for sym in obj.symtab.iter() {
@@ -477,6 +497,59 @@ fn read_initramfs_file(path: &str) -> Result<Vec<u8>> {
 #[inline]
 fn align_up(x: usize, a: usize) -> usize {
     (x + a - 1) & !(a - 1)
+}
+
+/// Walk a fully-relocated `__ksymtab` (or `__ksymtab_gpl`) section and
+/// register each entry into `exports::runtime::RUNTIME_EXPORTS`.
+///
+/// Linux 7.0 arm64 `kernel_symbol` layout (12 bytes per entry):
+///   +0  s32 value_offset      ; PC-relative to function
+///   +4  s32 name_offset       ; PC-relative to `__kstrtab_<name>`
+///   +8  s32 namespace_offset  ; PC-relative to namespace string (often 0)
+///
+/// Each PREL32 is computed at this entry's location: e.g.
+/// `function_va = (entry_va + 0) + value_offset`.
+fn register_ksymtab_entries(sec_va: usize, size: usize, sec_name: &str) {
+    const ENTRY_SIZE: usize = 12;
+    if size % ENTRY_SIZE != 0 {
+        log::warn!(
+            "kabi: {} size {} not a multiple of {}",
+            sec_name, size, ENTRY_SIZE,
+        );
+        return;
+    }
+    let n = size / ENTRY_SIZE;
+    let mut registered = 0;
+    for idx in 0..n {
+        let entry_va = sec_va + idx * ENTRY_SIZE;
+        #[allow(unsafe_code)]
+        unsafe {
+            let value_off = *((entry_va) as *const i32);
+            let name_off = *((entry_va + 4) as *const i32);
+            let function_va =
+                (entry_va as isize).wrapping_add(value_off as isize) as usize;
+            let name_va =
+                ((entry_va + 4) as isize).wrapping_add(name_off as isize) as usize;
+            // Read NUL-terminated name (up to 256 bytes).
+            let name_bytes = core::slice::from_raw_parts(
+                name_va as *const u8, 256,
+            );
+            let nul = name_bytes.iter().position(|&b| b == 0).unwrap_or(0);
+            if nul == 0 {
+                continue;
+            }
+            let name = match core::str::from_utf8(&name_bytes[..nul]) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            super::exports::runtime::register(name, function_va);
+            registered += 1;
+        }
+    }
+    log::info!(
+        "kabi: registered {} runtime exports from {} ({} bytes)",
+        registered, sec_name, size,
+    );
 }
 
 /// Find a section by name and return its raw bytes from the file.

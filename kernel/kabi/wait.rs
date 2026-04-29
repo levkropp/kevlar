@@ -127,3 +127,44 @@ ksym!(wake_up_all);
 ksym!(wake_up_interruptible);
 ksym!(wake_up_interruptible_all);
 ksym!(kabi_wait_event);
+
+// ── ext4 arc Phase 8/9 stubs: variable-keyed wait queues ────────
+//
+// mbcache and jbd2 use `wait_var_event` / `wake_up_var` to coordinate
+// on per-object state changes (cache eviction, journal commit).  For
+// our RO-mount path nothing actually waits — the read paths run to
+// completion on a single thread.  Stub these as no-ops; revisit when
+// adding write support.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __var_waitqueue(_var: *const c_void) -> *mut c_void {
+    // Return a stable non-null pointer so callers don't bail.  No
+    // waiter ever blocks on it because wake_up_var below is a no-op.
+    static FAKE_WQ: u64 = 0;
+    &raw const FAKE_WQ as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn init_wait_var_entry(
+    _wbq_entry: *mut c_void, _var: *mut c_void, _flags: i32,
+) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wake_up_var(_var: *mut c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn preempt_schedule() {}
+
+/// Linux's `system_percpu_wq` is a `struct workqueue_struct *` — we
+/// hand back a pointer that callers can pass to `queue_work` etc.
+/// kabi/work.rs already supports a default workqueue; reuse the
+/// pointer pattern.  For mbcache this is only used to schedule
+/// shrinker work which our RO path never triggers.
+#[unsafe(no_mangle)]
+pub static system_percpu_wq: u64 = 0;
+
+ksym!(__var_waitqueue);
+ksym!(init_wait_var_entry);
+ksym!(wake_up_var);
+ksym!(preempt_schedule);
+crate::ksym_static!(system_percpu_wq);

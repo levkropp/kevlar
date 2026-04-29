@@ -941,6 +941,26 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         unsafe { kabi::fs_synth::ALLOW_FILL_SUPER = true; }
         info!("kabi: ALLOW_FILL_SUPER set — erofs fill_super dispatch enabled");
     }
+    // Phase 8 (ext4 arc): smoke-test inter-module symbol export by
+    // loading mbcache.ko (smallest, 17KB) and observing runtime export
+    // registration.  Subsequent ext4-arc phases will load jbd2.ko +
+    // ext4.ko in sequence.
+    #[cfg(target_arch = "aarch64")]
+    if bootinfo.raw_cmdline.as_str().contains("kabi-load-mbcache=1") {
+        info!("kabi: [Phase 8 probe] loading /lib/modules/mbcache.ko");
+        match kabi::load_module("/lib/modules/mbcache.ko", "init_module") {
+            Ok(m) => {
+                info!(
+                    "kabi: mbcache loaded; runtime exports = {}",
+                    kabi::exports::runtime::count(),
+                );
+                if let Some(rc) = m.call_init() {
+                    info!("kabi: mbcache init_module returned {}", rc);
+                }
+            }
+            Err(e) => warn!("kabi: mbcache load_module failed: {:?}", e),
+        }
+    }
     #[cfg(target_arch = "aarch64")]
     if bootinfo.raw_cmdline.as_str().contains("kabi-load-erofs=1") {
         info!("kabi: loading /lib/modules/erofs.ko (Ubuntu 26.04, K33 Phase 2)");

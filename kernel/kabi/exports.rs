@@ -48,7 +48,59 @@ pub fn all() -> &'static [KSym] {
 /// Linear-search the kernel exports table.  K1 has only one entry;
 /// K2+ will sort + binary-search.
 pub fn lookup(name: &str) -> Option<usize> {
-    all().iter().find(|s| s.name == name).map(|s| s.addr as usize)
+    if let Some(s) = all().iter().find(|s| s.name == name) {
+        return Some(s.addr as usize);
+    }
+    // Phase 8 (ext4 arc): also search the runtime table populated
+    // by previously-loaded `.ko` modules' `__ksymtab` sections.
+    runtime::lookup(name)
+}
+
+/// Runtime exports — populated by `loader::load_module` from each
+/// `.ko`'s `__ksymtab` section after relocations are applied.  Lets
+/// ext4.ko find symbols exported by the previously-loaded jbd2.ko
+/// without us hand-stubbing every one.
+pub mod runtime {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use kevlar_platform::spinlock::SpinLock;
+
+    pub struct RuntimeExport {
+        pub name: String,
+        pub addr: usize,
+    }
+
+    pub static RUNTIME_EXPORTS: SpinLock<Vec<RuntimeExport>> =
+        SpinLock::new(Vec::new());
+
+    pub fn lookup(name: &str) -> Option<usize> {
+        let table = RUNTIME_EXPORTS.lock();
+        for entry in table.iter() {
+            if entry.name == name {
+                return Some(entry.addr);
+            }
+        }
+        None
+    }
+
+    pub fn register(name: &str, addr: usize) {
+        let mut table = RUNTIME_EXPORTS.lock();
+        // Last-loaded wins; warn on duplicate so collisions are visible.
+        if let Some(existing) = table.iter_mut().find(|e| e.name == name) {
+            log::warn!(
+                "kabi: runtime export {:?} re-registered \
+                 (was {:#x}, now {:#x})",
+                name, existing.addr, addr,
+            );
+            existing.addr = addr;
+            return;
+        }
+        table.push(RuntimeExport { name: String::from(name), addr });
+    }
+
+    pub fn count() -> usize {
+        RUNTIME_EXPORTS.lock().len()
+    }
 }
 
 /// Declare a kernel symbol exportable to loaded `.ko` modules.
