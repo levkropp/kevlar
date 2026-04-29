@@ -39,40 +39,62 @@ use kevlar_vfs::result::{Errno, Error, Result as VfsResult};
 
 use crate::prelude::*;
 
-/// `KabiFileSystem` wraps a `*mut super_block` returned by a Linux
-/// fs `.ko` module's `->mount` op (or its `init_fs_context` →
-/// `get_tree` chain).  It implements Kevlar's `FileSystem` trait
-/// by translating `root_dir()` calls into a walk through the
-/// Linux super_block's root dentry.
+/// `KabiFileSystem` wraps a Linux `struct super_block *` returned by
+/// the kABI mount path's `init_fs_context → get_tree → fill_super`
+/// chain.  Implements Kevlar's `FileSystem` trait by handing back a
+/// `KabiDirectory` rooted at `super_block->s_root` (the dentry erofs
+/// populated via `d_make_root`).
 #[derive(Debug)]
 pub struct KabiFileSystem {
-    /// `*mut super_block` from Linux's perspective.  Opaque to us;
-    /// dereferenced only through helper fns that know the offsets.
-    super_block: *mut c_void,
+    super_block: usize,
+    root_dentry: usize,
     /// Filesystem name for diagnostics (e.g. "erofs").
     name: alloc::string::String,
+    /// Per-mount unique device ID for the VFS mount-key table.
+    dev_id: usize,
 }
 
-// SAFETY: super_block accesses go through the kABI surface which
-// itself synchronises.  v1 v never accesses the super_block (root_dir
-// returns ENOSYS); Send + Sync are needed to satisfy FileSystem.
+// SAFETY: super_block / dentry accesses go through the kABI surface
+// which is single-threaded by construction (no concurrent mounts in
+// v1).  Send + Sync are required to satisfy FileSystem.
 unsafe impl Send for KabiFileSystem {}
 unsafe impl Sync for KabiFileSystem {}
 
 impl KabiFileSystem {
-    pub fn new(super_block: *mut c_void, name: alloc::string::String) -> Self {
-        KabiFileSystem { super_block, name }
+    pub fn new(
+        super_block: usize,
+        root_dentry: usize,
+        name: alloc::string::String,
+    ) -> Self {
+        let dev_id = kevlar_vfs::inode::alloc_dev_id();
+        KabiFileSystem { super_block, root_dentry, name, dev_id }
     }
 }
 
 impl FileSystem for KabiFileSystem {
     fn root_dir(&self) -> VfsResult<Arc<dyn Directory>> {
-        log::warn!(
-            "kabi: KabiFileSystem({}).root_dir() — not yet implemented \
-             (super_block={:p}); Phase 3b lands the dentry walk",
-            self.name, self.super_block,
+        // Read root_dentry->d_inode (+56) to get the root inode.
+        let inode = unsafe {
+            *((self.root_dentry as *const u8)
+                .add(super::struct_layouts::DENTRY_D_INODE_OFF)
+                as *const usize)
+        };
+        if inode == 0 {
+            log::warn!("kabi: KabiFileSystem({}).root_dir(): d_inode is null",
+                       self.name);
+            return Err(Error::new(Errno::EIO));
+        }
+        log::info!(
+            "kabi: KabiFileSystem({}).root_dir(): dentry={:#x} inode={:#x}",
+            self.name, self.root_dentry, inode,
         );
-        Err(Error::new(Errno::ENOSYS))
+        Ok(Arc::new(super::kabi_dir::KabiDirectory::new(
+            self.root_dentry,
+            inode,
+            self.super_block,
+            self.dev_id,
+            self.name.clone(),
+        )))
     }
 }
 
@@ -357,13 +379,31 @@ pub fn kabi_mount_filesystem(
         return Err(crate::result::Error::new(errno));
     }
 
-    // Success path: fc->root holds the mounted dentry.  Wrap and
-    // return.  Phase 3d v3 will walk the dentry to provide
-    // root_dir() backing.
+    // Success path: pull (sb, root_dentry) out of the side-channel
+    // that get_tree_nodev_synth set after fill_super returned 0.
+    // The fc itself is no longer needed; the sb and dentry it
+    // contained live independently in the heap.
+    let (sb, root_dentry) = match super::fs_synth::LAST_MOUNT_STATE
+        .lock()
+        .take()
+    {
+        Some(t) => t,
+        None => {
+            warn!("kabi: get_tree returned 0 but LAST_MOUNT_STATE not set");
+            super::alloc::kfree(fc);
+            return Err(crate::result::Error::new(
+                crate::result::Errno::EIO,
+            ));
+        }
+    };
     info!(
-        "kabi: erofs ops->get_tree returned 0 — fc->root populated, \
-         dentry walk is Phase 3d v3",
+        "kabi: erofs ops->get_tree returned 0 — sb={:#x} root_dentry={:#x}",
+        sb, root_dentry,
     );
     super::alloc::kfree(fc);
-    Err(crate::result::Error::new(crate::result::Errno::ENOSYS))
+    Ok(Arc::new(KabiFileSystem::new(
+        sb,
+        root_dentry,
+        name.into(),
+    )) as Arc<dyn FileSystem>)
 }

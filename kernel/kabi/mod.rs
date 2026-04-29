@@ -46,6 +46,7 @@ pub mod fs_register;
 pub mod fs_stubs;
 pub mod fs_synth;
 pub mod fs_synth_io;
+pub mod kabi_dir;
 pub mod input;
 pub mod io;
 pub mod jbd2_stubs;

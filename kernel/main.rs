@@ -962,9 +962,38 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                     match kabi::fs_adapter::kabi_mount_filesystem(
                         "erofs", None, 0, core::ptr::null(),
                     ) {
-                        Ok(_) => info!("kabi: erofs mount route Ok (unexpected at v1)"),
+                        Ok(fs) => {
+                            info!("kabi: erofs mount route Ok — exercising root_dir()");
+                            match fs.root_dir() {
+                                Ok(root) => {
+                                    info!("kabi: root_dir Ok — listing entries");
+                                    for i in 0..16 {
+                                        match root.readdir(i) {
+                                            Ok(Some(de)) => info!(
+                                                "kabi: entry[{}]: name={:?} ino={} type={:?}",
+                                                i, de.name,
+                                                de.inode_no.as_u64(),
+                                                de.file_type,
+                                            ),
+                                            Ok(None) => {
+                                                info!("kabi: readdir end at idx={}", i);
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "kabi: readdir({}) error: {:?}",
+                                                    i, e,
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!("kabi: root_dir failed: {:?}", e),
+                            }
+                        }
                         Err(e) => info!(
-                            "kabi: erofs mount route returned {:?} (Phase 3 v1 expected)",
+                            "kabi: erofs mount route returned {:?}",
                             e,
                         ),
                     }

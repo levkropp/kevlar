@@ -39,6 +39,15 @@ static KABI_AOPS_PTR: AtomicUsize = AtomicUsize::new(0);
 /// the call gated off.  Set via cmdline `kabi-fill-super=1`.
 pub static mut ALLOW_FILL_SUPER: bool = false;
 
+/// Side channel between get_tree_nodev_synth and the
+/// kabi_mount_filesystem caller in fs_adapter.rs.  After fill_super
+/// succeeds we stash (sb, root_dentry) here so the adapter can wrap
+/// them in `KabiFileSystem` without walking dentry->d_sb (whose
+/// offset is currently a guess).  Single-mount v1; revisit when we
+/// need concurrent mounts.
+pub static LAST_MOUNT_STATE: SpinLock<Option<(usize, usize)>> =
+    SpinLock::new(None);
+
 /// Returns the address of the kABI aops table.  Panics if
 /// init_synth() hasn't been called.
 fn kabi_aops_addr() -> usize {
@@ -346,6 +355,11 @@ pub fn get_tree_nodev_synth(fc: *mut c_void,
         "kabi: get_tree_nodev_synth: fc->root = {:p} — mount succeeded",
         s_root,
     );
+    // Side-channel for kabi_mount_filesystem.  See LAST_MOUNT_STATE
+    // doc.  We pass sb (the buffer we kmalloc'd here) and root_dentry
+    // (set by erofs's fill_super) so the adapter can wrap them in
+    // `KabiFileSystem` without walking dentry->d_sb at a guessed offset.
+    *LAST_MOUNT_STATE.lock() = Some((sb as usize, s_root as usize));
     0
 }
 
