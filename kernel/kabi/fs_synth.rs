@@ -35,9 +35,10 @@ static KABI_AOPS_PTR: AtomicUsize = AtomicUsize::new(0);
 
 /// Day 2 gate: erofs's fill_super dispatch crashes on inline
 /// `kmap_local_page` expansions that target Linux-PAGE_OFFSET VAs
-/// we don't map.  Until VA aliasing is implemented (K35+), keep
-/// the call gated off.  Set via cmdline `kabi-fill-super=1`.
-pub static mut ALLOW_FILL_SUPER: bool = false;
+/// we don't map.  Phase 3b VA aliasing resolved that; Phase 13
+/// flips this to default-on so userspace mount(2) works without a
+/// special cmdline flag.
+pub static mut ALLOW_FILL_SUPER: bool = true;
 
 /// Side channel between get_tree_nodev_synth and the
 /// kabi_mount_filesystem caller in fs_adapter.rs.  After fill_super
@@ -50,7 +51,7 @@ pub static LAST_MOUNT_STATE: SpinLock<Option<(usize, usize)>> =
 
 /// Returns the address of the kABI aops table.  Panics if
 /// init_synth() hasn't been called.
-fn kabi_aops_addr() -> usize {
+pub(super) fn kabi_aops_addr() -> usize {
     let p = KABI_AOPS_PTR.load(Ordering::Acquire);
     debug_assert!(p != 0, "fs_synth: kabi_aops not initialised");
     p
@@ -446,6 +447,23 @@ pub extern "C" fn get_tree_bdev(fc: *mut c_void,
     let fc_sb_flags = unsafe {
         *(fc.cast::<u8>().add(fl::FC_SB_FLAGS_OFF) as *const u32)
     } as u64;
+    // Phase 13: pre-populate `sb[+192]` with a self-referential
+    // zero-filled buffer.  Ubuntu's compiled ext4.ko does multi-level
+    // pointer chases through sb (e.g. `(sb[+192])[+56][+64]`) very
+    // early in fill_super.  Boot context tolerates NULL there (low
+    // VAs map to zero pages); userspace process VA doesn't (low VAs
+    // are unmapped) and faults.  Self-referencing every 8-byte slot
+    // means any chain walk lands on the same valid (zeroed) buffer
+    // regardless of depth.
+    let sb_192_buf = super::alloc::kzalloc(4096, super::alloc::__GFP_ZERO);
+    if !sb_192_buf.is_null() {
+        unsafe {
+            let p = sb_192_buf as *mut usize;
+            for i in 0..(4096 / 8) {
+                *p.add(i) = sb_192_buf as usize;
+            }
+        }
+    }
     unsafe {
         let s = sb.cast::<u8>();
         // ext4 will call sb_min_blocksize / sb_set_blocksize to set
@@ -457,6 +475,9 @@ pub extern "C" fn get_tree_bdev(fc: *mut c_void,
         *(s.add(fl::SB_S_FS_INFO_OFF) as *mut *mut c_void) = fc_s_fs_info;
         *(s.add(fl::SB_S_BDEV_OFF) as *mut *mut c_void) = bdev;
         *(s.add(fl::SB_S_FLAGS_OFF) as *mut u64) = fc_sb_flags;
+        if !sb_192_buf.is_null() {
+            *(s.add(192) as *mut *mut c_void) = sb_192_buf;
+        }
     }
     log::info!(
         "kabi: get_tree_bdev: sb={:p} bdev={:p} fc_s_fs_info={:p}",

@@ -107,6 +107,7 @@ def compile_all_local():
         ("testing/test_ext2_rw.c",       "test-ext2-rw",     []),
         ("testing/test_ext4_mknod.c",    "test-ext4-mknod",  []),
         ("testing/test-kabi-mount-erofs.c", "test-kabi-mount-erofs", []),
+        ("testing/test-kabi-mount-ext4.c",  "test-kabi-mount-ext4",  []),
         ("testing/boot_alpine.c",        "boot-alpine",      []),
         ("testing/test_alpine_apk.c",    "test-alpine-apk",  []),
         ("testing/test_cgroups_hang.c",  "test-cgroups-hang", []),
@@ -1123,6 +1124,8 @@ def compile_all_local_arm64(cc):
         # via init=/bin/test-kabi-mount-erofs (see Makefile target
         # `test-kabi-mount-erofs`).
         ("testing/test-kabi-mount-erofs.c", "test-kabi-mount-erofs", []),
+        # Phase 13: ext4 userspace mount test.
+        ("testing/test-kabi-mount-ext4.c",  "test-kabi-mount-ext4",  []),
     ]
     # Contract tests
     for src in sorted(ROOT.glob("testing/contracts/*/*.c")):
@@ -1512,6 +1515,7 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
     for d in ["bin", "sbin", "usr/bin", "usr/sbin",
               "etc", "etc/network", "dev", "proc", "sys", "tmp", "mnt",
               "mnt/erofs",  # Phase 7: pre-create kABI mount target
+              "mnt/ext4",   # Phase 13: pre-create kABI ext4 mount target
               "var/www/html", "run", "lib"]:
         (ROOTFS / d).mkdir(parents=True, exist_ok=True)
 

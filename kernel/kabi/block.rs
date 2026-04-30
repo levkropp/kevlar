@@ -49,42 +49,184 @@ pub extern "C" fn bio_init(_bio: *mut c_void, _bdev: *mut c_void,
     log::warn!("kabi: bio_init (stub)");
 }
 
+// Phase 13: minimal bio infrastructure.  ext4_mpage_readpages allocates
+// a bio, sets bi_iter.bi_sector, calls bio_add_folio for each folio,
+// then submit_bio.  We synth a bio in a single 320-byte allocation:
+//
+//   +0..+144   Linux struct bio fields (we care about bi_bdev +8,
+//              bi_io_vec +40, bi_iter.bi_sector +48, bi_iter.bi_size
+//              +56, bi_end_io +80, bi_private +88).
+//   +144       u16 our_bvec_count                  (kABI scratch)
+//   +152..+280 BioVec[8] inline storage            (16 bytes each).
+//
+// bio_alloc_bioset zeros, sets bi_bdev, points bi_io_vec at the
+// inline storage.  bio_add_folio appends a vec.  submit_bio reads
+// from the bdev synchronously into each folio's data buffer (using
+// folio_to_data_va to compute the kernel VA), marks each folio
+// PG_uptodate, then invokes bi_end_io.
+
+const BIO_TOTAL_SIZE: usize = 320;
+const BIO_BVEC_INLINE_OFF: usize = 192;
+const BIO_BVEC_COUNT_OFF: usize = 184;
+const MAX_INLINE_BVECS: usize = 8;
+
+// Ubuntu's compiled ext4.ko bio layout (verified via disasm of
+// `ext4_mpage_readpages` around the bio_alloc_bioset call: writes
+// `bi_iter.bi_sector` to bio[+40] and `bi_end_io` to bio[+64]).
+// This is 8 bytes shorter before bi_iter than mainline's struct bio
+// — likely because Ubuntu's CONFIG omits the __bi_remaining +
+// padding pair that vanilla 7.0 has between the small-int header
+// and bi_io_vec.
+const BIO_BI_BDEV_OFF: usize = 8;
+const BIO_BI_IO_VEC_OFF: usize = 32;
+const BIO_BI_SECTOR_OFF: usize = 40;
+const BIO_BI_SIZE_OFF: usize = 48;
+const BIO_BI_END_IO_OFF: usize = 64;
+const BIO_BI_PRIVATE_OFF: usize = 72;
+
+const BVEC_BV_PAGE_OFF: usize = 0;
+const BVEC_BV_LEN_OFF: usize = 8;
+const BVEC_BV_OFFSET_OFF: usize = 12;
+const BVEC_SIZE: usize = 16;
+
+const PG_UPTODATE_FLAG: u64 = 1 << 3;
+
 #[unsafe(no_mangle)]
-pub extern "C" fn bio_alloc_bioset(_bdev: *mut c_void, _nr_vecs: u16,
+pub extern "C" fn bio_alloc_bioset(bdev: *mut c_void, _nr_vecs: u16,
                                    _opf: u32, _gfp: u32,
                                    _bs: *mut c_void) -> *mut c_void {
-    log::warn!("kabi: bio_alloc_bioset (stub) — returning null");
-    core::ptr::null_mut()
+    let bio = super::alloc::kzalloc(BIO_TOTAL_SIZE, super::alloc::__GFP_ZERO);
+    if bio.is_null() { return core::ptr::null_mut(); }
+    unsafe {
+        // bi_bdev
+        *(bio.cast::<u8>().add(BIO_BI_BDEV_OFF) as *mut *mut c_void) = bdev;
+        // bi_io_vec → inline bvec storage
+        *(bio.cast::<u8>().add(BIO_BI_IO_VEC_OFF) as *mut *mut u8)
+            = bio.cast::<u8>().add(BIO_BVEC_INLINE_OFF);
+    }
+    bio
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn bio_add_page(_bio: *mut c_void, _page: *mut c_void,
                                _len: u32, _off: u32) -> c_int {
-    log::warn!("kabi: bio_add_page (stub)");
+    log::warn!("kabi: bio_add_page (stub) — folio path is the only one used");
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bio_add_folio(_bio: *mut c_void, _folio: *mut c_void,
-                                _len: usize, _off: usize) -> bool {
-    log::warn!("kabi: bio_add_folio (stub)");
-    false
+pub extern "C" fn bio_add_folio(bio: *mut c_void, folio: *mut c_void,
+                                len: usize, off: usize) -> bool {
+    if bio.is_null() || folio.is_null() { return false; }
+    unsafe {
+        let count = *(bio.cast::<u8>().add(BIO_BVEC_COUNT_OFF) as *const u16);
+        if count as usize >= MAX_INLINE_BVECS {
+            return false;
+        }
+        let bvec = bio.cast::<u8>()
+            .add(BIO_BVEC_INLINE_OFF + count as usize * BVEC_SIZE);
+        *(bvec.add(BVEC_BV_PAGE_OFF) as *mut *mut c_void) = folio;
+        *(bvec.add(BVEC_BV_LEN_OFF) as *mut u32) = len as u32;
+        *(bvec.add(BVEC_BV_OFFSET_OFF) as *mut u32) = off as u32;
+        *(bio.cast::<u8>().add(BIO_BVEC_COUNT_OFF) as *mut u16) = count + 1;
+        // Advance bi_iter.bi_size by `len`.
+        let cur_size = *(bio.cast::<u8>().add(BIO_BI_SIZE_OFF) as *const u32);
+        *(bio.cast::<u8>().add(BIO_BI_SIZE_OFF) as *mut u32)
+            = cur_size + len as u32;
+    }
+    true
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bio_endio(_bio: *mut c_void) {
-    log::warn!("kabi: bio_endio (stub)");
+pub extern "C" fn bio_endio(bio: *mut c_void) {
+    if bio.is_null() { return; }
+    unsafe {
+        let end_io: usize = *(bio.cast::<u8>().add(BIO_BI_END_IO_OFF)
+            as *const usize);
+        if end_io != 0 {
+            type EndIoFn = unsafe extern "C" fn(*mut c_void);
+            let f: EndIoFn = core::mem::transmute(end_io);
+            f(bio);
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn bio_put(_bio: *mut c_void) {}
+pub extern "C" fn bio_put(bio: *mut c_void) {
+    if !bio.is_null() {
+        super::alloc::kfree(bio);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn bio_uninit(_bio: *mut c_void) {}
 
+/// Real `submit_bio`: walks bi_io_vec, reads from the registered
+/// BlockDevice into each folio's data buffer (computed via
+/// `folio_to_data_va`), marks each folio PG_uptodate, then calls
+/// `bi_end_io` if registered.  For our synchronous shim the read
+/// has already completed by the time we return.
 #[unsafe(no_mangle)]
-pub extern "C" fn submit_bio(_bio: *mut c_void) {
-    log::warn!("kabi: submit_bio (stub) — bio not actually issued");
+pub extern "C" fn submit_bio(bio: *mut c_void) {
+    if bio.is_null() { return; }
+    let device = match kevlar_api::driver::block::block_device() {
+        Some(d) => d,
+        None => {
+            log::warn!("kabi: submit_bio: no BlockDevice registered");
+            return;
+        }
+    };
+    let sector_size = device.sector_size() as u64;
+    unsafe {
+        let mut current_sector: u64 = *(bio.cast::<u8>()
+            .add(BIO_BI_SECTOR_OFF) as *const u64);
+        let count = *(bio.cast::<u8>().add(BIO_BVEC_COUNT_OFF) as *const u16);
+        log::info!(
+            "kabi: submit_bio: bio={:p} start_sector={} bvec_count={}",
+            bio, current_sector, count,
+        );
+        for i in 0..count as usize {
+            let bvec = bio.cast::<u8>()
+                .add(BIO_BVEC_INLINE_OFF + i * BVEC_SIZE);
+            let folio: *mut c_void = *(bvec.add(BVEC_BV_PAGE_OFF)
+                as *const *mut c_void);
+            let len: u32 = *(bvec.add(BVEC_BV_LEN_OFF) as *const u32);
+            let off: u32 = *(bvec.add(BVEC_BV_OFFSET_OFF) as *const u32);
+            if folio.is_null() || len == 0 { continue; }
+
+            let data_va = super::folio_shadow::folio_to_data_va(folio as u64);
+            let dst = core::slice::from_raw_parts_mut(
+                data_va.add(off as usize), len as usize,
+            );
+            log::info!(
+                "kabi: submit_bio: bvec[{}] folio={:p} data_va={:p} \
+                 len={} off={} sector={}",
+                i, folio, data_va, len, off, current_sector,
+            );
+            if let Err(e) = device.read_sectors(current_sector, dst) {
+                log::warn!(
+                    "kabi: submit_bio: read_sectors at {} failed: {:?}",
+                    current_sector, e,
+                );
+                return;
+            }
+            // Mark folio uptodate (folio->flags at offset 0, bit 3).
+            let flags_ptr = folio.cast::<u8>() as *mut u64;
+            *flags_ptr = *flags_ptr | PG_UPTODATE_FLAG;
+            current_sector += (len as u64 + sector_size - 1) / sector_size;
+        }
+        // Invoke bi_end_io if registered (e.g. mpage's bio_endio handler).
+        let end_io: usize = *(bio.cast::<u8>().add(BIO_BI_END_IO_OFF)
+            as *const usize);
+        if end_io != 0 {
+            type EndIoFn = unsafe extern "C" fn(*mut c_void);
+            let f: EndIoFn = core::mem::transmute(end_io);
+            f(bio);
+        } else {
+            // No end_io callback — free the bio ourselves.
+            super::alloc::kfree(bio);
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

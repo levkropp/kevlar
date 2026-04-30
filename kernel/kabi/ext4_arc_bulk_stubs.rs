@@ -458,9 +458,17 @@ fn fake_alloc() -> *mut c_void {
 #[unsafe(no_mangle)] pub extern "C" fn generic_file_llseek_size(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
-#[unsafe(no_mangle)] pub extern "C" fn generic_file_read_iter(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+/// Phase 13: real `generic_file_read_iter`.  ext4_file_read_iter
+/// dispatches buffered (non-DIRECT) reads to this; we route them
+/// straight into our `filemap_read` impl which handles the
+/// page-cache loop + a_ops->read_folio dispatch.  Direct-IO is not
+/// yet supported.
+#[unsafe(no_mangle)]
+pub extern "C" fn generic_file_read_iter(
+    iocb: *mut c_void, iter: *mut c_void,
+) -> isize {
+    super::filemap::filemap_read(iocb, iter, 0)
+}
 #[unsafe(no_mangle)] pub extern "C" fn generic_fill_statx_atomic_writes(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -543,6 +551,27 @@ pub extern "C" fn iget_locked(
         // → special inode unallocated" sanity check doesn't reject
         // before ext4 populates it from disk.
         *(inode.cast::<u8>().add(72) as *mut u32) = 1;
+    }
+
+    // Phase 13: allocate a per-inode address_space and point
+    // inode->i_mapping at it.  Real Linux's `inode_init_always`
+    // (called from `alloc_inode` between sb->s_op->alloc_inode and
+    // return) sets `inode->i_mapping = &inode->i_data`.  We don't
+    // call inode_init_always; without this, ext4_set_aops writes to
+    // `inode->i_mapping->a_ops` = NULL+104 = fault.  Filling
+    // i_mapping with a heap-allocated address_space gives ext4 a
+    // valid target.  host=inode so read_cache_folio sees the
+    // inode pointer when looking up KabiInodeMeta or a_ops.
+    let per_inode_mapping = super::alloc::kzalloc(
+        fl::AS_SIZE, super::alloc::__GFP_ZERO,
+    );
+    if !per_inode_mapping.is_null() {
+        unsafe {
+            *(per_inode_mapping.cast::<u8>().add(fl::AS_HOST_OFF)
+                as *mut *mut c_void) = inode;
+            *(inode.cast::<u8>().add(fl::INODE_I_MAPPING_OFF)
+                as *mut *mut c_void) = per_inode_mapping;
+        }
     }
     inode
 }

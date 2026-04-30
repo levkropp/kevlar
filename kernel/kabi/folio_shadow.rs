@@ -338,20 +338,29 @@ pub fn alloc_folio(
     // Compute fake_page slot inside the shadow page.
     let fake_page_va = VMEMMAP_START + data_paddr / SIZEOF_STRUCT_PAGE;
 
-    // Populate the fake_page header.  Linux folio fields used by
-    // erofs at mount time:
-    //   +0   unsigned long flags    — set PG_uptodate (bit 3)
-    //   +16  struct address_space *mapping
-    //   +24  pgoff_t index
+    // Populate the fake_page header.  Linux 7.0 struct folio layout
+    // (include/linux/mm_types.h:401):
+    //   +0   memdesc_flags_t flags             (8 bytes)
+    //   +8   union { list_head lru, pgmap }    (16 bytes — list_head is
+    //                                            { next, prev } = 16 B)
+    //   +24  struct address_space *mapping     (8 bytes)
+    //   +32  pgoff_t index                     (8 bytes)
     //
     // The fake_page_va lives inside the shadow page that we mapped
     // at VMEMMAP_START in `init()`.  Writes through it land in
     // the shadow page's physical backing.
+    //
+    // Phase 13 fix: Linux 7.0 has mapping at +24 (not +16), since the
+    // lru/pgmap union absorbs 16 bytes after flags.  The pre-Phase-13
+    // assumption of +16 worked for erofs's mount path because erofs
+    // reads inode->i_mapping directly rather than folio->mapping.
+    // ext4_read_folio reads folio->mapping->host as its first action,
+    // so the offset has to match Linux's actual layout.
     unsafe {
         let p = fake_page_va as *mut u8;
         core::ptr::write_volatile(p as *mut u64, flags);
-        core::ptr::write_volatile(p.add(16) as *mut *mut c_void, mapping);
-        core::ptr::write_volatile(p.add(24) as *mut u64, index);
+        core::ptr::write_volatile(p.add(24) as *mut *mut c_void, mapping);
+        core::ptr::write_volatile(p.add(32) as *mut u64, index);
     }
 
     FAKE_PAGES_USED.fetch_add(1, Ordering::Relaxed);
@@ -362,3 +371,15 @@ pub fn alloc_folio(
 /// folio's data is valid; they skip calling `read_folio` and use
 /// the data directly.
 pub const PG_UPTODATE: u64 = 1 << 3;
+
+/// Inverse of the inline `kmap_local_page` math erofs and ext4 use:
+///   data_va = LINUX_PAGE_OFFSET + ((fake_page_va - VMEMMAP_START)
+///             / sizeof(struct page)) * PAGE_SIZE
+///
+/// Used by `filemap_read` to compute the kernel VA holding the
+/// actual page contents from a folio (fake-page) pointer.
+pub fn folio_to_data_va(fake_page_va: u64) -> *mut u8 {
+    let idx = (fake_page_va.wrapping_sub(VMEMMAP_START)) / SIZEOF_STRUCT_PAGE;
+    let data_va = LINUX_PAGE_OFFSET + idx * PAGE_SIZE as u64;
+    data_va as *mut u8
+}

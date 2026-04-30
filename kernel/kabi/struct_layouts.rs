@@ -110,6 +110,77 @@ pub const AS_SIZE: usize = 256;
 pub const AOPS_READ_FOLIO_OFF: usize = 0;
 pub const AOPS_SIZE: usize = 152;
 
+// ── struct file_operations (include/linux/fs.h) ─────────────────
+//
+// Linux 7.0 layout:
+//   +0   struct module *owner
+//   +8   fop_flags_t fop_flags (4 bytes + 4 pad)
+//   +16  loff_t (*llseek)(...)
+//   +24  ssize_t (*read)(...)
+//   +32  ssize_t (*write)(...)
+//   +40  ssize_t (*read_iter)(struct kiocb *, struct iov_iter *)
+//   +48  ssize_t (*write_iter)(...)
+//   +56  int (*iopoll)(...)
+//   +64  int (*iterate_shared)(...)
+//   ...
+pub const FOPS_READ_ITER_OFF: usize = 40;
+pub const FOPS_ITERATE_SHARED_OFF: usize = 64;
+
+// ── struct kiocb (include/linux/fs.h:381) ───────────────────────
+//
+//   +0   struct file *ki_filp
+//   +8   loff_t ki_pos
+//   +16  void (*ki_complete)(struct kiocb *, long)
+//   +24  void *private
+//   +32  int ki_flags
+//   +36  u16 ki_ioprio
+//   +38  u8 ki_write_stream
+//   +40  struct wait_page_queue *ki_waitq
+// Total: 48 bytes.
+pub const KIOCB_KI_FILP_OFF: usize = 0;
+pub const KIOCB_KI_POS_OFF: usize = 8;
+pub const KIOCB_KI_FLAGS_OFF: usize = 32;
+pub const KIOCB_SIZE: usize = 48;
+
+// ── struct iov_iter (include/linux/uio.h:43) ────────────────────
+//
+//   +0   u8 iter_type
+//   +1   bool nofault
+//   +2   bool data_source
+//   +3..+7 pad (alignment to 8)
+//   +8   size_t iov_offset
+//   +16  union { iov, kvec, bvec, ubuf, ... }: 8-byte ptr
+//   +24  size_t count   (or 16-byte iovec for ITER_UBUF)
+//   +32  union { unsigned long nr_segs, ... }
+// Total: 40 bytes.
+pub const IOV_ITER_TYPE_OFF: usize = 0;
+pub const IOV_ITER_NOFAULT_OFF: usize = 1;
+pub const IOV_ITER_DATA_SOURCE_OFF: usize = 2;
+pub const IOV_ITER_IOV_OFFSET_OFF: usize = 8;
+pub const IOV_ITER_KVEC_OFF: usize = 16;
+pub const IOV_ITER_COUNT_OFF: usize = 24;
+pub const IOV_ITER_NR_SEGS_OFF: usize = 32;
+pub const IOV_ITER_SIZE: usize = 40;
+
+// `enum iter_type` from include/linux/uio.h:23
+//   ITER_UBUF=0, ITER_IOVEC=1, ITER_BVEC=2, ITER_KVEC=3, ...
+pub const ITER_KVEC: u8 = 3;
+// `data_source`: ITER_DEST=0 (read), ITER_SOURCE=1 (write).
+pub const ITER_DEST: u8 = 0;
+
+// ── struct kvec (include/linux/uio.h:18) ────────────────────────
+//
+//   +0   void *iov_base
+//   +8   size_t iov_len
+// Total: 16 bytes.
+pub const KVEC_IOV_BASE_OFF: usize = 0;
+pub const KVEC_IOV_LEN_OFF: usize = 8;
+pub const KVEC_SIZE: usize = 16;
+
+// `inode->i_fop` (file_operations *) — verified via Phase 4 erofs.ko
+// disasm (`erofs_fill_inode` storing at offset 0x160 from inode).
+pub const INODE_I_FOP_OFF: usize = 352;
+
 // ── struct super_block (include/linux/fs.h, larger) ─────────────
 //
 // Allocate 4096 bytes — super_block is ~1700 bytes in modern Linux

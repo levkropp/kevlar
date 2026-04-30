@@ -932,25 +932,16 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
     // (it returns -ENOMEM at our null-returning kmem_cache stub)
     // leaves state that later wedges virtio_input probe.  Wire
     // back on once the slab/kmem_cache stubs return real handles.
-    // Enable via the cmdline `kabi-load-erofs=1` for debug runs.
-    #[cfg(target_arch = "aarch64")]
-    if bootinfo.raw_cmdline.as_str().contains("kabi-fill-super=1") {
-        // K34 Day 2 gate: only enabled when explicitly requested
-        // via cmdline.  See kernel/kabi/fs_synth.rs ALLOW_FILL_SUPER
-        // comment.
-        unsafe { kabi::fs_synth::ALLOW_FILL_SUPER = true; }
-        info!("kabi: ALLOW_FILL_SUPER set — erofs fill_super dispatch enabled");
-    }
+    // Phase 13: ALLOW_FILL_SUPER defaults to true; the
+    // `kabi-fill-super=1` cmdline flag is no longer required.
     // Phase 8/9 (ext4 arc): load the mbcache → jbd2 → ext4 chain so
-    // their runtime exports become visible across modules.  Gated on
-    // `kabi-load-ext4=1` for full chain; `kabi-load-mbcache=1` loads
-    // only mbcache (smoke test).
+    // their runtime exports become visible across modules.  Phase 13:
+    // unconditional load — the userspace mount(2) syscall now routes
+    // ext4 through the kABI registry, so ext4.ko has to be available
+    // before init runs.
     #[cfg(target_arch = "aarch64")]
     {
         let cmdline = bootinfo.raw_cmdline.as_str();
-        let load_chain = cmdline.contains("kabi-load-ext4=1");
-        let load_mbcache = load_chain || cmdline.contains("kabi-load-mbcache=1");
-        let load_jbd2 = load_chain || cmdline.contains("kabi-load-jbd2=1");
 
         let try_load = |path: &str, label: &str| {
             info!("kabi: [ext4-arc] loading {}", path);
@@ -968,20 +959,13 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
             }
         };
 
-        if load_mbcache {
-            try_load("/lib/modules/mbcache.ko", "mbcache");
-        }
-        if load_jbd2 {
-            try_load("/lib/modules/jbd2.ko", "jbd2");
-        }
-        if load_chain {
-            try_load("/lib/modules/ext4.ko", "ext4");
-        }
+        try_load("/lib/modules/mbcache.ko", "mbcache");
+        try_load("/lib/modules/jbd2.ko", "jbd2");
+        try_load("/lib/modules/ext4.ko", "ext4");
 
-        // Phase 11 (ext4 arc): in-kernel mount probe.  Only attempt
-        // if `kabi-mount-ext4-probe=1` is set AND the load chain ran
-        // (otherwise no fs_type registered).
-        if load_chain && cmdline.contains("kabi-mount-ext4-probe=1") {
+        // Optional in-kernel mount probe (kept for diagnostics; the
+        // userspace test exercises the same path).
+        if cmdline.contains("kabi-mount-ext4-probe=1") {
             info!("kabi: [Phase 11 probe] mount-ext4 via kABI(/dev/vda, MS_RDONLY)");
             let source = "/dev/vda\0";
             kabi::breadcrumb::clear();
@@ -989,7 +973,42 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                 "ext4", Some("/dev/vda"), 1 /* MS_RDONLY */,
                 source.as_ptr(),
             ) {
-                Ok(_fs) => info!("kabi: ext4 mount probe Ok — KabiFileSystem ready"),
+                Ok(fs) => {
+                    info!("kabi: ext4 mount probe Ok — KabiFileSystem ready");
+                    // Phase 13 in-kernel probe: drive readdir + read on
+                    // the root directory so we can iterate without the
+                    // userspace test loop.
+                    if let Ok(root) = fs.root_dir() {
+                        info!("kabi: ext4 probe: root_dir Ok");
+                        match root.lookup("hello.txt") {
+                            Ok(node) => match node.as_file() {
+                                Ok(file) => {
+                                    let mut buf = [0u8; 64];
+                                    let opts = crate::fs::opened_file::OpenOptions::readwrite();
+                                    let ub = kevlar_vfs::user_buffer::UserBufferMut::from(&mut buf[..]);
+                                    match file.read(0, ub, &opts) {
+                                        Ok(n) => {
+                                            let s = core::str::from_utf8(&buf[..n])
+                                                .unwrap_or("(non-utf8)");
+                                            info!(
+                                                "kabi: ext4 probe: read hello.txt = {} bytes: {:?}",
+                                                n, s,
+                                            );
+                                        }
+                                        Err(e) => warn!(
+                                            "kabi: ext4 probe: read hello.txt failed: {:?}", e),
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    "kabi: ext4 probe: hello.txt as_file: {:?}", e),
+                            },
+                            Err(e) => warn!(
+                                "kabi: ext4 probe: lookup(hello.txt): {:?}", e),
+                        }
+                    } else {
+                        warn!("kabi: ext4 probe: root_dir failed");
+                    }
+                }
                 Err(e) => info!("kabi: ext4 mount probe returned {:?}", e),
             }
             // Always dump breadcrumbs — empty if no instrumentation.

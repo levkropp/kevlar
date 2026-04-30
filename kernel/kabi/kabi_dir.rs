@@ -452,6 +452,168 @@ impl KabiFile {
     fn read_inode_field<T: Copy>(&self, off: usize) -> T {
         unsafe { *((self.inode as *const u8).add(off) as *const T) }
     }
+
+    /// Phase 6 path — used for filesystems whose on-disk layout the
+    /// kABI side decodes directly (erofs FLAT_PLAIN / FLAT_INLINE).
+    fn read_via_inode_meta(
+        &self, offset: usize, want: usize,
+        buf: UserBufferMut<'_>,
+        meta: super::inode_meta::KabiInodeMeta,
+    ) -> VfsResult<usize> {
+        let mut writer = UserBufWriter::from(buf);
+        let mut done = 0usize;
+        let mut kbuf = [0u8; 4096];
+        while done < want {
+            let file_pos = offset + done;
+            let page_idx = (file_pos / 4096) as u64;
+            let (path, phys_off, inline_shift) =
+                super::inode_meta::translate_offset(&meta, page_idx)
+                    .ok_or_else(|| Error::new(Errno::EIO))?;
+            super::filemap::read_initramfs_at(
+                &path, phys_off as usize,
+                kbuf.as_mut_ptr(), 4096,
+            ).map_err(|_| Error::new(Errno::EIO))?;
+            let in_page = file_pos % 4096;
+            let src = (inline_shift as usize) + in_page;
+            if src >= 4096 {
+                break;
+            }
+            let chunk = (want - done).min(4096 - src);
+            if chunk == 0 {
+                break;
+            }
+            writer.write_bytes(&kbuf[src..src + chunk])
+                .map_err(|_| Error::new(Errno::EIO))?;
+            done += chunk;
+        }
+        Ok(done)
+    }
+
+    /// Phase 13 path — dispatch into the filesystem's own
+    /// `inode->i_fop->read_iter` (e.g. `ext4_file_read_iter`).  We
+    /// synth a (kiocb, iov_iter, kvec) triple pointing at a kernel
+    /// staging buffer; the .ko's read path drives our `filemap_read`
+    /// → `read_cache_folio` → `a_ops->read_folio` chain to populate
+    /// the page-cache and copy bytes into the kvec.  After return
+    /// we copy the staging buffer into the caller's UserBufferMut.
+    fn read_via_read_iter(
+        &self, offset: usize, want: usize,
+        buf: UserBufferMut<'_>,
+    ) -> VfsResult<usize> {
+        // Read i_fop and i_fop->read_iter.
+        let i_fop: usize = self.read_inode_field(fl::INODE_I_FOP_OFF);
+        if i_fop == 0 {
+            log::warn!("kabi: KabiFile({}).read: i_fop is null", self.name);
+            return Err(Error::new(Errno::EIO));
+        }
+        let read_iter_fn: usize = unsafe {
+            *((i_fop as *const u8).add(fl::FOPS_READ_ITER_OFF)
+                as *const usize)
+        };
+        if read_iter_fn == 0 {
+            log::warn!(
+                "kabi: KabiFile({}).read: i_fop->read_iter is null",
+                self.name,
+            );
+            return Err(Error::new(Errno::EIO));
+        }
+
+        // Allocate kernel staging buffer.
+        let staging = super::alloc::kmalloc(want, 0) as *mut u8;
+        if staging.is_null() {
+            return Err(Error::new(Errno::ENOMEM));
+        }
+
+        // Synth struct file with f_inode + f_mapping.
+        let file = super::alloc::kzalloc(fl::FILE_SIZE, 0) as *mut u8;
+        if file.is_null() {
+            super::alloc::kfree(staging as *mut c_void);
+            return Err(Error::new(Errno::ENOMEM));
+        }
+        let i_mapping: usize = self.read_inode_field(fl::INODE_I_MAPPING_OFF);
+        unsafe {
+            *(file.add(fl::FILE_F_MAPPING_OFF) as *mut usize) = i_mapping;
+            *(file.add(fl::FILE_F_INODE_OFF) as *mut usize) = self.inode;
+        }
+
+        // Synth kvec (single segment).
+        let kvec = super::alloc::kzalloc(fl::KVEC_SIZE, 0) as *mut u8;
+        if kvec.is_null() {
+            super::alloc::kfree(file as *mut c_void);
+            super::alloc::kfree(staging as *mut c_void);
+            return Err(Error::new(Errno::ENOMEM));
+        }
+        unsafe {
+            *(kvec.add(fl::KVEC_IOV_BASE_OFF) as *mut *mut u8) = staging;
+            *(kvec.add(fl::KVEC_IOV_LEN_OFF) as *mut usize) = want;
+        }
+
+        // Synth iov_iter.
+        let iter = super::alloc::kzalloc(fl::IOV_ITER_SIZE, 0) as *mut u8;
+        if iter.is_null() {
+            super::alloc::kfree(kvec as *mut c_void);
+            super::alloc::kfree(file as *mut c_void);
+            super::alloc::kfree(staging as *mut c_void);
+            return Err(Error::new(Errno::ENOMEM));
+        }
+        unsafe {
+            *(iter.add(fl::IOV_ITER_TYPE_OFF)) = fl::ITER_KVEC;
+            *(iter.add(fl::IOV_ITER_NOFAULT_OFF)) = 0;
+            *(iter.add(fl::IOV_ITER_DATA_SOURCE_OFF)) = fl::ITER_DEST;
+            *(iter.add(fl::IOV_ITER_IOV_OFFSET_OFF) as *mut usize) = 0;
+            *(iter.add(fl::IOV_ITER_KVEC_OFF) as *mut *mut u8) = kvec;
+            *(iter.add(fl::IOV_ITER_COUNT_OFF) as *mut usize) = want;
+            *(iter.add(fl::IOV_ITER_NR_SEGS_OFF) as *mut usize) = 1;
+        }
+
+        // Synth kiocb.
+        let kiocb = super::alloc::kzalloc(fl::KIOCB_SIZE, 0) as *mut u8;
+        if kiocb.is_null() {
+            super::alloc::kfree(iter as *mut c_void);
+            super::alloc::kfree(kvec as *mut c_void);
+            super::alloc::kfree(file as *mut c_void);
+            super::alloc::kfree(staging as *mut c_void);
+            return Err(Error::new(Errno::ENOMEM));
+        }
+        unsafe {
+            *(kiocb.add(fl::KIOCB_KI_FILP_OFF) as *mut *mut u8) = file;
+            *(kiocb.add(fl::KIOCB_KI_POS_OFF) as *mut i64) = offset as i64;
+            // ki_flags = 0 (buffered, sync, no NOWAIT).
+        }
+
+        log::info!(
+            "kabi: KabiFile({}).read: dispatching read_iter \
+             (want={} offset={})",
+            self.name, want, offset,
+        );
+        let rc = super::loader::call_with_scs_2(
+            read_iter_fn as *const (),
+            kiocb as usize,
+            iter as usize,
+        ) as isize;
+        log::info!(
+            "kabi: KabiFile({}).read: read_iter returned {}",
+            self.name, rc,
+        );
+
+        // Free temporaries (staging is freed last after copy).
+        super::alloc::kfree(kiocb as *mut c_void);
+        super::alloc::kfree(iter as *mut c_void);
+        super::alloc::kfree(kvec as *mut c_void);
+        super::alloc::kfree(file as *mut c_void);
+
+        if rc < 0 {
+            super::alloc::kfree(staging as *mut c_void);
+            return Err(Error::new(Errno::EIO));
+        }
+        let copied = (rc as usize).min(want);
+        let mut writer = UserBufWriter::from(buf);
+        let src = unsafe { core::slice::from_raw_parts(staging, copied) };
+        let res = writer.write_bytes(src);
+        super::alloc::kfree(staging as *mut c_void);
+        res.map_err(|_| Error::new(Errno::EIO))?;
+        Ok(copied)
+    }
 }
 
 impl FileLike for KabiFile {
@@ -482,36 +644,19 @@ impl FileLike for KabiFile {
         if want == 0 {
             return Ok(0);
         }
-        let meta = super::inode_meta::lookup_meta(self.inode)
-            .ok_or_else(|| Error::new(Errno::EIO))?;
 
-        let mut writer = UserBufWriter::from(buf);
-        let mut done = 0usize;
-        let mut kbuf = [0u8; 4096];
-        while done < want {
-            let file_pos = offset + done;
-            let page_idx = (file_pos / 4096) as u64;
-            let (path, phys_off, inline_shift) =
-                super::inode_meta::translate_offset(&meta, page_idx)
-                    .ok_or_else(|| Error::new(Errno::EIO))?;
-            super::filemap::read_initramfs_at(
-                &path, phys_off as usize,
-                kbuf.as_mut_ptr(), 4096,
-            ).map_err(|_| Error::new(Errno::EIO))?;
-            let in_page = file_pos % 4096;
-            let src = (inline_shift as usize) + in_page;
-            if src >= 4096 {
-                break;
-            }
-            let chunk = (want - done).min(4096 - src);
-            if chunk == 0 {
-                break;
-            }
-            writer.write_bytes(&kbuf[src..src + chunk])
-                .map_err(|_| Error::new(Errno::EIO))?;
-            done += chunk;
+        // Fast path for filesystems with KabiInodeMeta registered
+        // (erofs Phase 6: layout decoder + raw initramfs read).
+        if let Some(meta) = super::inode_meta::lookup_meta(self.inode) {
+            return self.read_via_inode_meta(offset, want, buf, meta);
         }
-        Ok(done)
+
+        // Phase 13: dispatch into the fs's own `read_iter` so ext4
+        // (and any future fs) handles its on-disk layout natively.
+        // Builds a synth (kiocb, iov_iter, kvec) triple, invokes
+        // `inode->i_fop->read_iter` via SCS, then copies the kernel
+        // staging buffer into the caller's UserBufferMut.
+        self.read_via_read_iter(offset, want, buf)
     }
 
     fn write(

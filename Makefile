@@ -1350,6 +1350,33 @@ test-kabi-mount-erofs: build
 		echo "kABI MOUNT TEST: no result line"; exit 1; \
 	fi
 
+# Phase 13 (ext4 arc): userspace mount(ext4) end-to-end via kABI.
+# Mounts /dev/vda (= build/test-fixtures/test.ext4 fixture) at
+# /mnt/ext4 through the kABI registry, then exercises readdir +
+# open + read of hello.txt and info.txt.  ext4.ko is loaded
+# unconditionally at boot now (Phase 13), so no special cmdline
+# flag is needed.
+.PHONY: test-kabi-mount-ext4
+test-kabi-mount-ext4: build
+	$(PROGRESS) "TEST" "kABI userspace mount(ext4) end-to-end ($(ARCH))"
+	$(PYTHON3) tools/run-qemu.py --timeout 60 --kvm --batch \
+		--arch $(ARCH) \
+		--disk build/test-fixtures/test.ext4 \
+		--append-cmdline "init=/bin/test-kabi-mount-ext4" \
+		$(kernel_qemu_arg) -- -smp 2 -m 1024 2>&1 \
+		| tee /tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E '^(TEST_PASS|TEST_FAIL|TEST_END|PASS|FAIL|RESULTS)' \
+		/tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log \
+		|| echo "(no test output)"
+	@if grep -q '^TEST_FAIL' /tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log; then \
+		echo "kABI EXT4 MOUNT TEST: FAIL"; exit 1; \
+	elif grep -q '^TEST_PASS' /tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log; then \
+		echo "kABI EXT4 MOUNT TEST: PASS"; \
+	else \
+		echo "kABI EXT4 MOUNT TEST: no result line"; exit 1; \
+	fi
+
 # Test LXDE desktop startup (batch mode, 2 CPUs, with VGA for framebuffer)
 .PHONY: test-lxde
 test-lxde: $(LXDE_IMG)

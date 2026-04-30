@@ -104,11 +104,35 @@ impl<'a> SyscallHandler<'a> {
                     }
                 }
             }
-            "ext2" | "ext3" | "ext4" => {
-                // Mount ext2/ext3/ext4 from the global block device.
-                // TODO: when ext4.ko is in the kABI registry, route
-                // ext4 here through `kabi_mount_filesystem` (task #99).
+            "ext2" | "ext3" => {
+                // Mount ext2/ext3 from the global block device via
+                // the homegrown driver.  ext4 routes through the
+                // kABI fs registry (Phase 13).
                 kevlar_ext2::mount_ext2()?
+            }
+            "ext4" => {
+                // Phase 13: route ext4 through the kABI registry so
+                // ext4.ko handles its own on-disk format.
+                let source_str = source_opt
+                    .filter(|p| p.value() != 0)
+                    .map(|p| UserCStr::new(p, PATH_MAX))
+                    .transpose()?;
+                let source_ref = source_str.as_ref().map(|s| s.as_str());
+                let source_ptr = source_str
+                    .as_ref()
+                    .map(|s| s.as_str().as_ptr())
+                    .unwrap_or(core::ptr::null());
+                match crate::kabi::fs_adapter::kabi_mount_filesystem(
+                    "ext4", source_ref, flags as u32, source_ptr,
+                ) {
+                    Ok(fs) => fs,
+                    Err(e) => {
+                        debug_warn!(
+                            "mount: kABI route for ext4 failed: {:?}", e,
+                        );
+                        return Err(e);
+                    }
+                }
             }
             "devtmpfs" => {
                 // Mount our real DEV_FS so mknod'd nodes appear.
