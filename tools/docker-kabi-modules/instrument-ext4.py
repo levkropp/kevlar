@@ -43,10 +43,37 @@ import sys
 from pathlib import Path
 
 SENTINEL = "/* KABI_INSTRUMENT */"
-GOTO_RE = re.compile(
-    r'^(\s*)goto\s+(failed_mount\w*|failed_mount|out_\w*|out|err\w*|err)\s*;'
+# Match any `goto <label>;` — we used to limit to known error-path
+# label prefixes but that missed wrapper-function gotos like
+# `goto free_sbi;` in `ext4_fill_super`.  The function-range filter
+# already restricts injection to the bodies the user requested.
+GOTO_RE = re.compile(r'^(\s*)goto\s+(\w+)\s*;')
+# Match label-definition lines: e.g. `failed_mount4:` or
+# `failed_mount8: __maybe_unused`.  Excludes `case X:` and `default:`
+# statements (those are handled by switch/case, not goto).
+LABEL_RE = re.compile(
+    r'^(\s*)([A-Za-z_]\w*)\s*:\s*(?:__maybe_unused\s*)?$'
 )
 FUNC_OPEN_RE = re.compile(r'^(static\s+)?\w[\w\s\*]*\b(\w+)\s*\([^)]*\)\s*\{?\s*$')
+
+
+def detect_error_var(lines: list[str], start: int, end: int) -> str:
+    """Scan a function's body (1-based line range) for the most likely
+    error/return variable.  Returns the literal source name, or `'0'`
+    if none is found (so the breadcrumb call still type-checks).
+
+    Heuristic: find the FIRST `int <name>` or `int <name> =` declared at
+    the top of the function body.  ext4 mostly uses `err`/`ret`/`rc`.
+    """
+    decl_re = re.compile(r'^\s*int\s+(err|ret|rc)\s*(?:=|;)')
+    # Scan only the first ~50 lines of the function (declarations
+    # almost always appear there).
+    scan_end = min(end, start + 50)
+    for i in range(start - 1, scan_end):
+        m = decl_re.match(lines[i])
+        if m:
+            return m.group(1)
+    return '0'
 
 
 def find_function_ranges(lines: list[str], func_names: set[str]) -> dict[str, tuple[int, int]]:
@@ -93,9 +120,13 @@ def inject(
     lines: list[str],
     in_range: callable,  # type: ignore[name-defined]
     site_filter: callable | None = None,  # type: ignore[name-defined]
+    err_var_for_line: callable | None = None,  # type: ignore[name-defined]
 ) -> tuple[list[str], int]:
     """Walk `lines` and inject breadcrumbs at goto sites that pass
     both `in_range(line_no)` and `site_filter(line_no, target)`.
+
+    `err_var_for_line(line_no)` returns the name of the in-scope error
+    variable to capture (e.g. `err`, `ret`, `rc`) — or `'0'` if none.
     """
     out: list[str] = []
     injected = 0
@@ -108,13 +139,71 @@ def inject(
             indent = m.group(1)
             target = m.group(2)
             tid = encode_target_id(target)
+            err_var = err_var_for_line(i) if err_var_for_line else 'err'
+            # Wrap in do/while(0) so the single-statement-if pattern
+            # `if (err) goto failed_mount;` keeps both the breadcrumb
+            # AND the goto guarded by the same condition.  Inserting
+            # two sibling statements would silently drop the goto out
+            # of the conditional and execute it unconditionally.
             instr = (
-                f'{indent}kabi_breadcrumb({i}, {tid}, err); {SENTINEL} '
-                f'/* {target} */\n'
+                f'{indent}do {{ kabi_breadcrumb({i}, {tid}, {err_var}); '
+                f'goto {target}; }} while (0); {SENTINEL} /* {target} */\n'
             )
             out.append(instr)
             injected += 1
+        else:
+            out.append(line)
+    return out, injected
+
+
+def inject_at_labels(
+    lines: list[str],
+    in_range: callable,  # type: ignore[name-defined]
+    err_var_for_line: callable,  # type: ignore[name-defined]
+) -> tuple[list[str], int]:
+    """Inject breadcrumb at every label-definition site (e.g.
+    `failed_mount4:`).  Unlike goto-site injection, label-entry
+    breadcrumbs survive inliner optimizations because labels are
+    addressable boundaries — the compiler can't elide the prologue
+    of a label without merging it with another label, in which case
+    the merged label still carries one of our breadcrumbs.
+
+    Each instrumented label becomes:
+      failed_mount4:
+        kabi_breadcrumb(<line>, <label_id>, <err>); /* sentinel */
+        ...rest of label body...
+    """
+    out: list[str] = []
+    injected = 0
+    for i, line in enumerate(lines, start=1):
         out.append(line)
+        if SENTINEL in line:
+            continue
+        m = LABEL_RE.match(line)
+        if not m or not in_range(i):
+            continue
+        indent = m.group(1)
+        label = m.group(2)
+        # Filter out non-goto-target labels: typedefs, struct fields,
+        # or enum values shouldn't appear in our regex output anyway,
+        # but skip clearly-non-flow labels just in case.
+        if label in ('default', 'case'):
+            continue
+        # Skip labels that aren't goto targets (heuristic: search the
+        # whole file for `goto <label>;`).  Cheap because we do this
+        # only at injection time.
+        if not any(f'goto {label};' in l for l in lines):
+            continue
+        tid = encode_target_id(label)
+        err_var = err_var_for_line(i) if err_var_for_line else 'err'
+        # Indent the breadcrumb call one level deeper than the label
+        # itself so it reads as a label-body statement.
+        instr = (
+            f'{indent}\tkabi_breadcrumb({i}, {tid}, {err_var}); '
+            f'{SENTINEL} /* label:{label} */\n'
+        )
+        out.append(instr)
+        injected += 1
     return out, injected
 
 
@@ -154,8 +243,11 @@ def main() -> int:
     ap.add_argument('source', help='path to fs/ext4/super.c (or similar)')
     ap.add_argument(
         '--mode',
-        choices=['all', 'lines', 'bisect', 'functions'],
+        choices=['all', 'lines', 'bisect', 'functions', 'labels'],
         default='all',
+        help='Injection strategy.  `labels` injects at label entry '
+             '(survives inliner reorganization); the others inject at '
+             '`goto X` sites which the inliner may eliminate.',
     )
     ap.add_argument(
         '--lines',
@@ -184,8 +276,20 @@ def main() -> int:
     if not ranges:
         print(f'instrument-ext4: no functions matched {func_names}', file=sys.stderr)
         return 1
+    # Build per-function error-var map by scanning each function body
+    # for the first `int err|ret|rc` declaration.
+    err_var_by_func: dict[str, str] = {
+        name: detect_error_var(lines, s, e) for name, (s, e) in ranges.items()
+    }
     for name, (s, e) in ranges.items():
-        print(f'  function {name}: lines {s}..{e}')
+        print(f'  function {name}: lines {s}..{e} '
+              f'(err_var={err_var_by_func[name]})')
+
+    def err_var_for_line(line_no: int) -> str:
+        for name, (s, e) in ranges.items():
+            if s <= line_no <= e:
+                return err_var_by_func[name]
+        return '0'
 
     in_range_funcs = lambda i: any(s <= i <= e for s, e in ranges.values())  # noqa: E731
 
@@ -212,11 +316,20 @@ def main() -> int:
         else:
             in_range = lambda i: mid < i <= e  # noqa: E731
         site_filter = None
+    elif args.mode == 'labels':
+        in_range = in_range_funcs
+        site_filter = None  # unused for label mode
     else:
         return 1
 
-    lines = ensure_extern_decl(lines)
-    new_lines, n = inject(lines, in_range, site_filter)
+    # Inject FIRST so user-supplied --lines refer to the original source
+    # line numbers.  ensure_extern_decl prepends 4 lines after #include
+    # block, which would otherwise shift line numbers under the user.
+    if args.mode == 'labels':
+        new_lines, n = inject_at_labels(lines, in_range, err_var_for_line)
+    else:
+        new_lines, n = inject(lines, in_range, site_filter, err_var_for_line)
+    new_lines = ensure_extern_decl(new_lines)
     src.write_text(''.join(new_lines))
     print(f'instrument-ext4: injected {n} breadcrumb(s) into {src}')
     return 0

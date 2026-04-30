@@ -439,6 +439,13 @@ pub extern "C" fn get_tree_bdev(fc: *mut c_void,
     let fc_s_fs_info = unsafe {
         *(fc.cast::<u8>().add(fl::FC_S_FS_INFO_OFF) as *const *mut c_void)
     };
+    // Propagate fc->sb_flags into sb->s_flags so `sb_rdonly(sb)` works
+    // inside fill_super.  Without this, ext4_setup_super sees sb as
+    // writable and runs the journal-update write path (which fails
+    // -EIO on our RO bdev).
+    let fc_sb_flags = unsafe {
+        *(fc.cast::<u8>().add(fl::FC_SB_FLAGS_OFF) as *const u32)
+    } as u64;
     unsafe {
         let s = sb.cast::<u8>();
         // ext4 will call sb_min_blocksize / sb_set_blocksize to set
@@ -449,6 +456,7 @@ pub extern "C" fn get_tree_bdev(fc: *mut c_void,
         *(s.add(fl::SB_S_MAXBYTES_OFF) as *mut i64) = i64::MAX;
         *(s.add(fl::SB_S_FS_INFO_OFF) as *mut *mut c_void) = fc_s_fs_info;
         *(s.add(fl::SB_S_BDEV_OFF) as *mut *mut c_void) = bdev;
+        *(s.add(fl::SB_S_FLAGS_OFF) as *mut u64) = fc_sb_flags;
     }
     log::info!(
         "kabi: get_tree_bdev: sb={:p} bdev={:p} fc_s_fs_info={:p}",

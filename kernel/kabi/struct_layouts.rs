@@ -135,6 +135,10 @@ pub const SB_S_BLOCKSIZE_OFF: usize = 24;       // u64 (8 bytes, padding aligns)
 pub const SB_S_MAXBYTES_OFF: usize = 32;        // loff_t
 pub const SB_S_TYPE_OFF: usize = 40;            // file_system_type *
 pub const SB_S_OP_OFF: usize = 48;              // super_operations *
+// sb->s_flags at +80: after dq_op +56, s_qcop +64, s_export_op +72.
+// Verified by counting from struct super_block in
+// include/linux/fs/super_types.h (Linux 7.0).  s_flags is unsigned long.
+pub const SB_S_FLAGS_OFF: usize = 80;
 // `sb->s_root` verified via erofs.ko `fc_fill_super` disasm at 0x4940:
 //   str x0, [x19, #104]   ; sb[+104] = result of d_make_root
 // Was guessed at 256; real offset is 104.
