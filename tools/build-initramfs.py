@@ -1893,6 +1893,51 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
         shutil.copy2(erofs_img_src, dest)
         log("IMG", f"installed /lib/test.erofs ({erofs_img_src.stat().st_size} bytes) [K33 Phase 3 fixture]")
 
+    # ── Phase 12 v2 (ext4 arc) test image: a fresh mkfs.ext4 fixture
+    # at build/test-fixtures/test.ext4.  Attached to QEMU as /dev/vda
+    # by the `test-kabi-mount-ext4-probe` Makefile target.  Built with
+    # `^has_journal` so RO mount via ext4.ko's noload path skips
+    # journal replay.
+    ext4_img = ROOT / "build" / "test-fixtures" / "test.ext4"
+    ext4_img.parent.mkdir(parents=True, exist_ok=True)
+    # macOS: e2fsprogs is in /opt/homebrew/Cellar; not in PATH.
+    mkfs_ext4 = shutil.which("mkfs.ext4")
+    if not mkfs_ext4:
+        candidates = sorted(Path("/opt/homebrew/Cellar/e2fsprogs").glob(
+            "*/sbin/mkfs.ext4"))
+        if candidates:
+            mkfs_ext4 = str(candidates[-1])
+    if mkfs_ext4 and Path(mkfs_ext4).exists() and not ext4_img.exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            content_dir = Path(tmp) / "ext4-content"
+            content_dir.mkdir()
+            (content_dir / "hello.txt").write_text(
+                "hello from kABI-mounted ext4!\n"
+            )
+            (content_dir / "info.txt").write_text("kevlar: ext4 demo\n")
+            # 8 MiB pre-allocated; mkfs.ext4 will format in-place.
+            with open(ext4_img, "wb") as fh:
+                fh.truncate(8 * 1024 * 1024)
+            try:
+                # Disabled features:
+                #   has_journal      — RO mount; no journal replay needed.
+                #   metadata_csum    — ext4.ko's SB csum check rejects
+                #                       our images for reasons TBD.  Skip.
+                #   64bit            — keeps group desc size at 32 bytes
+                #                       (matches Linux 7.0 small-fs default).
+                subprocess.run(
+                    [mkfs_ext4, "-F", "-b", "4096",
+                     "-O", "^has_journal,^metadata_csum,^64bit",
+                     "-L", "kabi-test",
+                     "-d", str(content_dir),
+                     str(ext4_img)],
+                    check=True, capture_output=True,
+                )
+                log("IMG", f"generated {ext4_img.name} (8 MiB ext4, no journal)")
+            except subprocess.CalledProcessError as e:
+                log("WARN", f"mkfs.ext4 failed: {e.stderr.decode()[:200]}")
+                ext4_img.unlink(missing_ok=True)
+
     # ── kABI userspace test binary ──
     if local_arm64_bins:
         kabi_userspace_src = CACHE / "local-bin-arm64" / "test-kabi-userspace"

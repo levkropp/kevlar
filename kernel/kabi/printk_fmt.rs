@@ -23,6 +23,15 @@
 
 use core::ffi::{c_char, VaList};
 
+/// Linux's `struct va_format` — passed by `%pV` callers.  Lets
+/// `ext4_msg`, `pr_err_ratelimited`, etc. compose a formatted
+/// inner message and pass it through a single printk wrapper.
+#[repr(C)]
+struct VaFormat {
+    fmt: *const c_char,
+    va: *mut core::ffi::c_void,
+}
+
 const MAX_NUMBUF: usize = 32;
 
 /// Output sink: append bytes until full; further writes drop.
@@ -223,14 +232,36 @@ pub unsafe fn format_into(
             }
             b'p' => {
                 let v: usize = unsafe { args.arg::<usize>() };
-                // Optional `%p<modifier>` — skip any letter that
-                // immediately follows `p` and use plain hex with
-                // 0x prefix.
-                while *p != 0 && (*p).is_ascii_alphabetic() {
+                // Detect `%pV` (Linux's va_format extension):
+                //   struct va_format { const char *fmt; va_list *va; };
+                // Print the inner format string verbatim (no inner
+                // arg expansion) — gives diagnostic value for ext4's
+                // ext4_msg() etc. without recursing into another
+                // variadic frame.
+                let modifier = *p;
+                if modifier == b'V' {
                     p = p.add(1);
                     idx += 1;
+                    if v != 0 {
+                        let vaf = v as *const VaFormat;
+                        let inner_fmt = unsafe { (*vaf).fmt };
+                        if !inner_fmt.is_null() {
+                            let mut q = inner_fmt as *const u8;
+                            for _ in 0..1024 {
+                                let b = unsafe { *q };
+                                if b == 0 { break; }
+                                sink.push(b);
+                                q = unsafe { q.add(1) };
+                            }
+                        }
+                    }
+                } else {
+                    while *p != 0 && (*p).is_ascii_alphabetic() {
+                        p = p.add(1);
+                        idx += 1;
+                    }
+                    emit_hex(sink, v as u64, &spec, false, true);
                 }
-                emit_hex(sink, v as u64, &spec, false, true);
             }
             0 => break,
             _ => {

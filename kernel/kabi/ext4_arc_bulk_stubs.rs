@@ -482,9 +482,39 @@ fn fake_alloc() -> *mut c_void {
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
 // get_tree_bdev — Phase 11: real impl in kabi/fs_synth.rs.
-#[unsafe(no_mangle)] pub extern "C" fn iget_locked(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { fake_alloc() }
+// iget_locked — Phase 12 v2: allocate a real inode-sized buffer with
+// i_state=I_NEW so caller knows to populate it from disk.  ext4
+// passes (sb, ino) and expects a fully-shaped struct inode back.
+//
+//   sb_arg   = first arg (x0) = struct super_block *
+//   ino_arg  = second arg (x1) = inode number (unsigned long)
+#[unsafe(no_mangle)]
+pub extern "C" fn iget_locked(
+    sb: *mut c_void, ino: u64,
+    _: usize, _: usize, _: usize, _: usize,
+) -> *mut c_void {
+    use super::struct_layouts as fl;
+    let inode = super::alloc::kmalloc(fl::INODE_SIZE,
+        super::alloc::__GFP_ZERO);
+    if inode.is_null() { return inode; }
+    unsafe {
+        // Mirror iget5_locked's setup so ext4_iget's inode reads
+        // see consistent state.
+        *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF)
+            as *mut *mut c_void) = sb;
+        *(inode.cast::<u8>().add(fl::INODE_I_INO_OFF) as *mut u64) = ino;
+        *(inode.cast::<u8>().add(fl::INODE_I_BLKBITS_OFF) as *mut u8) = 12;
+        // Mark I_NEW so caller (ext4_iget) knows to read on-disk
+        // inode + populate fields, rather than treating as cached.
+        const I_NEW: u32 = 1 << 0;
+        *(inode.cast::<u8>().add(144) as *mut u32) = I_NEW;
+        // Default i_nlink = 1 so check_igot_inode's "i_nlink == 0
+        // → special inode unallocated" sanity check doesn't reject
+        // before ext4 populates it from disk.
+        *(inode.cast::<u8>().add(72) as *mut u32) = 1;
+    }
+    inode
+}
 #[unsafe(no_mangle)] pub extern "C" fn igrab(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }

@@ -1295,6 +1295,31 @@ kabi-modules:
 	docker run --rm -v "$$PWD/build/kabi-modules:/output" kevlar-kabi-modules
 	@ls -la build/kabi-modules/
 
+# Phase 12 v2 (ext4 arc): in-kernel boot probe that mounts a fresh
+# mkfs.ext4 fixture (build/test-fixtures/test.ext4) attached as
+# /dev/vda.  Verifies the get_tree_bdev → submit_bh → fill_super
+# chain returns 0 against a clean ext4 filesystem.
+.PHONY: test-kabi-mount-ext4-probe
+test-kabi-mount-ext4-probe: build
+	$(PROGRESS) "TEST" "kABI in-kernel ext4 mount probe ($(ARCH))"
+	$(PYTHON3) tools/run-qemu.py --timeout 30 --kvm --batch \
+		--arch $(ARCH) \
+		--disk build/test-fixtures/test.ext4 \
+		--append-cmdline "kabi-load-ext4=1 kabi-fill-super=1 kabi-mount-ext4-probe=1" \
+		$(kernel_qemu_arg) -- -smp 2 -m 1024 2>&1 \
+		| tee /tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log; true
+	@echo ""
+	@grep -E "submit_bh|fill_super|ext4 mount probe|EXT4-fs" \
+		/tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log \
+		|| echo "(no probe output)"
+	@if grep -q 'fill_super returned 0' \
+		/tmp/kevlar-test-kabi-mount-ext4-$(ARCH)-$(PROFILE).log; then \
+		echo "EXT4 PROBE: fill_super returned 0 PASS"; \
+	else \
+		echo "EXT4 PROBE: fill_super did not return 0 (Phase 12 v2 incomplete)"; \
+		exit 1; \
+	fi
+
 # Phase 7: userspace integration test for the kABI-mounted erofs
 # filesystem.  Boots Kevlar with init=/bin/test-kabi-mount-erofs as
 # PID 1 — the test does mount(2) → opendir/readdir → open/read against
