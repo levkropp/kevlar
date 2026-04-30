@@ -482,24 +482,54 @@ fn fake_alloc() -> *mut c_void {
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
 // get_tree_bdev — Phase 11: real impl in kabi/fs_synth.rs.
-// iget_locked — Phase 12 v2: allocate a real inode-sized buffer with
-// i_state=I_NEW so caller knows to populate it from disk.  ext4
-// passes (sb, ino) and expects a fully-shaped struct inode back.
+// iget_locked — Phase 12 v3: dispatch through sb->s_op->alloc_inode
+// so per-fs allocators (ext4_alloc_inode → struct ext4_inode_info
+// with vfs_inode at offset +0x110) produce inodes shaped to the
+// caller's expectations.  ext4's check_igot_inode reads
+// `[inode, -192]`, which only points at valid memory if vfs_inode
+// is embedded inside ext4_inode_info.
 //
 //   sb_arg   = first arg (x0) = struct super_block *
 //   ino_arg  = second arg (x1) = inode number (unsigned long)
+//
+// `struct super_operations.alloc_inode` is the FIRST function pointer
+// (offset 0) per linux-7.0 include/linux/fs/super_types.h:83.
 #[unsafe(no_mangle)]
 pub extern "C" fn iget_locked(
     sb: *mut c_void, ino: u64,
     _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void {
     use super::struct_layouts as fl;
-    let inode = super::alloc::kmalloc(fl::INODE_SIZE,
-        super::alloc::__GFP_ZERO);
+    if sb.is_null() { return core::ptr::null_mut(); }
+
+    // Try sb->s_op->alloc_inode(sb) first.
+    let s_op = unsafe {
+        *(sb.cast::<u8>().add(fl::SB_S_OP_OFF) as *const usize)
+    };
+    let inode = if s_op != 0 {
+        let alloc_inode_ptr = unsafe { *(s_op as *const usize) };
+        if alloc_inode_ptr != 0 {
+            let raw = super::loader::call_with_scs_1(
+                alloc_inode_ptr as *const (), sb as usize,
+            ) as *mut c_void;
+            log::info!("kabi: iget_locked: s_op->alloc_inode(sb={:p}) → {:p}",
+                       sb, raw);
+            if raw.is_null() {
+                return core::ptr::null_mut();
+            }
+            raw
+        } else {
+            // alloc_inode unset; fall back to plain inode kmalloc.
+            super::alloc::kmalloc(fl::INODE_SIZE, super::alloc::__GFP_ZERO)
+        }
+    } else {
+        super::alloc::kmalloc(fl::INODE_SIZE, super::alloc::__GFP_ZERO)
+    };
     if inode.is_null() { return inode; }
+
     unsafe {
-        // Mirror iget5_locked's setup so ext4_iget's inode reads
-        // see consistent state.
+        // Populate vfs_inode fields ext4_iget reads before
+        // ext4_get_inode_loc fills the rest from disk.
         *(inode.cast::<u8>().add(fl::INODE_I_SB_OFF)
             as *mut *mut c_void) = sb;
         *(inode.cast::<u8>().add(fl::INODE_I_INO_OFF) as *mut u64) = ino;
