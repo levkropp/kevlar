@@ -125,6 +125,16 @@ pub const AOPS_SIZE: usize = 152;
 //   ...
 pub const FOPS_READ_ITER_OFF: usize = 40;
 pub const FOPS_ITERATE_SHARED_OFF: usize = 64;
+// Continuing the file_operations layout:
+//   +72  poll
+//   +80  unlocked_ioctl
+//   +88  compat_ioctl
+//   +96  mmap
+//   +104 open(struct inode *, struct file *)
+//   +112 flush
+//   +120 release(struct inode *, struct file *)
+pub const FOPS_OPEN_OFF: usize = 104;
+pub const FOPS_RELEASE_OFF: usize = 120;
 
 // ── struct kiocb (include/linux/fs.h:381) ───────────────────────
 //

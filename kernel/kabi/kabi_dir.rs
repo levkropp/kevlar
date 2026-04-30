@@ -147,10 +147,23 @@ impl KabiDirectory {
             *(file.add(fl::FILE_F_INODE_OFF) as *mut usize) = self.inode;
         }
 
+        // 2a. Phase 13 v3: pre-allocate `struct dir_private_info`
+        // and assign to file->private_data.  Without this, ext4's
+        // info=NULL → reads/writes via the kABI null guard page;
+        // any stale data on the shared null guard becomes part of
+        // ext4's fname rb_tree state and corrupts the walk.
+        let info = super::alloc::kzalloc(64, super::alloc::__GFP_ZERO);
+        if !info.is_null() {
+            unsafe {
+                *(file.add(24) as *mut *mut c_void) = info;
+            }
+        }
+
         // 3. Allocate dir_context (24 bytes): actor, pos, count,
         //    dt_flags_mask.
         let ctx = super::alloc::kzalloc(32, 0) as *mut u8;
         if ctx.is_null() {
+            if !info.is_null() { super::alloc::kfree(info); }
             super::alloc::kfree(file as *mut c_void);
             return Err(Error::new(Errno::ENOMEM));
         }
@@ -187,6 +200,13 @@ impl KabiDirectory {
         );
 
         super::alloc::kfree(ctx as *mut c_void);
+        // Free the pre-allocated dir_private_info if we made one.
+        let info: *mut c_void = unsafe {
+            *(file.add(24) as *const *mut c_void)
+        };
+        if !info.is_null() {
+            super::alloc::kfree(info);
+        }
         super::alloc::kfree(file as *mut c_void);
 
         // 6. Take the captured entries.

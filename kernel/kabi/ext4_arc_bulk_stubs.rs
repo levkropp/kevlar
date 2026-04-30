@@ -767,9 +767,7 @@ pub extern "C" fn iget_locked(
 #[unsafe(no_mangle)] pub extern "C" fn proc_create_single_data(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { fake_alloc() }
-#[unsafe(no_mangle)] pub extern "C" fn rb_next(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+// `rb_next` is now real — see `kernel/kabi/rbtree.rs`.
 #[unsafe(no_mangle)] pub extern "C" fn rcuwait_wake_up(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -1118,7 +1116,7 @@ ksym!(preempt_schedule_notrace);
 ksym!(print_hex_dump);
 ksym!(proc_create_seq_private);
 ksym!(proc_create_single_data);
-ksym!(rb_next);
+// rb_next is now real — exported from rbtree.rs.
 ksym!(rcuwait_wake_up);
 ksym!(release_dentry_name_snapshot);
 ksym!(remove_proc_subtree);
