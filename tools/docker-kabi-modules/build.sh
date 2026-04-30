@@ -70,6 +70,13 @@ make ARCH=arm64 olddefconfig
 echo "==> make ARCH=arm64 modules_prepare (-j$(nproc))"
 make ARCH=arm64 -j"$(nproc)" modules_prepare
 
+# Phase 12 v7 (kept commented): instrument ext4_fill_super with pr_err
+# at every `goto failed_mount`.  When enabled, the instrumented .ko
+# changes code layout enough to surface a different fault before
+# the instrumentation lands; revisit if we need definitive identification
+# of the failing branch.
+# python3 /build/instrument-ext4.py fs/ext4/super.c
+
 # Skip the full vmlinux build — modpost would otherwise fail with
 # "vmlinux.o is missing".  Our kABI loader does its own symbol
 # resolution at load time (same as erofs.ko), so unresolved symbols

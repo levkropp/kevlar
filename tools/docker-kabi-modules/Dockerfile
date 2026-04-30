@@ -31,11 +31,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dpkg-dev \
         ca-certificates \
         wget \
+        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 COPY build.sh /build/build.sh
-RUN chmod +x /build/build.sh
+COPY instrument-ext4.py /build/instrument-ext4.py
+RUN chmod +x /build/build.sh /build/instrument-ext4.py
 
 CMD ["/build/build.sh"]
