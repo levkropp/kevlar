@@ -147,6 +147,7 @@ pub mod arch {
     #[cfg(target_arch = "aarch64")]
     pub use super::arm64::{
         broadcast_halt_ipi, send_reschedule_ipi, broadcast_membarrier_ipi, local_memory_barrier, sync_icache_range, cpu_id, enable_interrupts, enable_irq, halt, idle, in_preempt, interrupts_enabled,
+        init_kabi_null_guard,
         last_user_regs, last_user_state,
         num_online_cpus, preempt_disable, preempt_enable,
         read_clock_counter, read_clock_frequency, read_rtc_epoch_secs,

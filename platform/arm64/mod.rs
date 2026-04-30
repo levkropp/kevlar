@@ -32,7 +32,7 @@ pub use backtrace::Backtrace;
 pub use idle::{halt, idle};
 pub use interrupt::{last_user_regs, last_user_state, SavedInterruptStatus};
 pub use gic::enable_irq;
-pub use paging::{PageFaultReason, PageTable};
+pub use paging::{init_kabi_null_guard, PageFaultReason, PageTable};
 pub use profile::{read_clock_counter, read_clock_frequency};
 pub use timer::nanoseconds_since_boot;
 pub use semihosting::{semihosting_halt, SemihostingExitStatus};

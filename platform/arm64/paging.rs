@@ -996,6 +996,81 @@ fn allocate_pgd() -> Result<PAddr, PageAllocError> {
     Ok(pgd)
 }
 
+// ── Phase 13 v2: kABI null-guard zero page ────────────────────────────
+//
+// kABI-loaded Linux .ko code (e.g. ext4_readdir) chases multi-level
+// pointer chains like `(sb[+192])[+56][+64]`.  In boot context, low VAs
+// are mapped via the early-init identity map, so a NULL+offset read
+// returns whatever is at low physical RAM (typically zeros) instead of
+// faulting.  In process VA context (TTBR0 = empty user PGD), low VAs
+// are unmapped and any NULL+offset read faults at translation level 2.
+//
+// Fix: install one shared physical zero page at user VA 0..0x1000 in
+// every process's TTBR0, with AP=00 (privileged-only RW; EL0 has no
+// access).  Kernel code chasing through NULL pointers reads zeros
+// silently; user-mode `*NULL` derefs from EL0 still segfault.
+//
+// Mapping permissions:
+//   AP[1] (ATTR_AP_USER) = 0  → privileged-only, EL0 cannot access
+//   AP[2] (ATTR_AP_RO)   = 0  → kernel RW (in case ext4 writes)
+//   ATTR_AF + ATTR_IDX_NORMAL + ATTR_SH_ISH + ATTR_NG + DESC_VALID +
+//   DESC_PAGE — standard normal-memory user-PT leaf.
+static KABI_NULL_GUARD_PADDR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Allocate the global kABI null-guard zero page.  Idempotent — second
+/// call returns the existing paddr.  Call once at boot, after the page
+/// allocator is up.
+pub fn init_kabi_null_guard() -> Result<PAddr, PageAllocError> {
+    use core::sync::atomic::Ordering;
+    let existing = KABI_NULL_GUARD_PADDR.load(Ordering::Acquire);
+    if existing != 0 {
+        return Ok(PAddr::new(existing as usize));
+    }
+    let paddr = alloc_pages(1, AllocPageFlags::KERNEL | AllocPageFlags::DIRTY_OK)?;
+    unsafe {
+        paddr.as_mut_ptr::<u8>().write_bytes(0, PAGE_SIZE);
+    }
+    KABI_NULL_GUARD_PADDR.store(paddr.value() as u64, Ordering::Release);
+    log::info!(
+        "kabi: null guard page allocated at paddr={:#x}",
+        paddr.value(),
+    );
+    Ok(paddr)
+}
+
+/// Returns the kABI null-guard paddr, or `None` if not yet initialised.
+pub fn kabi_null_guard_paddr() -> Option<PAddr> {
+    let v = KABI_NULL_GUARD_PADDR.load(core::sync::atomic::Ordering::Acquire);
+    if v == 0 { None } else { Some(PAddr::new(v as usize)) }
+}
+
+/// Install the kABI null-guard mapping at user VA 0..0x1000 in `pgd`.
+/// No-op if `init_kabi_null_guard` hasn't been called yet (early boot
+/// page tables don't get the guard; only matters once kABI .ko code
+/// runs in process VA, which is post-init).
+fn install_null_guard(pgd: PAddr) -> Result<(), PageAllocError> {
+    let guard = match kabi_null_guard_paddr() {
+        Some(p) => p,
+        None => return Ok(()),  // not yet initialised; harmless
+    };
+    // VA 0 — UserVAddr::new() rejects 0, so use new_unchecked.
+    let vaddr = unsafe { UserVAddr::new_unchecked(0) };
+    let pte = match traverse(pgd, vaddr, true) {
+        Some(p) => p,
+        None => return Err(PageAllocError),
+    };
+    let attrs = DESC_VALID | DESC_PAGE
+        | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF | ATTR_NG;
+    // No ATTR_AP_USER → AP[1]=0 (privileged-only).
+    // No ATTR_AP_RO   → AP[2]=0 (RW for kernel).
+    unsafe {
+        *pte.as_ptr() = guard.value() as u64 | attrs;
+        core::arch::asm!("dsb ishst", options(nostack));
+    }
+    Ok(())
+}
+
 /// Translate Linux mmap prot flags to ARM64 PTE attributes for a user page.
 fn prot_to_attrs(prot_flags: i32) -> u64 {
     let mut attrs = DESC_VALID | DESC_PAGE | ATTR_IDX_NORMAL | ATTR_SH_ISH | ATTR_AF | ATTR_NG;
@@ -1108,6 +1183,11 @@ pub struct PageTable {
 impl PageTable {
     pub fn new() -> Result<PageTable, PageAllocError> {
         let pgd = allocate_pgd()?;
+        // Phase 13 v2: install the kABI null-guard mapping at user VA
+        // 0..0x1000 so kABI .ko code chasing NULL pointers reads zeros
+        // (mirrors boot-context's identity map behaviour).  Kernel-RW,
+        // EL0 no access; user `*NULL` from EL0 still segfaults.
+        install_null_guard(pgd)?;
         Ok(PageTable {
             pgd,
             asid_gen: core::sync::atomic::AtomicU64::new(alloc_asid()),

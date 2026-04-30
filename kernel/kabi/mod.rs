@@ -104,6 +104,12 @@ pub fn init() {
     {
         task_mock::init_per_cpu_mocks();
         task_mock::install_for_current_cpu();
+        // Phase 13 v2: allocate the global zero page mapped at user
+        // VA 0..0x1000 in every process's TTBR0 so kABI .ko code that
+        // chases NULL pointers reads zeros instead of faulting.
+        if let Err(e) = kevlar_platform::arch::init_kabi_null_guard() {
+            log::warn!("kabi: init_kabi_null_guard failed: {:?}", e);
+        }
     }
     log::info!(
         "kabi: runtime initialized (workqueue + platform bus + fs_synth + \
