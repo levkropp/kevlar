@@ -21,7 +21,9 @@ pub extern "C" fn __init_waitqueue_head(
 ) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __wait_on_buffer(_bh: *mut c_void) {}
+pub extern "C" fn __wait_on_buffer(bh: *mut c_void) {
+    log::info!("kabi-trace: __wait_on_buffer(bh={:p})", bh);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn autoremove_wake_function(
@@ -156,7 +158,9 @@ pub extern "C" fn __bh_read_batch(
 pub extern "C" fn __brelse(_bh: *mut c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __lock_buffer(_bh: *mut c_void) {}
+pub extern "C" fn __lock_buffer(bh: *mut c_void) {
+    log::info!("kabi-trace: __lock_buffer(bh={:p})", bh);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __find_get_block_nonatomic(
@@ -325,7 +329,9 @@ pub extern "C" fn sync_blockdev(_bdev: *mut c_void) -> i32 { 0 }
 pub extern "C" fn try_to_free_buffers(_folio: *mut c_void) -> bool { false }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn unlock_buffer(_bh: *mut c_void) {}
+pub extern "C" fn unlock_buffer(bh: *mut c_void) {
+    log::info!("kabi-trace: unlock_buffer(bh={:p})", bh);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn write_dirty_buffer(

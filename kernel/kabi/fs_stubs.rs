@@ -306,7 +306,17 @@ pub extern "C" fn iput(_inode: *mut c_void) {}
 pub extern "C" fn clear_inode(_inode: *mut c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn unlock_new_inode(_inode: *mut c_void) {}
+pub extern "C" fn unlock_new_inode(inode: *mut c_void) {
+    log::info!("kabi-trace: unlock_new_inode(inode={:p})", inode);
+    // Clear I_NEW bit (bit 0 of i_state at +144).  ext4_iget calls
+    // this once it has populated the on-disk fields.
+    if !inode.is_null() {
+        unsafe {
+            let p = inode.cast::<u8>().add(144) as *mut u32;
+            *p &= !1u32;
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn init_special_inode(_inode: *mut c_void, _mode: u32,
@@ -323,7 +333,15 @@ pub extern "C" fn inode_set_ctime_to_ts(_inode: *mut c_void,
                                         _ts: *const c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn set_nlink(_inode: *mut c_void, _nlink: u32) {}
+pub extern "C" fn set_nlink(inode: *mut c_void, nlink: u32) {
+    log::info!("kabi-trace: set_nlink(inode={:p}, nlink={})", inode, nlink);
+    // Write inode->i_nlink (offset +72; verified Phase 5).
+    if !inode.is_null() && nlink > 0 {
+        unsafe {
+            *(inode.cast::<u8>().add(72) as *mut u32) = nlink;
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kill_anon_super(_sb: *mut c_void) {}
