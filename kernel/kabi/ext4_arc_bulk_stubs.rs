@@ -179,8 +179,11 @@ fn fake_alloc() -> *mut c_void {
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn dput(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+    dentry: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
+) -> *mut c_void {
+    log::info!("kabi-trace: dput(dentry=0x{:x})", dentry);
+    core::ptr::null_mut()
+}
 #[unsafe(no_mangle)] pub extern "C" fn dqget(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }

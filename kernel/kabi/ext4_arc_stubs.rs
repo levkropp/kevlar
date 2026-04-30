@@ -155,7 +155,9 @@ pub extern "C" fn __bh_read_batch(
 ) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __brelse(_bh: *mut c_void) {}
+pub extern "C" fn __brelse(bh: *mut c_void) {
+    log::info!("kabi-trace: __brelse(bh={:p})", bh);
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __lock_buffer(bh: *mut c_void) {
@@ -245,7 +247,9 @@ pub extern "C" fn folio_set_bh(
 pub extern "C" fn free_buffer_head(_bh: *mut c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mark_buffer_dirty(_bh: *mut c_void) {}
+pub extern "C" fn mark_buffer_dirty(bh: *mut c_void) {
+    log::info!("kabi-trace: mark_buffer_dirty(bh={:p})", bh);
+}
 
 #[unsafe(no_mangle)]
 /// Phase 12 (ext4 arc): real `submit_bh`.  Read the block at

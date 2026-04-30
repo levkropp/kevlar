@@ -1923,11 +1923,14 @@ def assemble_rootfs_arm64(arm64_bins, local_arm64_bins=None, hello_ko=None, k2_k
                 #   has_journal      — RO mount; no journal replay needed.
                 #   metadata_csum    — ext4.ko's SB csum check rejects
                 #                       our images for reasons TBD.  Skip.
-                #   64bit            — keeps group desc size at 32 bytes
-                #                       (matches Linux 7.0 small-fs default).
+                #   64bit            — keeps group desc size at 32 bytes.
+                #   flex_bg          — flex block groups; not needed.
+                #   sparse_super     — sparse SB layout; simpler without.
+                # Phase 12 v5: minimum feature set to maximize the chance
+                # ext4.ko's RO mount path takes the simplest code paths.
                 subprocess.run(
                     [mkfs_ext4, "-F", "-b", "4096",
-                     "-O", "^has_journal,^metadata_csum,^64bit",
+                     "-O", "^has_journal,^metadata_csum,^64bit,^flex_bg",
                      "-L", "kabi-test",
                      "-d", str(content_dir),
                      str(ext4_img)],
