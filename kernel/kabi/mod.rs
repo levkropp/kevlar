@@ -16,6 +16,7 @@ pub mod alloc;
 pub mod arch;
 pub mod bitops;
 pub mod block;
+pub mod breadcrumb;
 pub mod bus;
 pub mod cdev;
 pub mod completion;

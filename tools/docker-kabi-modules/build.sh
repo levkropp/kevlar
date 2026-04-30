@@ -70,12 +70,22 @@ make ARCH=arm64 olddefconfig
 echo "==> make ARCH=arm64 modules_prepare (-j$(nproc))"
 make ARCH=arm64 -j"$(nproc)" modules_prepare
 
-# Phase 12 v7 (kept commented): instrument ext4_fill_super with pr_err
-# at every `goto failed_mount`.  When enabled, the instrumented .ko
-# changes code layout enough to surface a different fault before
-# the instrumentation lands; revisit if we need definitive identification
-# of the failing branch.
-# python3 /build/instrument-ext4.py fs/ext4/super.c
+# Phase 12 v7+: optional ext4 instrumentation gated by env vars.
+#   KABI_INSTRUMENT=all          → all goto failed_mount* sites
+#   KABI_INSTRUMENT=lines L=L1,L2 → specific lines only
+#   KABI_INSTRUMENT=bisect H=lower|upper → first/second half of fill_super
+#   KABI_INSTRUMENT=functions F=name1,name2 → all sites in named functions
+#
+# When unset, no instrumentation is applied (default — produces stock .ko
+# matching Ubuntu's binary ABI).
+if [ -n "${KABI_INSTRUMENT:-}" ]; then
+    echo "==> instrumenting fs/ext4/super.c (mode=${KABI_INSTRUMENT})"
+    args="--mode ${KABI_INSTRUMENT}"
+    [ -n "${KABI_LINES:-}" ] && args="${args} --lines ${KABI_LINES}"
+    [ -n "${KABI_HALF:-}" ] && args="${args} --half ${KABI_HALF}"
+    [ -n "${KABI_FUNCTIONS:-}" ] && args="${args} --functions ${KABI_FUNCTIONS}"
+    python3 /build/instrument-ext4.py fs/ext4/super.c ${args}
+fi
 
 # Skip the full vmlinux build — modpost would otherwise fail with
 # "vmlinux.o is missing".  Our kABI loader does its own symbol

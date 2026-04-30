@@ -1292,7 +1292,12 @@ kabi-modules:
 	docker build -t kevlar-kabi-modules tools/docker-kabi-modules
 	$(PROGRESS) "BUILD" "ext4.ko / jbd2.ko / mbcache.ko (Linux 7.0.0-14)"
 	@mkdir -p build/kabi-modules
-	docker run --rm -v "$$PWD/build/kabi-modules:/output" kevlar-kabi-modules
+	docker run --rm \
+		$(if $(KABI_INSTRUMENT),-e KABI_INSTRUMENT="$(KABI_INSTRUMENT)") \
+		$(if $(KABI_LINES),-e KABI_LINES="$(KABI_LINES)") \
+		$(if $(KABI_HALF),-e KABI_HALF="$(KABI_HALF)") \
+		$(if $(KABI_FUNCTIONS),-e KABI_FUNCTIONS="$(KABI_FUNCTIONS)") \
+		-v "$$PWD/build/kabi-modules:/output" kevlar-kabi-modules
 	@ls -la build/kabi-modules/
 
 # Phase 12 v2 (ext4 arc): in-kernel boot probe that mounts a fresh

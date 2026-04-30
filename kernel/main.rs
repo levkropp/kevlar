@@ -984,6 +984,7 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
         if load_chain && cmdline.contains("kabi-mount-ext4-probe=1") {
             info!("kabi: [Phase 11 probe] mount-ext4 via kABI(/dev/vda, MS_RDONLY)");
             let source = "/dev/vda\0";
+            kabi::breadcrumb::clear();
             match kabi::fs_adapter::kabi_mount_filesystem(
                 "ext4", Some("/dev/vda"), 1 /* MS_RDONLY */,
                 source.as_ptr(),
@@ -991,6 +992,8 @@ pub fn boot_kernel(#[cfg_attr(debug_assertions, allow(unused))] bootinfo: &BootI
                 Ok(_fs) => info!("kabi: ext4 mount probe Ok — KabiFileSystem ready"),
                 Err(e) => info!("kabi: ext4 mount probe returned {:?}", e),
             }
+            // Always dump breadcrumbs — empty if no instrumentation.
+            kabi::breadcrumb::dump();
         }
     }
     #[cfg(target_arch = "aarch64")]
