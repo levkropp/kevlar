@@ -164,14 +164,41 @@ pub extern "C" fn __find_get_block_nonatomic(
 ) -> *mut c_void { core::ptr::null_mut() }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn alloc_buffer_head(_gfp: u32) -> *mut c_void {
-    core::ptr::null_mut()
+pub extern "C" fn alloc_buffer_head(gfp: u32) -> *mut c_void {
+    super::alloc::kmalloc(super::struct_layouts::BH_SIZE, gfp)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn bdev_getblk(
-    _bdev: *mut c_void, _block: u64, _size: u32, _gfp: u32,
-) -> *mut c_void { core::ptr::null_mut() }
+    bdev: *mut c_void, block: u64, size: u32, gfp: u32,
+) -> *mut c_void {
+    use super::struct_layouts as fl;
+    // Phase 12: return a buffer_head + kmalloc'd data buffer with
+    // (b_blocknr, b_size, b_bdev) populated.  Force GFP_ZERO so
+    // unset fields (b_state, b_end_io, etc.) read as 0.  The caller
+    // (ext4) keys subsequent submit_bh() against b_blocknr/b_size,
+    // so getting these wrong reads garbage sectors.
+    let bh = super::alloc::kmalloc(fl::BH_SIZE,
+        gfp | super::alloc::__GFP_ZERO);
+    if bh.is_null() { return bh; }
+    let data = super::alloc::kmalloc(size as usize,
+        gfp | super::alloc::__GFP_ZERO);
+    if data.is_null() {
+        super::alloc::kfree(bh);
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        *(bh.cast::<u8>().add(fl::BH_B_DATA_OFF)
+            as *mut *mut u8) = data as *mut u8;
+        *(bh.cast::<u8>().add(fl::BH_B_SIZE_OFF)
+            as *mut u64) = size as u64;
+        *(bh.cast::<u8>().add(fl::BH_B_BLOCKNR_OFF)
+            as *mut u64) = block;
+        *(bh.cast::<u8>().add(fl::BH_B_BDEV_OFF)
+            as *mut *mut c_void) = bdev;
+    }
+    bh
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn bh_uptodate_or_lock(_bh: *mut c_void) -> i32 { 1 }
@@ -217,7 +244,79 @@ pub extern "C" fn free_buffer_head(_bh: *mut c_void) {}
 pub extern "C" fn mark_buffer_dirty(_bh: *mut c_void) {}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn submit_bh(_op: u32, _bh: *mut c_void) {}
+/// Phase 12 (ext4 arc): real `submit_bh`.  Read the block at
+/// `bh->b_blocknr * bh->b_size` from the registered virtio_blk
+/// device into `bh->b_data`, then set `bh->b_state |= BH_Uptodate`
+/// + call `bh->b_end_io(bh, 1)` if set (synchronous semantics).
+///
+/// ext4's bread chain: `bdev_getblk` → bh with empty data →
+/// `ext4_read_bh` → `__ext4_read_bh` → `submit_bh(REQ_OP_READ, bh)`.
+/// Without a real impl the bh stays not-uptodate and ext4 returns
+/// -EIO from `__ext4_sb_bread_gfp`.
+#[unsafe(no_mangle)]
+pub extern "C" fn submit_bh(op: u32, bh: *mut c_void) {
+    use super::struct_layouts as fl;
+    if bh.is_null() { return; }
+    // op encodes (op_flags << 8 | op_type) — REQ_OP_READ = 0.
+    let op_type = op & 0xff;
+    let blocknr: u64 = unsafe {
+        *(bh.cast::<u8>().add(fl::BH_B_BLOCKNR_OFF) as *const u64)
+    };
+    let size: u64 = unsafe {
+        *(bh.cast::<u8>().add(fl::BH_B_SIZE_OFF) as *const u64)
+    };
+    let data: *mut u8 = unsafe {
+        *(bh.cast::<u8>().add(fl::BH_B_DATA_OFF) as *const *mut u8)
+    };
+    if data.is_null() || size == 0 {
+        log::warn!("kabi: submit_bh: bh has no data buffer (size={})", size);
+        return;
+    }
+
+    let device = match kevlar_api::driver::block::block_device() {
+        Some(d) => d,
+        None => {
+            log::warn!("kabi: submit_bh: no BlockDevice registered");
+            return;
+        }
+    };
+    let sector_size = device.sector_size() as u64;
+    let start_sector = blocknr * size / sector_size;
+
+    if op_type == 0 /* REQ_OP_READ */ {
+        let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
+        log::info!("kabi: submit_bh READ blocknr={} size={} start_sector={} sector_size={}",
+                   blocknr, size, start_sector, sector_size);
+        if let Err(e) = device.read_sectors(start_sector, buf) {
+            log::warn!("kabi: submit_bh READ: failed {:?} (blocknr={} size={} start_sector={})",
+                       e, blocknr, size, start_sector);
+            return;
+        }
+        log::info!("kabi: submit_bh READ: ok (first 8 bytes: {:02x?})",
+                   &buf[..8.min(buf.len())]);
+    } else {
+        // RO mount — write paths shouldn't fire.
+        log::warn!("kabi: submit_bh: write op {} ignored", op_type);
+    }
+
+    // Mark uptodate.
+    unsafe {
+        let state = bh.cast::<u8>().add(fl::BH_B_STATE_OFF) as *mut u64;
+        *state |= fl::BH_UPTODATE;
+    }
+
+    // Call end_io if registered (synchronous semantics: caller waits
+    // on buffer; we mark uptodate + invoke callback inline).
+    let end_io: usize = unsafe {
+        // bh->b_end_io is at offset 56 per Linux 7.0 layout.
+        *(bh.cast::<u8>().add(56) as *const usize)
+    };
+    if end_io != 0 {
+        type EndIoFn = unsafe extern "C" fn(*mut c_void, i32);
+        let f: EndIoFn = unsafe { core::mem::transmute(end_io) };
+        unsafe { f(bh, 1 /* uptodate */); }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sync_blockdev(_bdev: *mut c_void) -> i32 { 0 }

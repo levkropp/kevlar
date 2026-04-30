@@ -109,26 +109,16 @@ pub extern "C" fn schedule_work(w: *mut WorkStructShim) -> i32 {
 }
 
 /// Block until `w` is no longer queued or running.
+///
+/// Phase 12 (ext4 arc): noop.  ext4.ko's `INIT_WORK` initializes
+/// the work_struct using Linux's struct layout, not our
+/// `WorkStructShim` shape — so `(*w).inner` is garbage Linux
+/// fields.  For RO-mount paths nothing actually runs work, so
+/// flush is a noop.  Real impl needed when something queues +
+/// awaits work in the kABI path.
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-pub extern "C" fn flush_work(w: *mut WorkStructShim) -> i32 {
-    if w.is_null() {
-        return 0;
-    }
-    let inner_ptr = unsafe { (*w).inner };
-    if inner_ptr.is_null() {
-        return 0;
-    }
-    let inner = unsafe { &*inner_ptr };
-    let _ = inner.flush_wq.sleep_signalable_until(|| {
-        if !inner.pending.load(Ordering::Acquire) {
-            Ok(Some(()))
-        } else {
-            Ok(None)
-        }
-    });
-    0
-}
+pub extern "C" fn flush_work(_w: *mut WorkStructShim) -> i32 { 0 }
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]

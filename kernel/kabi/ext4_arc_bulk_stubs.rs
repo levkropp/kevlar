@@ -93,7 +93,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn bdev_file_open_by_dev(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn bdev_fput(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -147,7 +147,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn d_alloc(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn d_drop(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -159,7 +159,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn d_instantiate_new(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn d_mark_dontcache(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -192,10 +192,10 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn dquot_alloc(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn dquot_alloc_inode(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn dquot_claim_space_nodirty(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -351,7 +351,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn finish_open(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn folio_clear_dirty_for_io(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -484,7 +484,7 @@ fn fake_alloc() -> *mut c_void {
 // get_tree_bdev — Phase 11: real impl in kabi/fs_synth.rs.
 #[unsafe(no_mangle)] pub extern "C" fn iget_locked(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn igrab(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -643,7 +643,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn pcpu_alloc_noprof(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn percpu_down_write(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -655,7 +655,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn posix_acl_alloc(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn posix_acl_chmod(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -673,10 +673,10 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn proc_create_seq_private(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn proc_create_single_data(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn rb_next(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -734,7 +734,7 @@ fn fake_alloc() -> *mut c_void {
 ) -> *mut c_void { core::ptr::null_mut() }
 #[unsafe(no_mangle)] pub extern "C" fn simple_inode_init_ts(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+) -> *mut c_void { fake_alloc() }
 #[unsafe(no_mangle)] pub extern "C" fn sort(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
