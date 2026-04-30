@@ -179,6 +179,14 @@ pub const BH_SIZE: usize = 128;
 /// before reading bh->b_data.
 pub const BH_UPTODATE: u64 = 1 << 0;
 
+/// Linux 7.0 `enum bh_state_bits` (include/linux/buffer_head.h):
+///   BH_Uptodate=0, BH_Dirty=1, BH_Lock=2, BH_Req=3, ...
+/// Real `__lock_buffer` / `unlock_buffer` set/clear bit 2 atomically;
+/// ext4's bread chain relies on the lock state to track "I/O in flight".
+pub const BH_DIRTY:  u64 = 1 << 1;
+pub const BH_LOCK:   u64 = 1 << 2;
+pub const BH_REQ:    u64 = 1 << 3;
+
 // ── struct dentry (include/linux/dcache.h:92) ───────────────────
 //
 // Phase 5 v4 disasm verification (erofs_lookup at .ko offset

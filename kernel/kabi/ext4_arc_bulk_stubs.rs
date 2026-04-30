@@ -289,9 +289,7 @@ fn fake_alloc() -> *mut c_void {
 #[unsafe(no_mangle)] pub extern "C" fn dump_stack(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
-#[unsafe(no_mangle)] pub extern "C" fn end_buffer_read_sync(
-    _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
-) -> *mut c_void { core::ptr::null_mut() }
+// end_buffer_read_sync — Phase 12 v6: real impl in ext4_arc_stubs.rs.
 #[unsafe(no_mangle)] pub extern "C" fn errseq_set(
     _: usize, _: usize, _: usize, _: usize, _: usize, _: usize,
 ) -> *mut c_void { core::ptr::null_mut() }
@@ -959,7 +957,7 @@ ksym!(dquot_transfer);
 ksym!(dquot_writeback_dquots);
 ksym!(drop_nlink);
 ksym!(dump_stack);
-ksym!(end_buffer_read_sync);
+// ksym!(end_buffer_read_sync) — registered in ext4_arc_stubs.rs
 ksym!(errseq_set);
 ksym!(fdget);
 ksym!(fiemap_fill_next_extent);

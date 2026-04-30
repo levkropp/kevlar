@@ -11,7 +11,20 @@
 //! Style: one declaration per line where possible; group by Linux
 //! subsystem to make later refactors painless.
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::ksym;
+use super::struct_layouts as fl;
+
+/// Read `bh->b_state` as an `AtomicU64` for the BH bit operations.
+/// Linux's `set_bit`/`clear_bit` operate on `unsigned long b_state`
+/// at offset 0 of struct buffer_head.
+#[inline]
+fn bh_state(bh: *mut c_void) -> Option<&'static AtomicU64> {
+    if bh.is_null() { return None; }
+    Some(unsafe {
+        &*(bh.cast::<u8>().add(fl::BH_B_STATE_OFF) as *const AtomicU64)
+    })
+}
 
 // ── Wait queue / scheduler primitives ──────────────────────────────
 
@@ -22,7 +35,19 @@ pub extern "C" fn __init_waitqueue_head(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __wait_on_buffer(bh: *mut c_void) {
-    log::info!("kabi-trace: __wait_on_buffer(bh={:p})", bh);
+    // Linux: wait_on_bit_io(&bh->b_state, BH_Lock, TASK_UNINTERRUPTIBLE).
+    // Single-threaded kABI dispatch: by the time wait fires, our
+    // synchronous submit_bh + end_buffer_read_sync have already
+    // cleared BH_Lock.  Spin briefly for paranoia in case some
+    // path forgot to clear it.
+    if let Some(state) = bh_state(bh) {
+        for _ in 0..1024 {
+            if state.load(Ordering::Acquire) & fl::BH_LOCK == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -161,7 +186,13 @@ pub extern "C" fn __brelse(bh: *mut c_void) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __lock_buffer(bh: *mut c_void) {
-    log::info!("kabi-trace: __lock_buffer(bh={:p})", bh);
+    // Linux: wait_on_bit_lock(&bh->b_state, BH_Lock, TASK_UNINTERRUPTIBLE).
+    // Atomically set BH_Lock (bit 2).  Single-threaded → no spin
+    // for contention; the fetch_or makes the transition observable
+    // to subsequent unlock_buffer / wait_on_buffer.
+    if let Some(state) = bh_state(bh) {
+        state.fetch_or(fl::BH_LOCK, Ordering::Acquire);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -236,7 +267,31 @@ pub static blockdev_superblock: u64 = 0;
 pub extern "C" fn bmap(_inode: *mut c_void, _block: *mut u64) -> i32 { 0 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn end_buffer_write_sync(_bh: *mut c_void, _uptodate: i32) {}
+pub extern "C" fn end_buffer_write_sync(bh: *mut c_void, uptodate: i32) {
+    // Linux: __end_buffer_write_sync clears BH_Lock + (if !uptodate)
+    // sets some error state.  For RO mount the write path
+    // shouldn't fire, but be safe.
+    if let Some(state) = bh_state(bh) {
+        if uptodate != 0 {
+            state.fetch_or(fl::BH_UPTODATE, Ordering::Release);
+        }
+        state.fetch_and(!fl::BH_LOCK, Ordering::Release);
+    }
+}
+
+/// Linux's read-side end_io callback.  Clears BH_Lock + sets
+/// BH_Uptodate (if uptodate=1).  ext4's `__ext4_read_bh` registers
+/// this as `bh->b_end_io` before calling `submit_bh`; our submit_bh
+/// invokes it after read completes.
+#[unsafe(no_mangle)]
+pub extern "C" fn end_buffer_read_sync(bh: *mut c_void, uptodate: i32) {
+    if let Some(state) = bh_state(bh) {
+        if uptodate != 0 {
+            state.fetch_or(fl::BH_UPTODATE, Ordering::Release);
+        }
+        state.fetch_and(!fl::BH_LOCK, Ordering::Release);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn folio_set_bh(
@@ -324,6 +379,13 @@ pub extern "C" fn submit_bh(op: u32, bh: *mut c_void) {
         let f: EndIoFn = unsafe { core::mem::transmute(end_io) };
         unsafe { f(bh, 1 /* uptodate */); }
     }
+
+    // Defense-in-depth: clear BH_Lock so any subsequent
+    // wait_on_buffer call sees the lock as released, even if
+    // b_end_io was null or didn't clear it.
+    if let Some(state) = bh_state(bh) {
+        state.fetch_and(!fl::BH_LOCK, Ordering::Release);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -334,7 +396,12 @@ pub extern "C" fn try_to_free_buffers(_folio: *mut c_void) -> bool { false }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn unlock_buffer(bh: *mut c_void) {
-    log::info!("kabi-trace: unlock_buffer(bh={:p})", bh);
+    // Linux: clear_bit_unlock(BH_Lock, &bh->b_state) + wake_up_bit.
+    // Single-threaded → just clear the bit; wake is implicit (no
+    // waiters in our context).
+    if let Some(state) = bh_state(bh) {
+        state.fetch_and(!fl::BH_LOCK, Ordering::Release);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -502,6 +569,7 @@ ksym!(blkdev_issue_zeroout);
 crate::ksym_static!(blockdev_superblock);
 ksym!(bmap);
 ksym!(end_buffer_write_sync);
+ksym!(end_buffer_read_sync);
 ksym!(folio_set_bh);
 ksym!(free_buffer_head);
 ksym!(mark_buffer_dirty);
